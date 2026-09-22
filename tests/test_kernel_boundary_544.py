@@ -20,9 +20,11 @@ next:
    narrowness (item 519, PR #1253). Both resolve to `*`, which is disjoint from
    nothing.
 
-The residual this slice does NOT refuse is pinned too (`test_the_key_namespaced
-_residual_is_still_admitted`), because a gap that is written down stays visible
-and a gap that is assumed away does not.
+The residual this slice left open - a service declaring `emission` with no
+capability token - is closed by issue #1265 and held here in section 5, with
+the control that keeps the closure from swallowing a service that declares no
+emission at all. That control is the whole difference between refusing an
+undeclared reach and refusing every candidate.
 """
 
 from __future__ import annotations
@@ -336,23 +338,37 @@ def test_an_undeclared_surrogate_refuses_the_compile_end_to_end(monkeypatch):
     compile_source(CONTROL, "composition.rvl")
 
 
-# ----------------------------------------------------------- 5. the residual
+# ------------------------------------------- 5. the undeclared-service arm
 
-def test_the_key_namespaced_residual_is_still_admitted():
-    """PINNED, not assumed away (`kernel_boundary._undeclared`).
+class _FakeService:
+    """A two-field stand-in for the service record `_undeclared_emission_
+    services` reads, so the predicate can be exercised on a declaration shape
+    without a compile."""
+
+    def __init__(self, emission: bool, capabilities=None):
+        self.methods = {"m": _FakeMethod(emission, capabilities)}
+
+
+class _FakeMethod:
+    def __init__(self, emission: bool, capabilities):
+        self.emission = emission
+        self.capabilities = capabilities
+
+
+def test_the_undeclared_service_element_is_refused():
+    """The arm issue #1265's exit asks for, and this is its closure.
 
     A service method that declares `emission` with no capability list yields a
-    reserved-namespace fold element: a declared WIRING with an undeclared
-    REACH. Refusing it is the stronger answer and this slice does not, because
-    on this tree it is the ordinary spelling. This test fails if that ever
-    changes silently, which is the only thing standing between a stated
-    residual and a forgotten one.
+    `svc:`-namespaced fold element: a declared WIRING with an undeclared REACH.
+    Item 544 admitted it and pinned the gap; issue #1265 closes it, because the
+    declaration bounds nothing. `_method_emissions` runs its subset check only
+    when a token is declared, so a provider of `Bare` may emit through
+    anything, and a candidate holding `b: Bare` reaches whatever that provider
+    reaches. Nothing in the composition says it stops short of the kernel.
 
-    Item 561 moved that element off the consumer's wiring key and onto the
-    SERVICE the method is declared on (`lower._undeclared_cap`), which is what
-    it is named BY and not whether it is undeclared. The element below is built
-    by the reference rather than spelled as a literal, so this pin tracks the
-    real one instead of a namespace that has moved out from under it."""
+    The element is built by the reference rather than spelled as a literal, so
+    this tracks the real one instead of a namespace that has moved out from
+    under it (it moved once already, from `key:` to `svc:`, in item 561)."""
     src = _TASK + """
 service Bare { emission fn cross(row: Str) -> Int }
 
@@ -366,11 +382,136 @@ component Candidate requires b: Bare provides task: Task {
 }
 """
     profile = AdmissionProfile.untrusted_author({"Bare", "Task"})
-    compile_source(src, "candidate.rvl", profile=profile)
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "candidate.rvl", profile=profile)
+    error = excinfo.value
+    assert error.code == "G8"
+    assert "wires `Bare`" in (error.hint or "")
+    assert "names no capability token" in (error.hint or "")
+    # the migration sentence an operator acts on
+    assert "emission[<token>] fn" in (error.hint or "")
+
     element = lower._undeclared_cap("Bare")
     assert element.token == lower._UNDECLARED_NS + "Bare"
-    assert not kb._undeclared(element)
-    assert not kb.offending({element}, undeclared_reaches_kernel=True)
+    assert kb._undeclared(element, frozenset({element.token}))
+    assert kb.offending({element}, undeclared_reaches_kernel=True,
+                        undeclared_tokens=frozenset({element.token}))
+
+
+def test_declaring_the_token_admits_the_same_program():
+    """Non-vacuity, on one source: the ONLY difference is the capability list.
+
+    Without it the program is refused above; with it the reach is a name the
+    kernel's own set can be compared against, and it is disjoint, so the
+    candidate admits. The arm decides a verdict rather than sitting inert
+    beside one, and it is not refusing every candidate that emits."""
+    src = _TASK + """
+service Bare { emission[rowcap] fn cross(row: Str) -> Int }
+
+component Candidate requires b: Bare provides task: Task {
+  provide task {
+    fn go() {
+      emit b.cross("x")
+      return 0
+    }
+  }
+}
+"""
+    profile = AdmissionProfile.untrusted_author({"Bare", "Task"})
+    compile_source(src, "candidate.rvl", profile=profile)
+
+
+def test_a_service_with_no_emission_method_is_still_admitted():
+    """The other half of the arm, and the one that is easy to get wrong.
+
+    `lower._held_capabilities_pairs` builds a `svc:` element for a required
+    service with a bare `emission` method AND for a service that declares no
+    emission method at all. Only the first is an undeclared reach. The second
+    is a proof of the OPPOSITE: a plain `fn` bounds its provider under G4, so
+    the wiring provably reaches nothing.
+
+    Reading the namespace alone as undeclared refuses this program, which is
+    the ordinary admitted turn - a candidate composing only pure services.
+    Measured rather than asserted: on this tree, doing it that way turns 17
+    tests red across 7 files, and 16 of them are this shape."""
+    src = """
+service Plain { fn ping(row: Str) -> Int }
+""" + _TASK + """
+component Candidate requires p: Plain provides task: Task {
+  provide task {
+    fn go() {
+      return p.ping("x")
+    }
+  }
+}
+"""
+    profile = AdmissionProfile.untrusted_author({"Plain", "Task"})
+    compile_source(src, "candidate.rvl", profile=profile)
+
+
+def test_the_granted_service_may_be_declared_only_in_the_running_manifest():
+    """The shape `mcp.session.admit` actually sees, which the tests above do not.
+
+    A per-turn candidate does not redeclare the operator's services: it
+    `requires` them and they resolve against the running composition. If the
+    fold only saw the services the CANDIDATE declares, the arm would be inert
+    on every real turn and refuse only in a test. It is not: the manifest's
+    declarations are in the same table, so the bare `emission` on the
+    operator's `Bare` is what decides."""
+    base = compile_source("""
+service Bare { emission fn cross(row: Str) -> Int }
+service Fs { emission[fs] fn write(p: Str) -> Int }
+component BareProvider requires f: Fs provides b: Bare {
+  provide b { fn cross(row) { emit f.write("x") return 0 } }
+}
+""", "base.rvl")
+    turn = """
+service Turn { emission fn run() -> Int }
+component TurnComp requires b: Bare provides turn: Turn {
+  provide turn { fn run() { emit b.cross("x") return 0 } }
+}
+"""
+    profile = AdmissionProfile.untrusted_author({"Bare", "Turn"})
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(turn, "<turn>.rvl", manifest=base, profile=profile)
+    assert excinfo.value.code == "G8"
+    assert "wires `Bare`" in (excinfo.value.hint or "")
+    # and the provider above is exactly why: `Bare.cross` declares no token,
+    # so its provider reaching `fs.write` is admitted, and the candidate
+    # holding `b: Bare` inherits that unstated reach.
+
+
+def test_the_undeclared_service_arm_is_scoped_to_an_untrusted_candidate():
+    """The first-party tree is the SUBJECT of the loop, not a candidate.
+
+    The same source that is refused under the untrusted-author profile compiles
+    on `main`, because `undeclared_reaches_kernel` is a scope switch and not a
+    fail-open default. 459 of this tree's 556 emission methods are bare
+    (item 561's census); refusing them for the first-party compile would be a
+    different item with a different cost."""
+    src = _TASK + """
+service Bare { emission fn cross(row: Str) -> Int }
+
+component Candidate requires b: Bare provides task: Task {
+  provide task {
+    fn go() {
+      emit b.cross("x")
+      return 0
+    }
+  }
+}
+"""
+    compile_source(src, "composition.rvl")
+
+
+def test_the_predicate_names_only_the_bare_emission_services():
+    """`_undeclared_emission_services` on the three declaration shapes."""
+    table = {
+        "Bare": _FakeService(emission=True),
+        "Declared": _FakeService(emission=True, capabilities=["rowcap"]),
+        "Plain": _FakeService(emission=False),
+    }
+    assert lower._undeclared_emission_services(table) == frozenset({"Bare"})
 
 
 def test_the_host_extern_routes_to_star_are_closed_before_this_check():
