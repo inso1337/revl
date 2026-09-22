@@ -10,19 +10,19 @@ use "../externs.rvl" {
 }
 
 pub service Workspace {
-  emission fn manifest(projectDir: Str) -> Str
-  emission fn read(path: Str) -> Str
+  emission[host_manifest_read] fn manifest(projectDir: Str) -> Str
+  emission[host_read] fn read(path: Str) -> Str
   fn exists(path: Str) -> Bool
-  emission fn read_sources(projectDir: Str, spec: Str) -> Str
-  emission fn commit_add(projectDir: Str, plan: Str) -> Str
-  emission fn commit_rm(projectDir: Str, plan: Str) -> Str
-  emission fn write_assembly(projectDir: Str, manifest: Str) -> Str
+  emission[host_read_sources] fn read_sources(projectDir: Str, spec: Str) -> Str
+  emission[host_commit_add] fn commit_add(projectDir: Str, plan: Str) -> Str
+  emission[host_commit_rm] fn commit_rm(projectDir: Str, plan: Str) -> Str
+  emission[host_write_assembly] fn write_assembly(projectDir: Str, manifest: Str) -> Str
   // 426 S6: resolve/admit the project's composition layer stack. The
   // resolution and admission are revl.composition's (decision 7); the report
   // comes back as a planner `Report` the dispatch prints and returns.
-  emission fn stack_check(projectDir: Str) -> Str
-  emission fn apply(projectDir: Str, trustHostCode: Bool) -> Str
-  emission fn print(text: Str)
+  emission[host_stack_check] fn stack_check(projectDir: Str) -> Str
+  emission[host_apply] fn apply(projectDir: Str, trustHostCode: Bool) -> Str
+  emission[host_print] fn print(text: Str)
 }
 
 component Workspace provides ws: Workspace {

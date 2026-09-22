@@ -9,7 +9,7 @@ use "../externs.rvl" { host_admit_all }
 pub service Gate {
   // Admit an ordered list of {path, source, name} incrementally through the
   // gate; the verdict names the first candidate that would not join.
-  emission fn admit_all(orderedJson: Str) -> Str
+  emission[host_admit_all] fn admit_all(orderedJson: Str) -> Str
 }
 
 component GateKeeper provides gate: Gate {

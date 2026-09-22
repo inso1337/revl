@@ -435,7 +435,7 @@ def test_a_resolve_policy_inside_the_root_still_loads(tmp_path):
 # ------------------------------------------- the operator's granted providers
 
 _PROVIDER = (
-    "service Notify {{ emission fn send(msg: Str) }}\n"
+    "service Notify {{ emission[notify] fn send(msg: Str) }}\n"
     "pub extern emission[notify] fn host_send(msg: Str) = @py {{\n"
     "    open({sink!r},'a').write('sent:' + msg)\n"
     "    return\n"
@@ -446,7 +446,7 @@ _PROVIDER = (
 
 _AGENT = (
     'use "notify_provider.rvl" { Notify }\n'
-    "service App { emission fn run(msg: Str) }\n"
+    "service App { emission[notify] fn run(msg: Str) }\n"
     "component A requires notify: Notify provides app: App {\n"
     "  provide app { fn run(msg) { emit notify.send(msg) } }\n"
     "}\n")
@@ -478,7 +478,7 @@ def test_the_agent_may_not_reach_a_granted_providers_host_extern(tmp_path):
         providers={"notify_provider.rvl": _PROVIDER.format(sink=str(sink))})
     payload = _call("revl_check", {"source": (
         'use "notify_provider.rvl" { host_send }\n'
-        "service App2 { emission fn run(msg: Str) }\n"
+        "service App2 { emission[notify] fn run(msg: Str) }\n"
         "component B provides app2: App2 {\n"
         "  provide app2 { fn run(msg) { emit host_send(msg) } }\n"
         "}\n")})

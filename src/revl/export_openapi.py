@@ -18,6 +18,16 @@ in the handler; the marker grants nothing.
 
 Pure IR codegen, no runtime, no language change: the document is a projection of
 the same `route` IR entry `revl serve --http` and `revl export client` read.
+
+This module carries revl's SECOND type-to-schema mapping (issue #1272,
+docs/design/1272-two-type-to-schema-mappings.md). The first is
+`json_schema_for` in `mcp/schema.py`, which renders one self-contained
+validation fragment; this one renders an OpenAPI DOCUMENT, so it names its
+schemas as `$ref`s into `components/schemas`, treats a bare-`Opt` record field
+as absent rather than null, and REFUSES a type it cannot render exactly instead
+of degrading to an unconstrained stub. The two are deliberately separate and are
+held together by `tests/test_schema_mapping_differential_1272.py`, which renders
+one corpus through both and fails on any divergence that note does not name.
 """
 
 from __future__ import annotations

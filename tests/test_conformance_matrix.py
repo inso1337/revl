@@ -63,15 +63,19 @@ def test_revl_self_host_column_is_present():
 
 
 def test_deliberate_limit_and_real_gap_are_distinguished():
-    """The three-way distinction (ok / deliberate limit / real gap) is keyed on
-    how a refusal was raised: a tier's own EmitError is a deliberate limit, any
-    other exception is a real gap. Today every tier is gap-free; if that ever
-    stops being true the matrix says so loudly (**GAP**), feeding the v3.0 E1
-    exit test."""
+    """The distinction is keyed on how a refusal was raised: a tier's own
+    EmitError is deliberate, any other exception is a real gap. Today every
+    tier is gap-free; if that ever stops being true the matrix says so loudly
+    (**GAP**), feeding the v3.0 E1 exit test.
+
+    A deliberate refusal splits further since issue #1342. `limit` is one the
+    corpus has classified as a capability limit and may publish as `lim`;
+    `refused` is one it has not, which the generator declines to publish rather
+    than downgrade. Both are deliberate; only one is a claim about the tier."""
     report = conformance.run()
     for row in report["cases"]:
         for tier in conformance.TIERS:
-            assert row["emit_kind"][tier] in ("ok", "limit", "gap")
+            assert row["emit_kind"][tier] in ("ok", "limit", "refused", "gap")
     real_gaps = {tier: [row["case"] for row in report["cases"]
                         if row["emit_kind"][tier] == "gap"]
                  for tier in conformance.TIERS}
@@ -191,3 +195,119 @@ def test_sweep_block_carries_no_wall_clock():
     """Same rule as the matrix: nothing in a gated block may change per run."""
     block = _fresh_sweep()
     assert "ms" not in block
+
+
+# ---------------------------------------------------------------------------
+# an unclassified refusal is refused, not downgraded (issue #1342, #1347)
+# ---------------------------------------------------------------------------
+# `lim` reads as "this tier cannot express this construct". An emitter also
+# refuses because of the DOCUMENT this corpus builds, and because a stdlib
+# method has no arm on the path the case takes; all three arrive as the tier's
+# own EmitError. Publishing either of the last two as `lim` understates the
+# tier, in the direction a reader deciding whether revl suits them would be
+# misled by.
+#
+# The go column was the worked example and is now settled (issue #1347). It was
+# 24 unclassified cells: 22 were the issue-#721 mixed-document refusal, carried
+# since issue #1321 (PR #1355); `expr/Int32 bitwise` was a missing `to_int32`
+# arm in the component method path, now implemented; the arrow in method scope
+# is the one real capability limit and is written down as one. The tests below
+# no longer have an unclassified cell to work with, so the refusal path is
+# driven with an injected one instead of whatever the corpus happens to leave
+# unclassified — the guard must not evaporate the day the corpus goes clean.
+def _one_unclassified(monkeypatch):
+    """Drop the arrow classification, which puts exactly one unclassified
+    refusal back into the run without inventing an emitter or a case."""
+    limits = dict(conformance.tier_limits())
+    limits.pop("go::method/arrow param binds in method scope (FR-1)")
+    monkeypatch.setattr(conformance, "_TIER_LIMITS_CACHE", limits)
+
+
+def test_an_unclassified_refusal_stops_the_generator(capsys, monkeypatch):
+    """The load-bearing one. `--write-readme` must REFUSE, not write."""
+    _one_unclassified(monkeypatch)
+    rc = conformance._write_readme(check_only=False)
+    assert rc == 2, (
+        "the generator produced a matrix while cells carried an unclassified "
+        "refusal. Exit 2 is 'the block cannot be generated'; exit 1 would say "
+        "'the committed block is stale', which is an instruction a reader can "
+        "follow and this is not."
+    )
+    err = capsys.readouterr().err
+    assert "REFUSING to generate" in err
+    assert "conformance_tier_limits.json" in err
+
+
+def test_the_check_refuses_too_rather_than_reporting_staleness(capsys, monkeypatch):
+    """`--check-readme` may not answer a question the generator cannot ask."""
+    _one_unclassified(monkeypatch)
+    assert conformance._write_readme(check_only=True) == 2
+    assert "REFUSING to generate" in capsys.readouterr().err
+
+
+def test_the_document_is_not_touched_by_a_refused_generation(monkeypatch):
+    """The failure mode this exists to prevent is a matrix published with a
+    false claim in it, so the refusal must happen BEFORE the write."""
+    _one_unclassified(monkeypatch)
+    doc = ROOT / "docs" / "conformance.md"
+    before = doc.read_bytes()
+    assert conformance._write_readme(check_only=False) == 2
+    assert doc.read_bytes() == before
+
+
+def test_nothing_is_unclassified():
+    """Names the measurement, so a change in it is visible rather than
+    absorbed. This read 24 go cells under the issue-#721 mixed-document
+    refusal; issue #1347 classified or closed every one, so the corpus now
+    leaves the generator nothing it may not publish. A cell arriving here again
+    is a new refusal somebody has to judge, not a number to bump."""
+    unclassified = conformance.unclassified_refusals(conformance.run())
+    assert unclassified == [], unclassified
+
+
+def test_the_go_arrow_is_the_one_classified_go_limit():
+    """The other half of the same measurement: go publishes exactly one `lim`,
+    and it is the arrow in method scope. A second one appearing is a tier that
+    lost a capability, or a refusal somebody classified too easily."""
+    report = conformance.run()
+    limits = conformance.classified_limits(report)
+    assert limits["go"] == {"method/arrow param binds in method scope (FR-1)"}, \
+        sorted(limits["go"])
+
+
+def test_a_classified_refusal_is_still_published_as_a_limit():
+    """The negative control: the fix must not refuse everything. The wasm and
+    java refusals are capability limits, written down with the limit each one
+    is, and they keep their `lim` cells."""
+    report = conformance.run()
+    kinds = {tier: [row["emit_kind"][tier] for row in report["cases"]]
+             for tier in conformance.TIERS}
+    assert kinds["wasm"].count("limit") == 10
+    assert kinds["java"].count("limit") == 1
+    assert kinds["wasm"].count("refused") == 0
+    assert kinds["java"].count("refused") == 0
+
+
+def test_a_classification_expires_when_the_refusal_is_reworded():
+    """An entry is a judgement about a stated reason, not a permanent licence
+    for a cell. A rewritten refusal drops back to unclassified instead of
+    inheriting it, which is what stops this table becoming a place to silence
+    a cell once and forget it."""
+    case = "wasm::expr/true division"
+    entry = conformance.tier_limits()[case]
+    assert conformance.classify_refusal(
+        "wasm", "expr/true division", entry["message_prefix"] + " ...") == "limit"
+    assert conformance.classify_refusal(
+        "wasm", "expr/true division", "a completely different refusal") == "refused"
+
+
+def test_every_classification_names_a_real_case_and_a_reason():
+    """A table entry that matches no case is a cell somebody silenced and then
+    renamed; a reason shorter than a sentence is not a classification."""
+    labels = {f"{group}/{name}" for group, name, _src in conformance.CASES}
+    for key, entry in conformance.tier_limits().items():
+        tier, _, case = key.partition("::")
+        assert tier in conformance.TIERS, key
+        assert case in labels, f"{key} names no case in the corpus"
+        assert len(entry.get("reason", "")) > 40, key
+        assert entry.get("message_prefix"), key
