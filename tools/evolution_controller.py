@@ -29,8 +29,9 @@ rather than a rule a later generation can propose a change to. That is correct
 and it is item 544's work, not this module's. What a controller can contribute,
 and what is implemented here, is the other half of the same argument:
 
-  * the kernel set is ENUMERATED in one place (`KERNEL_PATHS` below) instead of
-    being understood, which is the precondition issue #1223 lists first;
+  * the kernel set is ENUMERATED in one place, `KERNEL_PATHS` in
+    `src/revl/kernel_boundary.py`, which this module IMPORTS rather than
+    restates, which is the precondition issue #1223 lists first;
   * the enumeration and the stage table are themselves FENCED
     (`AUTHORITY_FENCE`), so a proposal whose diff reaches the rules that judge
     it is refused BY NAME rather than judged by the rules it just edited. That
@@ -140,6 +141,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+if str(ROOT / "tools") not in sys.path:
+    sys.path.insert(0, str(ROOT / "tools"))
+
+from revl.kernel_boundary import KERNEL_PATHS  # noqa: E402
+from revl.promotion_barrier import AUTHORITY_AXES  # noqa: E402
+
+# Item 536's verdict, IMPORTED (issue #1336). The stage verdict below EXTENDS
+# it; it does not restate it. See `Verdict`.
+from evolution_reward import Verdict as ComponentVerdict  # noqa: E402
 
 # Exit statuses. REFUSE is distinct from ROLL_BACK for the same reason
 # `tools/heldout_scoring.py` separates REFUSED from DIVERGENT: a reader has to
@@ -210,17 +221,11 @@ AUTHORITY_FENCE = (
 # policies" as ordinary behaviour tuning can extend its own `Retained[T, P]`
 # deadline, which is an authority change wearing the clothes of a cache
 # setting, and G-RETAIN is the guarantee it quietly relaxes.
-KERNEL_PATHS = (
-    "src/revl/admission.py",
-    "src/revl/admit_profile.py",
-    "src/revl/attest.py",
-    "src/revl/taint.py",
-    "src/revl/retention.py",
-    "crates/revl-gate",
-    "formal",
-    "tools/gate_reference_census.py",
-    "tools/gate_reference_census_baseline.json",
-)
+# KERNEL_PATHS is IMPORTED, not restated. It used to be copied here, and the
+# copy had already drifted: `src/revl/kernel_boundary.py` itself was in the
+# definition and missing from this one, so the diff-side check did not defend
+# the file that says what the kernel is. A loop permitted to edit that file
+# could widen the boundary and then pass the widened check.
 
 # Services whose grant is the non-extern path to the decider. The first two are
 # `_DECIDER_SERVICES` in `src/revl/gate.py`, where `Gate.propose` refuses a
@@ -238,39 +243,54 @@ KERNEL_PATHS = (
 # to `gate.py`'s set so the two cannot drift apart silently.
 DECIDER_SERVICES = ("Admission", "AdmitGate", "Gate", "Session")
 
-# The four authority axes the attenuation product accounts for
+# The authority axes the attenuation product accounts for
 # (`docs/capability-attenuation.md`), plus retention per issue #1223.
-AUTHORITY_AXES = ("capability", "taint", "budget", "realm", "retention")
+# IMPORTED from `src/revl/promotion_barrier.py`, not restated, for the
+# reason KERNEL_PATHS is: that module says in so many words that it is the
+# canonical axis set and that `AXIS_ALIASES` maps every other spelling in
+# the tree onto it, and this file had already shipped one copied constant
+# that drifted. An axis added there is measured here on the next run
+# instead of being read as UNMEASURED by a stale tuple.
 
 
 # ------------------------------------------------------------------ verdicts
 
 @dataclass(frozen=True)
-class Verdict:
-    """One stage's answer.
+class Verdict(ComponentVerdict):
+    """One stage's answer: item 536's component verdict, plus a named code.
 
-    The field names are item 536's (`tools/evolution_reward.py`), deliberately:
-    a lifecycle whose stage answers have a different shape from the reward's
+    The four fields `component`, `verified`, `reason` and `evidence`, and the
+    four keys `as_dict` spells for them, are item 536's
+    (`tools/evolution_reward.py::Verdict`). They are INHERITED, not restated. A
+    lifecycle whose stage answers had a different shape from the reward's
     component answers would need a translation layer, and a translation layer
     between two fail-closed checks is where a third value gets introduced.
     `verified` is the only value that is not a failure. There is no `unknown`
     and no `skipped`, because a third value is where a fail-open default hides.
+
+    `code` IS THIS MODULE'S FIFTH FIELD and it is deliberate, not drift. Issue
+    #1222's exit test asks for a refusal BY NAME, and the FAILURE DIRECTION
+    table in this module's docstring enumerates fourteen codes a stage can
+    fail with. Item 536's reward has no such enumeration: a reward component
+    fails with prose, because the reward answers "did this candidate earn a
+    training example" and the lifecycle answers "which authority refused, and
+    at which stage". A code is the lifecycle's question, so it lives on the
+    lifecycle's verdict.
+
+    Until issue #1336 this was a third HAND-KEPT COPY of the four fields whose
+    docstring said they were item 536's. They were not: this copy had already
+    grown `code`, so the docstring asserted an agreement that did not hold, in
+    the place a reader is most likely to trust. Inheriting makes the agreement
+    structural in the direction that matters -- a field or key item 536 adds or
+    renames arrives here on the next import instead of being read as absent by
+    a stale list -- and leaves `code` as the ONE difference, declared once.
     """
 
-    component: str
-    verified: bool
-    reason: str
-    evidence: tuple = ()
     code: str = ""
 
     def as_dict(self) -> dict:
-        return {
-            "component": self.component,
-            "verdict": "verified" if self.verified else "failed",
-            "reason": self.reason,
-            "evidence": list(self.evidence),
-            "code": self.code,
-        }
+        """Item 536's four keys, verbatim from its `as_dict`, plus `code`."""
+        return {**super().as_dict(), "code": self.code}
 
 
 def failed(component: str, code: str, reason: str, evidence=()) -> Verdict:

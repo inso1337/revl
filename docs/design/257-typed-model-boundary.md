@@ -199,10 +199,21 @@ revl already maps a surface type to a JSON Schema fragment:
 tool's `inputSchema`/`outputSchema` (`schema.py:137,171`). It takes the type as
 a NAME STRING, which is exactly how a return type is carried in the IR
 (`returns: str | None`), so deriving the boundary schema is one call against the
-shape that is already there. There is no second mapping and this design forbids
-inventing one: a divergence between "the schema MCP shows" and "the schema the
+shape that is already there. This design does not fork a rendering for the
+boundary: a divergence between "the schema MCP shows" and "the schema the
 boundary validates" would be a latent bug factory. One derivation, two consumers
 (MCP projection and boundary validation), pinned by a shared test.
+
+**CORRECTION (issue #1272).** This paragraph used to say "there is no second
+mapping". That was wrong when it was written. `src/revl/export_openapi.py`
+carries a second, independent type-to-schema mapping for `revl export openapi`,
+and it renders several constructors differently on purpose (a `$ref` into a
+`components` block, a bare-`Opt` field dropped from `required`, a refusal where
+this one degrades). The scope of the rule above is the FRAGMENT mapping and its
+consumers, which are the MCP projection and the three gated boundaries in
+`lower.py`. The document mapping, why it is separate, and the differential test
+that now holds the two together are in
+`docs/design/1272-two-type-to-schema-mappings.md`.
 
 **Derive on the qualifier-stripped return type (HIGH-2).** The SECURE spelling of
 a validated model emission in the default taint profile is
@@ -871,8 +882,12 @@ Non-goals:
   this the right or safe tool".
 - No new declassifier and no taint change: the validated response is
   `Untrusted`, full stop.
-- No second type-to-schema mapping: the boundary runs `json_schema_for` or it is
-  a bug (section 3.1).
+- No second FRAGMENT mapping: the boundary runs `json_schema_for` or it is a bug
+  (section 3.1). Corrected scope (issue #1272): `revl export openapi` has always
+  had a mapping of its own, for a document rather than a validation fragment.
+  This non-goal never reached it and does not now; the two are held together by
+  the differential in `tests/test_schema_mapping_differential_1272.py`
+  (`docs/design/1272-two-type-to-schema-mappings.md`).
 - No automatic validation of every emission return: `validated` is opt-in so the
   IR / emit path stays byte-identical and the guarantee is a reviewable
   declaration. NOTE the scope (MEDIUM-2): "byte-identical" covers IR and emit, not
@@ -904,5 +919,11 @@ Open questions:
   rather than strict JSON Schema) needs a stricter `{"oneOf": [T, {"type":
   "null"}]}` form for a validating boundary. MCP tolerates `nullable`; a strict
   validator may not. Slice 1 will settle this against the chosen validator and,
-  if it must change, change it in the one mapping (which MCP then also gets),
-  never forking a second rendering.
+  if it must change, change it in the fragment mapping (which MCP then also
+  gets), never forking a second rendering for the boundary. Issue #1272 adds a
+  constraint to settling it: `export_openapi.py` already spells the same type
+  `{"oneOf": [T, {"type": "null"}]}`, so the two mappings currently answer this
+  question differently, and the differential names that divergence
+  (`OPT_NULLABLE_VS_ONEOF`). Settling it has to settle it on both sides or drop
+  the entry from the table in
+  `docs/design/1272-two-type-to-schema-mappings.md`.

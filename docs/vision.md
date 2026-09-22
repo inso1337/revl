@@ -49,7 +49,7 @@ with `make docs-gen`; never edit the block by hand.
 | cordis-rs (Rust) | spike | 61 ok / 0 limit / 0 gap | the backend contract is small enough to target any Cordis runtime |
 | cordis4j (Java) | spike | 60 ok / 1 limit / 0 gap | the same contract, on a second spike nobody optimised for |
 | cordis-wasm | performance + enforcement | 51 ok / 10 limit / 0 gap | confinement becomes physical (sandbox), instances drop cleanly |
-| cordis-go (Go) | third-party runtime | 61 ok / 0 limit / 0 gap | the same contract holds for a Cordis runtime nobody on the project wrote ([stc-go](https://github.com/0xdenny218/stc-go)) |
+| cordis-go (Go) | third-party runtime | 60 ok / 1 limit / 0 gap | the same contract holds for a Cordis runtime nobody on the project wrote ([stc-go](https://github.com/0xdenny218/stc-go)) |
 <!-- docgen:vision-tiers end -->
 
 One `.rvl` source, one IR, six emitters. The [2.0 roadmap](v2.0-roadmap.md)

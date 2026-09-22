@@ -51,7 +51,7 @@ extern acquire fn log_open(path: Str) -> LogHandle undo log_close(result)
     }
 
 service AuditLog {
-  emission fn record(line: Str) -> Int
+  emission[audit] fn record(line: Str) -> Int
 }
 
 component FileAuditLog provides audit: AuditLog {

@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo pre-merge pre-merge-affected formal roadmap-check workflow-permissions runtime-seams vision-check
+.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship pre-merge pre-merge-affected formal roadmap-check workflow-permissions runtime-seams vision-check
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -124,6 +124,13 @@ docs-check:
 demo:
 	@[ -x backends/python/.venv/bin/python ] || sh backends/python/setup.sh
 	REVL_DEMO_REQUIRE=1 backends/python/.venv/bin/python demo/live_systems/run_demo.py
+
+# Roadmap item 525: the flagship integrated demo. One legacy-enterprise agent
+# across the typed API, a peer service and the computer-use family, with the
+# guarantee each leg discharges named beside the artifact that shows it. Needs
+# the compiler and nothing else, so there is no runtime to set up first.
+demo-flagship:
+	python3 demo/legacy_enterprise/run_demo.py
 
 # formal/ — the machine-checked backbone (formal/STATUS.md). run_gate.sh:
 # the import-layering and non-vacuity gates (both toolchain-free, so they

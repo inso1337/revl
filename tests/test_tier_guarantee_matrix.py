@@ -11,7 +11,14 @@ the refusals, each constructed rather than hoped for:
   * an acknowledgement left behind after the gap it excused closed;
   * a parity subject added to the marker check with no decision here;
   * a runtime divergence pinned with no guarantee to hang it on;
+  * a gate tag aliased to a code the compiler's register does not carry;
   * a hand edit to the committed block.
+
+One rule here is not a refusal but a measurement, and it is the one issue
+#1190 made necessary: a gate TAG names a construct and a construct can span
+several guarantees, so a tag in `SELFHOST_TAG_CODES` is credited to a row only
+when the gate's sentence is the reference's sentence. The two tests at the end
+of the refusal block hold both halves of that.
 
 Each of those has a test that asserts the failure, and
 `test_the_unmodified_tree_generates` is the control: it passes on the same tree
@@ -123,6 +130,78 @@ def test_a_parity_subject_with_no_decision_fails_generation(monkeypatch):
         tg.parity_divergences(conformance.TIERS)
     assert "quarantine" in str(caught.value)
     assert "SUBJECT_CODES" in str(caught.value)
+
+
+def test_a_tag_aliased_to_an_unregistered_code_fails_generation(monkeypatch):
+    """`SELFHOST_TAG_CODES` names a code the compiler's register does not carry.
+
+    Such an entry can never match a row, so it credits nothing while reading
+    like a decision somebody made. Same direction as every other refusal here:
+    say so rather than generate around it.
+    """
+    monkeypatch.setitem(tg.SELFHOST_TAG_CODES, "COUNCIL",
+                        frozenset({"G-COUNCIL-SPILT"}))
+    with pytest.raises(tg.MatrixError) as caught:
+        tg.matrix()
+    message = str(caught.value)
+    assert "G-COUNCIL-SPILT" in message
+    assert "SELFHOST_TAG_CODES" in message
+
+
+# ------------------------------------------- a gate tag is not a guarantee
+
+def test_the_council_tag_stands_for_every_code_the_council_raises():
+    """One gate FAMILY, two guarantees, and the table has to say both.
+
+    `selfhost/lower.rvl` tags every council refusal `COUNCIL` because the tag
+    names the CONSTRUCT (`docs/design/556-model-council-selfhost.md` section
+    1.1), and `docs/design/557-council-disagreement.md` section 3 splits that
+    one construct across two codes: the refusals whose subject is a `model
+    role` keep item 512's, the rest carry the council's. Both are module
+    constants in `src/revl/model_council.py`, so this reads the split off the
+    module that performs it rather than restating it.
+
+    A third code raised from that module with no third entry here would credit
+    nothing and read as if it did.
+    """
+    from revl import model_council
+
+    assert tg.SELFHOST_TAG_CODES["COUNCIL"] == {model_council.CODE,
+                                                model_council.PLACE_CODE}
+
+
+def test_an_aliased_tag_is_not_credited_on_the_tag_alone(monkeypatch):
+    """The fail-open case the SET exists to keep shut.
+
+    A tag that stands for several codes cannot say which of them a refusal is
+    evidence for; the SENTENCE can. So the gate answering the right family
+    with the wrong sentence must not leave the cell `proved`. It is a
+    divergence, and crediting the family would credit whichever guarantee the
+    reader assumed.
+    """
+    index = tg.reproducers()
+    assert index.get("G-COUNCIL-SPLIT"), (
+        "no fixture in examples/rejections/ is refused under G-COUNCIL-SPLIT; "
+        "this test measures the tag-vs-sentence rule on a real reproducer")
+
+    truthful = tg.selfhost_verdicts(index)
+    assert truthful["G-COUNCIL-SPLIT"][0] == tg.PROVED
+
+    real = tg._selfhost_admit()
+
+    def wrong_sentence(source: str) -> str:
+        answer = real(source)
+        tag, sep, message = answer.partition("|")
+        if tag == "COUNCIL":
+            return f"{tag}{sep}{message} (and something else)"
+        return answer
+
+    monkeypatch.setattr(tg, "_selfhost_admit", lambda: wrong_sentence)
+    spoiled = tg.selfhost_verdicts(index)
+    assert spoiled["G-COUNCIL-SPLIT"][0] != tg.PROVED
+    # and the unaliased rows are untouched: this rule reaches only the tags
+    # `SELFHOST_TAG_CODES` resolves.
+    assert spoiled["G1"] == truthful["G1"]
 
 
 def test_an_unmapped_runtime_divergence_fails_generation(monkeypatch):

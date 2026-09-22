@@ -4,13 +4,15 @@ The executable spec for slice 1 of `docs/design/543-model-council.md`: the
 `model council` declaration, its members, its `aggregate` clause, and every
 refusal the three carry.
 
-These programs are written INLINE rather than dropped in `examples/` or
-`tests/fixtures/`, on purpose, and for the reason item 512's suite records.
-Both directories are census corpus roots (`tools/gate_reference_census.py`
-CORPUS_DIRS) and `selfhost/parser.rvl` does not parse `model council`, so an
-admitting fixture in either place would be a `false-reject` entry in the census
-the moment it landed. The self-host port is slice 5; see the design doc's
-section 13.
+Slice 1's programs are written INLINE rather than dropped in `examples/` or
+`tests/fixtures/`, which was the right call when they were written and is no
+longer the rule for new ones. Both directories are census corpus roots
+(`tools/gate_reference_census.py` CORPUS_DIRS), and while the gate could not
+read a council an admitting fixture in either would have been a `false-reject`
+entry the moment it landed. The self-host port is slice 5 and it LANDED
+(`docs/design/556-model-council-selfhost.md`), so the gate now decides a
+council declaration and, since slice 2, an arm that names one. The slice-2
+section at the foot of this file therefore reads its two programs off disk.
 """
 
 import sys
@@ -29,7 +31,12 @@ from revl.diagnostics import GUARANTEES, classify  # noqa: E402
 # non-vacuity run readable: on the tree without this change the controls pass
 # and every council test fails, instead of the whole file erroring at import
 # time. `test_the_module_constants_match` is the tie-back.
-CODE = "G-MODEL-PLACE"
+# Item 1190 / `docs/design/557-council-disagreement.md` split the council's
+# refusals across two codes. `CODE` is the disagreement family, which is almost
+# all of them; `PLACE_CODE` is the two whose subject is a `model role` and whose
+# rewrite is therefore item 512's.
+CODE = "G-COUNCIL-SPLIT"
+PLACE_CODE = "G-MODEL-PLACE"
 FUNCTIONS = ("proposer", "adversary", "verifier")
 AGGREGATIONS = ("unanimous", "majority", "veto")
 
@@ -263,7 +270,8 @@ def test_a_member_with_no_declared_role_is_refused():
     assert "names no action" not in str(err)
     assert "model role `nowhere`, which is not declared" in str(err)
     assert "edge" in str(err) and "vast" in str(err)  # the known roles
-    assert classify(err)["code"] == CODE
+    # A `model role` is the subject, so the rewrite is item 512's: declare it.
+    assert classify(err)["code"] == PLACE_CODE
 
 
 def test_an_unknown_council_function_is_refused():
@@ -335,7 +343,8 @@ def test_a_council_named_after_a_role_is_refused():
               + TAIL)
     err = refusal(source)
     assert "has the name of the model role" in str(err)
-    assert classify(err)["code"] == CODE
+    # Two placement tables would both answer the word, so this one is 512's too.
+    assert classify(err)["code"] == PLACE_CODE
 
 
 # ---------------------------------------------------------------------------
@@ -354,13 +363,19 @@ def test_an_admitted_council_writes_no_ir():
     assert with_council == without
 
 
-def test_no_new_guarantee_code_is_registered():
-    """The council is the placement family's second construct, not a second
-    family. A new code would need a reproducer under `examples/rejections/` or
-    an `ACKNOWLEDGED` entry for item 523's generated tier matrix, and this
-    slice adds no new class of refusal."""
+def test_the_guarantee_codes_are_registered():
+    """Slice 1 filed every council refusal under `G-MODEL-PLACE`, on the
+    reading that the council is the placement family's second construct.
+
+    Item 1190 reversed that for the disagreement rules and
+    `docs/design/557-council-disagreement.md` section 2 gives the reason:
+    `classify()` hands an agent a `fix` line, item 512's says to route the
+    origin to an `on_device` role, and that is not the rewrite for `on_tie
+    allow`. Both codes are registered; which refusal carries which is
+    `tests/test_council_disagreement_1190.py`.
+    """
     assert CODE in GUARANTEES
-    assert "G-MODEL-COUNCIL" not in GUARANTEES
+    assert PLACE_CODE in GUARANTEES
 
 
 # ---------------------------------------------------------------------------
@@ -371,6 +386,7 @@ def test_the_module_constants_match():
     from revl import model_council
 
     assert model_council.CODE == CODE
+    assert model_council.PLACE_CODE == PLACE_CODE
     assert model_council.FUNCTIONS == FUNCTIONS
     assert model_council.AGGREGATIONS == AGGREGATIONS
     assert model_council.QUORUM_BASES == ("declared",)
@@ -424,3 +440,246 @@ def test_a_program_with_no_council_reads_an_empty_table():
     from revl.parser import Parser
 
     assert model_council.check(Parser(NO_COUNCIL, "council.revl").parse()) == {}
+
+
+# ===========================================================================
+# SLICE 2: binding a council to an action (issue #1366)
+#
+# Slice 1 checked a declaration bound to nothing. A `route model` arm may now
+# name a COUNCIL where it names a role, so the council's residence is what item
+# 514's ceiling reads and the members' separate placement bites on a value.
+#
+# The two fixtures below are in `examples/`, unlike the inline programs above,
+# and the module docstring's reason no longer holds: the self-host port landed
+# (slice 5, `docs/design/556-model-council-selfhost.md`) and this slice extends
+# it, so the gate decides both files and neither is a census divergence.
+# ===========================================================================
+
+BINDING_CONTROL = ROOT / "examples" / "model_council_binding.rvl"
+BINDING_REFUSED = (ROOT / "examples" / "rejections"
+                   / "gmodelplace_council_member_off_device.rvl")
+
+# The two fixtures differ in ONE word. Spelled here so the non-vacuity claim is
+# checked rather than asserted: if an edit ever made them differ in more, the
+# pair would stop being a controlled comparison and this is where that shows.
+BINDING_EDIT = ("local2", "vast")
+
+
+def _binding(member_role: str) -> str:
+    """The control program with the proposer placed on `member_role`.
+
+    The three roles above are declared in both files whichever one the proposer
+    names, so the pair differs in the proposer's ROLE and in nothing else.
+    """
+    return f"""
+model role edge   on_device
+model role local2 on_device
+model role vast   off_device
+
+service Answer {{ fn classify(text: Str) -> Str }}
+
+model council Release {{
+  proposer  -> {member_role},
+  adversary -> edge,
+  aggregate unanimous
+}}
+
+component Classifier provides out: Answer {{
+  route model on classify {{
+    confidential -> Release
+  }}
+  provide out {{ fn classify(text) = text }}
+}}
+"""
+
+
+def test_a_council_bound_to_an_action_with_an_off_device_member_is_refused():
+    """The slice's exit test. A two-member council whose members are placed
+    differently, bound to an action by a `confidential` arm, does not admit -
+    and the diagnostic names the MEMBER, not the council."""
+    err = refusal(_binding("vast"))
+    assert err.code == PLACE_CODE
+    assert "model council `Release`" in err.message
+    assert "whose member `proposer` runs on model role `vast`" in err.message
+    assert "may not leave the device" in err.message
+
+
+def test_the_honest_control_with_both_members_on_device_admits():
+    """The other half of the same measurement. One word apart from the program
+    above, and it compiles: the rule is about the member's placement and not
+    about the word `council`."""
+    assert compile_source(_binding("local2"), "council.revl")
+
+
+def test_the_two_checked_in_fixtures_are_the_same_one_word_apart():
+    """The corpus pair, read off disk. `examples/model_council_binding.rvl`
+    admits and its rejection twin does not, and the ONLY difference between the
+    two programs is which role the proposer names."""
+    control = BINDING_CONTROL.read_text()
+    refused = BINDING_REFUSED.read_text()
+    assert compile_source(control, "binding.rvl")
+    err = refusal(refused)
+    assert err.code == PLACE_CODE
+    assert "whose member `proposer` runs on model role `vast`" in err.message
+
+    def _code(src):
+        return [line.strip() for line in src.splitlines()
+                if line.strip() and not line.strip().startswith("//")]
+
+    a, b = _code(control), _code(refused)
+    assert len(a) == len(b), (a, b)
+    differ = [(x, y) for x, y in zip(a, b) if x != y]
+    assert differ == [(f"proposer  -> {BINDING_EDIT[0]},",
+                       f"proposer  -> {BINDING_EDIT[1]},")], differ
+
+
+def test_the_refusal_names_every_off_device_member_in_its_hint():
+    """The message names the first off-device member; the hint names them all.
+    An author who moved one of two and recompiled would otherwise learn the
+    rule one member at a time."""
+    err = refusal("""
+model role edge on_device
+model role vast off_device
+model role vast2 off_device
+
+service Answer { fn classify(text: Str) -> Str }
+
+model council Release {
+  proposer  -> vast,
+  adversary -> vast2,
+  verifier  -> edge,
+  aggregate unanimous
+}
+
+component Classifier provides out: Answer {
+  route model on classify { confidential -> Release }
+  provide out { fn classify(text) = text }
+}
+""")
+    assert "whose member `proposer` runs on model role `vast`" in err.message
+    assert "`proposer` on `vast`, `adversary` on `vast2`" in err.hint
+
+
+def test_the_ceiling_is_a_confidentiality_ceiling_and_nothing_more():
+    """An origin outside `CEILING_ORIGINS` routed to the same split council
+    admits. The rule is item 514's ceiling, not a general statement about which
+    roles an action may reach."""
+    assert compile_source(_binding("vast").replace(
+        "confidential -> Release", "web -> Release"), "council.revl")
+
+
+def test_the_catch_all_never_covers_a_confidentiality_origin_for_a_council():
+    """`* -> <council>` is admitted as a written arm for the same reason
+    `* -> cloud` is: `*` is DEFINED not to cover a confidentiality origin, so
+    it is not the sentence that sends a confidential input to the council."""
+    assert compile_source(_binding("vast").replace(
+        "confidential -> Release", "* -> Release"), "council.revl")
+
+
+def test_a_bound_secret_reaches_no_council_at_any_placement():
+    """Item 256's rule does not weaken because the arm names a council. The
+    noun in the sentence moves and nothing else does."""
+    err = refusal(_binding("local2").replace(
+        "confidential -> Release", "secret -> Release"))
+    assert err.code == "G-SECRET-FLOW"
+    assert "routes the `secret` origin to model council `Release`" in err.message
+
+
+def test_an_arm_naming_neither_a_role_nor_a_council_is_still_refused():
+    """The council table WIDENS what an arm may name and narrows nothing. A
+    name that is neither gets item 512's sentence, byte for byte."""
+    err = refusal(_binding("local2").replace(
+        "confidential -> Release", "confidential -> ghost"))
+    assert err.code == PLACE_CODE
+    assert err.message.endswith(") names no declared model role")
+
+
+def test_the_binding_reads_the_council_table_and_re_derives_nothing():
+    """`model_route.check` records the council's own residence and its members
+    verbatim from `model_council.check`'s table, which is the slice's stated
+    contract (design note 543 section 14)."""
+    from revl import model_council, model_route
+    from revl.parser import Parser
+
+    program = Parser(_binding("local2"), "council.revl").parse()
+    councils = model_council.check(program)
+    placed = model_route.check(program, councils=councils)
+    arm = placed["Classifier"]["classify"]["confidential"]
+
+    assert arm["council"] == "Release"
+    assert arm["role"] == "Release"
+    assert arm["residence"] == councils["Release"].residence == "on_device"
+    assert arm["member_roles"] == tuple(
+        m.role for m in councils["Release"].members)
+    assert [m["function"] for m in arm["members"]] == ["proposer", "adversary"]
+    assert model_route.off_device_members(arm) == ()
+
+
+def test_an_action_routed_to_a_council_reaches_every_members_role():
+    """A council is one question asked of every member, so a crossing placed on
+    a member's role is inside the placement the block names. Refusing it would
+    widen nothing and protect nothing."""
+    from revl import model_council, model_route
+    from revl.parser import Parser
+
+    program = Parser(_binding("local2"), "council.revl").parse()
+    placed = model_route.check(program,
+                               councils=model_council.check(program))
+    reach = model_route.reach_of(placed["Classifier"]["classify"])
+    assert reach == frozenset({"Release", "local2", "edge"})
+
+
+def test_the_binding_costs_the_ir_nothing():
+    """A council still writes no IR, and neither does the arm that names it
+    (item 512 writes none either). The bound program emits byte for byte what
+    the same program emits with the council and the route deleted."""
+    bound = _binding("local2")
+    plain = """
+model role edge   on_device
+model role local2 on_device
+model role vast   off_device
+
+service Answer { fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}
+"""
+    assert compile_source(bound, "council.revl") == \
+        compile_source(plain, "council.revl")
+
+
+def test_the_value_side_says_council_where_the_arm_named_one():
+    """Item 514's ceiling fires on a VALUE, and its sentence has to name the
+    thing the arm named. `* -> <council>` places no confidential value, the
+    same way `* -> cloud` places none, and an author sent to a `model role
+    Release` declaration that does not exist would be sent nowhere."""
+    src = """
+model role edge   on_device
+model role local2 on_device
+
+extern emission[model.complete] fn prompt(p: Secret[Str]) -> Int = @py { return 0 }
+
+service Answer { emission fn summarize(d: Str) -> Int }
+
+model council Release {
+  proposer  -> local2,
+  adversary -> edge,
+  aggregate unanimous
+}
+
+component Summarizer provides out: Answer {
+  config { doc: Secret[Str] }
+  route model on summarize { * -> Release }
+  provide out {
+    fn summarize(d) {
+      let r = prompt(config.doc)
+      return 0
+    }
+  }
+}
+"""
+    err = refusal(src)
+    assert err.code == PLACE_CODE
+    assert "the catch-all `*` routes to model council `Release`" in err.message
+    assert "model role `Release`" not in err.message
