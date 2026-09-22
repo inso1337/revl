@@ -800,8 +800,8 @@ jobs:
   #
   # `fetch-depth: 0` is load-bearing twice over. The merge commits live on the
   # base branches, not on main, so a single-branch clone does not have them --
-  # and the checker reports a commit it cannot see as UNKNOWN and fails rather
-  # than reading "absent from this clone" as "absent from main".
+  # and the checker reports a commit it cannot see as UNRESOLVED rather than
+  # reading "absent from this clone" as "absent from main".
   #
   # A job-level `permissions` block REPLACES the workflow-level one rather than
   # merging into it (issue #191), so `contents: read` is restated here beside
@@ -817,9 +817,16 @@ jobs:
           fetch-depth: 0
       # Belt and braces over `fetch-depth: 0`: the merge commits this reads sit
       # on the BASE branches, so every branch has to be present, not only the
-      # ref being built. A commit that is absent is reported UNKNOWN and fails
-      # the job rather than being read as "absent from main", so a missing
-      # fetch would be loud rather than wrong -- this makes it neither.
+      # ref being built.
+      #
+      # This step CANNOT close the window on its own, and issue #1377 is what
+      # that looked like: it runs before the checker reads the pull requests
+      # from GitHub, so the list is always the fresher of the two, and a PR
+      # that merges in between names a commit no earlier fetch could have
+      # brought in. The checker therefore refreshes again on the miss, which
+      # is the only ordering that can answer the question it is asking. This
+      # step stays because it keeps the common case to zero network calls
+      # inside the checker.
       - run: git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
       - env:
           GH_TOKEN: ${{ github.token }}
