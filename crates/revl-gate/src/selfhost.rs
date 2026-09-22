@@ -16365,6 +16365,14 @@ fn msecret_arm_msg(act: &str, cname: &str, role: &str) -> String {
     return ((((((String::from("action `").revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") routes the `secret` origin to model role `")).revl_concat(&role)).revl_concat("`: a capability-bound secret never reaches a model prompt, on ")).revl_concat("the device or off it (G-SECRET-FLOW)");
 }
 
+fn msecret_council_msg(act: &str, cname: &str, name: &str) -> String {
+    return ((((((String::from("action `").revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") routes the `secret` origin to model council `")).revl_concat(&name)).revl_concat("`: a capability-bound secret never reaches a model prompt, on ")).revl_concat("the device or off it (G-SECRET-FLOW)");
+}
+
+fn mcouncil_off_device_msg(act: &str, cname: &str, orig: &str, name: &str, fun: &str, role: &str, res: &str, rline: i64) -> String {
+    return (((((((((((((((((String::from("action `").revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") routes the `")).revl_concat(&orig)).revl_concat("` origin to model council `")).revl_concat(&name)).revl_concat("`, whose member `")).revl_concat(&fun)).revl_concat("` runs on model role `")).revl_concat(&role)).revl_concat("`, declared `")).revl_concat(&res)).revl_concat("` on line ")).revl_concat(&(rline).to_string())).revl_concat(": a ")).revl_concat(&orig)).revl_concat(" input may not leave the device (G-MODEL-PLACE)");
+}
+
 fn moff_device_msg(act: &str, cname: &str, orig: &str, role: &str, res: &str, rline: i64) -> String {
     return (((((((((((((String::from("action `").revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") routes the `")).revl_concat(&orig)).revl_concat("` origin to model role `")).revl_concat(&role)).revl_concat("`, which is declared `")).revl_concat(&res)).revl_concat("` on line ")).revl_concat(&(rline).to_string())).revl_concat(": a ")).revl_concat(&orig)).revl_concat(" input may not leave the device (G-MODEL-PLACE)");
 }
@@ -16571,7 +16579,19 @@ fn marm_origin_at(as__: &[MArm], o: &str, i: i64) -> i64 {
     return marm_origin_at(as__, o, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn model_arms_refusal(b: MBlock, cname: &str, rs: &[MRole]) -> Verd {
+fn ccl_off_member(c: CDecl, rs: &[MRole]) -> i64 {
+    let mut i = 0i64;
+    while (i < c.cmems.revl_length()) {
+        let ri = mrole_at(rs, &(c.cmems)[(i) as usize].crole, 0i64);
+        if ((ri != (0i64).checked_sub(1i64).expect("revl: Int overflow")) && ((rs)[(ri) as usize].rres == "off_device")) {
+            return i;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+}
+
+fn model_arms_refusal(b: MBlock, cname: &str, rs: &[MRole], cs: &[CDecl]) -> Verd {
     let mut i = 0i64;
     while (i < b.barms.revl_length()) {
         let a = (b.barms)[(i) as usize].clone();
@@ -16582,14 +16602,29 @@ fn model_arms_refusal(b: MBlock, cname: &str, rs: &[MRole]) -> Verd {
             return mverd(&morigin_twice_msg(&a.aorig, &b.bact, cname), a.aline);
         }
         let ri = mrole_at(rs, &a.arole, 0i64);
-        if (ri == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        let ci = if (ri == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { ccl_at(cs, &a.arole, 0i64) } else { (0i64).checked_sub(1i64).expect("revl: Int overflow") };
+        if ((ri == (0i64).checked_sub(1i64).expect("revl: Int overflow")) && (ci == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
             return mverd(&mundeclared_role_msg(&a.aorig, &a.arole, &b.bact, cname), a.aline);
         }
         if (a.aorig == "secret") {
+            if (ci != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                return mverd(&msecret_council_msg(&b.bact, cname, &a.arole), a.aline);
+            }
             return mverd(&msecret_arm_msg(&b.bact, cname, &a.arole), a.aline);
         }
-        if (contains__m2(&model_confidentiality_origins(), &a.aorig) && ((rs)[(ri) as usize].rres == "off_device")) {
-            return mverd(&moff_device_msg(&b.bact, cname, &a.aorig, &a.arole, &(rs)[(ri) as usize].rres, (rs)[(ri) as usize].rline.clone()), a.aline);
+        if (ci != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            if contains__m2(&model_confidentiality_origins(), &a.aorig) {
+                let mi = ccl_off_member((cs)[(ci) as usize].clone(), rs);
+                if (mi != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                    let m = ((cs)[(ci) as usize].cmems.clone())[(mi) as usize].clone();
+                    let mr = (rs)[(mrole_at(rs, &m.crole, 0i64)) as usize].clone();
+                    return mverd(&mcouncil_off_device_msg(&b.bact, cname, &a.aorig, &a.arole, &m.cfun, &m.crole, &mr.rres, mr.rline), a.aline);
+                }
+            }
+        } else {
+            if (contains__m2(&model_confidentiality_origins(), &a.aorig) && ((rs)[(ri) as usize].rres == "off_device")) {
+                return mverd(&moff_device_msg(&b.bact, cname, &a.aorig, &a.arole, &(rs)[(ri) as usize].rres, (rs)[(ri) as usize].rline.clone()), a.aline);
+            }
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
@@ -16606,7 +16641,7 @@ fn mblock_action_at(bs: &[MBlock], a: &str, i: i64) -> i64 {
     return mblock_action_at(bs, a, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn model_comp_refusal(ts: Vec<Token>, sp: MSpan, rs: Vec<MRole>) -> Verd {
+fn model_comp_refusal(ts: Vec<Token>, sp: MSpan, rs: Vec<MRole>, cs: Vec<CDecl>) -> Verd {
     let bs = model_blocks_in(&ts, sp.slo, sp.shi);
     if (bs.revl_length() == 0i64) {
         return no_verd();
@@ -16627,7 +16662,7 @@ fn model_comp_refusal(ts: Vec<Token>, sp: MSpan, rs: Vec<MRole>) -> Verd {
         if (!contains__m2(&acts, &b.bact)) {
             return mverd(&mno_action_msg(&b.bact, &sp.sname), b.bline);
         }
-        let av = model_arms_refusal(b.clone(), &sp.sname, &rs);
+        let av = model_arms_refusal(b.clone(), &sp.sname, &rs, &cs);
         if (av.v != "") {
             return av;
         }
@@ -16642,10 +16677,11 @@ fn model_place_refusal(ts: Vec<Token>) -> Verd {
     if (rv.v != "") {
         return rv;
     }
+    let cs = model_councils_of(&ts);
     let sps = model_comp_spans(&ts);
     let mut i = 0i64;
     while (i < sps.revl_length()) {
-        let cv = model_comp_refusal(ts.clone(), (sps)[(i) as usize].clone(), rs.clone());
+        let cv = model_comp_refusal(ts.clone(), (sps)[(i) as usize].clone(), rs.clone(), cs.clone());
         if (cv.v != "") {
             return cv;
         }
@@ -16961,6 +16997,10 @@ fn model_council_refusal(ts: &[Token]) -> Verd {
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     let rs = model_roles_of(ts);
+    let rv = model_roles_refusal(&rs);
+    if (rv.v != "") {
+        return rv;
+    }
     i = 0i64;
     while (i < cs.revl_length()) {
         let v = council_one_refusal(&cs, i, &rs);
@@ -16974,13 +17014,13 @@ fn model_council_refusal(ts: &[Token]) -> Verd {
 
 fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>, ambSvcs: Vec<String>, ambSvcsKnown: bool, ambOps: Vec<SvcOps>) -> NoLink {
     let base = ctx_amb_ops(ctx_with_callables(build_maps(pg.clone()), type_ctors(ts.clone())), amb_ops_map(&ambOps, 0i64, std::collections::HashMap::new()));
-    let mdlv = model_place_refusal(ts.clone());
-    if (mdlv.v != "") {
-        return NoLink { done: true, refs: vec![mdlv.clone()] };
-    }
     let cclv = model_council_refusal(&ts);
     if (cclv.v != "") {
         return NoLink { done: true, refs: vec![cclv.clone()] };
+    }
+    let mdlv = model_place_refusal(ts.clone());
+    if (mdlv.v != "") {
+        return NoLink { done: true, refs: vec![mdlv.clone()] };
     }
     let wfv = declared_types_refusal(ts.clone());
     if (wfv.v != "") {
@@ -26466,6 +26506,37 @@ fn the_secret_origin_reaches_no_role__at_either_residence() {
 }
 
 #[test]
+fn an_arm_may_name_a_council_whose_members_all_stay_on_the_device() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Review }\n  provide out { fn classify(text) = text }\n}")) == ""));
+}
+
+#[test]
+fn a_confidential_origin_routed_to_a_council_names_the_off_device_member() {
+    let v = admit_src(String::from("model role edge on_device\nmodel role vast off_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn the_secret_origin_reaches_no_council_either() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { secret -> Review }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `secret` origin to model council `Review`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"));
+}
+
+#[test]
+fn a_name_that_is_neither_a_role_nor_a_council_is_still_refused() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role local2 on_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Review { proposer -> local2, adversary -> edge, aggregate unanimous }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> ghost }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|`confidential -> ghost` in `route model on classify` (Classifier) names no declared model role"));
+}
+
+#[test]
+fn the_council_phase_runs_ahead_of_the_route_phase() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> vast, adversary -> edge, aggregate first }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidental -> edge }\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"));
+}
+
+#[test]
+fn a_malformed_role_is_still_decided_before_a_refusable_council() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_devise\nservice Answer { fn classify(text: Str) -> Str }\nmodel council Release { proposer -> edge, adversary -> vast, aggregate first }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "MODEL|unknown residence `off_devise` for model role `vast`"));
+}
+
+#[test]
 fn a_model_placement_is_a_prelude_declaration() {
     let v = admit_src(String::from("model role local on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n  route model on classify { web -> local }\n}"));
     assert!((v == "PRELUDE|`route model` must precede every effect, emit, await, and provide statement"));
@@ -26553,7 +26624,7 @@ fn a_council_leaves_the_rest_of_the_document_checked__and__council__is_a_name() 
 fn a_council_and_a_route_model_block_are_decided_in_the_same_compilation() {
     let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, adversary -> local, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> local, * -> cloud }\n  provide out { fn classify(text) = text }\n}"));
     assert!((v == ""));
-    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+    assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 1 member"));
 }
 
 #[test]

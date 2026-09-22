@@ -125,9 +125,36 @@ reference's.
 
 ## 1.3 What the port deliberately does NOT decide
 
-**Binding a council to an action.** Slice 2 turns a `route model` arm naming a
-council into a placement. It reads a flow position, the gate has no flow walk,
-and it is not getting one here.
+**Binding a council to an action.** SUPERSEDED by slice 2 (issue #1366); kept
+because the reason it gave was half right and the half that was wrong is worth
+naming. The sentence read: slice 2 turns a `route model` arm naming a council
+into a placement, it reads a flow position, the gate has no flow walk, and it
+is not getting one here.
+
+Slice 2 landed as two rules and only one of them reads a flow position. The
+DECLARATION half is an arm the author wrote, resolved against a council whose
+members' residences are declared in the same token stream, so the gate decides
+it: an arm naming a council, the `secret` origin against a council at any
+placement, and a confidentiality origin against a council one of whose members
+is `off_device`, that last one naming the MEMBER. All three live in the
+model-PLACEMENT section under the tag `MODEL`, because what they refuse is a
+`route model` arm and the arm is item 512's surface; the council is only what
+the arm names.
+
+What still reads a flow position, and is still not decided here, is item 514's
+ceiling on a council-placed VALUE. Its messages open "a `<origin>` value
+reaches the model crossing", which is the opening the oracle's classifier
+already excludes, and the exclusion needed no change for the council spelling
+of it.
+
+Slice 2 also MOVED A PHASE. `model_council.check` now runs ahead of
+`model_route.check` in the reference, because an arm may name a council and a
+placement is resolved before anything that names one, so `collect_nonlink`
+swapped the two verdicts to match. `model_council_refusal` gained the role-table
+validation the reference reaches through `model_council.check`'s own call to
+`model_route.roles`, or a program declaring both a malformed role and a
+refusable council would have answered `COUNCIL` here and `MODEL` there. Two
+in-file tests pin the new order and one that pinned the old one was rewritten.
 
 **What the members answered.** Item 517's evidence record, and the `Aggregate[T]`
 runtime of the design's section 3, are values and not declarations. Nothing in

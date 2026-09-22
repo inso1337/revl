@@ -415,6 +415,16 @@ REJECTIONS = {
     # have entered the census as an out-of-slice `BAD`.
     "gmodelplace_confidential_off_device.rvl":
         "routes the `confidential` origin to model role `cloud`",
+    # roadmap item 516 slice 2: the same rule where the arm names a model
+    # COUNCIL. A council's members are placed separately, so the council's own
+    # residence is the most permissive of theirs and the refusal names the
+    # MEMBER that made the join rather than the council. Its admitting twin is
+    # `examples/model_council_binding.rvl`, which is this file with the
+    # proposer on an `on_device` role: one word apart, and only one of them
+    # compiles.
+    "gmodelplace_council_member_off_device.rvl":
+        "routes the `confidential` origin to model council `Release`, whose "
+        "member `proposer` runs on model role `vast`",
     # roadmap item 472: the RETENTION dimension of the same qualifier family. A
     # `Retained[T, P]` value past P's deadline may not reach a persistence sink
     # (a crossing whose declared capability scope means durable storage). The

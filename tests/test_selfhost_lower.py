@@ -184,6 +184,15 @@ def _classify(e: RevlError) -> str:
             or (m.startswith("action `") and " is routed twice in " in m)
             or " is routed twice in `route model on " in m
             or " origin to model role `" in m
+            # item 516 slice 2: the same arm naming a `model council`. It is a
+            # MODEL refusal and not a COUNCIL one because what it refuses is a
+            # `route model` arm, which is item 512's surface; the council is
+            # only what the arm names. The gate spells both sentences - the
+            # `secret` one and the one naming the off-device MEMBER - byte for
+            # byte in its model-placement section. The item-514 value side
+            # spells "model council" too, and the guard at the head of this
+            # condition is what keeps it out.
+            or " origin to model council `" in m
             or m.endswith(") names no declared model role")
             or (m.startswith("`route model on ")
                 and (m.endswith(" names no role")
@@ -209,11 +218,14 @@ def _classify(e: RevlError) -> str:
     # is therefore SHAPED — an opening plus the phrase that fixes the rule — and
     # POSITIVE, a substring the gate spells byte for byte.
     #
-    # That is what keeps the slices this gate does NOT decide out. Binding a
-    # council to an action (slice 2) and recording what its members answered
-    # (item 517) both read a flow position the gate has no walk for; naming
-    # their sentences here would claim an agreement that does not exist and
-    # would report a no-objection the gate is entitled to as a bypass.
+    # That is what keeps the slices this gate does NOT decide out. Slice 2's
+    # BINDING is decided, but under MODEL above, because what it refuses is a
+    # `route model` arm; nothing about it belongs in this block. What is left
+    # out is item 514's ceiling on a council-placed VALUE and item 517's record
+    # of what the members answered, both of which read a flow position the gate
+    # has no walk for; naming their sentences here would claim an agreement
+    # that does not exist and would report a no-objection the gate is entitled
+    # to as a bypass.
     if ((m.startswith("model council `")
          and (" is declared twice (first on line " in m
               or " has the name of the model role declared on line " in m
