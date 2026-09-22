@@ -483,6 +483,32 @@ def test_the_candidate_shape_is_item_536s(clean_tree):
         "component", "verified", "reason", "evidence"}
 
 
+def test_the_stage_verdict_inherits_item_536s_rather_than_restating_it():
+    """Issue #1336. This was a third hand-kept copy of item 536's four verdict
+    fields whose docstring said they were item 536's. They were not: it had
+    already grown `code`, and the mirror gate groups by exact equality, so it
+    paired the two copies that agreed and never looked at this one.
+
+    The relation is now structural in the direction that matters. A field or
+    key item 536 adds or renames arrives here on the next import; only `code`
+    is declared here, and only once."""
+    import evolution_reward as er  # noqa: PLC0415
+
+    assert issubclass(ec.Verdict, er.Verdict)
+    # `code` is the ONE difference, and it is the lifecycle's question: issue
+    # #1222 asks for a refusal BY NAME, and item 536's reward has no codes.
+    own = set(ec.Verdict.__dataclass_fields__) - set(er.Verdict.__dataclass_fields__)
+    assert own == {"code"}
+    stage = ec.failed("authority", "AUTHORITY_WIDENED", "capabilities grew",
+                      ("docs/capability-attenuation.md",))
+    component = er.Verdict("authority", False, "capabilities grew",
+                           ("docs/capability-attenuation.md",))
+    serialised = stage.as_dict()
+    assert list(serialised) == list(component.as_dict()) + ["code"]
+    assert {k: serialised[k] for k in component.as_dict()} == component.as_dict()
+    assert serialised["code"] == "AUTHORITY_WIDENED"
+
+
 def test_keys_outside_the_whitelist_are_dropped_and_reported(clean_tree):
     record = proposal_record(clean_tree)
     record["rationale"] = "this change is safe, trust me"

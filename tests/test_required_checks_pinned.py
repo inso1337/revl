@@ -92,6 +92,24 @@ REQUIRED_CHECKS = ENFORCED_TODAY | ASPIRATIONAL
 # Jobs deliberately NOT required. Each exclusion is a choice with a reason, so a
 # reader can tell an intentional gap from a forgotten one.
 NOT_REQUIRED_CHECKS = {
+    # Roadmap item 537 (issue #1207): scores the diff on programs generated at
+    # score time from a seed drawn in the job, so the set is one the diff's
+    # author could not read. Deliberately NOT a merge gate, and the reason is
+    # the mechanism rather than flakiness.
+    #
+    # A candidate diff that touches the scorer is REFUSED rather than scored
+    # (`diff-reaches-fence`), which is the design's routing of a semantic
+    # change to human review and not a verdict about the change. Required, that
+    # refusal would either block every legitimate edit to the gate tooling or
+    # have to be downgraded to a pass inside the job, and the second is the
+    # fail-open shape the item exists to prevent. Advisory, the refusal stays a
+    # loud annotation and the human reads it.
+    #
+    # The finding direction (exit 1) does fail the job, so a real divergence is
+    # red on the PR even though the check is not blocking. Promotion is where
+    # this is enforced: `tools/evolution_reward.py` carries it as the `held-out`
+    # component, and a conjunction there admits no advisory verdict.
+    "held-out": "item 537 held-out scoring; a scorer-touching diff is REFUSED by design, so it is advisory here and enforced in the promotion reward",
     # Container/privilege smoke that needs a Docker-capable runner; flaky as a
     # hard merge gate, run for signal not enforcement.
     "sandbox-container": "container smoke; not a hard merge gate",
@@ -137,6 +155,16 @@ NOT_REQUIRED_CHECKS = {
     # and promoting it is a protection change made outside this tree. It is the
     # obvious next promotion candidate once it has run on `main`.
     "frontend-assets": "item 459 gap G5 frontend build/typecheck; promotion is a branch-protection change, out of tree",
+    # Issue #1342: reads the merge RECORD, not the diff. It asks whether every
+    # pull request GitHub reports as MERGED has its merge commit reachable from
+    # `main`, which is a property of the repository rather than of the change
+    # under review. Required, a stranding caused by one merge would block every
+    # unrelated PR until somebody repaired it, and the author of the blocked PR
+    # is not the person who can. Advisory, it reds loudly on the run that
+    # follows the stranding, which is the signal nobody had. Same promotion
+    # note as the two above: a context must exist on `main` before branch
+    # protection can name it.
+    "merged-prs-landed": "issue #1342 merged-PR landing audit; a repository-wide property, advisory so one bad merge does not block every other PR",
 }
 
 

@@ -57,10 +57,10 @@ needs_cordis = pytest.mark.skipif(
 # --------------------------------------------------------------------------- #
 
 _DECLS = (
-    "service Ops { emission fn stash(p: Str) }\n"
+    "service Ops { emission[fs] fn stash(p: Str) }\n"
     "service Tool {\n"
     "  fn describe() -> Str\n"
-    "  emission fn run(p: Str)\n"
+    "  emission[ops] fn run(p: Str)\n"
     "}\n"
 )
 

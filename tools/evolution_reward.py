@@ -15,10 +15,16 @@ explanation of its own work. It has two halves.
 Eight components already had machinery in this tree. Nothing folded them into a
 verdict and nothing stated the retention criterion. This module is that fold.
 
+A ninth was added from item 537 (issue #1207): `held-out`. Item 536's eight all
+read artifacts that are IN the tree the candidate was handed, so a candidate
+that read the repository read everything they score it on. `held-out` scores it
+on a draw that does not exist until score time, which makes it the one component
+no other can supply and the one whose absence from a scorecard is detectable.
+
 THE REWARD IS A CONJUNCTION, NOT A SCALAR
 -----------------------------------------
 No weighted score is computed here, and none is exported. The reward is the
-conjunction of the eight component verdicts, and the retention rule is that same
+conjunction of the component verdicts, and the retention rule is that same
 conjunction. Three reasons, in the order they decided it:
 
   1. The floor the repository enforces is not a magnitude. `false-admission` is
@@ -57,20 +63,25 @@ outcome is `failed`:
 There is no `unknown` verdict and no `skipped` verdict, because a third value is
 where a fail-open default hides. `verified` means somebody's artifact said yes.
 
-WHAT IS IMPLEMENTED (slice 1)
------------------------------
-Four of the eight components read their real artifacts:
+WHAT IS IMPLEMENTED
+-------------------
+Five of the nine components read their real artifacts:
 
     no-new-false-admits   tools/gate_reference_census.py --check, PLUS a read of
                           the baseline diff that refuses a grown allowance
     artifact-stability    tools/regen_goldens.py --all --check
     documentation         tools/docgen.py --check, tools/check_roadmap_claims.py
     scope                 the changed-file set against the declared scope
+    held-out              tools/heldout_scoring.py --diff-base, on a draw the
+                          candidate could not read; a REFUSAL is a fail here,
+                          because a component that was not scored was not
+                          verified
 
 The other four (`compiles`, `tests`, `conformance`, `formal`) have no probe and
 therefore FAIL. That is the honest state: until they are implemented, nothing is
 retained, and the scorecard names them as the blockers. See
-`docs/design/534-evolution-reward.md` for the slice plan.
+`docs/design/534-evolution-reward.md` for the slice plan and
+`docs/design/535-held-out-scoring.md` for the ninth component's.
 
 USAGE
 -----
@@ -84,7 +95,10 @@ The candidate record is a JSON object. Exactly three keys are read:
 
 Every other key is IGNORED and reported by name under `prose_ignored`, so a
 reader of the scorecard can see that the candidate's narrative was present and
-was not consulted. Exit status is 0 only when the trajectory is retained.
+was not consulted. The held-out seed is NOT a record key: it arrives in
+`REVL_HELDOUT_SEED`, because a candidate that could name its own seed would
+choose the draw it is judged on. Exit status is 0 only when the trajectory is
+retained.
 """
 
 from __future__ import annotations
@@ -96,12 +110,25 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# The eight components, in the order roadmap item 536 lists them.
+# Item 536's eight components in the order it lists them, then the ninth.
+#
+# `held-out` is not one of item 536's: it comes from item 537 (issue #1207) and
+# it is the only component whose subject the candidate could not read. The other
+# eight all measure artifacts that are in the tree the candidate was given --
+# the census corpus, the goldens, the docs, the diff -- so a candidate that has
+# read the repository has read everything they score it on. This one scores it
+# on a draw that does not exist until score time.
+#
+# That also makes it the only component whose ABSENCE is detectable: a scorecard
+# with no `held-out` verdict was produced by a scorer that did not ask the
+# question, and `Scorecard.retained` iterates COMPONENTS rather than the verdict
+# list precisely so a missing verdict cannot pass.
 COMPONENTS = (
     "compiles",
     "tests",
@@ -111,7 +138,19 @@ COMPONENTS = (
     "formal",
     "scope",
     "documentation",
+    "held-out",
 )
+
+# Programs in a promotion draw. Larger than the suite's 60: a promotion is paid
+# for once and the wall clock is a few seconds, most of it compiling
+# `selfhost/lower.rvl` rather than drawing.
+HELDOUT_DRAW = 200
+
+# The environment variable the seed arrives in. It is NOT a field on the
+# candidate record: `RECORD_KEYS` is the whitelist that keeps a candidate from
+# reaching a probe, and a candidate that could name its own seed would choose
+# the draw it is judged on.
+HELDOUT_SEED_ENV = "REVL_HELDOUT_SEED"
 
 # The census baseline. `probe_no_new_false_admits` reads this file on both sides
 # of the candidate's change, which is the half of the item's "can only shrink in
@@ -338,6 +377,87 @@ def probe_no_new_false_admits(candidate: Candidate) -> Verdict:
          f"{CENSUS_BASELINE}@{_sha256(baseline_path)}"])
 
 
+def probe_held_out(candidate: Candidate) -> Verdict:
+    """The scoring set the candidate could not read (item 537, issue #1207).
+
+    `tools/heldout_scoring.py` is already fail-closed on every unknown, and this
+    probe's whole job is not to undo that. Its three exit statuses map onto two
+    verdicts and no third:
+
+        0  scored clean                     -> verified
+        1  scored, a finding                -> failed
+        2  REFUSED, no score was produced   -> failed
+
+    A refusal is a fail HERE even though it is not a finding, because a
+    component that has not been scored has not been verified, and the reward's
+    whole doctrine is that `verified` means somebody's artifact said yes. The
+    refusal name is carried into the reason so the reader can tell "the gate
+    found something" from "the gate declined to run", which is the distinction
+    the tool spends an exit status on.
+
+    The seed comes from the environment and NOT from the candidate record. A
+    candidate that could name its own seed would choose the draw it is judged
+    on, which is the fail-open shape this component exists to close. An absent
+    seed is a failed component rather than a skipped one: a promotion pipeline
+    that silently drops this check when nobody configured a seed has exactly
+    the property item 537 was opened about.
+    """
+    name = "held-out"
+    seed = os.environ.get(HELDOUT_SEED_ENV, "")
+    if not seed:
+        return failed(
+            name,
+            f"no held-out seed: {HELDOUT_SEED_ENV} is unset, so the candidate "
+            "was not scored on anything it could not read")
+
+    with tempfile.TemporaryDirectory() as scratch:
+        # The record is written OUTSIDE the candidate tree on purpose. Writing
+        # it inside would put a file carrying `draw_digest` into the tree the
+        # next candidate reads, and `tools/heldout_scoring.py` spends a whole
+        # enforcement on the draw never becoming a file.
+        verdict_path = Path(scratch) / "heldout-verdict.json"
+        run = run_tool(candidate, [
+            "tools/heldout_scoring.py",
+            "--diff-base", candidate.base,
+            "--count", str(HELDOUT_DRAW),
+            "--json", str(verdict_path),
+        ])
+        record = None
+        if verdict_path.is_file():
+            try:
+                record = json.loads(verdict_path.read_text())
+            except ValueError:
+                record = None
+
+    evidence = ["tools/heldout_scoring.py --diff-base " + candidate.base]
+    if record is None:
+        return failed(name, run.detail + " (and wrote no verdict record)",
+                      evidence)
+    if record.get("verdict") == "refused":
+        return failed(name, "held-out scoring REFUSED: "
+                      + str(record.get("refusal")) + "; no score was produced",
+                      evidence)
+    if not run.ok or record.get("verdict") != "clean":
+        findings = {k: len(v) for k, v in record.get("zero_tolerance", {}).items()
+                    if v}
+        findings.update({"false-admit/" + tag: len(ids) for tag, ids
+                         in record.get("bypass", {})
+                         .get("new_families", {}).items()})
+        return failed(name, "held-out scoring found " + (
+            ", ".join(f"{k}: {n}" for k, n in sorted(findings.items()))
+            or run.detail), evidence)
+
+    live = record.get("liveness", {})
+    return verified(
+        name,
+        "clean over " + str(record.get("size")) + " programs the candidate "
+        "could not read (" + str(live.get("issued_admissions"))
+        + " issued admissions, "
+        + str(live.get("near_miss_reference_refusals"))
+        + " near misses the reference refuses)",
+        evidence + ["draw " + str(record.get("draw_digest"))])
+
+
 def probe_artifact_stability(candidate: Candidate) -> Verdict:
     """Every generated artifact matches a fresh generation.
 
@@ -468,6 +588,7 @@ PROBES = {
         "(docs/design/534-evolution-reward.md)"),
     "scope": probe_scope,
     "documentation": probe_documentation,
+    "held-out": probe_held_out,
 }
 
 

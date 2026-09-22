@@ -101,15 +101,29 @@ def test_an_undeclared_verb_is_refused() -> None:
     assert "CLOSED" in (error.hint or "")
 
 
-def test_a_fallback_ladder_rung_is_refused_until_its_check_exists() -> None:
-    """Slice 1 admits only the ladder's top rung, a semantic target. A
-    selector or pixel rung is refused rather than admitted ahead of the check
-    that bounds it: admitting the spelling first is the fail-open shape."""
-    error = _refusal(
-        "extern emission[ui.click.pixel] fn click(target: Str) = @py { pass }\n")
-    assert "descends the computer-use fallback ladder" in error.message
-    assert "not admissible yet" in error.message
-    assert error.code == "G8"
+def test_the_ladder_is_bounded_at_the_declaration_site() -> None:
+    """Slice 1 refused EVERY rung token, by name, until the check that bounds
+    one existed. Slice 3 landed that check, so the declaration site now bounds
+    the ladder rather than closing it: a declared rung on an actuation verb is
+    admissible, and three shapes are still refused here. The per-component
+    prefix-closure rule is the other half and is measured in
+    `tests/test_ui_ladder_rungs_521.py`, because it is a property of a reach
+    and not of a token."""
+    invented = _refusal(
+        "extern emission[ui.click.zoom] fn click(target: Str) = @py { pass }\n")
+    assert "not a declared rung" in invented.message
+    assert invented.code == "G8"
+
+    unranged = _refusal(
+        "extern emission[ui.find.pixel] fn find(s: Str) = @py { pass }\n")
+    assert "does not act on a target" in unranged.message
+
+    too_deep = _refusal(
+        "extern emission[ui.click.pixel.exact] fn c(t: Str) = @py { pass }\n")
+    assert "deeper than the computer-use fallback ladder goes" in too_deep.message
+
+    # and the rung itself parses and is admitted as a TOKEN
+    assert ui_family.refusal("ui.click.pixel", "emission") is None
 
 
 def test_a_service_method_scope_is_checked_too() -> None:
@@ -193,13 +207,31 @@ def test_every_verb_names_an_emission_class() -> None:
 # on the extern table and NOT on the reach: the audit reports what a component
 # can reach, not what the file mentions.
 
+# The target record is item 521 slice 4's: a computer-use program that
+# declares `ui.find` or an actuation verb must carry it, so the fixture below
+# is the post-slice-4 spelling of the same program. Nothing in THIS file
+# measures the record - it is here because the program would not compile
+# without it, which is exactly what slice 4 set out to make true.
 CUA_WORKER = """
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
 extern emission[screen.observe] fn screen_observe(region: Str) -> Str
   = @py { return "" }
-extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> Str
-  = @py { return "" }
-extern emission[ui.click] fn ui_click(target: Str) -> Int = @py { return 0 }
-extern emission[ui.download] fn ui_download(target: Str) -> Str
+extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> UiTarget
+  = @py { return None }
+extern emission[ui.click] fn ui_click(target: UiTarget) -> Int = @py { return 0 }
+extern emission[ui.download] fn ui_download(target: UiTarget) -> Str
   = @py { return "" }
 
 service Worker { emission fn approve(region: Str) -> Int }

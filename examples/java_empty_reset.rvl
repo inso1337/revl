@@ -9,7 +9,7 @@
 // trap. The consumer invokes `reset()` during activation, so a run that boots
 // and tears down cleanly proves the body is a no-op rather than a throw.
 service Resettable {
-  emission fn reset()
+  emission[r] fn reset()
 }
 
 component ResetSvc provides r: Resettable {

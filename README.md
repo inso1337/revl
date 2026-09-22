@@ -92,6 +92,7 @@ revl compile examples/user_cache.rvl   # source -> checked IR -> emitted compone
 revl audit    examples/user_cache.rvl   # everything that can cross the boundary
 revl mcp serve                          # the compiler as an agent admission gate
 make demo                               # a live hot-swap, migration and rollback
+make demo-flagship                      # one agent, ten guarantees, six refusals
 ```
 
 The first command installs the `revl` package editable; the documented happy

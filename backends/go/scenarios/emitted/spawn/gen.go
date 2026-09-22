@@ -198,8 +198,8 @@ func Worker(cfg WorkerConfig) stc.Component {
 				return nil, err
 			}
 			if err := ctx.Effect(func() stc.Inverse {
-				probe.Mark(fmt.Sprintf("up:%v", cfg.Tag))
-				return func() error { probe.Mark(fmt.Sprintf("d1:%v", cfg.Tag)); return nil }
+				probe.Mark(("up:" + cfg.Tag))
+				return func() error { probe.Mark(("d1:" + cfg.Tag)); return nil }
 			}); err != nil {
 				return nil, err
 			}

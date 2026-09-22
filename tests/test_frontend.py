@@ -406,6 +406,25 @@ REJECTIONS = {
     # unit can no longer disclose the token into an ordinary sink.
     "gsecret_service_return_discloses.rvl":
         "a Secret[T] value flows into an extern host call (a disclosure sink)",
+    # roadmap item 512: the PLACEMENT dimension. A `model role` says where a
+    # model call runs, and an action that routes the `confidential` origin to a
+    # role declared `off_device` is refused naming the action, the origin and
+    # the role — the item's exit test verbatim. The fixture arrived with slice
+    # 3 rather than with the rule: `examples/rejections/` is a census corpus
+    # root, and until the self-host decided `route model` a file here would
+    # have entered the census as an out-of-slice `BAD`.
+    "gmodelplace_confidential_off_device.rvl":
+        "routes the `confidential` origin to model role `cloud`",
+    # roadmap item 516 slice 2: the same rule where the arm names a model
+    # COUNCIL. A council's members are placed separately, so the council's own
+    # residence is the most permissive of theirs and the refusal names the
+    # MEMBER that made the join rather than the council. Its admitting twin is
+    # `examples/model_council_binding.rvl`, which is this file with the
+    # proposer on an `on_device` role: one word apart, and only one of them
+    # compiles.
+    "gmodelplace_council_member_off_device.rvl":
+        "routes the `confidential` origin to model council `Release`, whose "
+        "member `proposer` runs on model role `vast`",
     # roadmap item 472: the RETENTION dimension of the same qualifier family. A
     # `Retained[T, P]` value past P's deadline may not reach a persistence sink
     # (a crossing whose declared capability scope means durable storage). The
@@ -472,6 +491,10 @@ REJECTIONS = {
     # drift rejections, which need a running composition and so cannot be a
     # single-file fixture.
     "service_compat_duplicate.rvl": "duplicate service `Cache`",
+    # G-COUNCIL-SPLIT (item 516, docs/design/543-model-council.md): a council
+    # aggregation written to admit on a tie. The fixture landed with commit
+    # 9a635f9c and this table did not follow it.
+    "gcouncilsplit_on_tie_allow.rvl": "admits when the members disagree",
 }
 
 # ------------------------------------------------------------------ coverage

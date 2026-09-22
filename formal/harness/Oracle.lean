@@ -937,8 +937,8 @@ surfaces read, and they name a crossing in DIFFERENT namespaces, so it
 carries both spellings:
 
 * `cap` is the ATTENUATION element — the DECLARED boundary token and its
-  valuation (`lower._cap_keyed`), or the namespaced wiring key where no
-  declaration tokens it (`lower._wire_cap`). `Attenuates` compares a
+  valuation (`lower._cap_keyed`), or the namespaced SERVICE where no
+  declaration tokens it (`lower._undeclared_cap`). `Attenuates` compares a
   parent's grant with a child's demand across a component boundary, and
   `covers` clause 1 is a boundary IDENTITY test, so a local wiring key —
   which two components spell however each likes — names nothing there;

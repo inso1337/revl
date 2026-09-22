@@ -289,6 +289,20 @@ jobs:
       # teeth are exercised on every PR. Never add `|| true`.
       - run: python3 tools/check_runtime_seams.py --self-test
       - run: python3 tools/check_runtime_seams.py
+      # issue #1285: a closed vocabulary declared in more than one place is
+      # recorded, and every recorded copy still spells the same vocabulary.
+      # Three lanes found this defect in one day in three unrelated subsystems
+      # (a type-to-schema mapping, an IR path normalization two of whose three
+      # copies had already drifted, and a taint-origin set an auto-approve
+      # decision INTERSECTS against), and none of the three was found by a
+      # gate. `tests/fixtures/vocabulary_mirror_ledger.json` is the ratchet: a
+      # new copy, a recorded copy drifting, and a stale entry all red, and a
+      # missing ledger reds rather than reading as nothing to check. Stdlib
+      # only and no subprocess, so it runs in this job, which installs no revl.
+      # The self-test runs FIRST and reds the gate against the three instances
+      # themselves. Never add `|| true`.
+      - run: python3 tools/check_vocabulary_mirrors.py --self-test
+      - run: python3 tools/check_vocabulary_mirrors.py --check
       # The roadmap's in-progress markers, checked against git: a marker naming
       # a branch that already landed, a branch gone from origin, or a sha not
       # reachable from main is a lie the next reader pays for. Needs no
@@ -435,7 +449,42 @@ jobs:
         with:
           distribution: temurin
           java-version: "21"
-      - run: pip install -e ".[test]"
+      - id: install
+        run: pip install -e ".[test]"
+      # Issue #1358: every step below is INDEPENDENT of every other. They were
+      # plain steps, so GitHub's default `success()` condition made each one a
+      # precondition for the rest: `conformance.py --check-readme` had been
+      # failing on main against a stale conformance matrix, and that single
+      # staleness reported `skipped` for the four gates after it AND for
+      # `pytest tests/ -q`. The root suite was not running in CI, on main or on
+      # any pull request built from it. Measured on run 35636928793 (main,
+      # 421695acb): step 7 `failure`, steps 8 through 12 `skipped`. #1358
+      # counts what accumulated behind the green tick, including `docgen
+      # --check` drift growing from 3 findings to 9 with nothing reporting it.
+      #
+      # `!cancelled()` and not `always()`, deliberately. This workflow sets
+      # `cancel-in-progress: true`, so a superseded run is cancelled mid-job;
+      # under `always()` that run would still push through `pytest tests/`,
+      # spending the runner minutes that are this repository's actual
+      # throughput limit. `!cancelled()` runs after a FAILED step and stops
+      # after a CANCELLED one, which is exactly the distinction wanted.
+      #
+      # The `steps.install.outcome` conjunct is the one real dependency: if the
+      # package did not install there is no revl to check anything with, and
+      # six identical import errors are noise, not six findings.
+      #
+      # Not a separate job: `frontend` is a 3-version matrix, so splitting the
+      # gates out costs either three more runner slots or one slot plus its own
+      # `pip install -e ".[test]"`, and runner concurrency is what this
+      # repository queues on. Not a reorder either: putting `pytest tests/ -q`
+      # first only moves the silence, and would have moved it onto these five
+      # gates, since the root suite is the step that is currently red.
+      #
+      # The job still FAILS when any step fails -- nothing here is softened,
+      # branch protection is unaffected. What changes is that each step now
+      # reports its own verdict instead of the first failure speaking for six.
+      # `tests/test_ci_steps_are_independent.py` is what keeps this true.
+      #
       # roadmap 328: the README conformance + performance matrix is generated
       # from real emitter output, never authored. Fail the build if the
       # committed block drifts from a fresh generation — the same contract as
@@ -450,11 +499,23 @@ jobs:
       # arrives with no row on some tier — the case a hand-written support
       # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: python3 tools/selfhost_coverage.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # Issue #301: differential oracles only prove the constructs their corpus
       # spells. Keep a named reach report for every oracle, including lower_ir and
       # compile, so a new reference construct cannot hide behind a green oracle.
       - run: python3 tools/oracle_construct_reach.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
+      # Roadmap item 542 / issue #1221: the census corpus and the emit corpora
+      # are globbed, so a generated document enters them with no list to edit
+      # and reads as evidence indistinguishable from a hand-written one. This
+      # holds every scoring document to a declared authoring generation, fails
+      # on one that declares none (an unknown provenance is NEVER read as
+      # hand-written), on a manifest line that outlived its document, and on a
+      # scoring corpus below its declared independence floor.
+      - run: python3 tools/corpus_provenance.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # issue #255: five docs carried source-derived content (the MCP verb
       # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
       # inventory, a test count) with nothing to keep them honest, and the one
@@ -466,6 +527,7 @@ jobs:
       # the check. Pure Python over the installed package, so it belongs beside
       # the matrix gate rather than in a new job.
       - run: python3 tools/docgen.py --check
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # roadmap 110c: the playground/site wheel freshness is NOT checked here,
       # and must not be. The wheel vendors the whole of src/revl, so a per-push
       # gate reddened CI on every source change to a bundled module (an outage
@@ -486,6 +548,7 @@ jobs:
       # runtime-integration tests skip cleanly when their host runtime is
       # absent (cordis-py fork, node/cordis, wasmtime, cordisc)
       - run: pytest tests/ -q
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
 
   backend-python:
     runs-on: ubuntu-latest
@@ -721,6 +784,151 @@ jobs:
           set -euo pipefail
           set -f
           pytest $SEL_PYTEST -q
+
+  # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
+  # work absent from `main`, because each was merged into a base branch that
+  # had already been squash-merged; every required check on every one of them
+  # was green, and nothing in CI asked the question. This job asks it: for
+  # every merged pull request, is the merge commit GitHub recorded reachable
+  # from `main`?
+  #
+  # Reading the RECORD rather than the diff is the point, so it is UNGATED,
+  # like `root-suite-affected` and for the same reason: the defect it covers is
+  # "nobody was looking", and a check with an `if:` can report `skipping`,
+  # which is indistinguishable from a pass in the merge box. It costs one
+  # `gh pr list` and one `git merge-base --is-ancestor` per pull request.
+  #
+  # `fetch-depth: 0` is load-bearing twice over. The merge commits live on the
+  # base branches, not on main, so a single-branch clone does not have them --
+  # and the checker reports a commit it cannot see as UNRESOLVED rather than
+  # reading "absent from this clone" as "absent from main".
+  #
+  # A job-level `permissions` block REPLACES the workflow-level one rather than
+  # merging into it (issue #191), so `contents: read` is restated here beside
+  # the `pull-requests: read` that `gh pr list` needs.
+  merged-prs-landed:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0
+      # Belt and braces over `fetch-depth: 0`: the merge commits this reads sit
+      # on the BASE branches, so every branch has to be present, not only the
+      # ref being built.
+      #
+      # This step CANNOT close the window on its own, and issue #1377 is what
+      # that looked like: it runs before the checker reads the pull requests
+      # from GitHub, so the list is always the fresher of the two, and a PR
+      # that merges in between names a commit no earlier fetch could have
+      # brought in. The checker therefore refreshes again on the miss, which
+      # is the only ordering that can answer the question it is asking. This
+      # step stays because it keeps the common case to zero network calls
+      # inside the checker.
+      - run: git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}"
+
+  # The held-out scoring set (roadmap item 537, issue #1207). Every other
+  # corpus that scores a change here is a file in this repository, so the
+  # reward is a function of the candidate's own input. This job scores the
+  # diff on a set of programs generated at score time from a seed that did
+  # not exist when the diff was written.
+  #
+  # THE SEED IS GENERATED IN THE JOB, not held in a repository secret, and
+  # that is deliberate rather than a workaround. This repository is public:
+  # GitHub does not expose secrets to a workflow triggered by a pull request
+  # from a fork, so a seed-from-secret job is unavailable on exactly the
+  # contributions it exists to judge, and `docs/design/535-held-out-scoring.md`
+  # rejects that shape under section 2.2. A freshly drawn seed is also
+  # STRICTLY HARDER to read than a long-lived one: the tool's residual 2.1.3 is
+  # that a seed leaks through a log or a verdict record, and a seed that exists
+  # for one run and is never recorded cannot have leaked before the diff was
+  # written. What it gives up is reproducibility, so the step prints the seed
+  # when and only when there is a finding to reproduce.
+  #
+  # The three exit statuses are NOT collapsed:
+  #   0  scored clean                          -> pass
+  #   1  scored, a zero-tolerance finding      -> FAIL
+  #   2  refused, `diff-reaches-fence`         -> pass, annotated for review
+  #   2  refused, anything else                -> FAIL
+  # Exit 2 on the fence is the one refusal that is not a failure of the check:
+  # the design's own words are that a candidate changing the scorer is making a
+  # semantic change, and REFUSED is the routing of that change to a human
+  # rather than a verdict about the candidate. Every other refusal means the
+  # question could not be asked, and a question that could not be asked has not
+  # been answered green. There is no path here that scores against the in-tree
+  # corpus when the draw is unavailable, which is the fail-open shape the item
+  # exists to prevent.
+  held-out:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # full history: the diff base has to be a real commit locally, and
+          # the seed check is a `git grep` over the tracked tree.
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
+      - name: score the diff on a set it could not read
+        env:
+          # a branch name is attacker-controllable text, so it reaches the
+          # shell through env: and never as interpolated source -- the same
+          # rule `changes` and `root-suite-affected` follow.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          base="HEAD~1"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch --no-tags --depth=1 origin \
+              "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+            base="origin/${BASE_REF}"
+          elif [ -n "${BEFORE_SHA:-}" ] \
+               && git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            base="${BEFORE_SHA}"
+          fi
+          # One seed, this run only, never written down. `set +x` is not needed
+          # because nothing traces here, and the value is printed only on the
+          # failure path below where a reproducer is worth more than the draw.
+          seed="$(openssl rand -hex 32)"
+          status=0
+          REVL_HELDOUT_SEED="$seed" python3 tools/heldout_scoring.py \
+            --diff-base "$base" --count 200 --json /tmp/heldout.json || status=$?
+          refusal="$(python3 -c "import json;print(json.load(open('/tmp/heldout.json')).get('refusal') or '')" 2>/dev/null || echo "")"
+          if [ "$status" = "0" ]; then
+            echo "held-out scoring: clean on a draw this diff could not read."
+            exit 0
+          fi
+          if [ "$status" = "2" ]; then
+            case "$refusal" in
+              diff-reaches-fence:*)
+                echo "::warning title=held-out scoring refused::$refusal"
+                echo "This diff changes the scorer, so it was NOT scored by it."
+                echo "That is a semantic change to the gate and routes to human"
+                echo "review (docs/design/535-held-out-scoring.md section 3.2)."
+                exit 0
+                ;;
+            esac
+            echo "::error title=held-out scoring refused::$refusal"
+            echo "No score was produced, and none was substituted."
+            exit 1
+          fi
+          echo "::error title=held-out scoring found a divergence::seed $seed"
+          echo "Reproduce with:"
+          echo "  REVL_HELDOUT_SEED=$seed python3 tools/heldout_scoring.py \\"
+          echo "    --diff-base $base --count 200"
+          exit 1
 
   # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
   # container: a sandboxed process runs inside a boundary whose confinement
@@ -1320,7 +1528,8 @@ jobs:
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16  # v6.5.0
         with:
           go-version: "1.26"
-      - run: pip install -e ".[test]"
+      - id: install
+        run: pip install -e ".[test]"
       # emitted Go is compiled and executed against the pinned stc-go runtime
       # (fetched from the module proxy on a fresh runner), mirroring how the
       # rust tier gates against cordis-rs and java against cordis4j.
@@ -1328,6 +1537,7 @@ jobs:
       # file left five (opt gaps 280, reserved-word idents, result ctor 302,
       # router exec, stream exec 130) unrun. The root is ~6s.
       - run: pytest backends/go/ -q
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # The `go` half of the golden drift gate (issue #1089). Every other
       # target runs in `lint`; this one lives here because its producer
       # (`backends/go/regen.sh`) needs `gofmt` to make the emitted bytes
@@ -1337,9 +1547,18 @@ jobs:
       # `go test ./...` below compiles and runs the same modules, which is a
       # different property: this step is what says they are the bytes the
       # emitter produces today.
+      #
+      # Issue #1358's sweep found this job carrying the same shape as
+      # `frontend`: a drift gate sitting between two test steps, so a golden
+      # that a landing on main re-staled would report `skipped` for both
+      # `go test ./...` steps below and nobody would learn that the emitted Go
+      # stopped compiling. Same condition, same reasoning as `frontend`.
       - run: python3 tools/regen_goldens.py --check --strict go
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: cd backends/go/scenarios && go test ./...
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: cd backends/go/v3 && go test ./...
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
 
   # Issue #183, second half: the per-backend jobs above each run ONE root in
   # ONE process, so a state leak BETWEEN two backend roots is invisible to all
