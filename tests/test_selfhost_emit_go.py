@@ -410,17 +410,51 @@ def test_a_components_only_document_names_every_component(emitted, reference):
     assert_boundary_witness(want, got, "stc-go", "<<UNSUPPORTED-COMPONENT:Consumer>>")
 
 
+def test_an_observable_component_on_the_pure_path_is_named_by_the_port(emitted,
+                                                                       reference,
+                                                                       tmp_path):
+    """The pure path's component drop is NOT a silent agreement on either side.
+
+    This case used to assert the opposite: the reference's pure typed-core path
+    routed PAST the components of a document that also carries top-level
+    declarations, so both sides dropped the same thing and agreed byte-for-byte,
+    and the port was told not to mark what the reference also omitted.
+
+    That agreement was two implementations of a fail-open. A module `fn` beside
+    a component with provide methods is the ordinary shape of real revl code —
+    every revl-harness component file is exactly it — and go answered it with a
+    compiling package that had no services, no component and no routes, with no
+    error on either side of the fork. Issue #721 reached it by migrating the
+    harness's ternary dispatch to a provide-method if-chain: the reference
+    emitted 6185 bytes of stdlib preamble and two free functions, and nothing
+    that could serve a request.
+
+    The reference CARRIES it now (issue #1321): the declarations and the live
+    components in one package. So there is no agreement left for the port to
+    protect, and the port names what it does not carry instead of matching a
+    reference output that no longer exists. The boundary that remains is the
+    genuinely incidental component, below.
+    """
+    path = tmp_path / "observable.rvl"
+    path.write_text("fn f() -> Int { return 1 }\n"
+                    "service S { fn g() -> Int }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert 'Name: "C",' in want, "the reference carries the component"
+    assert "func f() int64 {" in want, "and the declaration it was routed for"
+    assert_boundary_witness(want, got, "stc.Component", "<<UNSUPPORTED-COMPONENT:C>>")
+
+
 def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, reference,
                                                                 tmp_path):
     """The boundary of the rule above, so it is not read as wider than it is.
 
     The rule is to name every `components` entry the port does not carry EXCEPT
     where naming it would break a byte agreement the reference itself produces.
-    This is that exception: the reference's PURE typed-core path routes PAST the
-    components of a document that also carries top-level declarations and emits
-    ordinary Go for those alone, so both sides drop the same thing and agree
-    byte-for-byte. 38 documents in the tree are in exactly that state, and a
-    marker here would name a gap that is not there and cost every one of them.
+    That exception survives for a component with nothing to drop: no activation
+    body and no provide method, so routing past it loses nothing anyone could
+    have called and both sides still agree byte-for-byte.
 
     The suppression needs BOTH halves: pure declarations present, and no in-file
     `test` section. A document with a test section already diverges (this slice
@@ -430,43 +464,51 @@ def test_an_incidental_component_on_the_pure_path_is_not_marked(emitted, referen
     """
     path = tmp_path / "incidental.rvl"
     path.write_text("fn f() -> Int { return 1 }\n"
-                    "service S { fn g() -> Int }\n"
-                    "component C provides s: S { provide s { fn g() = 1 } }\n")
+                    "component C { }\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
     assert "<<UNSUPPORTED-COMPONENT" not in got
     assert got == want
 
 
-def test_the_stream_diversion_with_top_level_declarations_stays_silent(emitted,
+def test_the_stream_diversion_with_top_level_declarations_is_named_now(emitted,
                                                                        reference):
-    """The recorded residual of the rule, kept visible rather than in prose.
+    """The recorded residual of the rule, closed -- kept as the pin that it is.
 
-    `has_top_level` is the half of the reference's routing predicate this port
-    can state without branching on a component STEP. The other half is item
-    130's stream diversion: a document that holds a stream is sent to the live
-    stc-go path even when it carries top-level declarations, which a typed-event
-    program always does (the event's record declaration is what puts a `types`
-    entry in the document). Mirroring it would mean reading the `subscribe` /
-    `stream-iter` discriminants, and tools/selfhost_coverage.py takes a port's
-    construct table straight off those spellings -- reading one here would move
-    `subscribe=<true>` and `step=stream-iter` out of the go tier's `unported`
-    baseline in tests/fixtures/selfhost_blind_spots.json and claim a port of the
-    stream lowering this slice does not have.
+    This case used to assert SILENCE. `has_top_level` was the half of the
+    reference's routing predicate the port could state without branching on a
+    component STEP; the other half is item 130's stream diversion, which sends a
+    document that holds a stream to the live stc-go path even when it carries
+    top-level declarations (a typed-event program always does -- the event's
+    record declaration is what puts a `types` entry in the document). So the
+    port suppressed its marker for this document while the reference answered
+    with a whole live module, and the divergence went unnamed.
 
-    Three documents in the tree are in that state; this is the go one. When a
-    later slice closes it, this test fails -- delete it, and say so.
+    Mirroring the diversion itself is still out of reach: it would mean reading
+    the `subscribe` / `stream-iter` discriminants, and tools/selfhost_coverage.py
+    takes a port's construct table straight off those spellings -- reading one
+    here would move `subscribe=<true>` and `step=stream-iter` out of the go
+    tier's `unported` baseline in tests/fixtures/selfhost_blind_spots.json and
+    claim a port of the stream lowering this slice does not have.
+
+    Issue #1321 closed the residual without doing that. The suppression now also
+    requires that no component be OBSERVABLE, and `component_is_observable`
+    reads the LENGTH of a component's `body` rather than the discriminant of any
+    step inside it. A stream component has a body, so it is named -- and the go
+    tier's blind-spot baseline is untouched.
     """
     ir = compile_files([str(ROOT / "backends" / "go" / "testdata"
                             / "stream_event_130.rvl")])
     assert ir["components"] and ir["types"], (
         "the residual is the stream document that ALSO declares a type"
     )
-    got = emitted["emit_go_src"](ir)
-    assert "<<UNSUPPORTED-COMPONENT" not in got, (
-        "the stream diversion is carried now: delete this test and widen "
-        "`has_top_level`'s comment in selfhost/emit_go.rvl"
-    )
+    names = [component["name"] for component in ir["components"]]
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert [line for line in got.splitlines() if line.startswith("<<")] == [
+        f"<<UNSUPPORTED-COMPONENT:{name}>>" for name in names
+    ], "one marker per components entry, in document order"
+    assert_boundary_witness(want, got, "stc-go",
+                            f"<<UNSUPPORTED-COMPONENT:{names[0]}>>")
 
 
 def test_record_update_is_a_reference_refusal(reference, tmp_path):

@@ -743,6 +743,80 @@ class ModelRoleDecl:
 
 
 @dataclass
+class CouncilMember:
+    """One member of a `model council`: `<function> -> <role>` (item 516).
+
+    `function` is what the member is FOR (proposer, adversary, verifier) and
+    `role` is the item-512 `model role` that places it. The two are separate
+    words on purpose: the function is the member's job in the aggregation and
+    the role is where its call runs, which is what lets a council put a local
+    adversary beside a cloud proposer.
+
+    SYNTAX ONLY. The function vocabulary, the distinctness rules and the
+    placement lookup are `revl.model_council`'s."""
+    function: str
+    role: str
+    line: int
+
+
+@dataclass
+class AggregateClause:
+    """`aggregate <rule> [quorum <basis>] [on_tie <outcome>]` (item 516).
+
+    The rule that turns the members' answers into one outcome, written down
+    rather than implied. `quorum` and `on_tie` are OPTIONAL and default in
+    `revl.model_council` to the fail-closed readings (`declared` and `split`);
+    `None` here means the clause was omitted, which is not the same as writing
+    the default and is why the parser records the omission rather than filling
+    it in.
+
+    Every one of the three names parses as a bare identifier, INCLUDING the
+    spellings the checker refuses (`aggregate first`, `on_tie allow`,
+    `quorum answered`). That is deliberate and is the discipline item 512's
+    `_model_route_candidate` already uses for `*`: an author who reaches for
+    "whichever member answered" gets the reason it is refused, not a syntax
+    complaint."""
+    rule: str
+    quorum: str | None
+    on_tie: str | None
+    line: int
+
+
+@dataclass
+class ModelCouncilDecl:
+    """`model council NAME { <function> -> <role>, ..., aggregate <rule> }`
+    (roadmap item 516).
+
+    A council is a PROGRAM-LEVEL declaration for the reason
+    `docs/design/531-model-placement.md` section 9 records: it binds several
+    item-512 roles in one aggregation, so the roles it names have to be
+    program-level too.
+
+    `model` stays a CONTEXTUAL keyword — it heads a declaration only in the
+    shapes `model role NAME <residence>` and `model council NAME {`, so the
+    lexer's `KEYWORDS` table and the self-hosted lexer that mirrors it need no
+    sync and a program using `model` as an ordinary name keeps parsing.
+
+    `aggregates` holds EVERY `aggregate` clause written, which is normally one
+    and is empty when none was written. The parser neither supplies a default
+    nor drops a duplicate: "a council declares exactly one aggregation" is a
+    rule with a diagnostic that needs both lines, and inventing a default here
+    would be the silent pick the item exists to remove."""
+    name: str
+    members: tuple
+    aggregates: tuple
+    line: int
+
+    @property
+    def aggregate(self):
+        """The single aggregation clause, or `None`.
+
+        Only meaningful once `revl.model_council` has admitted the council;
+        before that a program may legally have parsed two."""
+        return self.aggregates[0] if self.aggregates else None
+
+
+@dataclass
 class InterceptStmt:
     key: str
     metadata: dict
@@ -2104,6 +2178,10 @@ class Program:
     # `revl.model_route` (validated there). Empty for every program that
     # declares none, so those programs are byte-identical.
     model_roles: list[ModelRoleDecl] = field(default_factory=list)
+    # item 516: the model councils declared in this program. Read by
+    # `revl.model_council` (validated there). Empty for every program that
+    # declares none, so those programs are byte-identical.
+    model_councils: list[ModelCouncilDecl] = field(default_factory=list)
     tests: list[TestDecl] = field(default_factory=list)
     fault_tests: list[FaultTestDecl] = field(default_factory=list)
     prop_tests: list[PropTestDecl] = field(default_factory=list)
@@ -2403,9 +2481,27 @@ class Parser:
         of naming the construct that swallowed the tokens.
 
         Only ever called AFTER a parse has already failed, so it can reword a
-        genuine error but never reject accepted source (additivity)."""
+        genuine error but never reject accepted source (additivity).
+
+        The reword is bounded to the CORRUPTED TAIL (issue #1310). A stray
+        close can only mis-parse the source between itself and the next
+        backtick; past that the lexer is back in step with the file, so a
+        failure there is an ordinary error carrying its own, usually far
+        better, diagnostic. As first written the bound was one-sided: any
+        failure at or after a flagged close was reworded. The flag itself is a
+        loose heuristic, and a single-line `` `// …` `` template, which is what
+        every emitter in `selfhost/` writes to emit a host comment, trips it.
+        The two together replaced an exact "`acquire` is a reserved keyword" at
+        `selfhost/emit_go.rvl:1711` with a template complaint at line 1341:
+        the wrong kind of error, 370 lines from the statement that caused it.
+        Keeping the reword inside the tail costs the item-365 case nothing,
+        since its failures land on the very next token after the stray close,
+        and it leaves every failure outside the tail with the diagnostic the
+        parser actually computed."""
+        if e.line is None:
+            return None
         best = None
-        for tok in self.toks:
+        for index, tok in enumerate(self.toks):
             if tok.kind != "template":
                 continue
             span = getattr(tok, "stray_backtick", None)
@@ -2413,8 +2509,9 @@ class Parser:
                 continue
             start_line, close_line = span
             # nearest suspect template whose stray close is at or before the
-            # point the parse gave out.
-            if e.line is not None and close_line > e.line:
+            # point the parse gave out, AND whose tail still covers that point.
+            tail_end = self._tail_end_line(index)
+            if tail_end is None or not close_line <= e.line <= tail_end:
                 continue
             if best is None or close_line > best[1]:
                 best = span
@@ -2432,6 +2529,25 @@ class Parser:
                  "backtick with an interpolation, `` ${\"`\"} ``, or move the "
                  "template's closing backtick to where the template really ends",
         )
+
+    def _tail_end_line(self, index: int) -> int | None:
+        """Last line the template at token `index` could have corrupted had its
+        close been stray (issue #1310), or `None` when it cannot have been.
+
+        If the close was stray, the host text after it lexed as revl up to the
+        next backtick in the file, and that backtick is where the NEXT
+        template token opens, because the template's real end re-lexes as the
+        start of one. So the damage stops at that token's line.
+
+        No template after it at all means no backtick after it at all, since
+        templates are what consume backticks. A stray close needs the real
+        close to be somewhere further on, so with nothing further on the close
+        cannot have been stray: the only source that fits is a template left
+        unterminated, and the lexer refuses that before the parser runs."""
+        for tok in self.toks[index + 1:]:
+            if tok.kind == "template":
+                return tok.line
+        return None
 
     def _parse_program(self) -> Program:
         program = Program(self.filename)
@@ -2599,6 +2715,15 @@ class Parser:
                 # self-hosted lexer's KEYWORDS table needs no sync.
                 program.model_roles.append(self.model_role_decl())
 
+            elif self.at("ident", "model") \
+                    and self.peek_ahead(1).kind == "ident" \
+                    and self.peek_ahead(1).value == "council":
+                # item 516: `model council NAME { ... }`. The second contextual
+                # shape `model` heads, on the same discipline as `model role`
+                # above: the pair `model council` is what makes this a
+                # declaration, so `model` alone is still an ordinary name.
+                program.model_councils.append(self.model_council_decl())
+
             elif self.at("ident", "prop") and self.peek_ahead(1).kind == "kw" \
                     and self.peek_ahead(1).value == "test":
                 # `prop` is a *contextual* keyword: like `fault`, it only heads a
@@ -2737,6 +2862,80 @@ class Parser:
         residence = self.expect(
             "ident", what="a residence for the role (`on_device` or `off_device`)").value
         return ModelRoleDecl(name, residence, line)
+
+    def model_council_decl(self) -> ModelCouncilDecl:
+        """`model council NAME { <fn> -> <role>, ..., aggregate <rule> }`
+        (roadmap item 516).
+
+        Two kinds of item inside the braces, distinguished by the first token:
+        an `aggregate` clause, or a member arm. Both are comma- or
+        semicolon-separated and a trailing comma is allowed, exactly as the
+        `route model` block allows one.
+
+        The parser validates NOTHING beyond the shape: the function
+        vocabulary, the aggregation vocabulary, the distinctness rules and the
+        lookup of each member's `model role` are `revl.model_council`'s, so the
+        refusal and the rule it enforces sit in one file (the `retention` and
+        `route model` discipline).
+
+        A SECOND `aggregate` clause is kept rather than dropped, because "a
+        council declares exactly one aggregation" is a rule with a diagnostic
+        and not a parse accident; the checker needs both lines to name them.
+
+        Member ORDER is preserved. It decides nothing — a rule that depended on
+        it would be the match-order failure `route model` already refuses for
+        two arms on one origin — but the declared order is what the diagnostics
+        and item 517's evidence list members in."""
+        line = self.expect("ident", value="model").line
+        self.expect("ident", value="council")
+        name = self.expect("ident", what="a model council name").value
+        self.expect("{", what=f"`{{` after `model council {name}`")
+        members: list = []
+        aggregates: list = []
+        while not self.at("}"):
+            self._skip_semis()
+            if self.at("}"):
+                break
+            if self.at("ident", "aggregate"):
+                aggregates.append(self._council_aggregate())
+            else:
+                fn_tok = self.expect(
+                    "ident",
+                    what="a council function, or `aggregate`, inside "
+                         f"`model council {name}`")
+                self.expect("arrow", what=f"`->` after `{fn_tok.value}`")
+                role = self.expect(
+                    "ident",
+                    what=f"a model role name after `{fn_tok.value} ->`").value
+                members.append(CouncilMember(fn_tok.value, role, fn_tok.line))
+            if self.at(","):
+                self.next()
+        self.expect("}")
+        return ModelCouncilDecl(name, tuple(members), tuple(aggregates), line)
+
+    def _council_aggregate(self) -> AggregateClause:
+        """`aggregate <rule> [quorum <basis>] [on_tie <outcome>]` (item 516).
+
+        `aggregate`, `quorum` and `on_tie` are CONTEXTUAL identifiers read only
+        in this slot. Every value is taken as a bare name and checked in
+        `revl.model_council`, including the ones it refuses: `aggregate first`
+        and `on_tie allow` are the two spellings an author reaches for when
+        they want disagreement resolved toward an answer, and each gets the
+        reason rather than a syntax error."""
+        line = self.expect("ident", value="aggregate").line
+        rule = self.expect(
+            "ident", what="an aggregation rule after `aggregate`").value
+        quorum = None
+        if self.at("ident", "quorum"):
+            self.next()
+            quorum = self.expect(
+                "ident", what="a quorum basis after `quorum`").value
+        on_tie = None
+        if self.at("ident", "on_tie"):
+            self.next()
+            on_tie = self.expect(
+                "ident", what="an outcome after `on_tie`").value
+        return AggregateClause(rule, quorum, on_tie, line)
 
     def model_route_stmt(self) -> ModelRouteStmt:
         """`route model on <action> { <origin> -> <role>, ... }` (item 512).
@@ -5338,11 +5537,23 @@ class Parser:
 
     def stmt(self, in_method: bool, in_async_method: bool = False):
         tok = self.peek()
-        # `y = expr` — assignment to a `var` bound earlier in this method
-        if in_method and tok.kind == "ident" and self.peek_ahead(1).kind == "=":
+        # `y = expr` — assignment to a `var` bound earlier in this method, and
+        # (issue #721) the compound forms `y += expr` / `-=` / `*=` / `/=` / `%=`.
+        # The method grammar carries `var`, assignment, `if`, `while` and `for`
+        # (items 548 and 681), so a loop that accumulates is ordinary code here;
+        # only the compound spelling of the same assignment was missing, and it
+        # failed as "expected a statement … found 'i'", which reads as though
+        # assignment itself were out of bounds. `_assign_ahead` is the same
+        # lookahead the fn grammar uses, so the two strata admit one spelling.
+        if in_method and tok.kind == "ident" and self._assign_ahead():
             self.next()
-            self.next()
-            return AssignStmt(tok.value, self.pure_expr(), tok.line)
+            op = "="
+            if self.at("="):
+                self.next()
+            else:
+                op = self.next().value + "="
+                self.next()
+            return AssignStmt(tok.value, self.pure_expr(), tok.line, op)
         if tok.kind == "kw" and tok.value in ("let", "var"):
             mutable = tok.value == "var"
             self.next()

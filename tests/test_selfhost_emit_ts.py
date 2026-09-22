@@ -218,6 +218,13 @@ CORPUS = [
     # a supplied value is no longer silently dropped. Byte-identical across the
     # reference and the self-host emitter.
     "config_reserved.rvl",
+    # issue #721 / item 458: provide-method CONTROL FLOW (`if`/`else`/`while`/
+    # `for`/`break`/`continue`, items 548 and 681) — the shape a ternary-chained
+    # dispatch migrates to once the emission-hoist helpers come out. Shared with
+    # the py corpus: one document, two oracles, so the two tiers cannot drift
+    # apart on it. Added FAILING FIRST — the port answered
+    # `<<UNSUPPORTED-METHOD-STEP:if>>` and dropped every route in the document.
+    "../emit_py_corpus/services_control_flow.rvl",
 ]
 
 def _load_reference_emit():

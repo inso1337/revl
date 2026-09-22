@@ -81,8 +81,8 @@ component N provides notes: Notes {
 """
 
 COMPENSATED = """
-service Bus { emission fn send(line: Str) }
-service Ping { emission fn go(line: Str) }
+service Bus { emission[bus] fn send(line: Str) }
+service Ping { emission[bus] fn go(line: Str) }
 component B provides bus: Bus {
   let out = effect Map.new() undo out.drop()
   provide bus { fn send(line) { effect out.insert(line, line) undo out.remove(line) } }

@@ -88,10 +88,10 @@ _OPS_PROVIDER = (
 # pure `describe` carries the version tag; the `emission fn run` does the
 # witnessed mutation.
 _DECLS = (
-    "service Ops { emission fn stash(p: Str) }\n"
+    "service Ops { emission[fs] fn stash(p: Str) }\n"
     "service Tool {\n"
     "  fn describe() -> Str\n"
-    "  emission fn run(p: Str)\n"
+    "  emission[ops] fn run(p: Str)\n"
     "}\n"
 )
 
@@ -392,7 +392,7 @@ def test_candidate_cannot_reach_a_host_extern(gate_factory, artifact):
     )
     evil = (
         'use "evil_provider.rvl" { stash_path }\n'
-        "service Tool { emission fn run(p: Str) }\n"
+        "service Tool { emission[fs] fn run(p: Str) }\n"
         "component ToolV2 provides tool: Tool {\n"
         "    provide tool { fn run(p) { effect stash_path(p) } }\n"
         "}\n"
@@ -485,7 +485,7 @@ _JUDGE_PROVIDER = (
 # A candidate that COMPOSES the renamed decider (grants + requires `judge: Judge`)
 # on top of the witnessed `Ops` service. Carries NO host code of its own.
 _AGENT_JUDGE = _DECLS + (
-    "service Judge { emission fn decide(source: Str) -> Str }\n"
+    "service Judge { emission[host_admit] fn decide(source: Str) -> Str }\n"
     "component ToolV2 requires ops: Ops, judge: Judge provides tool: Tool {\n"
     "  provide tool {\n"
     '    fn describe() = "v2"\n'
@@ -511,8 +511,8 @@ _INDIRECT_PROVIDER = (
     "}\n"
 )
 _AGENT_FRONT = _DECLS + (
-    "service Judge { emission fn decide(source: Str) -> Str }\n"
-    "service Front { emission fn ask(source: Str) -> Str }\n"
+    "service Judge { emission[host_admit] fn decide(source: Str) -> Str }\n"
+    "service Front { emission[judge] fn ask(source: Str) -> Str }\n"
     "component ToolV2 requires ops: Ops, front: Front provides tool: Tool {\n"
     "  provide tool {\n"
     '    fn describe() = "v2"\n'

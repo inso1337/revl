@@ -480,6 +480,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # marking, and the effect block's pure setup all left this list when
         # lower.rvl grew the `match`/`format`/`fn`/witnessed-`effect` surface.)
         #
+        # issue #721: provide-method control flow (`if`/`while`/`for`/`break`/
+        # `continue`). The EMITTER half is byte-exact, selfhost/emit_py.rvl
+        # carries `method_control`, so this is a `selfhost/lower.rvl` gap: the
+        # native IR producer does not lower a method-body control-flow step.
+        "services_control_flow.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at
@@ -534,6 +539,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
         # bracket, the `assign` step and `undo_captures` landed in a provide
         # method body.)
+        # issue #721: provide-method control flow, the same lower.rvl gap the
+        # py list records: selfhost/emit_ts.rvl reproduces the reference bytes
+        # from the reference IR, and the fully-native chain does not.
+        "../emit_py_corpus/services_control_flow.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),

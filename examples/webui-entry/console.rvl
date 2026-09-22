@@ -83,7 +83,7 @@ service ConsoleRpc {
 // registering a frontend is an outward effect on the host (G4 upper bound, the
 // shape a `revl import cordis` of `@cordisjs/plugin-webui` recovers).
 service WebUI {
-  emission fn add_entry(
+  emission[webui] fn add_entry(
     dev_source: Asset,
     prod_manifest: Str,
     routes: List[Str],
