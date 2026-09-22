@@ -23,6 +23,19 @@ A `route model` block places one action's model calls by the ORIGIN CLASS of
 what the action is given, reusing the item-249 lattice rather than inventing a
 second vocabulary.
 
+AN ARM MAY ALSO NAME A COUNCIL (item 516 slice 2)
+-------------------------------------------------
+The right of an arm is a `model role` or a `model council`
+(`docs/design/543-model-council.md`), and the two share one namespace, which
+`revl.model_council` enforces by refusing a council that takes a declared
+role's name. A council's own placement is `Council.residence`, the MOST
+permissive of its members', so an arm routing a confidentiality origin to a
+council with one `off_device` member is refused - and the refusal names THE
+MEMBER, because the members are placed separately and that is the construct.
+The council table is threaded in from `revl.model_council.check()` rather than
+computed here: this slice reads two validated tables and re-derives neither
+(design note 543 section 14).
+
 WHICH WAY EVERY DECISION FAILS
 ------------------------------
 Every rule below refuses when it is unsure. There is no "assume the role is
@@ -130,6 +143,8 @@ MODEL_SCOPE = "model"
 _ORIGIN_VOCABULARY = ", ".join(sorted(ORIGIN_CLASSES) + ["*"])
 _RESIDENCE_VOCABULARY = ", ".join(RESIDENCES)
 
+_COUNCIL_DESIGN = "docs/design/543-model-council.md"
+
 
 @dataclass(frozen=True)
 class Role:
@@ -197,17 +212,106 @@ def _action_names(component) -> set[str]:
     return names
 
 
-def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
+def _council_ceiling_refusal(action: str, component: str, origin: str,
+                             name: str, off: tuple) -> tuple[str, str]:
+    """The message and hint for an arm that routes a confidentiality origin to
+    a council one of whose members is placed off the device (item 516 slice 2).
+
+    It names the MEMBER, and that is the whole reason this refusal exists
+    beside the role one rather than reusing it. A council's members are placed
+    separately (design note 543 section 6), so "the council is off_device" is
+    a derived fact and the actionable one is which member derived it: an author
+    told "`Release` may not read a confidential input" has to re-read three
+    placements to find out why, and an author told "its `proposer` runs on
+    `vast`, declared `off_device`" has the arm to edit.
+
+    The first off-device member in DECLARATION ORDER is the one the message
+    names; the hint names all of them, because moving one member of two off
+    the device leaves the refusal standing and an author who fixed the named
+    one and recompiled would otherwise learn that one refusal at a time.
+    """
+    first = off[0]
+    message = (
+        f"action `{action}` ({component}) routes the `{origin}` origin to "
+        f"model council `{name}`, whose member `{first['function']}` runs on "
+        f"model role `{first['role']}`, declared `{first['residence']}` on "
+        f"line {first['line']}: a {origin} input may not leave the device "
+        f"({CODE})")
+    named = ", ".join(f"`{m['function']}` on `{m['role']}`" for m in off)
+    hint = (
+        f"a council is asked ONE question with ONE input, so giving a "
+        f"`{origin}` value to `{name}` gives it to every member, and the "
+        f"council's residence is the most permissive of its members' rather "
+        f"than the least. Place the member on a role declared `on_device`, or "
+        f"route `{origin}` somewhere that stays on the device. Off the device: "
+        f"{named} ({_COUNCIL_DESIGN})")
+    return message, hint
+
+
+def _council_placement(council, table: dict) -> dict:
+    """The `{origin: placement}` entry a council-naming arm records.
+
+    `role` is the COUNCIL's name and `residence` is `Council.residence`, the
+    most permissive of its members' (design note 543 section 6), so every
+    reader that already understands a role placement - `admits`, `reach_of`,
+    item 518's `ShadowPlan.route_table` - reads a council placement without
+    knowing the word. `council` is what tells the ones that care which noun to
+    say, and `members` carries the per-member placement the join was computed
+    from, because the whole point of a council is that its members are placed
+    SEPARATELY and a refusal has to be able to name the one that made the
+    difference (item 516, `docs/design/543-model-council.md` section 6).
+
+    Read off `model_council.check()`'s validated table and `roles()`'s. Nothing
+    here re-derives a residence, a member or a role: a member's `line` is the
+    line its `model role` was DECLARED on, which is the line every other
+    placement refusal in this file cites, and not the line the member was
+    written on - the diagnostic already points at the arm.
+    """
+    return {
+        "role": council.name,
+        "residence": council.residence,
+        "council": council.name,
+        "members": tuple(
+            {"function": m.function, "role": m.role,
+             "residence": m.residence, "line": table[m.role].line}
+            for m in council.members),
+        "member_roles": tuple(m.role for m in council.members),
+    }
+
+
+def off_device_members(placement) -> tuple:
+    """The members of a council placement that are placed off the device.
+
+    Empty for a role placement and for a council whose members all stay on the
+    device, which is the pair of cases the ceiling admits. In DECLARATION
+    ORDER, so the member a refusal names is the first one an author reading
+    the council top to bottom would reach.
+    """
+    return tuple(m for m in (placement or {}).get("members") or ()
+                 if m.get("residence") == "off_device")
+
+
+def check(program, filename: str | None = None,
+          councils: dict | None = None) -> dict[str, dict[str, dict]]:
     """Check every `route model` block in the program against its role table.
 
     Returns `{component: {action: {origin: role}}}` for the blocks that passed,
     which is what item 514's flow walk will read. A program with no block gets
     `{}`.
+
+    `councils` is `revl.model_council.check()`'s validated table, which an arm
+    may name where it names a role (item 516 slice 2). It is threaded in
+    rather than computed here for the reason design note 543 section 14 gives:
+    this slice reads both already-validated tables and re-derives neither. The
+    default `None` is the same table as `{}` and leaves every program that
+    declares no council byte-identical through here, which is every program on
+    the tree that predates item 516.
     """
     from .parser import ModelRouteStmt  # noqa: PLC0415 - import cycle
 
     filename = filename or program.filename
     table = roles(program, filename)
+    councils = councils or {}
     placed: dict[str, dict[str, dict]] = {}
     for comp in program.components:
         where = comp.source or filename
@@ -273,7 +377,8 @@ def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
                         code=CODE, category=CATEGORY,
                     )
                 role = table.get(arm.role)
-                if role is None:
+                council = councils.get(arm.role) if role is None else None
+                if role is None and council is None:
                     known = ", ".join(sorted(table)) or "none"
                     raise RevlError(
                         where, arm.line,
@@ -289,10 +394,11 @@ def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
                         code=CODE, category=CATEGORY,
                     )
                 if arm.origin == "secret":
+                    noun = "council" if council is not None else "role"
                     raise RevlError(
                         where, arm.line,
                         f"action `{stmt.action}` ({comp.name}) routes the "
-                        f"`secret` origin to model role `{arm.role}`: a "
+                        f"`secret` origin to model {noun} `{arm.role}`: a "
                         f"capability-bound secret never reaches a model prompt, "
                         f"on the device or off it (G-SECRET-FLOW)",
                         hint="a `secret NAME for CAP` value is a host-scope "
@@ -302,6 +408,25 @@ def check(program, filename: str | None = None) -> dict[str, dict[str, dict]]:
                              "Drop the arm",
                         code="G-SECRET-FLOW", category=CATEGORY,
                     )
+                if council is not None:
+                    placement = _council_placement(council, table)
+                    # The council's own ceiling, which is the one number this
+                    # slice reads from `model_council.check()` (design note 543
+                    # section 6). It is the MOST permissive of its members',
+                    # because giving an input to a council gives it to every
+                    # member - and the refusal names the member that made the
+                    # join `off_device`, not the council, because the members
+                    # are placed separately and that IS the construct.
+                    off = off_device_members(placement)
+                    if arm.origin in CONFIDENTIALITY_ORIGINS and off:
+                        message, hint = _council_ceiling_refusal(
+                            stmt.action, comp.name, arm.origin, arm.role, off)
+                        raise RevlError(
+                            where, arm.line, message, hint=hint,
+                            code=CODE, category=CATEGORY,
+                        )
+                    arms[arm.origin] = placement
+                    continue
                 if arm.origin in CONFIDENTIALITY_ORIGINS and role.off_device:
                     raise RevlError(
                         where, arm.line,
@@ -368,11 +493,22 @@ class Verdict:
     the diagnostic can name both the origin and the role the exit test asks
     for. Under `unplaced` they carry the `*` arm's role when the block has one,
     which is the role the author believes the value is going to.
+
+    `council` is the council's name when the arm named a council rather than a
+    role (item 516 slice 2), and `member` / `member_role` are the member whose
+    own placement made the council's join `off_device`. They are what lets the
+    sentence name the member, which is what makes "the members are placed
+    separately" a fact about a VALUE rather than about a declaration. All
+    three are None for a role placement, and a reader that ignores them gets
+    the role-shaped verdict this type has always had.
     """
     ok: bool
     reason: str
     role: str | None = None
     residence: str | None = None
+    council: str | None = None
+    member: str | None = None
+    member_role: str | None = None
 
 
 _OK = Verdict(True, "ok")
@@ -408,12 +544,20 @@ def admits(arms: dict | None, origin: str, routed_component: bool) -> Verdict:
     if placement is None:
         star = arms.get("*") or {}
         return Verdict(False, "unplaced", star.get("role"),
-                       star.get("residence"))
+                       star.get("residence"), star.get("council"))
     if placement.get("residence") == "off_device":
+        # A council placement carries its members, so the refusal can name the
+        # one whose own residence made the join `off_device` (item 516 slice
+        # 2). `check()` refuses writing this arm, so this is the same
+        # belt-and-braces path the role case is: if a later slice ever admits
+        # such an arm, the VALUE is still refused, and still by member.
+        off = off_device_members(placement)
+        first = off[0] if off else {}
         return Verdict(False, "off_device", placement.get("role"),
-                       placement.get("residence"))
+                       placement.get("residence"), placement.get("council"),
+                       first.get("function"), first.get("role"))
     return Verdict(True, "ok", placement.get("role"),
-                   placement.get("residence"))
+                   placement.get("residence"), placement.get("council"))
 
 
 def ceiling_refusal(verdict: Verdict, origin: str, action: str,
@@ -426,6 +570,10 @@ def ceiling_refusal(verdict: Verdict, origin: str, action: str,
     declaration refusals and this one stay recognisably the same diagnostic.
     """
     where = f"argument {index + 1} of `{crossing}` (`{capability}`)"
+    # The noun the sentence says about the thing the arm named. An arm may name
+    # a role or a council (item 516 slice 2) and calling a council a role would
+    # send the author to a `model role` declaration that does not exist.
+    noun = "model council" if verdict.council else "model role"
     if verdict.reason == "unrouted":
         message = (
             f"a `{origin}` value reaches the model crossing {where} in action "
@@ -442,7 +590,7 @@ def ceiling_refusal(verdict: Verdict, origin: str, action: str,
         message = (
             f"a `{origin}` value reaches the model crossing {where} in action "
             f"`{action}` ({component}), whose `route model` block places it "
-            f"through no arm: the catch-all `*` routes to model role "
+            f"through no arm: the catch-all `*` routes to {noun} "
             f"`{verdict.role}` (declared `{verdict.residence}`) and `*` never "
             f"covers a confidentiality origin ({CODE})")
         hint = (
@@ -461,6 +609,19 @@ def ceiling_refusal(verdict: Verdict, origin: str, action: str,
             f"and not a default: add `{origin} -> <an on_device role>` to "
             f"`route model on {action}`, or keep the `{origin}` value out of "
             f"the crossing. The path is {chain}.")
+    elif verdict.council:
+        message = (
+            f"a `{origin}` value reaches the model crossing {where} in action "
+            f"`{action}` ({component}), which routes the `{origin}` origin to "
+            f"model council `{verdict.council}`, whose member "
+            f"`{verdict.member}` runs on model role `{verdict.member_role}`: "
+            f"a {origin} input may not leave the device ({CODE})")
+        hint = (
+            f"a council is asked one question with one input, so this value "
+            f"reaches every member of `{verdict.council}` and the member above "
+            f"is the one placed off the device. Place it on a role declared "
+            f"`on_device`, or keep the `{origin}` value out of this crossing. "
+            f"The path is {chain}.")
     else:
         message = (
             f"a `{origin}` value reaches the model crossing {where} in action "
@@ -543,6 +704,12 @@ def reach_of(arms) -> frozenset:
         if placement.get("role"):
             out.add(placement["role"])
         out.update(c for c in (placement.get("candidates") or ()) if c)
+        # item 516 slice 2: an action routed to a COUNCIL reaches every
+        # member's role, because the council is one question asked of every
+        # member. A crossing placed on a member's role is therefore inside the
+        # placement the block names, and refusing it would widen nothing and
+        # protect nothing.
+        out.update(r for r in (placement.get("member_roles") or ()) if r)
     return frozenset(out)
 
 

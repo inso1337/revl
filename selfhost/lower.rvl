@@ -12394,6 +12394,39 @@ fn msecret_arm_msg(act: Str, cname: Str, role: Str) -> Str {
     .concat("the device or off it (G-SECRET-FLOW)")
 }
 
+// The same sentence for an arm that names a `model council` (item 516 slice
+// 2). Only the noun moves: a council is not a role, and sending the author to
+// a `model role Release` declaration that does not exist would be worse than
+// no diagnostic.
+fn msecret_council_msg(act: Str, cname: Str, name: Str) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `secret` origin to model council `").concat(name)
+    .concat("`: a capability-bound secret never reaches a model prompt, on ")
+    .concat("the device or off it (G-SECRET-FLOW)")
+}
+
+// An arm that routes a confidentiality origin to a COUNCIL one of whose
+// members is placed off the device (item 516 slice 2, `model_route`'s
+// `_council_ceiling_refusal`).
+//
+// It names the MEMBER, and that is the whole reason it is a second sentence
+// rather than the role one with a different name in it. A council's members
+// are placed SEPARATELY (`docs/design/543-model-council.md` section 6), so
+// "the council is off_device" is a derived fact and the actionable one is
+// which member derived it. `rline` is the line the member's `model role` was
+// DECLARED on, which is the line every other placement refusal here cites;
+// the verdict's own line is the arm's.
+fn mcouncil_off_device_msg(act: Str, cname: Str, orig: Str, name: Str,
+                           fun: Str, role: Str, res: Str, rline: Int) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `").concat(orig)
+    .concat("` origin to model council `").concat(name)
+    .concat("`, whose member `").concat(fun)
+    .concat("` runs on model role `").concat(role).concat("`, declared `")
+    .concat(res).concat("` on line ").concat(rline.to_str()).concat(": a ")
+    .concat(orig).concat(" input may not leave the device (G-MODEL-PLACE)")
+}
+
 fn moff_device_msg(act: Str, cname: Str, orig: Str, role: Str, res: Str,
                    rline: Int) -> Str {
   return "action `".concat(act).concat("` (").concat(cname)
@@ -12610,10 +12643,37 @@ fn marm_origin_at(as_: List[MArm], o: Str, i: Int) -> Int {
   return marm_origin_at(as_, o, i + 1)
 }
 
+// The first member of a council placed off the device, in DECLARATION order,
+// or -1 when every member stays on it (item 516 slice 2,
+// `model_route.off_device_members`). Declaration order, so the member a
+// refusal names is the first one an author reading the council top to bottom
+// would reach.
+//
+// A member whose role is not declared cannot be judged and is stepped over
+// here rather than guessed at: the council phase, which runs BEFORE this one,
+// already refuses that council by name, so this loop never sees one.
+fn ccl_off_member(c: CDecl, rs: List[MRole]) -> Int {
+  var i = 0
+  while (i < c.cmems.length()) {
+    let ri = mrole_at(rs, c.cmems[i].crole, 0)
+    if (ri != 0 - 1 && rs[ri].rres == "off_device") { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
 // One block's arms, in the reference's own order: the origin vocabulary, then
-// one arm per origin, then the role's existence, then `secret` at any
-// residence, then a confidentiality origin against an `off_device` role.
-fn model_arms_refusal(b: MBlock, cname: Str, rs: List[MRole]) -> Verd {
+// one arm per origin, then the role's (or COUNCIL's) existence, then `secret`
+// at any residence, then a confidentiality origin against an `off_device`
+// placement.
+//
+// `cs` is the council table (item 516 slice 2): the right of an arm names a
+// `model role` or a `model council`, and the two share one namespace. A
+// council's placement is the MOST permissive of its members', so the last rule
+// splits in two: against the role's own residence, or against the first
+// member of the council that is off the device, which the refusal NAMES.
+fn model_arms_refusal(b: MBlock, cname: Str, rs: List[MRole],
+                      cs: List[CDecl]) -> Verd {
   var i = 0
   while (i < b.barms.length()) {
     let a = b.barms[i]
@@ -12624,15 +12684,30 @@ fn model_arms_refusal(b: MBlock, cname: Str, rs: List[MRole]) -> Verd {
       return mverd(morigin_twice_msg(a.aorig, b.bact, cname), a.aline)
     }
     let ri = mrole_at(rs, a.arole, 0)
-    if (ri == 0 - 1) {
+    let ci = ri == 0 - 1 ? ccl_at(cs, a.arole, 0) : 0 - 1
+    if (ri == 0 - 1 && ci == 0 - 1) {
       return mverd(mundeclared_role_msg(a.aorig, a.arole, b.bact, cname),
                    a.aline)
     }
     if (a.aorig == "secret") {
+      if (ci != 0 - 1) {
+        return mverd(msecret_council_msg(b.bact, cname, a.arole), a.aline)
+      }
       return mverd(msecret_arm_msg(b.bact, cname, a.arole), a.aline)
     }
-    if (contains(model_confidentiality_origins(), a.aorig)
-        && rs[ri].rres == "off_device") {
+    if (ci != 0 - 1) {
+      if (contains(model_confidentiality_origins(), a.aorig)) {
+        let mi = ccl_off_member(cs[ci], rs)
+        if (mi != 0 - 1) {
+          let m = cs[ci].cmems[mi]
+          let mr = rs[mrole_at(rs, m.crole, 0)]
+          return mverd(mcouncil_off_device_msg(b.bact, cname, a.aorig, a.arole,
+                                               m.cfun, m.crole, mr.rres,
+                                               mr.rline), a.aline)
+        }
+      }
+    } else if (contains(model_confidentiality_origins(), a.aorig)
+               && rs[ri].rres == "off_device") {
       return mverd(moff_device_msg(b.bact, cname, a.aorig, a.arole,
                                    rs[ri].rres, rs[ri].rline), a.aline)
     }
@@ -12649,7 +12724,8 @@ fn mblock_action_at(bs: List[MBlock], a: Str, i: Int) -> Int {
 
 // One component's blocks, in the reference's own order: routed-once per
 // action, a block that names no role, the action's existence, then the arms.
-fn model_comp_refusal(ts: List[Token], sp: MSpan, rs: List[MRole]) -> Verd {
+fn model_comp_refusal(ts: List[Token], sp: MSpan, rs: List[MRole],
+                      cs: List[CDecl]) -> Verd {
   let bs = model_blocks_in(ts, sp.slo, sp.shi)
   if (bs.length() == 0) { return no_verd() }
   let acts = model_action_names(ts, sp.slo, sp.shi)
@@ -12666,7 +12742,7 @@ fn model_comp_refusal(ts: List[Token], sp: MSpan, rs: List[MRole]) -> Verd {
     if (!contains(acts, b.bact)) {
       return mverd(mno_action_msg(b.bact, sp.sname), b.bline)
     }
-    let av = model_arms_refusal(b, sp.sname, rs)
+    let av = model_arms_refusal(b, sp.sname, rs, cs)
     if (av.v != "") { return av }
     i += 1
   }
@@ -12678,14 +12754,22 @@ fn model_comp_refusal(ts: List[Token], sp: MSpan, rs: List[MRole]) -> Verd {
 // order. Returns the reference's first refusal, tagged "MODEL", or the empty
 // verdict for a program that declares no role and no block — which is every
 // program on the tree that predates item 512, and which walks two empty lists.
+//
+// The COUNCIL table is read here rather than rebuilt per component, the way
+// the role table is, and it is the table `model_council_refusal` has already
+// walked: that phase runs BEFORE this one (item 516 slice 2 made a route arm
+// able to name a council, so a council is resolved before anything that names
+// one), so every council this pass resolves an arm against has passed its own
+// rules.
 fn model_place_refusal(ts: List[Token]) -> Verd {
   let rs = model_roles_of(ts)
   let rv = model_roles_refusal(rs)
   if (rv.v != "") { return rv }
+  let cs = model_councils_of(ts)
   let sps = model_comp_spans(ts)
   var i = 0
   while (i < sps.length()) {
-    let cv = model_comp_refusal(ts, sps[i], rs)
+    let cv = model_comp_refusal(ts, sps[i], rs, cs)
     if (cv.v != "") { return cv }
     i += 1
   }
@@ -12695,10 +12779,12 @@ fn model_place_refusal(ts: List[Token]) -> Verd {
 // ============================================================ model councils
 //
 // item 516, `docs/design/543-model-council.md`. The reference half is
-// `src/revl/model_council.py`, run from `check_and_lower` right AFTER
-// `model_route.check` and before any component is lowered, because a council's
-// members are `model role` declarations and the role table is the one both
-// read. This is that phase, and it runs in the same place for the same reason.
+// `src/revl/model_council.py`, run from `check_and_lower` BEFORE
+// `model_route.check` and before any component is lowered, because a `route
+// model` arm may name a council where it names a role (slice 2) and a
+// placement is resolved before anything that names one. This is that phase,
+// and it runs in the same place for the same reason. Slice 1 ran it after the
+// routes; the order moved with the dependency.
 //
 // WHAT A COUNCIL IS FOR, and therefore which way every rule fails. A council
 // that degrades to "whichever member answered" is STRICTLY WORSE than one
@@ -12711,12 +12797,23 @@ fn model_place_refusal(ts: List[Token]) -> Verd {
 //
 // WHAT THE GATE DECIDES AND WHAT IT DOES NOT. The DECLARATION half — the
 // seventeen refusals `model_council._check_one` raises over what is written —
-// is decided here under the tag "COUNCIL". Everything a council does with a
-// VALUE is not: slice 2 binds a council to an action and item 517 records what
-// its members answered, both of which read a flow position this gate has no
-// walk for. It raises no objection to either, which is a no-objection and not
-// an admission, and the oracle's classifier names neither so the gap stays a
-// measured out-of-slice row rather than a claimed agreement.
+// is decided here under the tag "COUNCIL".
+//
+// Slice 2's BINDING is decided too, and it is decided in the model-PLACEMENT
+// section above under the tag "MODEL", because what it refuses is a `route
+// model` arm and the arm is item 512's surface. `docs/design/556-model-council
+// -selfhost.md` section 1.3 declined the binding on the grounds that it reads
+// a flow position; that is true of the VALUE half and not of this one. An arm
+// naming a council is written down, the council's residence is the join of its
+// members' declared residences, and both are in the token stream, so the gate
+// decides them rather than declining by name.
+//
+// What is still NOT decided is everything a council does with a VALUE: item
+// 514's ceiling at a `model.*` crossing and item 517's record of what the
+// members answered both read a flow position this gate has no walk for. It
+// raises no objection to either, which is a no-objection and not an admission,
+// and the oracle's classifier names neither so the gap stays a measured
+// out-of-slice row rather than a claimed agreement.
 //
 // THE TAG IS ITS OWN. `MODEL` is the model-PLACEMENT family (item 512,
 // `src/revl/model_route.py`); a council is a second construct with its own
@@ -13120,6 +13217,17 @@ fn model_council_refusal(ts: List[Token]) -> Verd {
     i += 1
   }
   let rs = model_roles_of(ts)
+  // `model_council.check` calls `model_route.roles(program)` before it reads a
+  // single council, and `roles()` RAISES on an unknown residence or a
+  // re-declared name. Since slice 2 put this phase ahead of the route phase,
+  // that raise is the first refusal the reference produces for a program that
+  // declares both a malformed role and a refusable council, so it has to be
+  // the first one here too. It carries the MODEL tag, because it is item 512's
+  // refusal wherever it is reached from. A program that declares no council
+  // returned above and never reaches this, which is exactly where the
+  // reference returns `{}` without calling `roles()` at all.
+  let rv = model_roles_refusal(rs)
+  if (rv.v != "") { return rv }
   i = 0
   while (i < cs.length()) {
     let v = council_one_refusal(cs, i, rs)
@@ -13148,22 +13256,23 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // the DECLARED-TYPE validation runs at the head of `_validate_declared_types`,
   // ahead of the config-is-data walk that closes the same function, so a
   // malformed annotation on a `fn`/`extern` signature is decided before it.
-  // MODEL PLACEMENT (item 512) is the earliest phase of all: `check_and_lower`
-  // runs `model_route.check(program)` before `_validate_declared_types`,
-  // because a `route model` arm reads a `model role` declared anywhere in the
-  // compilation and a placement is resolved before anything that names one.
-  // See the model-placement section above for what it decides and what it
-  // deliberately leaves to the reference's flow walk.
-  let mdlv = model_place_refusal(ts)
-  if (mdlv.v != "") { return { done: true, refs: [mdlv] } }
-  // MODEL COUNCILS (item 516) run right after the routes and before anything
-  // else, which is where `check_and_lower` runs `model_council.check`: a
-  // council's members are `model role` declarations and the role table is the
-  // one both read, so the routes validate it and the councils index it. See the
-  // model-council section above for what it decides and what it leaves to the
-  // slices that bind a council to an action.
+  // MODEL COUNCILS (item 516) are the earliest phase of all, and they run
+  // AHEAD of the routes, which is where `check_and_lower` runs
+  // `model_council.check` since slice 2: a `route model` arm may name a
+  // council where it names a role, and a placement is resolved before anything
+  // that names one. Slice 1 ran the councils after the routes, which was right
+  // while a council was bound to nothing; the order moved with the dependency
+  // and not with the construct. See the model-council section above for what
+  // it decides and what it leaves to the slices that have not landed.
   let cclv = model_council_refusal(ts)
   if (cclv.v != "") { return { done: true, refs: [cclv] } }
+  // MODEL PLACEMENT (item 512) then, still ahead of
+  // `_validate_declared_types`, because a `route model` arm reads a `model
+  // role` declared anywhere in the compilation. See the model-placement
+  // section above for what it decides and what it deliberately leaves to the
+  // reference's flow walk.
+  let mdlv = model_place_refusal(ts)
+  if (mdlv.v != "") { return { done: true, refs: [mdlv] } }
   let wfv = declared_types_refusal(ts)
   if (wfv.v != "") { return { done: true, refs: [wfv] } }
   // the program-wide declared-type table (the `field <Type>.<name>` rows, the
@@ -20956,6 +21065,92 @@ component Classifier provides out: Answer {
 }""") == "MODEL|action `classify` (Classifier) routes the `secret` origin to model role `local`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"
 }
 
+// ------------------------------------------- binding a council (item 516 S2)
+//
+// An arm's right names a `model role` or a `model council`. The pair below is
+// the slice's exit test and its control: the two programs differ in ONE word,
+// the role the proposer names, and only one of them compiles. Both are checked
+// in as corpus files (`examples/model_council_binding.rvl` and
+// `examples/rejections/gmodelplace_council_member_off_device.rvl`), so the
+// census measures the same pair against the reference on every run.
+
+test "an arm may name a council whose members all stay on the device" {
+  assert admit_src("""model role edge on_device
+model role local2 on_device
+service Answer { fn classify(text: Str) -> Str }
+model council Review { proposer -> local2, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> Review }
+  provide out { fn classify(text) = text }
+}""") == ""
+}
+
+test "a confidential origin routed to a council names the off-device MEMBER" {
+  // the council's residence is the JOIN of its members', so one off-device
+  // member makes the whole council an off-device placement. The refusal names
+  // that member rather than the council, because "the council is off_device"
+  // is derived and the member is what the author has to edit.
+  let v = admit_src("""model role edge on_device
+model role vast off_device
+service Answer { fn classify(text: Str) -> Str }
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> Release }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"
+}
+
+test "the secret origin reaches no council either" {
+  assert admit_src("""model role edge on_device
+model role local2 on_device
+service Answer { fn classify(text: Str) -> Str }
+model council Review { proposer -> local2, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { secret -> Review }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` (Classifier) routes the `secret` origin to model council `Review`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"
+}
+
+test "a name that is neither a role nor a council is still refused" {
+  assert admit_src("""model role edge on_device
+model role local2 on_device
+service Answer { fn classify(text: Str) -> Str }
+model council Review { proposer -> local2, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> ghost }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|`confidential -> ghost` in `route model on classify` (Classifier) names no declared model role"
+}
+
+test "the council phase runs ahead of the route phase" {
+  // slice 2 moved `model_council.check` in front of `model_route.check` in the
+  // reference, because an arm may name a council. A program that trips both
+  // gets the COUNCIL verdict on both sides, and this is where an order that
+  // drifted apart would show.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+service Answer { fn classify(text: Str) -> Str }
+model council Release { proposer -> vast, adversary -> edge, aggregate first }
+component Classifier provides out: Answer {
+  route model on classify { confidental -> edge }
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"
+}
+
+test "a malformed role is still decided before a refusable council" {
+  // `model_council.check` calls `model_route.roles(program)` before it reads a
+  // single council, and `roles()` raises. Putting the council phase first must
+  // not move that raise behind a COUNCIL verdict.
+  assert admit_src("""model role edge on_device
+model role vast off_devise
+service Answer { fn classify(text: Str) -> Str }
+model council Release { proposer -> edge, adversary -> vast, aggregate first }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "MODEL|unknown residence `off_devise` for model role `vast`"
+}
+
 test "a model placement is a prelude declaration" {
   let v = admit_src("""model role local on_device
 service Answer { fn classify(text: Str) -> Str }
@@ -21252,8 +21447,10 @@ component Classifier provides out: Answer {
   provide out { fn classify(text) = text }
 }""")
   assert v == ""
-  // and the placement refusal still outranks the council's, because the
-  // reference decides the routes first.
+  // and the COUNCIL refusal now outranks the placement's, because item 516
+  // slice 2 made a `route model` arm able to name a council and the reference
+  // therefore decides the councils first. Before that slice this pair pinned
+  // the opposite order, which was right while a council was bound to nothing.
   assert admit_src("""model role local on_device
 model role cloud off_device
 model council Release { proposer -> cloud, aggregate unanimous }
@@ -21261,5 +21458,5 @@ service Answer { fn classify(text: Str) -> Str }
 component Classifier provides out: Answer {
   route model on classify { confidential -> cloud }
   provide out { fn classify(text) = text }
-}""") == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"
+}""") == "COUNCIL|model council `Release` declares 1 member"
 }
