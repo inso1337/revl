@@ -103,12 +103,26 @@ def test_the_residue_split_survives_the_default_render():
     assert "compensate LIFO: type_amount" in out, out
 
 
-def test_the_demo_names_the_measured_gap_rather_than_hiding_it():
-    """Item 521 slice 2 would derive a screen read's untrustedness from the
-    capability. It has not landed, so the qualifier is the author's and the
-    same program without it admits. The demo asserts that second outcome."""
+def test_the_demo_asserts_the_derivation_that_closed_the_measured_gap():
+    """Item 521 slice 2 DERIVES a screen read's untrustedness from the origin
+    class, and this demo used to assert the opposite under the label
+    `MEASURED GAP`: that the same program with the author's qualifier removed
+    admitted. It does not any more under `--taint-strict`, so the demo asserts
+    the refusal instead, and asserts the profile gate in both directions —
+    refused with the flag, admitted without it. Both halves matter: a
+    qualifier an author can delete to turn a check off is not a containment,
+    and a derived class that fired unconditionally would be a change to every
+    program on the tree rather than an item-249 profile class.
+
+    `tests/test_ui_taint_classes_521.py::
+    test_the_flagship_demo_no_longer_asserts_the_measured_gap` is the other
+    side of this: it fails by name if the stale label comes back."""
     proc = _run()
-    assert "MEASURED GAP" in proc.stdout, proc.stdout
+    out = proc.stdout
+    assert "MEASURED GAP" not in out, out
+    assert "under `--taint-strict`" in out, out
+    assert "the derivation refuses it on the origin class alone" in out, out
+    assert "still admits" in out, out
 
 
 def test_a_failed_check_exits_nonzero():

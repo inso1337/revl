@@ -70,17 +70,51 @@ def _strict() -> AdmissionProfile:
 # The family, declared once. `ui.text` carries its item-522 `compensate`
 # because a compensatable verb without one is a G4 refusal and would mask the
 # G9 answer this file is measuring.
+# Slice 4's target record. Every signature below carries it because slice 4
+# refuses the bare-string spelling outright, so this file measures the taint
+# classes on the program the language now admits rather than on the one it
+# admitted when slice 2 landed. The taint question is unchanged by that: the
+# ROLE is read off the declared capability token, never off the argument type,
+# which is why swapping `Str` for `UiTarget` moves no verdict in this file.
+TARGET_RECORD = (
+    'type UiTarget = {\n'
+    '  application: Str\n'
+    '  window: Str\n'
+    '  role: Str\n'
+    '  name: Str\n'
+    '  evidence: Str\n'
+    '  action: Str\n'
+    '  session: Str\n'
+    '  bounds: Str\n'
+    '  expiry: Int\n'
+    '  confirm: Bool\n'
+    '}\n'
+)
+
 FAMILY = (
-    'extern emission[screen.observe] fn screen_observe(region: Str) -> Str\n'
+    TARGET_RECORD
+    + 'extern emission[screen.observe] fn screen_observe(region: Str) -> Str\n'
     '  = @py { return "" }\n'
-    'extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> Str\n'
-    '  = @py { return "" }\n'
-    'extern emission[ui.click] fn ui_click(target: Str) -> Int = @py { return 0 }\n'
-    'extern emission[ui.text] fn ui_text(target: Str, s: Str)\n'
+    'extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> UiTarget\n'
+    '  = @py { return None }\n'
+    'extern emission[ui.click] fn ui_click(target: UiTarget) -> Int\n'
+    '  = @py { return 0 }\n'
+    'extern emission[ui.text] fn ui_text(target: UiTarget, s: Str)\n'
     '  compensate restore_field() = @py { return }\n'
-    'extern emission[ui.download] fn ui_download(target: Str) -> Str\n'
+    'extern emission[ui.download] fn ui_download(target: UiTarget) -> Str\n'
     '  = @py { return "" }\n'
     'fn restore_field() { }\n'
+)
+
+
+# A target minted OUTSIDE the screen, for the one measurement that needs its
+# first argument clean. `ui.text`'s derivation is all-arguments (a capability
+# token carries no parameter roles), so a target that came from `ui.find`
+# would taint argument 1 too and the refusal would name it instead of the
+# value - measuring the target, which two other tests already measure, rather
+# than the key input, which only this one does.
+_PURE_TARGET = (
+    'extern pure fn a_target(field: Str) -> UiTarget = @py { return None }\n'
 )
 
 
@@ -201,7 +235,8 @@ def test_an_untrusted_value_of_any_origin_is_refused_at_a_click() -> None:
         "      return emit ui_click(page)\n").replace(
         "fn restore_field() { }\n",
         "fn restore_field() { }\n"
-        'extern emission[web] fn fetch(url: Str) -> Str = @py { return "" }\n')
+        'extern emission[web] fn fetch(url: Str) -> UiTarget\n'
+        '  = @py { return None }\n')
     error = _refusal(src, _strict())
     assert classify(error)["code"] == "G9"
     assert "web" in error.message
@@ -224,8 +259,11 @@ def test_the_value_typed_into_a_field_is_a_sink() -> None:
     author-side and therefore never the derivation."""
     src = _component(
         "      let seen = emit screen_observe(region)\n"
-        '      emit ui_text("amount", seen)\n'
-        "      return 0\n")
+        '      let field = a_target("amount")\n'
+        "      emit ui_text(field, seen)\n"
+        "      return 0\n").replace(
+        "fn restore_field() { }\n",
+        "fn restore_field() { }\n" + _PURE_TARGET)
     error = _refusal(src, _strict())
     assert classify(error)["code"] == "G9"
     assert "argument 2" in error.message
@@ -237,7 +275,8 @@ def test_the_target_of_a_download_is_a_sink() -> None:
     there is the file-on-the-host decision made by the screen."""
     src = _component(
         "      let seen = emit screen_observe(region)\n"
-        "      return emit ui_download(seen)\n", sig="Str")
+        '      let t = emit ui_find(seen, "Receipt")\n'
+        "      return emit ui_download(t)\n", sig="Str")
     error = _refusal(src, _strict())
     assert classify(error)["code"] == "G9"
     assert "ui_download" in error.message
@@ -254,7 +293,7 @@ def test_find_is_a_source_and_not_a_sink() -> None:
     operator can see what is being claimed about it."""
     src = _component(
         "      let seen = emit screen_observe(region)\n"
-        '      return emit ui_find(seen, "Approve")\n', sig="Str")
+        '      return emit ui_find(seen, "Approve")\n', sig="UiTarget")
     compile_source(src, "find_only.rvl", profile=_strict())  # must not raise
 
 
@@ -339,17 +378,20 @@ def test_a_rung_token_inherits_its_verbs_role_by_prefix() -> None:
     than the verb it descends from. Resolution is by longest registered prefix,
     so admitting the spelling in `refusal()` cannot silently drop the role.
 
-    These tokens are NOT admissible today: slice 1 refuses them at the
-    declaration site and slice 3 owns the check that replaces that refusal.
-    What is pinned here is which way they fall if they are ever admitted."""
+    These tokens were NOT admissible when this was written: slice 1 refused
+    them at the declaration site. Slice 3 landed the prefix-closure check that
+    replaces that refusal, so they are admissible now and the resolution below
+    is doing real work rather than pinning a hypothetical."""
     assert ui_family.is_taint_sink("ui.click.selector")
     assert ui_family.is_taint_sink("ui.click.pixel")
     assert ui_family.is_taint_sink("ui.text.pixel")
     assert not ui_family.is_taint_sink("ui.find.selector")
     assert ui_family.source_origin("ui.find.selector") == "screen"
-    # still refused at the declaration site, by slice 1's own message
-    assert "not admissible yet" in ui_family.refusal(
-        "ui.click.pixel", "emission")[0]
+    # Slice 3 landed the check slice 1 was holding the spelling back for, so
+    # the rung is admissible now and the prefix resolution above is what makes
+    # that safe: `ui.click.pixel` arrives carrying `ui.click`'s sink role
+    # rather than none, which is what an exact-match table would have given it.
+    assert ui_family.refusal("ui.click.pixel", "emission") is None
 
 
 def test_an_unresolvable_ui_token_falls_to_the_sink_side() -> None:
@@ -389,11 +431,15 @@ def test_non_vacuity_the_four_programs_that_flipped() -> None:
             "      return emit ui_click(page)\n").replace(
             "fn restore_field() { }\n",
             "fn restore_field() { }\n"
-            'extern emission[web] fn fetch(url: Str) -> Str = @py { return "" }\n'),
+            'extern emission[web] fn fetch(url: Str) -> UiTarget\n'
+            '  = @py { return None }\n'),
         _component(
             "      let seen = emit screen_observe(region)\n"
-            '      emit ui_text("amount", seen)\n'
-            "      return 0\n"),
+            '      let field = a_target("amount")\n'
+            "      emit ui_text(field, seen)\n"
+            "      return 0\n").replace(
+            "fn restore_field() { }\n",
+            "fn restore_field() { }\n" + _PURE_TARGET),
     ]
     assert len(flipped) == 4
     for src in flipped:
