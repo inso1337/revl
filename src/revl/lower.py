@@ -14930,37 +14930,6 @@ def _undeclared_cap(service: "str | None") -> "object":
     return cap_order.Cap(_UNDECLARED_NS + service, ())
 
 
-def _undeclared_emission_services(services: dict) -> "frozenset[str]":
-    """The services whose declaration leaves a crossing's REACH undeclared:
-    those with at least one `emission` method naming no capability token.
-
-    This is the fact the `svc:` namespace does not carry, and
-    `kernel_boundary._undeclared` needs it. `_held_capabilities_pairs` builds a
-    `svc:` element on two different occasions and only the first is an
-    undeclared reach:
-
-      * a required service with a bare `emission` method. The declaration says
-        an effect happens and declines to say what it reaches, and it bounds
-        nothing: `_method_emissions` runs its subset check only when a token is
-        declared, so the provider may emit through anything.
-      * a required service with NO emission method at all, where the element
-        exists only to give the coverage fold a boundary identity to compare.
-        That one is a proof of the opposite - a plain `fn` bounds its provider
-        under G4, so the wiring reaches nothing.
-
-    Once both are `Cap`s in the same namespace they are indistinguishable, so
-    the question is answered here, against the declarations, and carried to the
-    fold rather than guessed back out of it."""
-    named: set = set()
-    for name, svc in (services or {}).items():
-        for method in getattr(svc, "methods", {}).values():
-            if (getattr(method, "emission", False)
-                    and not getattr(method, "capabilities", None)):
-                named.add(name)
-                break
-    return frozenset(named)
-
-
 def _cap_render(cap: "object") -> str:
     """The source-facing spelling of a fold element: a derived undeclared
     boundary renders as the bare service name, everything else as its canonical
@@ -15403,20 +15372,13 @@ def _check_kernel_boundary(components: list[dict], services: dict,
 
     WHICH WAY IT FAILS. Toward refusing, at both unknowns, and the reading of
     each is `kernel_boundary`'s rather than this function's: the unnameable `*`
-    is disjoint from nothing (`cap_order.disjoint`'s own rule), and a `svc:`
-    element whose SERVICE declares `emission` with no capability token is an
-    UNDECLARED reach, which is not an empty one (issue #1265). That second
-    reading is scoped to a candidate admitted under the untrusted-author
-    profile (`untrusted`), which is what "a generated component" means here;
-    the first-party tree is the subject of the loop, not a candidate passing
-    through admission, and a DECLARED kernel token is refused on both sides.
-
-    The `svc:` namespace is not by itself that reading, which is the trap this
-    function has to avoid: `_held_capabilities_pairs` also builds a `svc:`
-    element for a service with NO emission method, and that one is a proof the
-    wiring reaches nothing rather than a proof it may reach anything. Which is
-    which is `_undeclared_emission_services`, answered against the declarations
-    and passed to the fold.
+    is disjoint from nothing (`cap_order.disjoint`'s own rule), and a `key:`
+    element - a boundary whose declaration names no capability token - is an
+    UNDECLARED reach, which is not an empty one. That second reading is scoped
+    to a candidate admitted under the untrusted-author profile (`untrusted`),
+    which is what "a generated component" means here; the first-party tree is
+    the subject of the loop, not a candidate passing through admission, and a
+    DECLARED kernel token is refused on both sides.
 
     `manifest` is item 519's product record if it is present. Its
     `model_reach[].effective` is the per-edge ceiling statement, consumed
@@ -15443,12 +15405,6 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             for token in (getattr(method, "capabilities", None) or ()))
         if not declared:
             return []
-    # which `svc:` elements are an undeclared REACH rather than a proof of no
-    # reach at all. The namespace carries both, and only the first is the
-    # kernel's question (`_undeclared_emission_services`).
-    undeclared_tokens = frozenset(
-        _undeclared_cap(name).token
-        for name in _undeclared_emission_services(services))
     base = _spawn_reached_surface_pairs(components, services)
     record: list[dict] = []
     for comp in components:
@@ -15484,8 +15440,7 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             )
 
         hits = _kb.offending(effective,
-                             undeclared_reaches_kernel=bool(untrusted),
-                             undeclared_tokens=undeclared_tokens)
+                             undeclared_reaches_kernel=bool(untrusted))
         if hits:
             first_member, first_element = hits[0]
             members = []
@@ -15498,7 +15453,7 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             named = ", ".join(f"`{m.token}`" for m in members)
             paths = ", ".join(sorted({p for m in members for p in m.paths}))
             held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held))                 or "no capabilities"
-            if first_element.token == "*":
+            if _kb._undeclared(first_element):
                 why = (f"`{comp['name']}` reaches an unnameable host boundary, "
                        f"and an unnameable reach is not an empty one: nothing "
                        f"in this composition states that it stops short of the "
@@ -15510,20 +15465,6 @@ def _check_kernel_boundary(components: list[dict], services: dict,
                        "capability, or give the model role it routes through "
                        "a `reaches [...]` clause - so the reach can be "
                        "compared with the kernel's, or drop the crossing")
-            elif _kb._undeclared(first_element, undeclared_tokens):
-                svc_name = _cap_render(first_element)
-                why = (f"`{comp['name']}` wires `{svc_name}`, whose `emission` "
-                       f"declaration names no capability token, so what the "
-                       f"crossing reaches is undeclared - and an undeclared "
-                       f"reach is not an empty one. A bare `emission` bounds "
-                       f"its provider nowhere either, so this wiring may reach "
-                       f"whatever that provider reaches and nothing in this "
-                       f"composition states that it stops short of the kernel "
-                       f"(issue #1265)")
-                fix = (f"declare the token on `{svc_name}`'s emission "
-                       f"method(s) - `emission[<token>] fn ...` - so the reach "
-                       f"can be compared with the kernel's, or drop the "
-                       f"wiring")
             else:
                 why = (f"`{comp['name']}` holds "
                        f"`{_cap_render(first_element)}`, which is the kernel's "
