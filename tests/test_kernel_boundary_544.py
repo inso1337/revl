@@ -22,7 +22,10 @@ next:
 
 The residual this slice does NOT refuse is pinned too (`test_the_key_namespaced
 _residual_is_still_admitted`), because a gap that is written down stays visible
-and a gap that is assumed away does not.
+and a gap that is assumed away does not. Beside it, issue #1265's lane pinned
+the two things that decide whether it can be closed: that the `svc:` namespace
+cannot decide it on its own, and that the blocker is `revl_load` on the default
+trust level rather than any test count.
 """
 
 from __future__ import annotations
@@ -371,6 +374,84 @@ component Candidate requires b: Bare provides task: Task {
     assert element.token == lower._UNDECLARED_NS + "Bare"
     assert not kb._undeclared(element)
     assert not kb.offending({element}, undeclared_reaches_kernel=True)
+
+
+def test_the_namespace_alone_cannot_decide_the_residual():
+    """WHY the obvious closure of the residual above is wrong, as a test.
+
+    `_held_capabilities_pairs` builds a `svc:` element on two occasions and
+    only one of them is an undeclared reach: a required service with a bare
+    `emission` method, and a required service with NO emission method at all.
+    The second is a proof of the opposite, and the tree enforces it - a
+    provider of a plain `fn` that emits is refused under G4.
+
+    So `_undeclared` cannot close the residual by testing the namespace: it
+    would refuse a candidate composing only pure services, which is the
+    ordinary admitted turn. Issue #1265's lane measured that at 17 tests
+    across 7 files, 16 of them this shape. Closing it needs the set of
+    services whose declaration leaves the reach undeclared, computed against
+    the declarations. This pins the conflation so the next attempt does not
+    re-measure the wrong rule."""
+    plain = _TASK + """
+service Plain { fn ping(row: Str) -> Int }
+
+component Candidate requires p: Plain provides task: Task {
+  provide task {
+    fn go() {
+      return p.ping("x")
+    }
+  }
+}
+"""
+    profile = AdmissionProfile.untrusted_author({"Plain", "Task"})
+    compile_source(plain, "candidate.rvl", profile=profile)
+
+    # both shapes produce an element in the SAME namespace, and it is the same
+    # spelling rule, so nothing about the token distinguishes them
+    assert (lower._undeclared_cap("Plain").token
+            == lower._UNDECLARED_NS + "Plain")
+    assert (lower._undeclared_cap("Bare").token
+            == lower._UNDECLARED_NS + "Bare")
+
+    # and a plain `fn` really does bound its provider, which is why the second
+    # element is a proof of narrowness rather than an undeclared reach
+    with pytest.raises(RevlError) as excinfo:
+        compile_source("""
+service Fs { emission[fs] fn write(p: Str) -> Int }
+service Plain { fn ping(row: Str) -> Int }
+component PlainProvider requires f: Fs provides p: Plain {
+  provide p { fn ping(row) { emit f.write("x") return 0 } }
+}
+""", "composition.rvl")
+    assert excinfo.value.code == "G4"
+
+
+def test_the_residual_is_blocked_by_revl_load_not_by_a_test_count():
+    """What actually stops the residual being closed, pinned on the tree.
+
+    `revl.mcp.server.AuthoringTrust.profile()` compiles ALL agent-authored
+    source under `untrusted_author` on the DEFAULT trust level, with only the
+    reach allowlist left off. So closing the residual would change what
+    `revl_load` and `revl_swap` accept, not only `revl_admit`, and
+    `examples/user_cache.rvl` - this repository's primary demo composition,
+    which PR #1292 declined to give tokens because it is pinned byte-for-byte
+    to a hand-maintained reference IR - declares `Database.execute` and
+    `Cache.put` bare.
+
+    This asserts the two facts that make the step a composition-side item: the
+    default profile is the untrusted one, and the shipped example still loads
+    under it. It fails the day someone closes the residual without doing the
+    composition half first, which is the failure this pin exists for."""
+    from dataclasses import replace  # noqa: PLC0415
+
+    # exactly what `AuthoringTrust.profile()` builds when nothing is granted
+    default_profile = replace(AdmissionProfile.untrusted_author(()),
+                              granted=None)
+    source = (ROOT / "examples" / "user_cache.rvl").read_text(encoding="utf-8")
+    assert "emission fn execute" in source, (
+        "the fixture this pin is about has changed spelling; re-read "
+        "docs/design/561-undeclared-emission-boundary.md before editing")
+    compile_source(source, "user_cache.rvl", profile=default_profile)
 
 
 def test_the_host_extern_routes_to_star_are_closed_before_this_check():

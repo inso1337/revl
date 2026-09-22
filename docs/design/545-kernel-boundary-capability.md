@@ -248,14 +248,27 @@ is declared on, `svc:`. That changes what it is named by, not whether it is
 undeclared, so this section reads the same either way.
 
 Treating it as provably disjoint from the kernel is the weaker answer, and this
-slice takes it. The reason is a measurement, not a preference: on this tree it
-is the ordinary spelling, so refusing it turns tests red and changes what
-`mcp.session.admit` accepts on every turn whose granted services spell
-`emission` bare. This note measured 14 tests across 7 files; item 561 re-ran
-the same experiment at its own head, after PR #1292 declared this repository's
-own compositions, and measured 13 across the same 7. Making the remaining
-services declare their tokens is a composition-side change on the operator's
-side of the boundary, and it is its own item.
+slice takes it. The reason is a measurement, not a preference, but the
+measurement this note originally quoted was wrong and issue #1265's lane
+corrected it. What was written here was 14 tests across 7 files, and item 561
+re-ran it at its own head for 13.
+
+Both numbers came from making `_undeclared` true of the whole `svc:` namespace,
+which is not the rule the exit asks for: the namespace also carries a service
+with NO emission method, whose element is a proof the wiring reaches nothing.
+Re-measured at `32db56d9` that experiment gives 17, and 16 of the 17 are
+candidates composing only pure services. Asking the declarations instead costs
+9 tests across 4 files, and **eight of those nine are invisible without
+`cordis` installed**.
+
+The real blocker is not a test count. `revl.mcp.server.AuthoringTrust.profile()`
+compiles all agent-authored source under `untrusted_author` on the DEFAULT
+trust level, so the tightening changes what `revl_load` and `revl_swap` accept
+and not only `revl_admit`: with the arm live, `revl_load` refuses
+`examples/user_cache.rvl` with nothing granted. The files that would have to
+declare tokens are the ones PR #1292 measured as unchangeable in place.
+`docs/design/561-undeclared-emission-boundary.md` carries the full
+re-measurement and what the follow-up item needs.
 `test_the_key_namespaced_residual_is_still_admitted` pins the residual so it
 stays visible.
 
