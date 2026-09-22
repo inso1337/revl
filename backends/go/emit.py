@@ -9296,6 +9296,45 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
+#: The refusals that read the WHOLE document and answer about the TIER rather
+#: than about one rendering path. A hole has no implementation to lower, a
+#: fault test has no driver here, and a deferred emission has no session owner
+#: here, and none of that changes with which renderer the document reaches.
+#:
+#: Held as one list because this backend has TWO entry points -- `emit` and
+#: `emit_placement` -- and a document is admissible or not regardless of which
+#: one it arrives through. Issue #1379 measured what happens when each entry
+#: keeps its own copy of the list: a fault test and a called `deferred`
+#: emission were both refused through `emit` and ADMITTED through
+#: `emit_placement`, the second emitting Go byte-identical to the same
+#: document without them, so the construct was silently dropped rather than
+#: lowered or refused. `tests/test_go_placement_refusals.py` asserts this
+#: tuple holds every document-level refusal in the module, so the next one
+#: added cannot reach only one of the two entries.
+#:
+#: `_refuse_stream_document_top_level` is deliberately NOT here. It is a fact
+#: about a rendering path rather than about the tier: it refuses because the
+#: live stc-go path drops top-level `fn`s and the pure path drops the stream's
+#: component, and the combined renderer the placement path uses drops neither
+#: (measured: that document places, with `func double(...)` and the stream's
+#: acquisition both in the output). Adding it here would refuse documents this
+#: tier can and does emit.
+_DOCUMENT_REFUSALS = (
+    _refuse_holes,
+    _refuse_deferred_emissions,
+    _refuse_fault_tests,
+)
+
+
+def _refuse_inadmissible_document(ir: dict) -> None:
+    """Run every tier-wide refusal, in the order `emit` has always run them.
+
+    Called from both entry points rather than mirrored into each, so there is
+    one list to add to and no second one to forget."""
+    for refuse in _DOCUMENT_REFUSALS:
+        refuse(ir)
+
+
 _REVL_SYNC_SUFFIX = "_revl_sync"
 
 
@@ -9372,9 +9411,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
-    _refuse_holes(ir)
-    _refuse_deferred_emissions(ir)
-    _refuse_fault_tests(ir)
+    _refuse_inadmissible_document(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old
@@ -10568,6 +10605,11 @@ def _emit_placement(ir: dict, package: str = "emitted") -> str:
     global _RECORD_MODE
     _RECORD_MODE = False
     ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
+    # Before any branching, so every branch gets the same answer about whether
+    # the document is admissible at all (issue #1379). Two of the three
+    # branches below reach `emit`, which runs this again; it only reads the
+    # document, so a second run costs a walk and cannot change the verdict.
+    _refuse_inadmissible_document(ir)
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
     if ir.get("ir_version") == 3:
