@@ -631,9 +631,14 @@ proposer is not given, which is what makes section 6.1's sentence literally
 true. Needs the origin ceiling per member from S2 and is the reason this is not
 folded into it.
 
-**S5. The self-host port.** A named `MODEL` marker in `selfhost/parser.rvl`
-covering both shapes `model` heads, then the port. Both touch the crate closure,
-so both regenerate `crates/**` with `build_gate_crate.py` AND
-`build_gate_wasm.py`, and both must run `tests/test_gate_crate_admit.py`,
-because the two drift gates compare bytes only and a byte-correct regen has
-failed `cargo` before.
+**S5. The self-host port. LANDED** in
+`docs/design/556-model-council-selfhost.md`, which ports all seventeen refusals
+`model_council._check_one` raises into `selfhost/lower.rvl` under a `COUNCIL`
+tag rather than the `MODEL` marker sketched here, and teaches
+`selfhost/checker.rvl` to step past a council body by brace match. The original
+sketch, kept for the record: a named `MODEL` marker in `selfhost/parser.rvl`
+covering both shapes `model` heads, then the port. That closure is a crate
+input, so the landed port regenerated `crates/**` with `build_gate_crate.py`
+AND `build_gate_wasm.py` and ran `tests/test_gate_crate_admit.py`, because the
+two drift gates compare bytes only and a byte-correct regen has failed `cargo`
+before.
