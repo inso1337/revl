@@ -132,10 +132,14 @@ the same shape item 257 uses for its own `has_revl_stub` backstop.
 
 ## 4. What has no grammar
 
-Two gates, in order, both at compile time, both fail-closed. A type that passes
-both gets a grammar. A type that fails either is refused with the offending
-position named. There is no third outcome and in particular no runtime
-downgrade to an unconstrained decode.
+One gate at compile time, fail-closed. A type that passes it gets a grammar. A
+type that fails it is refused with the offending position named. There is no
+third outcome and in particular no runtime downgrade to an unconstrained decode.
+
+This section described two gates until issue #1348. Section 4.2 was the second
+one, and it no longer refuses anything: issue #1263 moved the same refusal into
+gate one, upstream of it. 4.2 now records what the rule is, why gate one carries
+it, and why the walk is still called.
 
 ### 4.1 Gate one: `fully_expressible` (item 257, inherited unchanged)
 
@@ -152,13 +156,14 @@ So the refusals item 257 already names carry over verbatim: an unknown nominal,
 an untagged `Result[T, E]`, a `Map[K, V]` with a non-`Str` key, and any type on
 a cycle.
 
-### 4.2 Gate two: a null-ambiguous `Opt`
+### 4.2 The null-ambiguous `Opt`, and who refuses it
 
-A type can have an exact schema and still have no usable grammar, because a
-grammar is judged on the strings it accepts and a schema on the values it
-validates. The case that reaches the surface today is an `Opt[T]` whose `T`
-already accepts the JSON token `null`: `Opt[Unit]`, `Opt[Opt[U]]`, and either
-of those nested inside a list, a map, a record field or a variant payload.
+A grammar is judged on the strings it accepts and a schema on the values it
+validates, so the two derivations do not have to agree about what has no
+rendering. The one case where they were expected to differ is an `Opt[T]` whose
+`T` already accepts the JSON token `null`: `Opt[Unit]`, `Opt[Opt[U]]`, and
+either of those nested inside a list, a map, a record field or a variant
+payload.
 
 Its grammar derives the string `null` twice, from two different values. A
 constrained decode that emits `null` has satisfied the grammar and still has
@@ -166,20 +171,71 @@ not said which revl value it meant. The guarantee "the decoder cannot emit
 anything the type does not accept" survives; the guarantee a caller actually
 wants, "the decoded string names one value", does not.
 
-Item 257 cannot see this, and the reason is worth stating plainly:
-`json_schema_for` renders `Opt[T]` as `{**inner, "nullable": true}`, so
-`Opt[Opt[Str]]` and `Opt[Str]` derive **the same schema object**. The outer
-layer is gone before the validator ever looks. That is why this gate walks the
-surface type rather than the schema, and why it has to exist as its own gate
-rather than as a check on the derived output.
+#### Why this stopped being a gate of its own
 
-The refusal names the position and the fix:
+When this note was written, item 257 could not see the shape. `json_schema_for`
+rendered `Opt[T]` as `{**inner, "nullable": true}`, which folds the outer layer
+into a flag on the inner schema, so `Opt[Opt[Str]]` and `Opt[Str]` derived the
+same schema object and the outer layer was gone before the validator looked.
+The grammar walk was the only place the ambiguity was visible, and it was the
+only thing refusing it.
+
+Issue #1263 (PR #1270) settled the question at the language surface instead:
+`Opt[Opt[T]]` is a distinct type in revl's type system and is **not expressible
+in a JSON document**, so a `validated` boundary refuses the spelling. That put
+the refusal in `fully_expressible`, alongside the untagged `Result`, the
+non-`Str` map key and the cycle, and the derivation now degrades to the honest
+`x-revlType` stub rather than claiming two types are one. The paragraph above is
+therefore history: `Opt[Opt[Str]]` and `Opt[Str]` no longer derive the same
+schema object.
+
+`decode_grammar._admits_null` and `mcp.schema.admits_json_null` are now the same
+predicate, and they are consulted at the same surface positions (`Opt` inner,
+`List` element, `Map` value, record field, variant payload). Issue #1348
+measured the consequence over 1872 constructed types, including nominal records
+and variants carrying `Opt[Unit]` and `Opt[Opt[Int]]` payloads, an unknown
+nominal, `Map[Int, _]` and `Result[_, Str]`:
+
+```
+types where fully_expressible=True AND the grammar walk refuses: 0
+types where fully_expressible=False AND the grammar walk accepts: 1288
+```
+
+The containment runs one way. 257 refuses everything this rule refuses, and much
+more, and it covers all three validated consumers (an emission's response, an
+`event` item schema, a routed endpoint's bound parameters) where the grammar
+walk only ever saw the first. So the author-facing sentence for this shape is
+257's, and always was in practice.
+
+#### Why the walk is still called
+
+`_validated_response_ir` still runs `grammar_refusal_reason`, as an internal
+assertion rather than a refusal. Its message is worded for a maintainer, names
+the drift, and no source can reach it.
+
+Keeping it is a deliberate call and not inertia. The alternative was to delete
+the walk, and the argument against that is what it would leave behind: the rule
+in this section is the grammar's, not the schema's, and after a deletion nothing
+running would enforce it. It would hold only because a second derivation happens
+to refuse the same shape for a different reason. The assertion runs on every
+validated emission, so if 257's coverage ever narrows the first program that
+declares such a type says so, rather than the rule quietly becoming unenforced.
+`tests/test_decode_grammar_513.py` pins the containment as a sweep and pins the
+two admission predicates as extensionally equal, which is the mechanism behind
+it; the assertion is the same alarm on real source.
+
+Reordering the two, so the grammar sentence is the one an author reads, was
+proposed and rejected while settling issue #1344: 257's refusal covers all three
+validated consumers, so reordering would leave one condition with two different
+sentences across the surface.
+
+The refusal an author gets today names the position and the fix:
 
 ```
 `validated` emission `complete` has response type `Opt[Opt[Str]]`, which
-reaches `Opt[Opt[Str]]`, whose grammar derives the string `null` from both
-`Opt[Opt[Str]]` and `Opt[Str]`, so a constrained decode of `null` does not
-name one value (flatten it, or wrap the inner type in a named tagged variant)
+reaches `Opt[Opt[Str]]`, whose inner type `Opt[Str]` already accepts `null`,
+so the outer `Opt` has no JSON document of its own and both layers derive the
+same schema (declare a named variant that gives each absence a tag)
 ```
 
 Both fixes are real. `Opt[Str]` is what most authors meant. A `Present(T) |
@@ -196,6 +252,9 @@ declaration. Registering a `G-GRAMMAR` would add a code whose only members are
 these refusals, would need its own tier-matrix acknowledgement, and would split
 one author-facing rule ("a validated crossing's response type must be one the
 boundary can pin") across two codes for no gain to the author being refused.
+
+This reads better after #1348 than before it. There is one code because there is
+one gate, and the grammar item added no author-facing refusal of its own.
 
 ## 5. The rendering, and the one narrowing it imposes
 
@@ -229,9 +288,10 @@ provider that pretty-prints is not refused for it.
 ## 6. Slices
 
 **Slice 1 (LANDED).** `src/revl/decode_grammar.py`: the grammar-side admission
-gate, the GBNF rendering from a derived schema, the digest. `lower.py` runs the
-gate and binds `response_grammar` at every `validated` crossing, service
-operation and extern alike. `tests/test_decode_grammar_513.py` holds the
+walk, the GBNF rendering from a derived schema, the digest. `lower.py` runs the
+257 gate and binds `response_grammar` at every `validated` crossing, service
+operation and extern alike. The admission walk is shadowed by that gate and runs
+as an assertion; section 4.2 says why it is still called. `tests/test_decode_grammar_513.py` holds the
 derived grammar to accepting exactly what item 257's validator accepts, using a
 miniature GBNF recogniser so the property is checked rather than asserted.
 
