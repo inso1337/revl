@@ -17,7 +17,7 @@
 
 /// The identifier `gate_version().frontier` reports. Two gates with different
 /// ids cover different surfaces and their agreement means nothing.
-pub const FRONTIER_ID: &str = "selfhost-admit:4609807f432aec86";
+pub const FRONTIER_ID: &str = "selfhost-admit:dcf8a90d662d453e";
 
 /// Sources above this many bytes are refused rather than decided: the emitted
 /// parser/checker are deeply recursive and a stack exhaustion ABORTS, which no
@@ -64,6 +64,22 @@ pub(crate) const EXCLUDED_KEYWORDS: &[&str] = &[];
 /// differently in the two compilers, so the crate refuses to decide the
 /// program at all rather than risk deciding it wrongly.
 pub(crate) const EXCLUDED_BUILTINS: &[&str] = &[];
+
+/// Reserved capability namespace roots whose admission rules the self-host
+/// gate does not run. Derived as `revl.ui_family.ROOTS -
+/// selfhost/lower.rvl::reserved_capability_root`, which is empty on the
+/// self-host side until that port lands.
+///
+/// This table exists because the reference compiler REFUSES programs in
+/// these namespaces (roadmap item 521: an unscoped verb, an undeclared
+/// one, an unclosed ladder rung, a target with no binding) and the
+/// self-host front end runs none of those checks. Without the table it
+/// would return no objection, which reads as agreement and is silence.
+/// Declining by name is what makes the absence loud.
+pub(crate) const EXCLUDED_CAPABILITY_ROOTS: &[&str] = &[
+    "screen",
+    "ui",
+];
 
 
 /// A word-and-member scan over `source` with string literals and `//` comments
@@ -121,6 +137,14 @@ pub(crate) fn scan(source: &str) -> Option<String> {
         } else if EXCLUDED_KEYWORDS.contains(&word) {
             return Some(format!(
                 "`{}` is a reference language keyword outside this gate's covered surface; use the reference `revl` toolchain for it",
+                word
+            ));
+        } else if EXCLUDED_CAPABILITY_ROOTS.contains(&word)
+            && i < bytes.len()
+            && bytes[i] == b'.'
+        {
+            return Some(format!(
+                "`{}.` is a RESERVED capability namespace whose admission rules the self-host gate this crate is built from does not run, so a no-objection from it would be agreement by silence rather than a decision; use the reference `revl` toolchain for it",
                 word
             ));
         }
@@ -234,6 +258,25 @@ mod tests {
             let src = format!("fn f(x: Str) -> Bool {{ return x.{}() }}", name);
             assert!(scan(&src).is_some(), "expected a gap for .{}()", name);
         }
+    }
+
+    #[test]
+    fn a_reserved_capability_namespace_is_a_gap() {
+        // Guarded the way the builtin test is: an empty table is a legitimate
+        // generation (it means the self-host ported the checks), not a broken
+        // one.
+        if let Some(root) = EXCLUDED_CAPABILITY_ROOTS.first() {
+            let src = format!("extern emission[{}.click] fn c(t: Str) = @py {{ pass }}", root);
+            assert!(scan(&src).is_some(), "expected a gap for {}.", root);
+        }
+    }
+
+    #[test]
+    fn a_bare_reserved_root_is_not_a_gap() {
+        // The guard is the DOTTED namespace, not the word: a local binding or
+        // a field called `ui` is an ordinary name and costs no frontier gap.
+        assert_eq!(scan("fn f() -> Int { let ui = 1 return ui }"), None);
+        assert_eq!(scan("fn f(screen: Int) -> Int { return screen }"), None);
     }
 
     #[test]

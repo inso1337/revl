@@ -52,7 +52,7 @@ The signed body carries these members:
 | `kind` / `version` | `revl.attestation` / `2.0`, the envelope identity                  |
 | `verdict`          | `admitted`, the only verdict an attestation records                |
 | `hash_alg`         | `sha256`                                                           |
-| `composition_hash` | SHA-256 over the **canonical** IR, the composition's stable identity |
+| `composition_hash` | SHA-256 over the **canonical, path-normalized** IR, the composition's stable identity: what the composition says, never where it sits |
 | `guarantees`       | the G-codes the gate verdict discharged (see below)                |
 | `checker`          | `{compiler, ruleset}`, WHICH frontend reached the verdict          |
 | `timestamp`        | ISO-8601 UTC instant the attestation was signed                    |
@@ -70,6 +70,35 @@ Because it is taken over the *post-lowering IR*, a composition attested from a
 to the same value: source formatting does not move the hash, a semantic change
 does. The IR is loaded read-only through `composition_diff.load_composition`,
 which accepts a `.rvl` source, a compiled IR, or an `audit --json` document.
+
+**What "stable" covers, and what it deliberately does not.** Stable is measured
+against the composition, not against the filesystem. The compiler stamps each
+component with the path it was compiled from (`components[*].source`, mirrored
+into `manifest.components[*].file`), and that path is spelled relative to the
+working directory, so it is a property of the shell that ran the compiler
+rather than of the composition. `canonical_hash` reduces every such path to its
+basename before hashing (`attest.path_normalized_ir`). Two copies of the same
+bytes in two directories are one composition and hash the same, and an
+attestation signed in CI at one checkout path verifies `--against` the same
+source at another. Without this the ordinary consumer shape did not work, and
+it failed in the worst available way: a `--verify --against` of an untouched
+file under a different spelling of its own path reported `hash mismatch: the
+composition changed since it was attested`, which is a false statement about
+the file and teaches a reader to discount the one message that means tampering
+(issue #1276).
+
+The normalization is at the hashing boundary and nowhere else. The IR still
+carries its source path, because a diagnostic and a why-trace have to name the
+file on disk; the canonical IR spelling is a project invariant that
+`selfhost/*.rvl` must reproduce byte for byte, so it does not move for this.
+Identity is location-independent, not content-independent: the same basename in
+another directory over different bytes is a different composition and still
+refuses. `revl bundle`, `registry.build_evidence` and `truc reproduce` each
+applied this normalization already (`docs/bundle.md` resolves it as a named
+design decision, and item 305 records the bundle's own version of the omission
+as a bug it fixed), but each from its own copy of the rule, which is how the
+plain `revl attest` path came to be the one producer without it. There is one
+definition now, and `canonical_hash` calls it.
 
 **The guarantees, and what they do and do not mean.** Through envelope v1 this
 member was a constant: `sorted()` over `diagnostics.GUARANTEES`, written by a
@@ -211,7 +240,14 @@ and ship it). `revl attest ATT --verify --json` prints the verdict:
   evidence_bindings=None) -> dict`, pure and deterministic given `now`; raises without an admitted `GateVerdict` whose
   hash matches `ir`, on a draft (open holes), or on an empty key.
 - `verify_attestation(att, key, ir=None) -> (ok, reason)`.
-- `canonical_hash(ir) -> str`, the IR content hash.
+- `canonical_hash(ir) -> str`, the IR content hash, taken over
+  `path_normalized_ir(ir)` so it is an identity of the composition and not
+  of where it was compiled.
+- `path_normalized_ir(ir) -> dict`, the compiled IR with every cwd-dependent
+  source path reduced to its basename. Returns its argument unchanged when
+  there is no such path, so the non-composition documents that also take
+  their identity from `canonical_hash` are hashed over the bytes they
+  always were.
 - `discharged_guarantees()` / `catalogued_guarantees()` / `ruleset_digest()` /
   `checker_identity()`, the guarantee derivation and the checker identity.
 - `resolve_key(path, *, env=None)` / `load_key(path)` / `load_attestation(path)`

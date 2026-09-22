@@ -44,6 +44,16 @@ The record schema a durable WAL speaks (all a tier must emit to be recoverable):
   for a crossing that carried a completion; consumes no seq. Recovery ignores
   it (it names a fact, not an effect); :func:`model_decisions` indexes it for
   the offline branch surface.
+  Since item 517 Slice 2 it may also carry ``evidence`` — one sealed
+  ``revl.model-decision`` object (`revl.model_evidence`), the provider's signed
+  account of the same crossing, which is what lets `revl replay` reconstruct
+  the decision from the artifact alone — or ``evidenceRefused``
+  (``{link, reason}``) when a run that engaged sealing could not seal this
+  crossing. Both are ABSENT by default, so a run that never engaged evidence
+  writes the Slice-3a record unchanged and "not sealed" never reads as
+  "sealed and refused". They ride ON this record rather than on a record of
+  their own, so the ``(component, stepIndex)`` index below reaches the
+  observation and the account together and no second correlation exists.
 * ``activation-complete`` — the terminal marker. Its PRESENCE is roll-forward,
   its ABSENCE (the crash) is roll-back. The whole decision.
 """
