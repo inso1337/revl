@@ -73,10 +73,12 @@ def _finite_float(value):
 # anonymous record literal has no declared record type to render (declaring
 # one moves the document to the v3 combined path, where the record type and
 # the live component are rendered together (issue #1321)), match/arrow/`?.`
-# have no lowering there yet, and bare Opt/Result
-# construction outside return position is refused by the tier's tuple-Opt
-# design. Each refusal names the limit and a workaround. `hole` is refused at
-# the document level by the pre-emit walk.
+# have no lowering there yet, and an Opt/Result construction in a true VALUE
+# position (bound to a local, passed as an argument) is refused by the tier's
+# tuple-Opt design — return position lowers, including inside a ternary, which
+# `_emit_return` spreads into an `if` statement (issue #1376). Each refusal
+# names the limit and a workaround. `hole` is refused at the document level by
+# the pre-emit walk.
 EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
     "component": frozenset({
         "bin", "builtin", "call", "config", "field", "fn", "format",
@@ -465,7 +467,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             if nm in ("Some", "None", "Ok", "Err"):
                 raise EmitError(
                     "Opt/Result construction is only supported in return "
-                    "position on the cordis-go tier (got a bare value)"
+                    "position on the cordis-go tier (got a bare value) - the "
+                    "component world spells an Opt VALUE as `*T` and nothing "
+                    "in it consumes one; lift it into a helper fn instead"
                 )
             src = _expr(callee, env)
             args = ", ".join(_expr(a, env) for a in node.get("args", []))
@@ -634,7 +638,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             return _v3_comp_construct(node, env)
         raise EmitError(
             "Opt/Result construction is only supported in return position on "
-            "the cordis-go tier (got a bare value)")
+            "the cordis-go tier (got a bare value) - the component world "
+            "spells an Opt VALUE as `*T` and nothing in it consumes one; "
+            "lift it into a helper fn instead")
     if kind == "match":
         if _V3_MODE:
             # v3 method bodies: user ADTs lower to a type switch (needs the
@@ -1019,6 +1025,18 @@ def _comp_infer(node, env: _Env):
         op = node.get("op")
         if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
             return "Bool"
+        if op == "??":
+            # `Opt[T] ?? T` answers T, not the Opt. Without this arm the left
+            # operand's type won (a service method's declared `Opt[Int]`), so
+            # `let a = bus.maybe(x) ?? 0` declared the local as the PURE tier's
+            # `RevlOpt[int64]` — a name the component package does not define —
+            # and assigned an `int64` to it. The #1376 ternary refusal was
+            # keeping the only document that binds a `??` in a method body away
+            # from the emitter, so nothing had measured this.
+            lt = _comp_infer(node.get("left"), env)
+            if isinstance(lt, str) and lt.startswith("Opt[") and lt.endswith("]"):
+                return lt[4:-1]
+            return _comp_infer(node.get("right"), env) or lt
         return _comp_infer(node.get("left"), env) or _comp_infer(node.get("right"), env)
     if k == "un":
         return "Bool" if node.get("op") == "!" else _comp_infer(node.get("operand"), env)
@@ -1853,6 +1871,22 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
         return
     cc = _construction_case(expr)
     rs = ret_surface.strip() if isinstance(ret_surface, str) else ""
+    if isinstance(expr, dict) and expr.get("kind") == "if" \
+            and (rs.startswith("Opt[") or rs.startswith("Result[")):
+        # A ternary in RETURN position over the tuple convention (issue #1376).
+        # `Opt[T]` is `(T, bool)` here and `Result[T, E]` is `(T, E, bool)`, so
+        # a branch that constructs one has no single-expression Go form and the
+        # value IIFE the ordinary ternary arm builds cannot carry it — which is
+        # why `(n > 0) ? Some(n) : None` refused while the same method written
+        # as `if (n > 0) { return Some(n) }  return None` emitted. Spread the
+        # ternary into that `if` statement instead and let each branch take the
+        # ordinary return lowering. Recursive, so a nested ternary and a mixed
+        # pair (one construction, one Opt-valued call) lower the same way.
+        out.append("%sif %s {" % (pad, _expr(expr.get("cond"), env)))
+        _emit_return(expr.get("then"), ret_surface, env, out, pad + "\t")
+        out.append("%s}" % pad)
+        _emit_return(expr.get("else"), ret_surface, env, out, pad)
+        return
     if cc and rs.startswith("Opt[") and cc[0] in ("Some", "None"):
         inner = rs[4:-1]
         if cc[0] == "Some":
