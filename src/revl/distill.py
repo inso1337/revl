@@ -78,7 +78,7 @@ class Reason(enum.Enum):
 class ShapeKey:
     """The resource-scoped shape key (§1.2). ``token`` is the class-(c)
     capability token, ``realm`` the item-33 realm scope (``""`` = shared),
-    ``taint`` the recorded item-249 taint-fold origin set (of the five)."""
+    ``taint`` the recorded item-249 taint-fold origin set."""
 
     token: str
     realm: str
@@ -116,7 +116,7 @@ class NotCovered:
 class BlastRadius:
     """The blast-radius fold's partition of the ledger window (§3), plus the
     negative guarantee (§3.2): the origins the rule can NEVER admit, the
-    complement of its `admitting` set over the five taint-fold origins."""
+    complement of its `admitting` set over the taint-fold origins."""
 
     covered: int
     not_covered: tuple[NotCovered, ...]
@@ -183,8 +183,8 @@ def _resource_params(cap: cap_order.Cap) -> list[tuple[str, object]]:
 def _admission_taint(taint: frozenset[str] | None, taint_relevant: bool) \
         -> frozenset[str]:
     """The taint set to enforce at ADMISSION (the H2 floor, §2.2). Unknown or
-    empty taint on a taint-RELEVANT crossing is treated as ALL FIVE origins
-    present (fail-closed, over-prompt is safe), never as an empty set a
+    empty taint on a taint-RELEVANT crossing is treated as ALL the taint-fold
+    origins present (fail-closed, over-prompt is safe), never as an empty set a
     ``{} subset admitting`` test would wave through. A non-taint-relevant
     crossing carries no taint."""
     if taint:
@@ -360,7 +360,7 @@ def blast_radius(rule: AutoApproveRule, window: list[dict]) -> BlastRadius:
     guarantee (§3.2).
 
     The taint gate uses the admission floor (§2.2): a taint-relevant crossing
-    whose admission taint set is empty or unknown is treated as ALL FIVE origins
+    whose admission taint set is empty or unknown is treated as EVERY taint-fold origin
     (fail-closed), so an empty set never slips a taint-relevant crossing through
     a `{} subset admitting` test."""
     rule_caps = [cap_order.parse_cap(c) for c in rule.caps]

@@ -45,7 +45,7 @@ type Draft = { body: Str }
 service Store {
   fn get(id: Str) -> Opt[Note]
   fn list() -> List[Note]
-  emission fn create(draft: Draft) -> Str
+  emission[store] fn create(draft: Draft) -> Str
 }
 
 // The memory driver. Any other driver (sqlite, postgres) provides this same

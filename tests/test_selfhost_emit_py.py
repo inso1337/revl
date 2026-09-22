@@ -131,6 +131,16 @@ CORPUS = [
     # binder decision had no oracle over it. Added FAILING FIRST, and the
     # component half of F3's binder-free arms was the divergence it caught.
     "services_match.rvl",    # a match in a provide-method body: the body-IS-the-bind, unread-bind and read-bind arms, over an ADT and an Opt
+    # issue #721 / item 458: provide-method CONTROL FLOW (`if`/`else`/`while`/
+    # `for`/`break`/`continue`, items 548 and 681), which is the shape a
+    # ternary-chained dispatch migrates to once the hoist helpers come out. The
+    # corpus reached a provide-method `if` exactly once before this document
+    # (shadowing_near_misses.rvl: one arm, no else, no emission, no loop) and
+    # reached a method `while`/`for`/`break`/`continue` not at all, so
+    # `_method_control` had no oracle over it. Added FAILING FIRST — the port
+    # answered `<<UNSUPPORTED-METHODSTEP:if>>` three times over and dropped
+    # every route the document declares.
+    "services_control_flow.rvl",
     # a `${…}` template in a provide-method body: the COMPONENT-path `format`
     # node (a fn body lowers `${…}` to `interp` instead), emitted as
     # `_revl_fmt('<template>', args)` with `fmt as _revl_fmt` pulled into the

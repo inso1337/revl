@@ -189,6 +189,83 @@ def _canonical_bytes(obj) -> bytes:
             f"the document has no canonical JSON spelling: {error}") from error
 
 
+def path_normalized_ir(ir):
+    """A compiled IR with every cwd-dependent source path reduced to its
+    basename — THE definition, called by everything that hashes a composition.
+
+    The compiler stamps each component with the path it was compiled from
+    (`components[*].source`, mirrored into `manifest.components[*].file`), and
+    that path is spelled relative to the WORKING DIRECTORY, not to the
+    composition. So the same file compiled from two directories, or named by
+    two different spellings of its own path, produced two different IR
+    documents and therefore two different composition hashes. Measured on
+    `dfecba2a`: one unchanged file attested from its own directory did not
+    verify `--against` itself named from the parent directory, and the reason
+    printed was "the composition changed since it was attested" — a false
+    statement about the file, and the worst possible one to print, because it
+    teaches a consumer to ignore hash mismatches.
+
+    The composition hash is the identity of a composition, and where a checkout
+    happens to sit is not part of what a composition IS. The ordinary consumer
+    shape — sign in CI at one checkout path, verify against the same source at
+    another — could not work while it was.
+
+    This is not a new decision. `revl bundle`, `registry.build_evidence` and
+    `truc reproduce` each already normalized these exact fields for exactly
+    this reason, and each did it in its own copy; two of those copies drifted
+    apart and left `truc reproduce`'s attestation tier structurally dead
+    against every attestation the publisher signed (`truc/reproduce.py`
+    `_normalized_ir`). What was missing was the normalization at the boundary
+    where the hash is actually taken, so the plain `revl attest` path — the one
+    with no bundle around it — never got it. One definition, one hash.
+
+    Returns the document UNCHANGED (the same object, not a copy) when it
+    carries none of these fields, so the non-composition documents that also
+    take their identity from `canonical_hash` (a TEE bundle or result, a
+    retention report, a conformance corpus) are hashed over exactly the bytes
+    they always were.
+    """
+    if not isinstance(ir, dict):
+        return ir
+    components = ir.get("components")
+    manifest_components = (ir.get("manifest") or {}).get("components") \
+        if isinstance(ir.get("manifest"), dict) else None
+
+    def _needs(rows, fields) -> bool:
+        if not isinstance(rows, list):
+            return False
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            for name in fields:
+                value = row.get(name)
+                if isinstance(value, str) and value != os.path.basename(value):
+                    return True
+        return False
+
+    if not (_needs(components, ("source", "file"))
+            or _needs(manifest_components, ("file",))):
+        return ir
+
+    import copy  # noqa: PLC0415 — lazy: only on the path that rewrites
+
+    out = copy.deepcopy(ir)
+    for comp in out.get("components") or []:
+        if not isinstance(comp, dict):
+            continue
+        for name in ("source", "file"):
+            value = comp.get(name)
+            if isinstance(value, str) and value:
+                comp[name] = os.path.basename(value)
+    for comp in (out.get("manifest") or {}).get("components") or []:
+        if not isinstance(comp, dict):
+            continue
+        value = comp.get("file")
+        if isinstance(value, str) and value:
+            comp["file"] = os.path.basename(value)
+    return out
+
+
 def canonical_hash(ir: dict) -> str:
     """The content hash of an admitted IR document — its stable identity.
 
@@ -196,8 +273,16 @@ def canonical_hash(ir: dict) -> str:
     is post-lowering) always yields the same hex digest. This is the value the
     attestation binds a verdict to, and the value `--verify` recomputes to
     detect that the composition changed.
+
+    "Stable" is measured against the composition, not against the filesystem:
+    the document is passed through `path_normalized_ir` first, so two copies of
+    the same bytes at two paths, and one file named by two spellings of its own
+    path, hash the same. Nothing in the IR itself moves — the normalization is
+    at the hashing boundary, and the canonical IR spelling
+    (`formatter._canonical_ir`, which `selfhost/*.rvl` must reproduce byte for
+    byte) is untouched.
     """
-    return hashlib.sha256(_canonical_bytes(ir)).hexdigest()
+    return hashlib.sha256(_canonical_bytes(path_normalized_ir(ir))).hexdigest()
 
 
 def key_id(key: bytes) -> str:
@@ -255,19 +340,134 @@ def named_guarantees() -> list[str]:
 #: `diagnostics` (the catalogue the codes are drawn from). Their bytes are what
 #: :func:`ruleset_digest` identifies.
 #:
-#: `retention` is here for a different reason than the rest, and the difference
-#: is the point: it raises no refusal of its own, but `PERSISTENCE_SINK_SCOPES`
-#: — the crossings at which a past-deadline `Retained[T, P]` value is refused
-#: under `G-RETAIN` — is read by `taint.py` to decide whether to refuse at all.
-#: A member whose BYTES move the set of programs that are refused is a rule, so
-#: its bytes are part of the digest: without it two artifacts could carry the
-#: same ruleset digest while having been admitted under different retention
-#: rules, which is the drift the digest exists to catch (issue #989). It cites
-#: no numbered `(Gn)` tag, so listing it here adds it to the digest without
+#: THE MEMBERSHIP RULE (issue #989): a module whose BYTES move the set of
+#: programs the frontend refuses is a rule, and its bytes are part of the
+#: digest. A module does not have to raise to meet it. `retention` raises no
+#: refusal of its own, but `PERSISTENCE_SINK_SCOPES`, the crossings at which a
+#: past-deadline `Retained[T, P]` value is refused under `G-RETAIN`, is read by
+#: `taint.py` to decide whether to refuse at all. Without it two artifacts could
+#: carry the same ruleset digest while having been admitted under different
+#: retention rules, which is the drift the digest exists to catch. It cites no
+#: numbered `(Gn)` tag, so listing it here adds it to the digest without
 #: changing the cited set :func:`discharged_guarantees` reads.
+#:
+#: `model_route` and `model_council` are here on that same rule, and each meets
+#: it twice over (issue #1311). `model_route` raises item 512's ten
+#: `G-MODEL-PLACE` / `G-SECRET-FLOW` declaration refusals, and its
+#: `CEILING_ORIGINS` is what `taint.py` reads at every `model.*` crossing to
+#: decide whether item 514's value-level refusal fires at all, the exact
+#: relationship `retention.PERSISTENCE_SINK_SCOPES` has with the same file.
+#: `model_council` is item 516's rule set, called from `lower.py` and refusing
+#: under `model_route.CODE`. Neither cites a `(Gn)` tag, so both are digest
+#: inputs and not cited codes, exactly as `retention` is.
+#: `tests/test_1311_model_routes_not_in_ir.py` pins it.
+#:
+#: The eleven members after `model_council` were found by AUDITING THE WHOLE
+#: LIST against the rule rather than by adding the two that a feature happened
+#: to touch. Each was established the same way: neutralise the module's
+#: contribution in one line (empty a table, make a predicate constant) and re-run
+#: the reference frontend over `examples/rejections/` and the module's own
+#: tests. Every one of them moved the refusal set while `ruleset_digest()` did
+#: not move at all, which is the definition of a missing member. What each one
+#: decides:
+#:
+#:   `typecheck`       the type relation itself. `lower`, `taint`, `admission`,
+#:                     `compiler`, `emission_analysis`, `placement` and
+#:                     `composition` all import it and refuse on its answer.
+#:   `lexer`           the token alphabet `parser` refuses from. `parser` is a
+#:                     member and its tokenizer was not.
+#:   `composition`     computes the per-row `AdmissionProfile` that
+#:                     `compile_files` then enforces (426 S4), so it decides
+#:                     whether a non-first-party row is confined at all. Its
+#:                     resolution checks stay off the trusted path, but the
+#:                     profile it produces is an INPUT to the trusted path.
+#:   `hostref`         the jail an `extern` host-module ref resolves under.
+#:   `hostfile`        the jail an `extern` host-body file resolves under.
+#:   `cap_order`       the closed registry of capability parameters and the
+#:                     `covers` relation; `parser` turns its `CapError` into a
+#:                     refusal, so the registry table decides the refusal.
+#:   `ui_family`       item 521's reserved computer-use namespace, a table
+#:                     `parser` reads at the declaration site. Pure table, no
+#:                     raise of its own: the `retention` shape exactly.
+#:   `resources`       item 308's R0 predicate, enforced at extern admission in
+#:                     `lower`. Also a pure table.
+#:   `kernel_boundary` item 544's kernel capability enumeration, the authority a
+#:                     candidate may not hold, read by `lower` and
+#:                     `admit_profile`.
+#:   `cardinality`     item 260's per-activation crossing bound, which `lower`
+#:                     refuses a declared `calls` ceiling against on the count
+#:                     axis.
+#:   `decode_grammar`  item 513's grammar renderer. A schema node it does not
+#:                     recognise is a refusal in `lower` rather than a permissive
+#:                     rule, so its coverage decides which `validated` emissions
+#:                     are admitted.
+#:
+#: None of the eleven cites a numbered `(Gn)` tag, so all eleven are digest
+#: inputs and not cited codes, exactly as `retention` is:
+#: :func:`discharged_guarantees` is unchanged by adding them.
+#:
+#: WHY THIS IS STILL A LIST. Membership is reachability plus effect, and neither
+#: is a property of the bytes of this file: a module refuses only when the
+#: frontend reaches it on some program, which only a run settles. An import-time
+#: derivation would have to either run a corpus (too slow, and it would make the
+#: digest depend on the corpus) or take the whole import closure of the frontend
+#: (which reaches `deploy`, `synthesize` and the per-tier runners, and would move
+#: every attested digest on a change to code that refuses nothing). So the list
+#: stays, and `tests/test_ruleset_modules_completeness.py` derives membership
+#: instead of restating it: it computes the modules that ORIGINATE a refusal
+#: over the committed rejection corpus, and it computes the sibling modules the
+#: rule modules IMPORT, and it fails on anything in either set that is neither a
+#: member nor classified in :data:`NOT_A_RULE`.
 RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "taint", "retention", "placement", "emission_analysis",
-                   "admit_profile", "holes", "diagnostics")
+                   "admit_profile", "holes", "diagnostics",
+                   "model_route", "model_council",
+                   "typecheck", "lexer", "composition", "hostref", "hostfile",
+                   "cap_order", "ui_family", "resources", "kernel_boundary",
+                   "cardinality", "decode_grammar")
+
+#: The sibling modules a rule module imports that are NOT rules, each with the
+#: reason it is not one. This is the argued half of the membership question and
+#: it is deliberately small: `tests/test_ruleset_modules_completeness.py`
+#: asserts SET EQUALITY between this table and the import fringe of
+#: :data:`RULESET_MODULES`, so a new import into the frontend cannot be left
+#: unclassified and an entry that stops being reachable cannot be left behind.
+#: An entry here is a claim that the module's bytes leave the refusal set
+#: unchanged, and the two entries that could be argued either way were measured
+#: rather than argued: neutralising `ownership.annotate_ir` and `why.render`
+#: each left the admit/refuse verdict identical on all 194 programs under
+#: `examples/`.
+NOT_A_RULE = {
+    "errors": "the RevlError carrier itself. It transports a refusal; it "
+              "decides none.",
+    "why": "the why-trace attached to a refusal as evidence. Measured: "
+           "neutralising `render` moves no verdict.",
+    "navigate": "the nearest-allowed-space projection of a refusal that "
+                "already happened. It grants nothing and decides nothing "
+                "(item 274 design section 4).",
+    "ownership": "annotates the IR with in-place accumulation facts and "
+                 "refuses nothing. Measured: neutralising `annotate_ir` moves "
+                 "no verdict. It does change emitted IR bytes, which the "
+                 "attestation's own content hash already covers.",
+    "boundary": "the G8 boundary walk used by `audit`, `plan` and `query`. "
+                "Reporting surface, not an admission decision.",
+    "_paths": "resolves where `backends/` and `stdlib/` sit under a checkout "
+              "or a wheel. It carries no rule. The stdlib SOURCES it points at "
+              "are outside the digest too, which is the deliberate bound: this "
+              "digest identifies the checker, not the library it checks.",
+    "attest": "this module: the consumer of the digest, not a checker.",
+    "intent": "declared-intent reporting on an already-admitted document.",
+    "policy": "the runtime policy evaluator; it runs after admission.",
+    "erasure_receipt": "an after-the-fact receipt over a completed erasure.",
+    "estop": "the runtime emergency stop.",
+    "deploy": "the deploy driver, reached from `placement`'s conductor.",
+    "distribute": "process-seam distributability for `placement`, reported "
+                  "rather than refused at admission.",
+    "peer_offer": "the federation offer surface, reached from `placement`.",
+    "sandbox_runtime": "the child-process sandbox `placement` launches.",
+    "synthesize": "`revl synthesize`, a generator rather than a checker.",
+    "tee_attestation": "TEE quote verification at run time.",
+}
 
 #: The modules SCANNED for the G-codes the ruleset cites. `diagnostics` is
 #: excluded on purpose: it is the catalogue, and reading the list off the

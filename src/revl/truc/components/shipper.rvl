@@ -244,7 +244,7 @@ fn ship_code_of(rj: Str) -> Int {
 // ---- the service + the thin rim component ----
 
 pub service Shipper {
-  emission fn run(projectDir: Str, name: Str) -> Int
+  emission[host_admit_all, host_gauntlet, host_print, host_publish, host_release_facts, host_ship_context] fn run(projectDir: Str, name: Str) -> Int
 }
 
 component Shipper provides ship: Shipper {

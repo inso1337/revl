@@ -521,3 +521,63 @@ def test_the_frontier_mirror_matches_the_rust(census):
         "1" for _ in range(generator.MAX_LEVEL_ITEMS + 1))
     assert len(flat) < generator.MAX_SOURCE_BYTES // 10
     assert scan(flat) is not None
+
+
+def test_every_sibling_tool_is_loaded_relative_to_this_tool():
+    """`ROOT` is the tree under measurement, and a caller may redirect it.
+
+    The census loads several of its own sibling modules by path. Resolving
+    one of those off `ROOT` asks the MEASURED tree for a module that belongs
+    to the census itself, and a caller that points `ROOT` at a prepared tree
+    then gets a `FileNotFoundError` from a tool it never asked about. That is
+    what item 542 hit the moment it gave `main()` a provenance line to print:
+    `--record` against a prepared tree raised on `tools/corpus_provenance.py`
+    and took `tests/test_evolution_reward.py` red with it.
+
+    Structural rather than behavioural, because the behavioural case only
+    reaches the modules one code path happens to load, and the next sibling
+    tool will be loaded from somewhere else. `backends/python/emit.py` stays
+    on `ROOT` on purpose: the emitter is the SUBJECT of the census, part of
+    the tree being measured, not part of the census.
+    """
+    import ast
+
+    tree = ast.parse((ROOT / "tools" / "gate_reference_census.py").read_text(
+        encoding="utf-8"))
+
+    def spelled(node):
+        """`("ROOT", ["tools", "x.py"])` for `ROOT / "tools" / "x.py"`."""
+        parts = []
+        while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            if not isinstance(node.right, ast.Constant) \
+                    or not isinstance(node.right.value, str):
+                return None, []
+            parts.append(node.right.value)
+            node = node.left
+        if not isinstance(node, ast.Name):
+            return None, []
+        return node.id, list(reversed(parts))
+
+    off_the_measured_tree, off_this_tool = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) \
+                or not isinstance(node.func, ast.Attribute) \
+                or node.func.attr != "spec_from_file_location":
+            continue
+        for arg in node.args:
+            base, parts = spelled(arg)
+            if base == "TOOLS":
+                off_this_tool.append("/".join(parts))
+            elif base == "ROOT" and parts[:1] == ["tools"]:
+                off_the_measured_tree.append("/".join(parts))
+
+    assert not off_the_measured_tree, (
+        "these sibling tools are resolved off the tree under measurement "
+        "rather than off this tool, so a redirected ROOT looks for them "
+        "inside the measured tree: " + ", ".join(sorted(
+            set(off_the_measured_tree))))
+    # Not vacuous: a rename of the helper, or a census that stopped loading
+    # siblings by path, would satisfy the assertion above without this file
+    # having checked a single load.
+    assert off_this_tool, (
+        "no sibling tool is loaded off TOOLS; this test checked nothing")

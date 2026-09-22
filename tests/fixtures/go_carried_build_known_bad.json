@@ -1,0 +1,32 @@
+{
+  "note": [
+    "The carried set is every document `backends/go/emit.py::emit` routes to",
+    "`_emit_v3_combined`: a top-level fn/type/extern/plain-test beside an",
+    "OBSERVABLE component (issue #1321). `carried` has to mean `builds`, so",
+    "tests/test_go_carried_set_builds.py emits the whole set and runs",
+    "`go build` over it. Every carried document that emits must build unless",
+    "it is named here, with the diagnostic it still produces.",
+    "",
+    "This list is a RATCHET. Removing an entry is the only edit that needs no",
+    "argument. Adding one needs the reason in the entry and an issue behind",
+    "it: a carried document that does not build is a defect, not a baseline."
+  ],
+  "known_bad": {
+    "backends/java/scenarios/runtime_values.rvl": "issue #1356 family 2 - a `host` call in a top-level pure fn lowers as `Pool.Open(...)`, a method on the host-runtime type, where the constructor is the free function `PoolOpen`. The component-step renderer lowers the same call correctly; the pure-tier fn renderer never learned the host calling convention, because before #1321 no document put a host call in a pure fn beside a live component.",
+    "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2/attempt-1.rvl": "issue #1356 family 1 - a provide method declares `-> List[Row]` over a declared record `Row` and returns an untyped `pool.query(sql)`. Reproduces on the rust tier too (`Vec<Row>` against `Vec<Value>`), so it is a frontend typing hole, not a go lowering.",
+    "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2/attempt-2.rvl": "issue #1356 family 1, as above.",
+    "bench/results/baseline-deepseek-v4-pro/02-pg-pool/v2host/attempt-3.rvl": "issue #1356 family 1, as above.",
+    "bench/results/rerun-deepseek-v4-pro-20260826/02-pg-pool/v2/attempt-1.rvl": "issue #1356 family 1, as above.",
+    "bench/results/rerun-deepseek-v4-pro-20260826/02-pg-pool/v2host/attempt-2.rvl": "issue #1356 family 1, as above.",
+    "bench/results/rerun-deepseek-v4-pro-20260826/22-cascade/v2/attempt-1.rvl": "issue #1356 family 1, as above.",
+    "bench/results/rerun-deepseek-v4-pro-20260826/22-cascade/v2host/attempt-2.rvl": "issue #1356 family 1, as above.",
+    "bench/results/typed-deepseek-v4-pro/02-pg-pool/v2/attempt-1.rvl": "issue #1356 family 1, as above.",
+    "bench/results/typed-deepseek-v4-pro/02-pg-pool/v2host/attempt-1.rvl": "issue #1356 family 1, as above.",
+    "bench/results/typed-deepseek-v4-pro/02-pg-pool/v2host/attempt-2.rvl": "issue #1356 family 1, as above.",
+    "tests/fixtures/emit_java_corpus/component_branches.rvl": "issue #1356 family 2 - `_emit_host_stubs` answers a host beyond Pool/Map with a FUNCTION stub (`func JobRun(_args ...any) any`), while `_host_type_of_acquire` types the bind as a `*Job` value with methods. The two disagree, and the component's Opt config field lowers to a two-value read of a one-value field.",
+    "tests/fixtures/emit_java_corpus/map_inference_builtins.rvl": "issue #1356 family 3 - an `Int32` value reaches `strconv.FormatInt` without the int64 widen that commit 5e83a9cfd gave the rest of the v3 component tier.",
+    "tests/fixtures/emit_py_corpus/services_control_flow.rvl": "issue #1356 family 3 - a `let mut i = 0` loop counter in a method body declares as Go `int`, and `revlStrCharAt` takes int64.",
+    "tests/fixtures/emit_ts_corpus/property_edges.rvl": "issue #1356 - a Map-typed pure-fn parameter renders as `any` and is then indexed, and an `assert` inside an ordinary top-level `fn` emits `t.Fatalf` with no `*testing.T` in scope.",
+    "tests/fixtures/emit_ts_corpus/services_composite.rvl": "issue #1356 - a service method with a function-typed parameter renders through the v1/v2 `_go_type`, which has no arm for one and prints the surface spelling (`f (Int, Str) > Bool`) into the interface."
+  }
+}

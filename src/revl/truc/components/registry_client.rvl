@@ -4,8 +4,8 @@
 use "../externs.rvl" { host_index_read, host_index_row }
 
 pub service Index {
-  emission fn load(registry: Str) -> Str
-  emission fn row(registry: Str, name: Str) -> Str
+  emission[host_index_read] fn load(registry: Str) -> Str
+  emission[host_index_row] fn row(registry: Str, name: Str) -> Str
 }
 
 component RegistryClient provides index: Index {

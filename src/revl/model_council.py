@@ -5,6 +5,13 @@ the DECLARATION half, kept in one file so each refusal sits beside the rule it
 enforces (the `revl.model_route` discipline: the parser reads the shape, this
 reads the meaning).
 
+The checked property is registered as `G-COUNCIL-SPLIT`
+(`docs/design/557-council-disagreement.md`, issue #1190): **disagreement can
+never be silently resolved toward allow.** Item 516 landed the rules below and
+filed them under item 512's `G-MODEL-PLACE`; 557 gives them their own code,
+because the code is what an agent reads instead of the prose and item 512's
+one-line fix is not the rewrite for any of them.
+
 The surface is one declaration, at the program level because it binds several
 program-level `model role` declarations in one aggregation:
 
@@ -55,7 +62,31 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .errors import RevlError
-from .model_route import CATEGORY, CODE, roles
+from .model_route import CATEGORY as PLACE_CATEGORY
+from .model_route import CODE as PLACE_CODE
+from .model_route import roles
+
+# The guarantee this module's refusals enforce (issue #1190,
+# `docs/design/557-council-disagreement.md`).
+#
+# It is a SECOND code rather than item 512's, and the reason is the one
+# `revl.diagnostics` exists for: `classify()` hands an agent a `guarantee` line
+# and a `fix` line so it can react without parsing prose, and item 512's pair
+# says "route the origin to a role declared `on_device`, declare the role the
+# arm names, or drop the arm". None of that is the rewrite for `on_tie allow`.
+# A refusal whose machine-readable fix does not fix it is worse than no code,
+# so the disagreement rules carry their own.
+#
+# The line BETWEEN the two codes is one sentence, and section 3 of the design
+# note is the table:
+#
+#   a council refusal carries `G-MODEL-PLACE` exactly when it is about a
+#   `model role` - one this program does not declare, or one whose name the
+#   council also claims. Every other council refusal carries
+#   `G-COUNCIL-SPLIT`, because what it refuses would let the council report
+#   agreement it does not have.
+CODE = "G-COUNCIL-SPLIT"
+CATEGORY = "model-council"
 
 # What a member is FOR. A CLOSED vocabulary, for the same reason `RESIDENCES`
 # is closed: a typo is a refusal rather than a member with no job.
@@ -165,9 +196,20 @@ class Council:
         return n
 
 
-def _err(filename, line, message, hint, code=CODE):
+def _err(filename, line, message, hint, code=CODE, category=CATEGORY):
     return RevlError(filename, line, message, hint=hint, code=code,
-                     category=CATEGORY)
+                     category=category)
+
+
+def _place_err(filename, line, message, hint):
+    """A council refusal whose subject is a `model role`, not the aggregation.
+
+    Two of them exist (design note 557 section 3): a member naming a role this
+    program does not declare, and a council claiming a declared role's name.
+    Both are answered by editing a `model role`, which is what item 512's fix
+    line tells an agent to do, so both keep item 512's code."""
+    return _err(filename, line, message, hint, code=PLACE_CODE,
+                category=PLACE_CATEGORY)
 
 
 def check(program, filename: str | None = None) -> dict[str, Council]:
@@ -209,7 +251,7 @@ def _check_one(decl, role_table, seen, where) -> Council:
     #    whichever table was consulted first.
     if decl.name in role_table:
         role = role_table[decl.name]
-        raise _err(
+        raise _place_err(
             where, decl.line,
             f"model council `{decl.name}` has the name of the model role "
             f"declared on line {role.line}",
@@ -249,7 +291,7 @@ def _check_one(decl, role_table, seen, where) -> Council:
         placed = role_table.get(raw.role)
         if placed is None:
             known = ", ".join(sorted(role_table)) or "none"
-            raise _err(
+            raise _place_err(
                 where, raw.line,
                 f"member `{raw.function}` of model council `{decl.name}` names "
                 f"model role `{raw.role}`, which is not declared",
