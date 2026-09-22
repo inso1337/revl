@@ -618,6 +618,7 @@
    "tests/fixtures/canary_candidate_diverge.rvl",
    "tests/fixtures/canary_candidate_inverse.rvl",
    "tests/fixtures/canary_candidate_same.rvl",
+   "tests/fixtures/canary_candidate_wider_reach.rvl",
    "tests/fixtures/canary_emit_baseline.rvl",
    "tests/fixtures/canary_emit_candidates.rvl",
    "tests/fixtures/canary_moved_baseline.rvl",

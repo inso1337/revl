@@ -31,6 +31,14 @@ So this module states the barrier once:
   * :func:`discover` sweeps the tree for modules that render a promote
     decision, so a path added tomorrow that nobody registers is found.
 
+The sweep has since found two more, which is the argument for having written
+it: :data:`REGISTRY` now holds four paths, `src/revl/mcp/canary.py` and
+`src/revl/peer_pool.py` beside the two above. The pool's was the same defect
+in a different currency, a member's tier rather than a model's placement: the
+ceiling diff ran after the count of attested receipts the member had
+accumulated, so the authority check was weighed beside the measured evidence
+instead of gating entry to it.
+
 THE FAILURE DIRECTION
 ---------------------
 Fail-closed, with one rule applied everywhere: an axis that is ABSENT from a
@@ -63,8 +71,20 @@ PUBLIC SURFACE
 ``PromotionPath``           : what a promotion path declares about itself
 ``check_path(path)``        : the ordering rule, as a refusal or None
 ``REGISTRY``                : every promotion path in this tree
+``SWEEP_EXEMPT``            : modules that carry the token and are not paths
 ``renders_promotion(src)``  : does this module source render a promote verdict
 ``discover(root)``          : modules that do, and are not in ``REGISTRY``
+
+WHAT THE REGISTRY IS DERIVED FROM, AND WHY
+------------------------------------------
+Issue #1338: this registry and `src/revl/shadow_promotion.py` were each correct
+alone and disagreed the moment both were on `main`, because the entry was a
+hand-kept copy of the module's stage tuples. The shadow entry is now DERIVED
+from the module's own `STAGES` and `AUTHORITY_AXES` by importing them, so there
+is no second copy to fall behind. What is left in the entry is the part that is
+a CLAIM rather than a copy: that the module walks a stage named `authority`,
+and that every axis spelling it uses is one :data:`AXIS_ALIASES` knows. Both of
+those can fail, and failing is what they are for.
 """
 
 from __future__ import annotations
@@ -72,6 +92,8 @@ from __future__ import annotations
 import ast
 import os
 from dataclasses import dataclass
+
+from . import shadow_promotion as _shadow_promotion
 
 BARRIER_KIND = "revl.promotion-barrier"
 
@@ -354,18 +376,60 @@ _CONTROLLER = PromotionPath(
          "refuses by name on AUTHORITY_WIDENED before any measured record",
 )
 
-#: `src/revl/shadow_promotion.py` (item 518, PR #1250). Not on `main` at the
-#: time this landed, so the binding test skips with a stated reason when the
-#: module is absent and compares when it is present.
+#: The stage `src/revl/shadow_promotion.py` walks PAST its own precondition
+#: walk. Its `STAGES` is exactly `PLAN_PRECONDITIONS + PRECONDITIONS`, so every
+#: stage it names is a precondition and the accumulator is what they gate entry
+#: to. This tuple is the one thing about that module stated here rather than
+#: read off it, and it is stated because the module has no constant for it.
+#: A measured stage added INSIDE `STAGES` would not be seen; that is the limit
+#: of this derivation and it is written down rather than hidden.
+_SHADOW_ACCUMULATOR = ("accumulate",)
+
+#: `src/revl/shadow_promotion.py` (item 518, PR #1250). DERIVED from the
+#: module's own constants rather than mirrored: `stages` is its `STAGES` and
+#: `covers` is its `AUTHORITY_AXES`, read by importing them. A hand-kept copy
+#: here was the shape that let issue #1338 happen, where this entry and the
+#: module were each correct alone and disagreed once both were on `main`. What
+#: the derivation still HOLDS is the part that is a claim and not a copy:
+#: `authority` is asserted to be a stage the module walks, so moving the
+#: authority diff out of the precondition walk refuses this entry, and every
+#: axis spelling the module uses must be in :data:`AXIS_ALIASES` or
+#: :func:`check_axes` refuses it.
 _SHADOW = PromotionPath(
     module="src/revl/shadow_promotion.py",
-    stages=("route", "evidence", "policy", "authority", "state",
-            "accumulate"),
-    measured=("accumulate",),
+    stages=tuple(_shadow_promotion.STAGES) + _SHADOW_ACCUMULATOR,
+    measured=_SHADOW_ACCUMULATOR,
     authority="authority",
-    covers=("budget", "capability", "taint", "realm", "retention"),
+    covers=tuple(_shadow_promotion.AUTHORITY_AXES),
     note="the metric block is never carried into `Pair`, so the measured "
          "evidence is structurally absent left of the barrier",
+)
+
+#: `src/revl/peer_pool.py` (item 546's pool, PR #1277). A promotion of a PEER
+#: rather than of a program, and an authority change all the same: `promote`
+#: raises a member's tier, and a tier is a set of caps and a budget table. The
+#: measured stage is `evidence`, the count of attested execution receipts the
+#: member accumulated while it worked, which is a reading of what the peer did.
+#: The authority stage is `ceiling`, `_ceiling_precondition`'s diff of the tier
+#: grant against the charter ceiling and against the peer's own advertised
+#: ceiling. The module computes no grant anywhere else, so holding a grant and
+#: not having run the diff is unreachable.
+#:
+#: The pool diffs two axes and does not pretend to five: a tier carries caps
+#: and budgets, and nothing in a charter says anything about taint edges, realm
+#: residence or a retention deadline, so those three are named as uncovered
+#: rather than counted.
+_POOL = PromotionPath(
+    module="src/revl/peer_pool.py",
+    stages=("charter", "membership", "tier", "ceiling", "attestation",
+            "evidence", "issue"),
+    measured=("evidence",),
+    authority="ceiling",
+    covers=("capability", "budget"),
+    uncovered=("taint", "realm", "retention"),
+    note="`_ceiling_precondition` runs before the evidence threshold is read, "
+         "so a tier the pool cannot lawfully issue is refused without the "
+         "member's accumulated record being consulted at all",
 )
 
 #: `src/revl/mcp/canary.py` (item 59). The promotion path that was on `main`
@@ -385,7 +449,7 @@ _CANARY = PromotionPath(
          "does not compare",
 )
 
-REGISTRY = (_CANARY, _CONTROLLER, _SHADOW)
+REGISTRY = (_CANARY, _CONTROLLER, _POOL, _SHADOW)
 
 BY_MODULE = {p.module: p for p in REGISTRY}
 
@@ -398,11 +462,28 @@ BY_MODULE = {p.module: p for p in REGISTRY}
 #: landed implementations live in different ones.
 SEARCH_ROOTS = ("src/revl", "tools")
 
-#: This module states the rule, so it carries the token the rule looks for
-#: (`renders_promotion`'s own comparison). It is exempt by name and for that
-#: one reason. The exemption is a literal path, never a pattern: a pattern is
-#: how a real promotion path ends up exempt by accident.
-SWEEP_EXEMPT = ("src/revl/promotion_barrier.py",)
+#: Modules that carry the token and are not promotion paths, each with the
+#: argument for why. A path here is a LITERAL, never a pattern, because a
+#: pattern is how a real promotion path ends up exempt by accident, and the
+#: reason is required because an exemption with no argument is how the sweep
+#: stops being a ratchet. `tests/test_promotion_barrier_543.py` asserts every
+#: entry still exists and would still be selected by the detector, so an
+#: exemption cannot outlive the module it was written for.
+SWEEP_EXEMPT = {
+    "src/revl/promotion_barrier.py":
+        "this module states the rule, so it carries the token the rule looks "
+        "for: `renders_promotion`'s own comparison is the literal 'promote'",
+    "tools/evolution_progress.py":
+        "its `promote` renders the self-evolution loop's GENERATION verdict, "
+        "whether any retained candidate moved a repository counter down. It "
+        "confers no authority: nothing is deployed, served or granted by it, "
+        "it reads scorecards that have already been decided, and no other "
+        "module in this tree consumes its verdict. The candidate admission "
+        "that DOES confer authority is `tools/evolution_controller.py`, whose "
+        "`authority` precondition gates entry to the `observe` stage that "
+        "those same scorecards are the evidence for, and that module is "
+        "registered above",
+}
 
 
 def renders_promotion(source: str) -> bool:
@@ -412,14 +493,17 @@ def renders_promotion(source: str) -> bool:
     renders a promotion when it contains a string constant whose value is
     exactly ``promote``, in any case. That is what a module that decides
     promotions has and what one that merely discusses them does not. Measured
-    over this tree, it selects `src/revl/mcp/canary.py` and
-    `tools/evolution_controller.py` and nothing else, and it selects
-    `src/revl/shadow_promotion.py` when that lands.
+    over `origin/main` at 9649f21c, it selects six modules: the four in
+    :data:`REGISTRY` (`src/revl/mcp/canary.py`,
+    `tools/evolution_controller.py`, `src/revl/peer_pool.py`,
+    `src/revl/shadow_promotion.py`) and the two in :data:`SWEEP_EXEMPT`.
 
-    A module that decided promotions without ever spelling the word would be
-    missed. That is stated rather than hidden: the sweep is a ratchet against
-    the ordinary case of a fourth path being added, not a proof that none can
-    exist.
+    It errs WIDE, and that is the direction to err in. A module that renders a
+    verdict conferring no authority is selected and has to be argued out by
+    name; a module that decided promotions without ever spelling the word would
+    be missed. That second limit is stated rather than hidden: the sweep is a
+    ratchet against the ordinary case of a path being added, not a proof that
+    none can escape.
     """
     try:
         tree = ast.parse(source)
@@ -473,4 +557,6 @@ def unregistered_refusal(paths) -> Refusal | None:
         + ", ".join(paths)
         + ". Add a `PromotionPath` to `src/revl/promotion_barrier.py`'s "
           "REGISTRY naming the stage that reads the authority diff and the "
-          "measured stages it gates entry to (item 543, issue #1222)")
+          "measured stages it gates entry to, or, if the verdict confers no "
+          "authority on anything, add the module to SWEEP_EXEMPT with the "
+          "argument for why (item 543, issue #1222)")

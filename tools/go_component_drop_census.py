@@ -24,6 +24,14 @@ branches on (`has_top_level` / `has_lifecycle` / `_document_holds_stream`) off
 the go emitter itself rather than restating it, so it cannot drift from the
 routing it describes.
 
+Issue #1321 gave the fork the third arm it was missing: a document with an
+observable component is carried on `_emit_v3_combined` (the declarations AND
+the components, in one package) rather than routed to the pure path. So the
+SILENT figure is the regression gate now, not a live count: it was 126 at
+ae8533ce3 and it is 0 on a tree that carries. What the tool still answers for
+is the question the issue asked: does the go tier ever return Go source with a
+declared component missing from it.
+
 A component counts as OBSERVABLE when dropping it loses something the author
 wrote: it has an activation body, or a provide step carrying methods. An empty
 component, or a `provides` with no methods, renders to nothing anyone can call
@@ -31,17 +39,17 @@ and is not counted.
 
 Two figures come out, and the difference between them matters:
 
-  ROUTED PAST  the routing predicate sends the document to the pure path and it
-               declares an observable component. This is the upper bound.
+  ROUTED PAST  the routing predicate reaches the document and it declares an
+               observable component. This is the upper bound: the set of
+               documents whose component the pure path would drop.
   SILENT       the emitter additionally RETURNS, and the component's name is
                absent from the Go it returned. This is the fail-open count: a
                caller got an artifact, it compiles, and the component is gone.
 
-The gap between them is documents the go tier refuses anyway for an unrelated
-reason (a missing `@go` extern body, an unlowerable type). Those are not part
-of the finding — the tier already says no — so the finding is the SILENT
-number, and running this against a tree that carries
-`_refuse_pure_path_component_drop` reports SILENT 0 by construction.
+The gap between them is documents the go tier refuses anyway for its own
+unrelated reason (a missing `@go` extern body, an unlowerable type). Those are
+not part of the finding (the tier already says no), so the finding is the
+SILENT number.
 """
 
 from __future__ import annotations
@@ -146,8 +154,8 @@ def main() -> int:
           f"{result['uncompilable_skipped']} not compilable and skipped")
     print(f"{result['v3_documents_with_components']} ir_version-3 document(s) "
           f"declare a component")
-    print(f"{result['routed_past_an_observable_component']} of them are routed "
-          f"past an observable component (upper bound)")
+    print(f"{result['routed_past_an_observable_component']} of them declare an "
+          f"observable component the pure path would drop (upper bound)")
     print(f"{result['refused_for_an_unrelated_reason']} of those the go tier "
           f"refuses anyway, for its own unrelated reason")
     print(f"{result['silently_dropped']} are SILENT: go returns Go source with "

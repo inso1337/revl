@@ -7549,6 +7549,137 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         check(decl, declared, getattr(decl, "source", "") or filename)
 
 
+def _check_ui_target_binding(program: Program, types: dict, filename: str) -> None:
+    """The computer-use target record and the signatures that carry it
+    (roadmap item 521, docs/design/565-ui-target-binding.md, Slice 4).
+
+    Slice 1 closed the family's NAMESPACE and slice 2 derived its taint
+    classes, so by here a declared UI token is one of five spellings and an
+    observed value is `Untrusted` by derivation. Neither of those says
+    anything about the target's SHAPE, and the shape is what a later phase
+    reads: `ui.find` returning `Str` names its target by NAME, and a name is
+    re-resolved at every use, so nothing binds an actuation to the
+    observation that justified it, nothing expires, and nothing survives a
+    phase boundary (item 522's check-to-use race, and the reason its
+    postcondition verdict is positional).
+
+    Three refusals, all `G8`/`boundary` like slice 1's, none registering a new
+    guarantee code:
+
+    1. a program declaring a target-carrying verb and no `UiTarget` record;
+    2. a `UiTarget` missing a registry field, or declaring one at the wrong
+       type - `expiry` is design 532 §10's named oracle for this slice and is
+       refused by the same rule as the other nine, not by a special case;
+    3. a producer verb whose return is not the record, or an actuation verb
+       with no parameter that is.
+
+    WHERE THIS RUNS AND WHY. After `_lower_type_decls` (the record table is
+    what the obligation is checked against) and after `extract_and_normalize`
+    stripped the item-249 qualifiers in place, which is why the comparison is
+    against `UiTarget` and not `Untrusted[UiTarget]`: the `Untrusted` half is
+    slice 2's derivation and is profile-gated on `taint_strict`, while this
+    half is not gated at all. An author may write either spelling.
+
+    SCOPE. Externs only. A service method's `emission[ui.find]` scope funnels
+    through the same parser hook slice 1 uses, and deliberately does not reach
+    here: the obligation belongs to the declaration that actually crosses, and
+    a service method declares an interface (item 522's `teardown_refusal`
+    makes the same cut for the same reason).
+
+    Inert for a program that declares no computer-use verb, which is every
+    program in the tree but the item's own fixtures.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    carriers = []
+    for ext in program.externs:
+        for cap in ext.capabilities or ():
+            # The VERB, so a slice-3 ladder rung carries its verb's obligation:
+            # `emission[ui.click.pixel]` would otherwise be the spelling that
+            # takes a bare string target again, which is a fail-open path
+            # opened by adding a rung in a different file.
+            verb = ui_family.verb_of(cap) or ui_family._bare(cap)
+            if verb in ui_family.TARGET_PRODUCERS or \
+                    verb in ui_family.TARGET_CONSUMERS:
+                carriers.append((ext, cap))
+                break
+    if not carriers:
+        return
+
+    spec = types.get(ui_family.TARGET_TYPE)
+    declared = spec.get("fields") if isinstance(spec, dict) \
+        and spec.get("kind") == "record" else None
+    record = ui_family.target_record_refusal(declared)
+    if record is not None:
+        # The line is the target record's own when there is one to point at,
+        # and the declaration that CREATED the obligation when there is not.
+        line = carriers[0][0].line
+        for decl in program.type_decls:
+            if decl.name == ui_family.TARGET_TYPE:
+                line = decl.line
+                break
+        message, hint = record
+        raise RevlError(filename, line, message, hint,
+                        code="G8", category="boundary")
+
+    for ext, token in carriers:
+        signature = ui_family.target_signature_refusal(
+            token, ext.classification, ext.name, ext.returns,
+            [p.type for p in ext.params])
+        if signature is not None:
+            message, hint = signature
+            raise RevlError(filename, ext.line, message, hint,
+                            code="G8", category="boundary")
+
+
+def _check_ui_rung_prefix_closure(program: Program, ir: dict,
+                                  filename: str) -> None:
+    """The computer-use ladder's prefix-closure rule (roadmap item 521,
+    docs/design/532-typed-computer-use.md §4.2, Slice 3).
+
+    `ui.click.pixel` is admissible only in a component that also reaches
+    `ui.click`. A program that can reach pixels but not semantic targets has
+    no fallback ladder, it has a pixel driver, and the ordering a ladder
+    claims is vacuous for it. §4.2 calls this the strongest form of "never
+    inverts that order" revl can honestly check: a property of the
+    DECLARATION, not of the loop.
+
+    WHY IT RUNS HERE AND NOT AT THE DECLARATION SITE, which is the blocker
+    slices 1 and 2 recorded and could not clear. `parser._capability_list`
+    sees ONE token with no component context, and prefix-closure is a
+    per-component property over a SET of tokens. The set that matters is the
+    G8 AUDIT REACH - what a component can reach, not what its file mentions -
+    and that exists only once the IR is assembled. So the check runs over the
+    finished document, through `policy.component_reach`, which is the same
+    function `revl audit` and the `capability <glob>` policy rules read. One
+    reach definition, not a second copy: a component that declares
+    `ui.click.pixel` on an extern it never calls is not reaching a pixel, and
+    the audit already says so.
+
+    Inert for every program that declares no rung token: the pre-scan below is
+    one loop over the extern list, and the `_boundary` walk runs only when it
+    finds one.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    if not any(ui_family.rung_of(cap) is not None
+               for ext in program.externs for cap in ext.capabilities or ()):
+        return
+
+    from .boundary import _boundary  # noqa: PLC0415 - lazy, as plan/registry do
+    from .policy import component_reach  # noqa: PLC0415 - lazy, avoids a cycle
+
+    audit = {"boundary": _boundary(ir)}
+    lines = {comp.name: comp.line for comp in program.components}
+    for name in sorted(audit["boundary"]):
+        tokens = [reach.token for reach in component_reach(audit, name)]
+        refusal = ui_family.prefix_closure_refusal(name, tokens)
+        if refusal is not None:
+            message, hint = refusal
+            raise RevlError(filename, lines.get(name, 0), message, hint,
+                            code="G8", category="boundary")
+
+
 def check_and_lower(program: Program, ambient: dict | None = None,
                     taint_strict: bool = False, untrusted: bool = False) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
@@ -7678,6 +7809,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _validate_declared_types(program, program.filename)
     _check_principal_producers(program, program.filename)
     types = _lower_type_decls(program, program.filename)
+    # item 521 slice 4: the computer-use target record and the signatures
+    # that carry it. Checked here because the obligation is a program-level
+    # fact (a verb declared in one place, a record declared in another) and
+    # the record table is what it is checked against. Inert - one loop over
+    # the extern list that finds nothing - for a program declaring no UI verb.
+    _check_ui_target_binding(program, types, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     # item 130 Slice 5: the typed-event contracts. Built after the record table
@@ -8224,6 +8361,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # does not qualify, so an IR document for a program with no in-place
     # accumulation is byte-identical to before. See src/revl/ownership.py.
     ownership.annotate_ir(result)
+    # item 521 slice 3: the computer-use ladder's prefix-closure rule, checked
+    # per component over the G8 audit reach. Runs last because the reach is a
+    # property of the assembled IR and not of any one declaration, which is
+    # exactly why slices 1 and 2 could not host this check. Inert (one loop
+    # over the extern list, no boundary walk) unless a rung token is declared.
+    _check_ui_rung_prefix_closure(program, result, program.filename)
     return result
 
 
@@ -14724,27 +14867,65 @@ def _collect_emit_caps(node, caps: set) -> None:
             _collect_emit_caps(value, caps)
 
 
-# The token namespace for a boundary that has NO declared capability token: the
-# G2 wiring key names it. A declared capability token is a dotted identifier
-# (`_capability_list`/`_capability_params` in parser.py), so a token carrying a
-# `:` is UNSPELLABLE in source and a wiring key can never collide with — and so
-# never be mistaken by `covers` for — a declared boundary. Rendered back to the
-# bare key by `_cap_render`, so refusal messages and the G8 audit chain read
-# exactly as before.
-_WIRE_NS = "key:"
+# The token namespace for a boundary that NO declaration names: a service
+# method spelling `emission` with no capability list. A declared capability
+# token is a dotted identifier (`_capability_list`/`_capability_params` in
+# parser.py), so a token carrying a `:` is UNSPELLABLE in source and a derived
+# element can never collide with — and so never be mistaken by `covers` for —
+# a declared boundary. Rendered back to the bare name by `_cap_render`, so
+# refusal messages and the G8 audit chain read as a source-level name.
+_UNDECLARED_NS = "svc:"
 
 
-def _wire_cap(key: str) -> "object":
-    """The fold element for a wiring key with no declared capability token."""
+def _undeclared_cap(service: "str | None") -> "object":
+    """The attenuation-fold element for an emission whose declaration names no
+    capability token, keyed by the SERVICE the method is declared on (item 561,
+    issue #1265).
+
+    The service, and NOT the consumer's local `requires` spelling, for
+    `_cap_keyed`'s own reason one declaration weaker. Item 294 moved the
+    DECLARED case onto the boundary's token because two components wire the
+    same boundary under whatever key each likes, so comparing keys compared two
+    identifiers that name nothing in common. A method that declares no token
+    had none to move onto and stayed on the key, and the laundering stayed open
+    behind it: a parent requiring `net: Net` and a child requiring `net: Kv`
+    reach two different boundaries, spelled one key, and the fold derived no
+    widening. The declared corner of that family is
+    `tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`; the
+    undeclared one is `..._undeclared_emission_same_key.rvl` beside it.
+
+    A service name is composition-independent, so both sides of a fold agree
+    exactly when they name the same declaration — which is already what the
+    declared case means by "the same boundary": a parent requiring `store: S`
+    and a child requiring `db: S` compare equal today, because the token lives
+    on `S` and not on either key.
+
+    NOT the unnameable `*`. `covers` gives `*` one clause — top of the order,
+    covered only by `*` — so a held `*` covers a reached `*`, and resolving
+    both sides of an undeclared emission to `*` admits that widening instead of
+    refusing it. `*` is the fail-closed element for a DISJOINTNESS question
+    (`cap_order.disjoint` is False for every pair touching it, which is why an
+    intersection fold wants it); coverage is a different question and `*` does
+    not answer it the same way. `docs/design/561-undeclared-emission-boundary.md`
+    carries the measurement.
+
+    An unresolvable service (impossible on a validated IR, where a `req` target
+    is typechecked against the `requires` map) degrades to `*`, which is
+    fail-closed on BOTH sides: as a reach element nothing covers it, as a held
+    element it covers nothing but `*`."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    return cap_order.Cap(_WIRE_NS + key, ())
+    if not service:
+        return cap_order.Cap("*", ())
+    return cap_order.Cap(_UNDECLARED_NS + service, ())
 
 
 def _cap_render(cap: "object") -> str:
-    """The source-facing spelling of a fold element: a namespaced wiring key
-    renders as the bare key, everything else as its canonical `(T, P)`."""
+    """The source-facing spelling of a fold element: a derived undeclared
+    boundary renders as the bare service name, everything else as its canonical
+    `(T, P)`."""
     text = cap.to_str()
-    return text[len(_WIRE_NS):] if text.startswith(_WIRE_NS) else text
+    return (text[len(_UNDECLARED_NS):] if text.startswith(_UNDECLARED_NS)
+            else text)
 
 
 def _cap_keyed(key: str, cap_str: str) -> "object":
@@ -14760,8 +14941,8 @@ def _cap_keyed(key: str, cap_str: str) -> "object":
     `parallel._resolve_emission` reads for the very same crossings. The wiring
     key still names the boundary where the declaration does NOT (a method with
     `emission` and no `capabilities[...]` list, an unresolvable service): that
-    element is built by `_wire_cap` in its own token namespace, so a key spelling
-    can never masquerade as a declared token.
+    element is built by `_undeclared_cap` in its own token namespace, so a
+    derived spelling can never masquerade as a declared token.
 
     A malformed stored spelling (impossible on a validated IR) degrades to the
     unnameable `*`, which is fail-closed on BOTH sides: as a reach element it is
@@ -14778,20 +14959,21 @@ def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> lis
     """The `Cap`(s) a single lowered `emit` step crosses, resolved through the
     key-to-token bridge. A req-keyed emission resolves key -> requires-target
     service -> the method being called -> that method's `emission[...]`
-    valuation(s); a bare or unresolvable method declares no token, so the G2
-    wiring key names the boundary (`_wire_cap`, its own namespace); a host
-    emission is the unnameable `*`."""
+    valuation(s); a bare or unresolvable method declares no token, so the
+    SERVICE it is declared on names the boundary (`_undeclared_cap`, its own
+    namespace); a host emission is the unnameable `*`."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
     expr = node.get("expr") or {}
     target = expr.get("target") or {}
     if target.get("kind") != "req":
         return [cap_order.Cap("*", ())]
     key = target.get("name")
-    svc = services.get(requires_map.get(key)) if requires_map else None
+    svcname = requires_map.get(key) if requires_map else None
+    svc = services.get(svcname) if svcname else None
     decl = svc.methods.get(expr.get("method")) if svc is not None else None
     cap_strs = getattr(decl, "capabilities", None) if decl is not None else None
     if not cap_strs:
-        return [_wire_cap(key)]
+        return [_undeclared_cap(svcname)]
     return [_cap_keyed(key, s) for s in cap_strs]
 
 
@@ -14836,21 +15018,23 @@ def _held_capabilities_pairs(comp: dict, base_surface: set,
     it was reached through — carrying each declaration's valuation, which is what
     lets a parent that holds `fs.write(path="/tmp")` refuse a child reaching
     wider. A method that declares `emission` with no capability list names no
-    token, so the G2 wiring key names that boundary (`_wire_cap`, its own token
-    namespace). A plain or unresolvable service likewise keeps the namespaced
-    key; a child cannot reach a non-emission key, so that element only ever
-    covers another key-named boundary of the same name."""
+    token, so the SERVICE it is declared on names that boundary
+    (`_undeclared_cap`, its own token namespace) — never the local key, which
+    is a name the boundary does not have. A plain or unresolvable service
+    likewise contributes its service element; a child cannot reach a
+    non-emission service, so that element only ever covers a boundary of the
+    same service."""
     held: set = set(base_surface)
     for key, svcname in (comp.get("requires") or {}).items():
         svc = services.get(svcname)
         emission_methods = ([m for m in svc.methods.values() if m.emission]
                             if svc is not None else [])
         if not emission_methods:
-            held.add(_wire_cap(key))
+            held.add(_undeclared_cap(svcname))
             continue
         for m in emission_methods:
             if not m.capabilities:
-                held.add(_wire_cap(key))
+                held.add(_undeclared_cap(svcname))
             else:
                 for s in m.capabilities:
                     held.add(_cap_keyed(key, s))
@@ -15326,9 +15510,10 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
     the wiring key instead compared two identifiers that name nothing in common,
     and renaming a child's `requires` key was enough to launder any boundary
     past the invariant quoted above. A boundary that no declaration tokens (a
-    method with `emission` and no capability list) is still named by its G2
-    wiring key, in its own token namespace (`_wire_cap`), so a key spelling can
-    never masquerade as a declared token.
+    method with `emission` and no capability list) is named by the SERVICE it
+    is declared on, in its own token namespace (`_undeclared_cap`), so a
+    derived spelling can never masquerade as a declared token and two
+    components cannot compare equal merely because they spell a key alike.
 
     Applies to activation-body spawns (see `_activation_spawn_sites`); returns
     the per-instance attenuation chain (spawner → child narrowing) for the G8

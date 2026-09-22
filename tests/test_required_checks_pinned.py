@@ -155,6 +155,16 @@ NOT_REQUIRED_CHECKS = {
     # and promoting it is a protection change made outside this tree. It is the
     # obvious next promotion candidate once it has run on `main`.
     "frontend-assets": "item 459 gap G5 frontend build/typecheck; promotion is a branch-protection change, out of tree",
+    # Issue #1342: reads the merge RECORD, not the diff. It asks whether every
+    # pull request GitHub reports as MERGED has its merge commit reachable from
+    # `main`, which is a property of the repository rather than of the change
+    # under review. Required, a stranding caused by one merge would block every
+    # unrelated PR until somebody repaired it, and the author of the blocked PR
+    # is not the person who can. Advisory, it reds loudly on the run that
+    # follows the stranding, which is the signal nobody had. Same promotion
+    # note as the two above: a context must exist on `main` before branch
+    # protection can name it.
+    "merged-prs-landed": "issue #1342 merged-PR landing audit; a repository-wide property, advisory so one bad merge does not block every other PR",
 }
 
 

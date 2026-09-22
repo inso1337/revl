@@ -88,13 +88,32 @@ Submit in the Billing application) is auditable; a coordinate pair is not.
 
 A program that declares the family and reaches three of its verbs:
 
+Slice 4 landed the target record, so the program below is the spelling the
+language admits today: `ui.find` returns a `UiTarget` and the actuation verbs
+receive one. Section 5 and `docs/design/565-ui-target-binding.md` say why the
+bare-string version this program used to carry is no longer writable.
+
 ```revl
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
 extern emission[screen.observe] fn screen_observe(region: Str) -> Str
   = @py { return "" }
-extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> Str
-  = @py { return "" }
-extern emission[ui.click] fn ui_click(target: Str) -> Int = @py { return 0 }
-extern emission[ui.download] fn ui_download(target: Str) -> Str
+extern emission[ui.find] fn ui_find(seen: Str, name: Str) -> UiTarget
+  = @py { return None }
+extern emission[ui.click] fn ui_click(target: UiTarget) -> Int
+  = @py { return 0 }
+extern emission[ui.download] fn ui_download(target: UiTarget) -> Str
   = @py { return "" }
 
 service Worker { emission fn approve(region: Str) -> Int }
@@ -201,13 +220,60 @@ capability tokens rather than new machinery:
    "never inverts that order" revl can honestly check: a property of the
    DECLARATION, not of the loop.
 
-**Slice 1 admits rung 0 only.** `emission[ui.click.pixel]` is refused today,
-by name, because the check that bounds it does not exist yet, and admitting
-the spelling ahead of the check is the same fail-open mistake one level up.
+**Slice 1 admitted rung 0 only.** `emission[ui.click.pixel]` was refused by
+name, because the check that bounds it did not exist yet, and admitting the
+spelling ahead of the check is the same fail-open mistake one level up.
+
+**Slice 3 landed that check**, so a rung token is admissible on an actuation
+verb and the declaration site now BOUNDS the ladder rather than closing it.
+Three shapes are still refused there: an invented rung (the rung set is
+closed, for the reason the verb set is), a rung on a verb that does not act on
+a target, and a fourth level, which would be a depth with no failure direction
+written down for it.
 
 ```revl reject G8
-extern emission[ui.click.pixel] fn click(target: Str) = @py { pass }
+extern emission[ui.click.zoom] fn click(target: Str) = @py { pass }
 ```
+
+The prefix-closure rule itself is not a property of a token, so it is not
+checked there. It is checked per component over the G8 audit reach, which is
+the set `revl audit` and every `capability <glob>` rule already read:
+
+```revl reject G8
+type UiTarget = {
+  application: Str
+  window: Str
+  role: Str
+  name: Str
+  evidence: Str
+  action: Str
+  session: Str
+  bounds: Str
+  expiry: Int
+  confirm: Bool
+}
+
+extern emission[ui.click.pixel] fn click_px(t: UiTarget) -> Int
+  = @py { return 0 }
+extern emission[ui.find] fn find(s: Str, n: Str) -> UiTarget
+  = @py { return None }
+extern emission[screen.observe] fn obs(r: Str) -> Str = @py { return "" }
+
+service Worker { emission fn approve(region: Str) -> Int }
+
+component Billing provides worker: Worker {
+  provide worker {
+    fn approve(region) {
+      let seen = emit obs(region)
+      let t = emit find(seen, "Approve")
+      return emit click_px(t)
+    }
+  }
+}
+```
+
+`Billing` reaches a pixel and no semantic target, so it has no ladder: it has
+a pixel driver, and the ordering claim is vacuous for it.
 
 ### 4.3 What this does not claim
 
@@ -301,6 +367,13 @@ application identity, an accessibility-tree identity where one exists, a
 screenshot/DOM/AX evidence hash, the allowed action type, the user/session/
 task identity, a region or coordinate bound, an expiry, and whether a
 confirmation is required.
+
+Slice 4 turned that sentence into a checked record, `UiTarget`, whose field
+set is registry-owned and whose absence is a G8 refusal.
+`docs/design/565-ui-target-binding.md` is its note: which half of
+`Untrusted[UiTarget]` each slice owns, why the field check is a floor rather
+than a ceiling, and why a bare-string target is the thing that makes item
+522's postcondition verdict positional.
 
 ## 6. What `revl audit` reports, measured
 
@@ -410,6 +483,26 @@ No `selfhost/*.rvl` file is touched by slice 1, and
 `tools/build_gate_crate.py --check` reports in-sync, so no crate is
 regenerated.
 
+**Corrected in slice 4, by measurement.** The paragraph above places the
+obligation at "a later slice" and slice 3's entry in section 10 repeats it.
+Both are wrong about the date, and the error is the one this section warns
+about. Slice 1 ALREADY decides admission on a UI token: it raises three G8
+refusals over one. Run through the harness `tests/test_selfhost_lower.py`
+uses, `admit_src` returns `""` on all three, and `""` is NO OBJECTION, which
+is agreement by silence. It is not a false admission (the native gate has no
+`admitted` arm, so the fail-closed claim above holds), but it is a gap nothing
+reports: a G8 refusal classifies OUT-OF-SLICE in the differential corpus, so
+every oracle stays green over a check the self-host does not run. The
+obligation had been outstanding since slice 1. It is pinned by
+`test_the_selfhost_gate_does_not_decide_a_ui_program` and **discharged in
+slice 3 by a named decline**: a third frontier-table axis in
+`tools/build_gate_crate.py`, derived from `ui_family.ROOTS`, so the native
+gate answers `OutsideFrontier` with a reason on any source carrying a reserved
+capability namespace. That is the marker this section asks for. It is not a
+port: `selfhost/lower.rvl` still runs none of these checks, and the test above
+keeps measuring that. `docs/design/565-ui-target-binding.md` §8 has the table,
+the mechanism and the conservatism of the lexical guard.
+
 ## 10. Slice plan
 
 Each slice is closable on its own and carries the oracle that makes it a
@@ -454,35 +547,106 @@ and `capability ui.*.pixel requires approval` selects it. This is the slice
 that replaces the "not admissible yet" refusal of slice 1, and the refusal
 message is the thing that points an author at it.
 
-Re-examined when slice 2 landed, and still deferred. The two reasons are
-recorded so the next reader does not re-derive them. First, slice 1's hook is
-`parser._capability_list`, which sees ONE token with no component context,
-while prefix-closure is a per-component property over a SET of tokens: it
-needs a refusal site in the reach/boundary layer that does not exist yet, and
-nothing in the taint slice supplies one. Second, §9's obligation fires here
-and did not fire for slices 1 or 2, because this is the first slice that
-DECIDES ADMISSION on a UI token: `selfhost/lower.rvl` must then port the check
-or decline the program by a named marker, which carries a crate regeneration.
-Slice 2 needed neither, and `tools/build_gate_crate.py --check` reports
-in-sync on it.
+**LANDED**, with both of the blockers slice 2 recorded cleared. They are
+kept here rather than deleted, because how they were cleared is the argument.
 
-What slice 2 did leave for this slice: `ui_family.taint_roles` resolves by
-longest registered PREFIX rather than by exact match, so `ui.click.pixel`
-inherits `ui.click`'s sink role the moment the spelling becomes admissible. A
-rung is a strictly weaker way to name the same target, and an exact-match
-table would have given a rung no taint role at all - the fail-open direction,
-reached by adding a spelling in a different file.
+FIRST BLOCKER: "slice 1's hook is `parser._capability_list`, which sees ONE
+token with no component context, while prefix-closure is a per-component
+property over a SET of tokens". Cleared by checking over the ASSEMBLED IR at
+the end of `lower._check_and_lower`, through `policy.component_reach` - the
+same reach this document's §6 prints and every `capability <glob>` rule
+selects over. Not a second reach definition, and the difference is
+load-bearing: a component that DECLARES `ui.click` on an extern it never calls
+is not reaching a semantic target, so it does not close a pixel it does reach.
+The declaration site keeps the checks that ARE properties of a token: an
+invented rung, a rung on a verb that does not act on a target, and a fourth
+level.
 
-**Slice 4: the target type.** `UiTarget` as a record carrying the binding of
-section 5, and `ui.find` returning `Untrusted[UiTarget]` rather than a bare
-string. Oracle: the evidence fields are present in the IR and in the recorded
-action, and a target with no expiry is refused. Depends on slice 2.
+SECOND BLOCKER: §9's porting obligation. Cleared by the NAMED DECLINE §9 asks
+for rather than by a port - a third frontier-table axis in
+`tools/build_gate_crate.py` derived from `ui_family.ROOTS`, so the native gate
+answers `OutsideFrontier` with a reason instead of no objection. Both builders
+were regenerated and `tests/test_gate_crate_admit.py` drives it from the
+consumer side. §9 above records that this obligation was outstanding from
+slice 1, not from here.
 
-**Slice 5: the receipt.** One recorded action carrying application, window,
-target role, target name, target evidence hash, action, capability, session,
-comparable to item 517's model decision. Oracle: the receipt for a refused
-step is as complete as the receipt for a successful one, which is item 525's
-"refusals as legibly as successes" applied to one step.
+What slice 2 left for this slice and what it bought: `ui_family.taint_roles`
+resolves by longest registered PREFIX rather than by exact match, so
+`ui.click.pixel` arrived carrying `ui.click`'s sink role the moment the
+spelling became admissible. A rung is a strictly weaker way to name the same
+target, and an exact-match table would have given a rung no role at all. The
+same argument was then applied to the two tables that ARE exact-match by
+nature: item 522's reversibility class and slice 4's target obligation both
+resolve the verb first, so a rung cannot be the spelling that escapes a
+compensation obligation or takes a bare string target again.
+
+Oracle: `tests/test_ui_ladder_rungs_521.py`, 26 tests, plus one added
+frontier probe per reserved root in `tests/test_gate_crate_admit.py`.
+Non-vacuity: on `4cfc8f32` every rung token was refused at the declaration
+site, so none of this file's four ladders could be written - the two admitted
+ones do not compile there and the two refused ones carry slice 1's blanket
+"not admissible yet" rather than a prefix-closure verdict.
+
+Failure direction: this ADMITS spellings that were refused, which is the one
+direction in this item that widens rather than narrows. It is safe because
+what it admits is bounded by a check that did not exist before: a rung is
+admissible only where the component also reaches the rung above it, and the
+three declaration-site refusals that remain are the ones a reach cannot
+express.
+
+**Slice 4: the target type. LANDED.** `UiTarget` as a record carrying the
+binding of section 5, with the field set registry-owned in
+`ui_family.TARGET_FIELDS`; `ui.find` returns it and `ui.click`, `ui.text` and
+`ui.download` each take one, checked in `lower._check_ui_target_binding`.
+Three refusals, all `code="G8"`, `category="boundary"`: a target-carrying verb
+with no record, a record missing or mis-typing a registry field, and a
+signature that does not carry the target. Oracle:
+`tests/test_ui_target_binding_521.py`, 44 tests. Non-vacuity measured on
+`4cfc8f32` with `ui_family.py` present (it is data) and the `lower.py` pass
+absent (it is the check): 21 fail, 23 pass. Here: 44 pass.
+`docs/design/565-ui-target-binding.md` is the note.
+
+Two things it deliberately does NOT do. It does not ask the author to write
+`Untrusted[...]`: that half is slice 2's derivation and stays profile-gated on
+`taint_strict`, while the `UiTarget` half is unconditional, and §4 of the note
+has the separation. And it does not check a field's VALUE - an expiry in the
+past is admitted - because a value check has no home in a compiler that never
+sees a screen.
+
+Failure direction: this WIDENS what is refused. The family's own canonical
+program, as section 2 of this note spelled it before slice 4, no longer
+compiles; section 2 now carries the post-slice-4 spelling. The fixtures in
+`tests/test_ui_capability_namespace_521.py` and
+`tests/test_ui_taint_classes_521.py` were moved to it in the same change, and
+their verdicts are unmoved, because a taint role is read off the declared
+capability token and never off an argument type.
+
+**Slice 5: the receipt. LANDED.** `src/revl/ui_action.py`: one recorded
+action carrying the crossing key (item 517's `component`/`step_index` pair,
+reused rather than re-invented), the declared capability token, the outcome,
+and the WHOLE target binding rather than the eight members this entry
+originally listed. The eight are all there; carrying only them would
+recreate, at audit time, the "which field got dropped" question slice 4
+removed at compile time.
+
+Oracle: `tests/test_ui_action_receipt_521.py`, 25 tests, with
+`test_the_receipt_for_a_refused_step_is_as_complete_as_for_a_performed_one`
+as the named one, generalised over all four arms by
+`test_every_arm_is_as_complete_as_every_other`. `OUTCOMES` is
+`performed | refused | unresolved | failed`, and `unresolved` is the arm that
+matters most: §4.2 refuses the descent inside one call, so an `unresolved`
+receipt is the POSITIVE evidence that a click which could not bind its target
+did not become a `ui.click.pixel`.
+
+Not signed, and the absence is pinned rather than left to be noticed. Item
+517 carries a MAC because the producer and the consumer are both inside revl's
+world; a UI step is performed by the substrate, which §7 and item 539 put
+outside this repository, so revl holds no key for it. What the module bounds
+is COMPLETENESS, which is a property of the record rather than of the
+recorder. `docs/design/565-ui-target-binding.md` §12 has the argument, and
+§12.5 the list of what nothing here verifies - starting with the fact that no
+revl surface emits a receipt yet, which is where `revl.model_evidence` also
+started.
 
 **Not in this item:** the transaction phases, the five-way reversibility
 classification and `uncompensated` are item 522's; the end-to-end
@@ -503,10 +667,13 @@ demonstration is item 525's; the substrate is upstream.
 Written down so a reader does not infer more than was measured.
 
 - The ladder's rung tokens (section 4.2) are a design, not code. Nothing in
-  the tree admits or checks them today; slice 1 refuses them.
-- The taint classes of section 5 are a proposal. `screen` and `ui` are not in
-  `_SOURCE_CLASS_SCOPES` or `_SINK_CLASS_SCOPES` today, so nothing yet refuses
-  an observed string flowing into a click.
+  the tree admits or checks them today; slice 1 refuses them. Still true.
+- The taint classes of section 5 were a proposal when this was written and
+  are not one now: slice 2 put `screen` in `_SOURCE_CLASS_SCOPES` and `ui` in
+  `_SINK_CLASS_SCOPES`, and an observed value flowing into a click is a G9
+  refusal under `taint_strict`. The bullet is corrected rather than deleted,
+  because what it says about the pre-slice-2 tree is the measurement slice 2's
+  non-vacuity is stated against.
 - The audit output in section 6 was produced by running `revl audit` on the
   program in section 2 and is reproduced from that run. It enumerates DECLARED
   tokens. It does not and cannot verify that a host body reaches only the

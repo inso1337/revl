@@ -342,11 +342,17 @@ def test_the_key_namespaced_residual_is_still_admitted():
     """PINNED, not assumed away (`kernel_boundary._undeclared`).
 
     A service method that declares `emission` with no capability list yields a
-    `key:`-namespaced fold element: a declared WIRING with an undeclared REACH.
-    Refusing it is the stronger answer and this slice does not, because on this
-    tree it is the ordinary spelling. This test fails if that ever changes
-    silently, which is the only thing standing between a stated residual and a
-    forgotten one."""
+    reserved-namespace fold element: a declared WIRING with an undeclared
+    REACH. Refusing it is the stronger answer and this slice does not, because
+    on this tree it is the ordinary spelling. This test fails if that ever
+    changes silently, which is the only thing standing between a stated
+    residual and a forgotten one.
+
+    Item 561 moved that element off the consumer's wiring key and onto the
+    SERVICE the method is declared on (`lower._undeclared_cap`), which is what
+    it is named BY and not whether it is undeclared. The element below is built
+    by the reference rather than spelled as a literal, so this pin tracks the
+    real one instead of a namespace that has moved out from under it."""
     src = _TASK + """
 service Bare { emission fn cross(row: Str) -> Int }
 
@@ -361,7 +367,8 @@ component Candidate requires b: Bare provides task: Task {
 """
     profile = AdmissionProfile.untrusted_author({"Bare", "Task"})
     compile_source(src, "candidate.rvl", profile=profile)
-    element = cap_order.Cap("key:b", ())
+    element = lower._undeclared_cap("Bare")
+    assert element.token == lower._UNDECLARED_NS + "Bare"
     assert not kb._undeclared(element)
     assert not kb.offending({element}, undeclared_reaches_kernel=True)
 

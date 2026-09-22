@@ -516,6 +516,28 @@ def _calls(node) -> list[tuple[str, bool]]:
     return found
 
 
+def _is_raised(token: str, approval_tokens) -> bool:
+    """Whether the operator's authority raises `token` to `confirm-required`.
+
+    A LADDER RUNG is raised by a rule naming its VERB. `ui.click.pixel` is a
+    strictly weaker way to name the same target as `ui.click` (item 521 slice
+    3), so an operator who raises `ui.click` and gets a plan reporting the
+    pixel rung `unconfirmed` has had the raise escaped by a spelling in a
+    different file. That is the fail-open direction, and it is the same
+    argument `ui_family.taint_roles` and `ui_family.reversibility` already
+    make by resolving a rung to its verb; this was the one table in the
+    computer-use surface still comparing by exact string.
+
+    The raise is MONOTONE, so resolving upward only ever raises: nothing here
+    can lower a token the operator named.
+    """
+    tokens = approval_tokens or frozenset()
+    if token in tokens:
+        return True
+    verb = ui_family.verb_of(token)
+    return verb is not None and verb != token and verb in tokens
+
+
 def method_plan(method: dict, externs: dict, approval_tokens) -> dict | None:
     """The transaction plan for one provide method, or `None` when the method
     crosses no computer-use verb.
@@ -546,7 +568,7 @@ def method_plan(method: dict, externs: dict, approval_tokens) -> dict | None:
     steps = []
     for i, step in enumerate(raw):
         token = step["token"]
-        raised = token in (approval_tokens or frozenset())
+        raised = _is_raised(token, approval_tokens)
         followed = any(j > i for j in reversible_at)
         steps.append({
             "extern": step["extern"],
