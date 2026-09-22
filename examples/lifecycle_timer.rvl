@@ -14,7 +14,7 @@
 
 service Counter {
   fn count() -> Int
-  emission fn tick()
+  emission[counter] fn tick()
 }
 
 component TickCounter provides counter: Counter {

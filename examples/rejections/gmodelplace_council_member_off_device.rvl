@@ -1,0 +1,58 @@
+// REJECTED — G-MODEL-PLACE: an action that routes the `confidential` origin to
+// a model COUNCIL one of whose members is placed off the device does not
+// compile, and the diagnostic names THE MEMBER. Roadmap item 516 slice 2's
+// exit test verbatim (`docs/design/543-model-council.md` sections 6 and 14).
+//
+// This file is `examples/model_council_binding.rvl` with one word changed: its
+// proposer runs on `vast` instead of `edge`. The two files together are what
+// makes this rule non-vacuous: the control admits and this one does not, and
+// the only difference between them is one member's placement.
+//
+// WHY THE MEMBER AND NOT THE COUNCIL. A council's members are placed
+// SEPARATELY, which is the construct: each names its own `model role` and
+// carries that role's residence, so item 514's ceiling applies per member. The
+// council's own residence is the MOST permissive of its members', because a
+// council is asked one question with one input and giving that input to the
+// council gives it to every member. "The council is off_device" is therefore a
+// derived fact, and the actionable one is which member derived it: an author
+// told only that `Release` may not read a confidential input has to re-read
+// every placement to find out why.
+//
+// The fix is not "route `confidential` through `*` instead". `*` is DEFINED
+// not to cover a confidentiality origin (`docs/design/531-model-placement.md`
+// section 2.1), so dropping the arm does not place the value somewhere else.
+// It leaves it unplaced, which is a refusal on the value side rather than an
+// admission.
+//
+// This file is also the self-host's reproducer for the binding. The gate built
+// from `selfhost/lower.rvl` decides a `route model` arm that names a council
+// in its model-placement section and spells the sentence below byte for byte,
+// which is why the fixture belongs in the census corpus rather than staying an
+// inline test program.
+//
+// expected error:
+//   routes the `confidential` origin to model council `Release`, whose member
+//   `proposer` runs on model role `vast`
+
+model role edge   on_device
+model role local2 on_device
+model role vast   off_device
+
+service Answer {
+  fn classify(text: Str) -> Str
+}
+
+model council Release {
+  proposer  -> vast,
+  adversary -> edge,
+  aggregate unanimous quorum declared on_tie split
+}
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> Release
+  }
+  provide out {
+    fn classify(text) = text
+  }
+}

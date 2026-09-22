@@ -226,7 +226,7 @@ class TaintFlowRule:
 
 # --------------------------------------------- item 251: approval distillation
 #
-# The five taint-fold origins an `AutoApproveRule` may `admit` - exactly the set
+# The taint-fold origins an `AutoApproveRule` may `admit` - exactly the set
 # the item-249 taint fold enforces (`taint._SOURCE_CLASS_SCOPES`, the set
 # `test_taint_fold_visits_every_in_scope_kind` asserts). `secret` is NOT one of
 # them: `taint._ORIGIN_CLASSES` lists it, but it is enforced by the separate
@@ -234,9 +234,19 @@ class TaintFlowRule:
 # origin, so it can never appear in a `taintOrigins` set and is never
 # `admit`-able by any rule (design §2.1, §3.2). Kept here rather than imported
 # from `taint` to avoid pulling the type-checker into the policy parser; the
-# 414 taint row pins the two to the same five.
+# 414 taint row pins the two to the same set.
+#
+# `screen` joined in item 521 Slice 2, and it had to: `approval.static_taint`
+# INTERSECTS a component's recorded taint with this set, so an origin missing
+# here is an origin silently dropped from the taint an auto-approve decision is
+# made against. A screen-tainted crossing would have compared as clean and
+# auto-approved without an operator ever writing `admitting screen-taint`. The
+# widening is therefore fail-CLOSED in every direction it reaches: a screen-
+# tainted crossing now prompts unless a rule names it, an unknown admission
+# taint now floors to a larger set, and `negative_guarantee` on every existing
+# rule now truthfully includes `screen`.
 TAINT_FOLD_ORIGINS: frozenset[str] = frozenset(
-    {"web", "net", "fs", "model", "input"})
+    {"web", "net", "fs", "model", "input", "screen"})
 
 
 @dataclass(frozen=True)
@@ -260,22 +270,22 @@ class AutoApproveRule:
 
     `caps` are canonical `cap_order` spellings (parsed and re-rendered through
     `Cap`, so two spellings of one cone compare equal). `admitting` ranges over
-    the five taint-fold origins only; `admitting secret-taint` is REFUSED at
+    the taint-fold origins only; `admitting secret-taint` is REFUSED at
     parse - `secret` is structurally never admit-able. Every origin not named is
     excluded (the negative guarantee, design §3.2). `ttl_ms`/`uses` bound the
     rule's lifetime exactly as a 344 grant's do."""
     component: str                          # glob over component names
     caps: tuple[str, ...]                   # canonical capability spellings
     realm: str | None = None                # the item-33 `in realm <name>` scope
-    admitting: frozenset[str] = frozenset()  # admitted taint origins (of the five)
+    admitting: frozenset[str] = frozenset()  # admitted taint-fold origins
     ttl_ms: int | None = None
     uses: int | None = None
 
     def negative_guarantee(self) -> frozenset[str]:
         """The taint origins this rule can NEVER admit - the complement of
-        `admitting` over the five taint-fold origins (design §3.2). `secret` is
+        `admitting` over the taint-fold origins (design §3.2). `secret` is
         not in this set: it is refused by G-SECRET at the crossing, an absolute
-        the render sources separately, not one of five symmetric origins."""
+        the render sources separately, not one of the symmetric origins."""
         return TAINT_FOLD_ORIGINS - self.admitting
 
     def to_dsl(self) -> str:
@@ -325,7 +335,7 @@ def _canon_cap_spelling(text: str, source, lineno) -> str:
 def _parse_admitting(origins: tuple[str, ...], source, lineno) -> frozenset[str]:
     """Parse an `admitting <origin>-taint, ...` list to a validated origin set.
 
-    Each entry is `<origin>-taint`; `<origin>` must be one of the five taint-fold
+    Each entry is `<origin>-taint`; `<origin>` must be one of the taint-fold
     origins. `admitting secret-taint` is REFUSED: `secret` is enforced by G-SECRET
     at the crossing and is structurally never admit-able (design §2.1, §3.2)."""
     out: set[str] = set()
@@ -341,7 +351,7 @@ def _parse_admitting(origins: tuple[str, ...], source, lineno) -> frozenset[str]
                 "`admitting secret-taint` is refused - a bound-secret crossing is "
                 "refused by G-SECRET (item 256) at the crossing regardless of any "
                 "rule, so no auto-approve rule can ever admit `secret`; it is not "
-                "one of the five admit-able taint-fold origins")
+                "one of the admit-able taint-fold origins")
         if origin not in TAINT_FOLD_ORIGINS:
             allowed = ", ".join(f"{o}-taint" for o in sorted(TAINT_FOLD_ORIGINS))
             raise PolicyError(

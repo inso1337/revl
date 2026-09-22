@@ -14,7 +14,7 @@
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
 }
 
 component LeakyDatabase provides leaky: Database {

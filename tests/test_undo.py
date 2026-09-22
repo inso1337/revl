@@ -45,7 +45,7 @@ from revl.mcp.session import Session  # noqa: E402
 # authority surface to enumerate. Db provides an `emission` service PgCache
 # emits through; the crossing token is `emit:PgCache:db.execute`.
 BASE = """
-service Database { emission fn execute(sql: Str) -> Int }
+service Database { emission[db] fn execute(sql: Str) -> Int }
 component Db provides db: Database { provide db { fn execute(sql) = 0 } }
 service Cache { emission[db] fn put(key: Str, value: Str) -> Int }
 component PgCache requires db: Database provides cache: Cache {

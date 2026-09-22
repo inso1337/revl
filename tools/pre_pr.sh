@@ -52,6 +52,14 @@ echo "== runtime seams =="
 python3 tools/check_runtime_seams.py --self-test || fail=1
 python3 tools/check_runtime_seams.py || fail=1
 
+# issue #1285: a closed vocabulary (a set or mapping over a fixed set of names)
+# declared in a second module rather than imported. Three of these were found
+# by accident in one day, one of them a taint-origin set an auto-approve
+# decision intersects against. Stdlib-only, seconds.
+echo "== vocabulary mirrors =="
+python3 tools/check_vocabulary_mirrors.py --self-test || fail=1
+python3 tools/check_vocabulary_mirrors.py --check || fail=1
+
 echo "== roadmap markers =="
 # --head-branch is the cheap half of the PR-context check: a marker saying work
 # is IN FLIGHT on the branch you are about to open the PR from goes stale the

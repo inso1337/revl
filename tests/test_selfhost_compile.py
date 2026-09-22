@@ -477,6 +477,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     "py": (
         # service dispatch and interpolation inside a component method
         "services_match.rvl",
+        # issue #721: provide-method control flow (`if`/`while`/`for`/`break`/
+        # `continue`). The EMITTER half is byte-exact — selfhost/emit_py.rvl
+        # carries `method_control` — so this is a `selfhost/lower.rvl` gap: the
+        # native IR producer does not lower a method-body control-flow step.
+        "services_control_flow.rvl",
         "services_interp.rvl",
         # witnessed effects / secret marking on the activation path
         "witnessed.rvl",
@@ -518,6 +523,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "property_edges.rvl",
         "component_edges.rvl",
         "cas_runtime.rvl",
+        # issue #721: provide-method control flow, the same lower.rvl gap the
+        # py list records — selfhost/emit_ts.rvl reproduces the reference bytes
+        # from the reference IR, and the fully-native chain does not.
+        "../emit_py_corpus/services_control_flow.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
