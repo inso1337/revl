@@ -69,6 +69,7 @@ from __future__ import annotations
 import dataclasses
 import math
 
+from . import model_answer as _model_answer
 from .errors import RevlError
 
 # reserved keys carried inside the `types` table (type names never start
@@ -144,6 +145,29 @@ def format_type(head: str | None, args: list[str]) -> str | None:
     if not args:
         return head
     return f"{head}[{', '.join(args)}]"
+
+
+def _scrutinee_spec(types: dict, scrutinee_t: str | None) -> dict | None:
+    """The declared-type spec a `match` reads its arm payloads off.
+
+    The table is keyed by the type's whole spelling, which answers for every
+    non-generic scrutinee and for nothing else. Item 516 slice 3's provided
+    `Aggregate[T]` / `Answer[T]` are only ever written APPLIED, so a plain
+    lookup would leave every arm over one binding an unknown-typed value - and
+    an unknown type unifies with whatever the arm has to produce, which is how
+    `Split(d) => d` would compile in a function returning `T`. That is the
+    total projection `Aggregate[T] -> T` design note 543 section 3 says does
+    not exist, so the provided types are resolved here.
+
+    Scoped to those two on purpose. A user ADT keeps the existing behaviour:
+    widening the lookup for every generic changes what the compiler admits for
+    programs that have nothing to do with model councils, and that belongs to
+    whoever owns the general rule.
+    """
+    spec = types.get(scrutinee_t or "")
+    if spec is not None:
+        return spec
+    return _model_answer.applied_spec(scrutinee_t)
 
 
 def parse_type(name: str | None) -> tuple[str | None, list[str]]:
@@ -2337,7 +2361,7 @@ def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str
     if isinstance(expr, ExprMatch):
         result = None
         scrutinee_t = infer_ast(expr.scrutinee, tenv, types, filename)
-        spec = types.get(scrutinee_t or "")
+        spec = _scrutinee_spec(types, scrutinee_t)
         # Index the variant's case table once (name -> payload) instead of
         # rescanning `spec["cases"]` for every arm — O(arms + cases), not
         # O(arms x cases). A duplicate case name keeps the last payload, exactly
@@ -2764,7 +2788,7 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
         # passes. Per-arm check-position closes that hole while staying silent
         # where an arm's type is genuinely unknown.
         scrutinee_t = infer_ast(expr.scrutinee, tenv, types, filename)
-        spec = types.get(scrutinee_t or "")
+        spec = _scrutinee_spec(types, scrutinee_t)
         # Index the variant's case table once (name -> payload) instead of
         # rescanning `spec["cases"]` for every arm — O(arms + cases), not
         # O(arms x cases); last-write-wins on a duplicate name, as before.
