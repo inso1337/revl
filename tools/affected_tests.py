@@ -61,7 +61,8 @@ BACKEND_TIERS = ("python", "go", "rust", "wasm", "java", "typescript")
 # is still covered by the folded goldens in tests/test_goldens.py + the frontend
 # ts-referencing tests, which is exactly what the FULL gate does for ts too.
 BACKEND_STEP_TIERS = ("python", "go", "rust", "wasm", "java")
-GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs")
+GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs",
+             "vocabulary")
 
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
@@ -77,6 +78,10 @@ DOCUMENTED_CORE = (
 # gate. Kept honest by tests/test_affected_tests.py, which recomputes the set
 # from the tree and fails if this tuple has drifted.
 BENCH_DEPENDENT_TESTS = (
+    # Censuses the whole tree's `.rvl` files to cost issue #1265's
+    # refuse-bare-`emission` arm, and most of that census is recorded model
+    # output under `bench/results/`, so a bench change must re-run it.
+    "tests/test_1265_undeclared_emission_boundary.py",
     # The guard below is itself bench-dependent: it validates this very
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",
@@ -201,6 +206,146 @@ REFERENCE_EMITTER_ORACLE = {
 # tests/test_selfhost_differential_survey.py.
 REFERENCE_EMITTER_ALWAYS = ("tests/test_selfhost_differential_survey.py",)
 
+# Files `tools/evolution_progress.py` reads a counter out of WITHOUT importing
+# them, so no import graph reaches them (issue #1224). Each one is a repository
+# artifact whose shape the progress counters depend on.
+PROGRESS_COUNTER_SOURCES = {
+    "tests/test_selfhost_compile.py",   # the LOWER_GAP_DOCS residual table
+    "tools/selfhost_coverage.py",       # reference_constructs / TIERS
+    "tools/gate_reference_census.py",   # CORPUS_DIRS / _SKIP_DIRS
+}
+
+# The held-out scorer's fence (roadmap item 537). Every file it names is read
+# by `tests/test_heldout_scoring.py`, which asserts that every repo path those
+# files name is classified fence, subject or unreached. That test is what turns
+# a new dependency into a red, so it has to be SELECTED when one of them moves.
+#
+# DERIVED from the tool, by AST rather than by import: a copy here is exactly
+# the drift the selection exists to catch. Issue #1307 landed because
+# `tools/gate_reference_census.py` began naming `tools/corpus_provenance.py`
+# and the tests selected for that file did not include the one that holds the
+# classification, so main went red on a path nobody ran.
+_FENCE_CACHE: dict[Path, frozenset] = {}
+
+
+def held_out_fence(root: Path) -> frozenset[str]:
+    """`HELD_OUT_FENCE` as written in `tools/heldout_scoring.py`.
+
+    An empty result is returned rather than raised: the caller treats it as "no
+    fence file changed", and the tool's own suite holds the parse. A scorer
+    file that is renamed away is a rename the generic rules still cover.
+
+    Cached per root, same shape and same reason as `_READ_CACHE` below: this
+    runs once per changed file, and `select()` is called a few hundred times in
+    a single run of `tests/test_affected_tests.py`.
+    """
+    if root in _FENCE_CACHE:
+        return _FENCE_CACHE[root]
+    _FENCE_CACHE[root] = _held_out_fence(root)
+    return _FENCE_CACHE[root]
+
+
+def _held_out_fence(root: Path) -> frozenset[str]:
+    source = root / "tools" / "heldout_scoring.py"
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return frozenset()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "HELD_OUT_FENCE" not in names:
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            return frozenset()
+        return frozenset(
+            e.value for e in node.value.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    return frozenset()
+
+
+# The directories `tools/gate_reference_census.py` walks for `.rvl` documents
+# (roadmap item 542, issue #1331). Every document under one of them is a case in
+# a scoring corpus, so it needs a line in `tests/fixtures/corpus_provenance.json`
+# and reds `tests/test_corpus_provenance.py` without one. Nothing in the import
+# graph reaches from a `.rvl` to that test, so the manifest is selected only by
+# a rule that names it.
+#
+# A NEW document reached the manifest from every corpus directory but one, and
+# always through the FULL fail-safe (`tests/fixtures/**` and `examples/**` by
+# name, `stdlib/`, `selfhost/`, `demo/`, `tck/` and `dogfood/` as unmapped or
+# unreferenced paths). `backends/**` is the one: it has its own narrow rule, so
+# `backends/go/scenarios/<new>.rvl` selected 243 nodes, none of them the
+# manifest, and an undeclared document there reached main green. A REMOVED
+# document, which leaves a stale entry the same gate refuses, was narrower
+# still: `stdlib/json.rvl` selected 16. Measured on this tree before this rule.
+#
+# What this does not close, stated so the next reader does not overtrust it:
+# issue #1331's own document is not this shape. `tests/fixtures/**` was already
+# FULL, and PR #1271's head carried no `tests/test_corpus_provenance.py` at all
+# because the manifest landed on main four hours after that branch last took
+# main. No selection can run a gate the branch does not have; only a
+# merge-queue-style re-run on the merged tree can.
+#
+# DERIVED from the census by AST rather than restated, for the same reason
+# `held_out_fence` is: the census owns which directories it walks, and a copy
+# here would be free to go stale against it.
+_CORPUS_DIRS_CACHE: dict[Path, tuple] = {}
+
+
+def census_corpus_dirs(root: Path) -> tuple[str, ...]:
+    """`CORPUS_DIRS` as written in `tools/gate_reference_census.py`.
+
+    An EMPTY result means "could not read it", and the caller reads that as
+    "every `.rvl` is a corpus document". That is the opposite default from
+    `held_out_fence`'s, deliberately: a fence file that cannot be read is still
+    covered by the generic rules, while an unreadable corpus list would make a
+    scoring document select nothing at all, which is the fail-open direction
+    this rule exists to close. Over-selecting costs one 0.3s test module.
+    """
+    if root in _CORPUS_DIRS_CACHE:
+        return _CORPUS_DIRS_CACHE[root]
+    _CORPUS_DIRS_CACHE[root] = _census_corpus_dirs(root)
+    return _CORPUS_DIRS_CACHE[root]
+
+
+def _census_corpus_dirs(root: Path) -> tuple[str, ...]:
+    source = root / "tools" / "gate_reference_census.py"
+    try:
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+    except (OSError, SyntaxError):
+        return ()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Assign):
+            continue
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "CORPUS_DIRS" not in names:
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
+            return ()
+        return tuple(
+            e.value for e in node.value.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str))
+    return ()
+
+
+def _is_scoring_corpus_document(f: str, root: Path) -> bool:
+    """True when this path is an `.rvl` the census walks.
+
+    `EXTRA_DIRS` (`bench/`, `site/`, `docs/`, ...) is NOT read: the census walks
+    it only under `--everything`, and `corpus_provenance.enumerate_corpora`
+    calls `load_corpus` without it, so a document there is in no scoring corpus
+    and needs no manifest line.
+    """
+    if not f.endswith(".rvl"):
+        return False
+    dirs = census_corpus_dirs(root)
+    if not dirs:
+        return True
+    return any(f == d or f.startswith(d + "/") for d in dirs)
+
+
 # Shared test scaffolding whose change can affect the whole suite -> FULL.
 _SHARED_TEST_FILES = {
     "tests/conftest.py",
@@ -240,6 +385,251 @@ def _node(p: Path) -> str:
     return f"tests/{p.name}"
 
 
+# --------------------------------------------------------------------------- #
+# Companion files: the repository files a test names outside tests/.           #
+# --------------------------------------------------------------------------- #
+# Issue #1342. Every text heuristic in this file reads `tests/**` and nothing
+# else, so a test whose SUBSTANCE lives in another file is invisible to all of
+# them. `tests/test_flagship_demo_525.py` is a thin wrapper that shells out to
+# `demo/legacy_enterprise/run_demo.py`; the demo is what runs `revl audit`,
+# `revl compile` and the computer-use verb set, and the wrapper names none of
+# it. A narrow change to `src/revl/audit.py` therefore selected 133 tests and
+# NOT the one test that runs `revl audit` end to end, which is how `main` came
+# to ship a demo that exits 1 with every gate green.
+#
+# That is the same shape as BENCH_DEPENDENT_TESTS, PROGRESS_COUNTER_SOURCES,
+# the census/provenance pair, `held_out_fence` and the corpus provenance
+# manifest: five hand-written tables of "this test reads that file", each added
+# after the gap it closes had already reached `main`. The rule below is the
+# derivable part of that relation, taken from the tests' own source rather than
+# restated here.
+#
+# It does NOT replace those tables, and the difference is measured: of the 18
+# modules BENCH_DEPENDENT_TESTS declares, exactly three SPELL a `bench/` path.
+# The rest reach it through a computed root, a directory walk, or a declaration
+# made only in prose, and no AST can see those. The tables stay; what this adds
+# is that a dependency somebody wrote down plainly no longer has to be noticed
+# by a human first. `tests/test_affected_tests.py` pins that split so a table
+# is not deleted in the belief that this covers it.
+#
+# It is used in BOTH directions:
+#
+#   forward   a companion's text joins the test's own for the leaf-module word
+#             heuristic, so a wrapper inherits the vocabulary of what it runs;
+#             NOT for the tier or stdlib heuristics, which match common words
+#             and are already covered by name -- see each one for its measured
+#             reason;
+#   reverse   a change to a named file selects every test that names it, which
+#             is what the five tables above each do for one path set.
+#
+# Paths are taken from the test's AST, not from a regex over its prose: a
+# `"a/b.py"` literal, and the trailing constant run of a `ROOT / "a" / "b.py"`
+# chain, which is how these files spell a repo path. A candidate counts only if
+# it exists in the tree and carries a separator; a bare `"src"` or `"demo"` is
+# too coarse to mean anything and is dropped. Comments and docstrings are NOT
+# a source of paths here: mentioning a file in prose is not reading it.
+
+# Which companions contribute TEXT to the forward heuristic: code and data a
+# test executes or reads as input, plus the documents it compiles examples out
+# of. Over-selecting here is the safe direction and it is cheap -- including
+# `.md` costs six extra nodes on the widest selection measured.
+_COMPANION_SUFFIXES = frozenset({
+    ".py", ".rvl", ".sh", ".md", ".json", ".toml", ".yml", ".yaml",
+    ".ts", ".mjs", ".go", ".rs", ".java", ".wat", ".ir",
+})
+# One companion file is read whole. The largest thing a test names today is
+# well under this; the cap is here so a future generated artifact cannot make
+# the selector quadratic in tree size.
+_COMPANION_MAX_BYTES = 512 * 1024
+
+
+def _path_suffix_segments(node: ast.AST) -> list[str]:
+    """The trailing run of string constants in a `x / "a" / "b"` chain.
+
+    `ROOT / "demo" / "legacy_enterprise" / "run_demo.py"` yields the three
+    segments; the `ROOT` name at the head is unresolvable and is where the walk
+    stops. A plain `"a/b"` constant yields itself.
+    """
+    out: list[str] = []
+    while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+        right = node.right
+        if not (isinstance(right, ast.Constant) and isinstance(right.value, str)):
+            return list(reversed(out))
+        out.append(right.value)
+        node = node.left
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        out.append(node.value)
+    return list(reversed(out))
+
+
+# A directory a test names is only evidence of a dependency when the test WALKS
+# it. Twenty test modules name `src/revl`, almost all of them to put it on
+# `sys.path` or to hand it to a subprocess; treating that as "reads every file
+# under it" made a one-module `src/revl/**` change select 213 tests instead of
+# 92. Eight of the twenty really do enumerate the directory, and those are the
+# ones a new file under it can break. Matched on the call rather than on the
+# path, because the path says nothing about what is done with it.
+_WALKS_A_DIRECTORY = re.compile(
+    r"\b(?:r?glob|iterdir|scandir|listdir|walk)\s*\(")
+
+
+def _named_paths(root: Path, source: str) -> frozenset[str]:
+    """Repo-relative paths a python source names and that exist in the tree.
+
+    A FILE counts on its own. A DIRECTORY counts only if `source` also walks
+    one: see `_WALKS_A_DIRECTORY`.
+    """
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        return frozenset()
+    # Docstrings are prose, and this file's own comment says so: naming a file
+    # in a paragraph is not reading it. They are the statement-level string
+    # expressions, so they are dropped before the walk rather than filtered
+    # after it.
+    docstrings = {
+        id(n.value) for n in ast.walk(tree)
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Constant)
+        and isinstance(n.value.value, str)
+    }
+    candidates: set[str] = set()
+    for node in ast.walk(tree):
+        if id(node) in docstrings:
+            continue
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            segs = _path_suffix_segments(node)
+            # Every suffix of the chain, because the head may be a `parents[1]`
+            # expression OR an already-nested directory constant.
+            for i in range(len(segs)):
+                candidates.add("/".join(segs[i:]))
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str):
+            if "/" in node.value:
+                candidates.add(node.value)
+    out: set[str] = set()
+    for cand in candidates:
+        rel = cand.strip("/")
+        # A separator is what makes a candidate specific enough to be evidence.
+        # `tests/**` is excluded because the sibling-import rule already owns
+        # test-to-test edges, and a URL is not a repo path.
+        if "/" not in rel or rel.startswith(("http:", "https:", "tests/")):
+            continue
+        parts = rel.split("/")
+        if ".." in parts:
+            continue
+        # Reject what cannot be a path BEFORE asking the filesystem. A prose
+        # string with a slash in it reaches here as one candidate, and handing
+        # a 1.6 KB paragraph to `stat()` raises ENAMETOOLONG on Linux -- which
+        # `Path.exists()` propagates on python 3.12 and swallows on 3.13+,
+        # where it was rewritten to catch OSError broadly. That difference is
+        # why this passed on a 3.14 developer machine and took out 44 tests in
+        # CI on 3.12: every caller of `select()` raised. Checked by name here
+        # rather than by catching the error, so the rule holds on every
+        # version, and the `except OSError` below is only the second line.
+        if any(not part or len(part.encode("utf-8")) > 255 for part in parts):
+            continue
+        if any(ch in rel for ch in "\n\r\x00"):
+            continue
+        try:
+            target = root / rel
+            if target.is_file():
+                out.add(rel)
+            elif target.is_dir() and _WALKS_A_DIRECTORY.search(source):
+                out.add(rel)
+        except OSError:
+            # A candidate the filesystem will not answer for is not evidence of
+            # a dependency. It must never be an exception either: `select()` is
+            # what decides whether a test runs, and a selector that raises on a
+            # string somebody wrote in a docstring stops every gate that calls
+            # it.
+            continue
+    return frozenset(out)
+
+
+_COMPANION_CACHE: dict[Path, dict[str, frozenset[str]]] = {}
+
+
+def companion_paths(root: Path) -> dict[str, frozenset[str]]:
+    """test node -> the repo paths outside `tests/` that it names.
+
+    Cached per root, same shape and reason as `_READ_CACHE`: `select()` is
+    called a few hundred times in one run of `tests/test_affected_tests.py`.
+    """
+    cached = _COMPANION_CACHE.get(root)
+    if cached is None:
+        cached = {}
+        for p in _test_files(root):
+            named = _named_paths(root, _read(p))
+            if named:
+                cached[_node(p)] = named
+        _COMPANION_CACHE[root] = cached
+    return cached
+
+
+# The one test the reverse rule must not add. `tests/test_selfhost_lower.py` is
+# the >120s descent test issue #431 excluded from the `selfhost/lower.rvl`
+# selection ON PURPOSE: the FULL fallback aborted on it under the pre-commit
+# hook's --timeout, which is what made a whole class of edits unlandable. It
+# names `selfhost/lower.rvl`, so the derived rule would put it straight back.
+# The exclusion is a COST decision that predates this rule, and the coverage it
+# gives up is the coverage #431 already decided to give up; a general rule is
+# not a reason to reopen it silently. `tests/test_selfhost_lower_ir.py` holds
+# that file's IR narrowly and is selected instead.
+#
+# `tests/test_affected_tests.py` is excluded for a different reason: its path
+# literals are FIXTURES, not inputs. It spells `src/revl/parser.py`,
+# `docs/arithmetic.md`, `backends/go/emit.py` and thirty more to ask the
+# selector what it does with them, and it reads none of those files. Taking
+# that as a dependency put a 70-second module into every documentation-only
+# selection, which is the one selection the fast path exists to keep cheap. It
+# is already selected by name whenever `tools/affected_tests.py` changes, and
+# by BENCH_DEPENDENT_TESTS whenever `bench/` does, which is when its answers
+# can actually move.
+REVERSE_RULE_EXCLUDED = (
+    "tests/test_selfhost_lower.py",
+    "tests/test_affected_tests.py",
+)
+
+
+def tests_naming(root: Path, changed: str) -> set[str]:
+    """Tests that name `changed`, or a directory containing it."""
+    parts = changed.split("/")
+    prefixes = {"/".join(parts[:i]) for i in range(2, len(parts) + 1)}
+    return {
+        node for node, named in companion_paths(root).items()
+        if named & prefixes and node not in REVERSE_RULE_EXCLUDED
+    }
+
+
+_COMPANION_TEXT_CACHE: dict[tuple[Path, str], str] = {}
+
+
+def _companion_text(root: Path, p: Path) -> str:
+    """A test's own source, plus the source of every repo file it names.
+
+    This is what the leaf-module word heuristic reads, so a test that delegates
+    to a script or a fixture program is matched on that file's vocabulary as
+    well as its own. The tier and stdlib heuristics deliberately do not use it.
+    """
+    node = _node(p)
+    key = (root, node)
+    if key in _COMPANION_TEXT_CACHE:
+        return _COMPANION_TEXT_CACHE[key]
+    parts: list[str] = [_read(p)]
+    for rel in sorted(companion_paths(root).get(node, ())):
+        q = root / rel
+        if not q.is_file() or q.suffix not in _COMPANION_SUFFIXES:
+            continue
+        try:
+            if q.stat().st_size > _COMPANION_MAX_BYTES:
+                continue
+        except OSError:
+            continue
+        parts.append(_read(q))
+    text = "\n".join(parts) if len(parts) > 1 else parts[0]
+    _COMPANION_TEXT_CACHE[key] = text
+    return text
+
+
 def _tier_tests(root: Path, tier: str) -> set[str]:
     """Frontend tests that reference a backend tier, by filename or content.
 
@@ -252,7 +642,17 @@ def _tier_tests(root: Path, tier: str) -> set[str]:
     path = re.compile(rf"backends/{re.escape(tier)}\b")
     out: set[str] = set()
     for p in _test_files(root):
-        if word.search(p.name) or word.search(_read(p)) or path.search(_read(p)):
+        # The test's OWN text, deliberately not `_companion_text`. A tier name
+        # is a common word: nearly every script and `.rvl` a test names spells
+        # `go` or `rust` somewhere, so inheriting companions here selected 322
+        # of 623 tests for a `backends/go/emit.py` change against 243 before,
+        # and 201 against 112 for wasm -- a third of the suite bought by a
+        # match that is not evidence the test exercises the tier. The holes
+        # this rule would have covered are already covered by name:
+        # REFERENCE_EMITTER_ORACLE and REFERENCE_EMITTER_ALWAYS select the
+        # oracles that reach `backends/<tier>/emit.py` without spelling it.
+        text = _read(p)
+        if word.search(p.name) or word.search(text) or path.search(text):
             out.add(_node(p))
     return out
 
@@ -286,6 +686,13 @@ def _stdlib_tests(root: Path, mod: str) -> set[str]:
     path_re = re.compile(rf"stdlib/{re.escape(mod)}\b")
     out: set[str] = set()
     for p in _test_files(root):
+        # The test's OWN text, deliberately not `_companion_text`: this match is
+        # on bare stdlib symbol names, which collide freely with words in any
+        # `.rvl` a test names, and the sound edge from a self-host file to a
+        # stdlib module is the `use` graph the caller already walks. Measured:
+        # feeding companions in here made a `stdlib/render.rvl` edit select
+        # `tests/test_selfhost_emit_go.py`, whose companion `selfhost/emit_go.rvl`
+        # merely spells a render symbol and does not `use` the module.
         text = _read(p)
         if p.name == f"test_{mod}.py" or p.name.startswith(f"test_{mod}_"):
             out.add(_node(p))
@@ -302,9 +709,16 @@ def _word_tests(root: Path, token: str) -> set[str]:
     `import revl.<mod>` call-sites and CLI-subcommand / feature-name references.
     """
     word = re.compile(rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])")
+    # A dunder is a Python IDIOM, not a name a test uses to refer to the
+    # module: every script in the tree carries `if __name__ == "__main__":`.
+    # Matching it across companions made `src/revl/__main__.py` select 191 of
+    # 623 tests, which is a match on the language rather than on the change, so
+    # a dunder is read out of the test's own text only.
+    idiom = token.startswith("__") and token.endswith("__")
     out: set[str] = set()
     for p in _test_files(root):
-        if word.search(p.name) or word.search(_read(p)):
+        text = _read(p) if idiom else _companion_text(root, p)
+        if word.search(p.name) or word.search(text):
             out.add(_node(p))
     return out
 
@@ -504,10 +918,68 @@ def select(changed, root) -> dict:
 
     pytest_nodes: set[str] = set()
     backends: set[str] = set()
-    gates: set[str] = {"ruff"}  # lint is cheap; always run it
+    # `ruff` because lint is cheap. `vocabulary`
+    # (`tools/check_vocabulary_mirrors.py`) because it has NO path set to
+    # select on: it walks every `.py` under `src/revl` and `tools`, and a
+    # mirror is a relation BETWEEN two files, so the file that creates one is
+    # routinely neither of the two the ledger will name. Issue #1332 is the
+    # measurement: four new mirror classes reached `main` and reddened the
+    # required `lint` check, and none of the four introducing commits selected
+    # this gate -- including the one that selected the FULL gate, because
+    # `tools/pre_merge.sh` did not run the tool in any mode. The honest
+    # selector for a whole-tree read is "always", and the cost of always is
+    # 1.2s: 1.19s for `--check` over 1585 sites and 0.03s for `--self-test`,
+    # measured on this tree against a 15-110s affected run.
+    gates: set[str] = {"ruff", "vocabulary"}
     reasons: list[str] = []
 
     for f in changed:
+        # --- the self-evolution progress counters (issue #1224) ------------ #
+        # `tools/evolution_progress.py` reads its counters out of artifacts
+        # other files own, by AST and by JSON key, and NOT by importing them.
+        # So no import graph reaches the dependency: renaming `LOWER_GAP_DOCS`,
+        # or changing `reference_constructs`, reds
+        # tests/test_evolution_progress.py from a file that never mentions it.
+        # First in the loop because every file named here also has its own rule
+        # further down that ends in `continue`. The census baseline and the
+        # reach ledger need no entry: a non-python `tools/` change and any
+        # `tests/fixtures/**` change are already FULL.
+        if f in PROGRESS_COUNTER_SOURCES:
+            pytest_nodes.add("tests/test_evolution_progress.py")
+            reasons.append(f"{f} (self-evolution progress counter input)")
+
+        # --- the held-out scoring fence (issue #1307) ---------------------- #
+        # Here for the same reason as the block above: every file named by the
+        # fence also has its own rule further down that ends in `continue`.
+        if f in held_out_fence(root):
+            pytest_nodes.add("tests/test_heldout_scoring.py")
+            reasons.append(f"{f} (held-out scoring fence)")
+
+        # --- the corpus provenance manifest (issue #1331) ------------------ #
+        # Here for the same reason as the two blocks above: `backends/**` and
+        # `stdlib/**` are census corpus directories AND have their own rules
+        # further down that end in `continue`. A document that arrives in a
+        # scoring corpus must name its generation, and the manifest is the only
+        # thing that reads it. Added and deleted are the same rule: a removed
+        # document leaves a STALE entry, which the same gate refuses in the
+        # other direction.
+        if _is_scoring_corpus_document(f, root):
+            pytest_nodes.add("tests/test_corpus_provenance.py")
+            reasons.append(f"{f} (scoring corpus document -> provenance)")
+
+        # --- a test NAMES this file (issue #1342) -------------------------- #
+        # The general form of the three blocks above and of
+        # BENCH_DEPENDENT_TESTS: a test that reads or runs a repository file is
+        # affected when that file moves, whether or not anyone has written the
+        # pair down. Derived from
+        # the tests' own source by `companion_paths`, and here rather than in a
+        # rule of its own because every path it can name also has a rule further
+        # down that ends in `continue`.
+        named_by = tests_naming(root, f)
+        if named_by:
+            pytest_nodes |= named_by
+            reasons.append(f"{f} (named by {len(named_by)} test(s))")
+
         # --- structural: always FULL --------------------------------------- #
         if f == "Makefile":
             return _full("Makefile changed -> full")
@@ -671,6 +1143,53 @@ def select(changed, root) -> dict:
             }
             reasons.append(f"{f} (guarantee x tier matrix + roadmap gate)")
             continue
+        if f in ("tools/gate_reference_census.py", "tools/corpus_provenance.py"):
+            # The two are coupled in both directions (roadmap item 542): the
+            # census prints the provenance table, and `corpus_provenance.py`
+            # enumerates its scoring corpus with the census's own
+            # `load_corpus`, so its case ids are the census's. The generic
+            # tools/ rule below matches only `test_<stem>.py`, which would run
+            # one side of that coupling and not the other -- and the coupling
+            # is where a drift would land, not in either file alone.
+            pytest_nodes.add("tests/test_gate_reference_census.py")
+            pytest_nodes.add("tests/test_corpus_provenance.py")
+            # item 560: the published artifact reads BOTH of these, and its
+            # tests hold the committed report against what they now say. A
+            # change here that moves the allowance or the NEVER_BASELINED
+            # mechanism has to red the artifact's suite, or the published
+            # table goes stale silently, which is the whole defect it exists
+            # to prevent.
+            pytest_nodes.add("tests/test_census_artifact.py")
+            detail = "census/provenance coupling"
+            # issue #1215: the `gate_census` row of
+            # `tools/oracle_construct_reach.py` imports the census for its
+            # corpus walk and its fast engine, so a change to the census moves
+            # what that row measures and what its ledger records.
+            # This selection used to live in a SECOND arm matching the same file
+            # further down, which the `continue` above it made unreachable, so it
+            # had never once run (issue #1315). It is folded in here rather than
+            # ordered ahead of this arm on purpose: a separate earlier arm would
+            # take the census file out of this one, and every node added to the
+            # coupling from then on -- this arm is edited often -- would silently
+            # apply to `corpus_provenance.py` alone. That is the same defect with
+            # a smaller blast radius, not a fix. Provenance is deliberately not
+            # in here: the oracle reads the census, not the provenance table.
+            if f == "tools/gate_reference_census.py":
+                pytest_nodes.add("tests/test_oracle_construct_reach.py")
+                detail += " + construct-reach oracle"
+                # issue #1328: the self-evolution reward loads this module and
+                # redirects its `ROOT`, and `tools/evolution_reward.py` carries
+                # a copy of the census's `NEVER_BASELINED` and its baseline
+                # path that `test_the_scorer_mirrors_the_census_never_baselined
+                # _set` holds to equality. A census change that moved either ran
+                # neither, so `--record` against a prepared tree started raising
+                # on a sibling tool and main went red on a file no gate had
+                # selected. Third coupling on the same file; the two above are
+                # not the whole of what reads it.
+                pytest_nodes.add("tests/test_evolution_reward.py")
+                detail += " + self-evolution reward"
+            reasons.append(f"{f} ({detail})")
+            continue
         if f == "tools/check_site_wheel.py":
             gates.add("site-wheel")
             reasons.append("tools/check_site_wheel.py")
@@ -690,16 +1209,6 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_check_vision_claims.py")
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
-            continue
-        # issue #1215: the `gate_census` row of tools/oracle_construct_reach.py
-        # imports this file for its corpus walk and its fast engine, so a change
-        # to either moves what that row measures and what its ledger records.
-        # The generic `tools/*.py` rule below matches on the file STEM and would
-        # select tests/test_gate_reference_census.py alone.
-        if f == "tools/gate_reference_census.py":
-            pytest_nodes.add("tests/test_gate_reference_census.py")
-            pytest_nodes.add("tests/test_oracle_construct_reach.py")
-            reasons.append("tools/gate_reference_census.py")
             continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
@@ -795,6 +1304,23 @@ def select(changed, root) -> dict:
             # the REAL document against the REAL tree, so a doc edit that moves
             # a cited path has to re-run it.
             pytest_nodes.add("tests/test_check_vision_claims.py")
+            # issue #1300: and the self-host residual, for the same reason. The
+            # residual figure lived in prose in three documents and disagreed
+            # with `LOWER_GAP_DOCS` in all three; it is generated now, and the
+            # module below byte-compares the generated blocks and reads every
+            # remaining prose figure. `docgen --check` does that too, in the
+            # `frontend` job, which a documentation-only diff SKIPS -- so
+            # without this line the gate would miss precisely the pull request
+            # that moves one of these documents.
+            pytest_nodes.add("tests/test_selfhost_residual_is_generated.py")
+            # issue #1358: the two modules above sample ONE generated block
+            # each. This one runs what the CI step runs, every block in
+            # `docgen.BLOCKS` and every check in `docgen.CHECKS`, so a block
+            # added to the generator is covered on a docs-only diff with no
+            # list to remember to edit. It is here for the same reason they
+            # are: `docgen --check` has no home outside the `frontend` job,
+            # and a docs-only diff skips that job.
+            pytest_nodes.add("tests/test_docgen_check_runs_on_a_docs_only_diff.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 

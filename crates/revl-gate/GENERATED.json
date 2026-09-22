@@ -30,7 +30,7 @@
     "Str",
     "Unit"
   ],
-  "admission_surface": "admission-interface:170573edd5a0f2f2",
+  "admission_surface": "admission-interface:ad4998172f9893c1",
   "admitted_layer": "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides",
   "covered_layer": "composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer",
   "crate": "revl-gate",
@@ -48,11 +48,12 @@
     "backends/rust/emit.py",
     "src/revl/lexer.py",
     "src/revl/typecheck.py",
+    "src/revl/ui_family.py",
     "tools/build_gate_crate.py"
   ],
   "emit_api_version": "0.1.0",
   "emit_arm": "revl_gate::emit_ir(ir_document, Tier::Rust) -> Result<String, Verdict>. A staged interchange IR document as JSON TEXT in, rust source out, with no Python and no reference compiler. Byte-agrees with backends/rust/emit.py over that backend's own self-host oracle corpus (tests/fixtures/emit_rust_corpus, 34 documents, no exclusions). It is not an admission and never reads `admitted:true`. `Tier::Py` fails closed: selfhost/emit_py.rvl's helper externs are @py-only. The FRONTEND is deliberately not in this path \u2014 `compile_to`, which would need one, still fails closed, because the self-host's lower_to_ir is behind the reference's (roadmap item 391).",
-  "frontier": "selfhost-admit:170573edd5a0f2f2",
+  "frontier": "selfhost-admit:ad4998172f9893c1",
   "frontier_excluded_builtins": [],
   "frontier_excluded_keywords": [],
   "gate_api_version": "1.0.0",
@@ -102,7 +103,7 @@
     "stdlib/json.rvl"
   ],
   "selfhost_root": "selfhost/lower.rvl",
-  "source_digest": "170573edd5a0f2f2f55c49b471fbf9f3579fd629264b313290f9c2fa010bcb7a",
+  "source_digest": "ad4998172f9893c184635c111a0020b19b474072b6d1948b80bf9383ace2e883",
   "symbols_api_version": "0.1.0",
   "verdict_arms": [
     "refused",

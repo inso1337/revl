@@ -622,15 +622,24 @@ class Timeline:
         The sink checks `is_open` at WRITE time rather than at build time: the
         seam fires after `make_call` returns, and a WAL closed in between is
         treated as absent (the decision stays trace-only) instead of raising
-        `ReplayError` out of a completion that already succeeded."""
+        `ReplayError` out of a completion that already succeeded.
+
+        Item 517 Slice 2 adds the two evidence members, both defaulted to None
+        so the Slice-3a call site and every hand-built sink in the suite keep
+        working unchanged. They reach `record_model_decision`, which omits an
+        absent one entirely: a run that seals nothing writes the Slice-3a
+        record byte for byte."""
         wal, component, index = self._wal, self.component, step.index
         if wal is None:
             return None
 
-        def sink(llm: dict, outcome: str) -> None:
+        def sink(llm: dict, outcome: str, evidence: Optional[dict] = None,
+                 evidence_refused: Optional[dict] = None) -> None:
             if wal.is_open:
                 wal.record_model_decision(component=component, step_index=index,
-                                          llm=llm, outcome=outcome)
+                                          llm=llm, outcome=outcome,
+                                          evidence=evidence,
+                                          evidence_refused=evidence_refused)
         return sink
 
     def record_yield(self, value: Any, effect_label: Optional[str]) -> tuple:
@@ -2789,7 +2798,9 @@ class WriteAheadLog:
         return record
 
     def record_model_decision(self, *, component: str, step_index: int,
-                              llm: dict, outcome: str) -> dict:
+                              llm: dict, outcome: str,
+                              evidence: Optional[dict] = None,
+                              evidence_refused: Optional[dict] = None) -> dict:
         """Append ``model-decision``, the durable record of ONE model completion
         (item 250 Slice 3a, docs/design/250-session-branching.md).
 
@@ -2817,10 +2828,30 @@ class WriteAheadLog:
         is the item 121 §4 CRITICAL), `producedSeq` (a trace seq), and the
         request-side parameters revl cannot see through the host body
         (temperature, seed, tool calls). Consumes no seq: it names a fact about
-        an existing step, it is not an effect."""
+        an existing step, it is not an effect.
+
+        Item 517 Slice 2 does not change any of that. The prompt and response
+        TEXT are still never written and `promptDigest` is still absent; what
+        the optional `evidence` member adds is the PROVIDER's own sealed
+        account of the crossing, in which the prompt appears as a
+        `prompt_binding` mode that is suppressed whenever the input's declared
+        origins say it must be - the evidence-layer restatement of the same
+        item 121 section 4 gate, not a way around it. `evidence_refused`
+        carries the link and reason when sealing was engaged and refused, so
+        the artifact states the gap instead of looking like a run that never
+        engaged."""
         record = {"record": RECORD_MODEL_DECISION, "component": component,
                   "stepIndex": step_index, "outcome": outcome,
                   "llm": dict(llm)}
+        # Item 517 Slice 2, absent by default on BOTH counts. A run that never
+        # engaged an evidence sealer writes the Slice-3a record byte for byte,
+        # so no WAL golden moves and "not sealed" stays distinguishable from
+        # "sealed and the seal refused" - which is the whole reason the refusal
+        # is a member of the record rather than only an exception.
+        if evidence is not None:
+            record["evidence"] = dict(evidence)
+        if evidence_refused is not None:
+            record["evidenceRefused"] = dict(evidence_refused)
         self._write(record)
         return record
 

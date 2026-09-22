@@ -31,7 +31,7 @@ service Admission {
   // validator. `granted` IS a sink (`Trusted[List[Str]]`): the granted list is
   // authority selection, and no gate downstream of it can un-grant what injected
   // text chose, so untrusted data must never reach it.
-  emission fn admit(source: Str, granted: Trusted[List[Str]]) -> Str
+  emission[host_admit] fn admit(source: Str, granted: Trusted[List[Str]]) -> Str
 }
 
 // The single classified host body behind the crossing (revl.mcp.admit_bridge).

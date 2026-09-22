@@ -1,0 +1,56 @@
+// Binding a model council to an action (roadmap item 516 slice 2,
+// `docs/design/543-model-council.md` sections 6 and 14).
+//
+// Slice 1 declared a council and bound it to nothing. This file is the other
+// half: a `route model` arm names the COUNCIL where it would otherwise name a
+// single `model role`, so the council is what the action's model calls are
+// placed on and the council's residence is what item 514's ceiling reads.
+//
+// The council here is the ADMITTING control, and it admits for a reason that
+// has to be stated rather than assumed: every member is placed on a role
+// declared `on_device`, so the join of the members' residences is `on_device`
+// and a `confidential` input given to the council is given to nothing that
+// leaves the device. Its refusing twin is
+// `examples/rejections/gmodelplace_council_member_off_device.rvl`, which is
+// this file with the proposer moved to a cloud role. One word, and the
+// program stops compiling.
+//
+// WHY THE JOIN GOES THAT WAY. A council is asked ONE question with ONE input,
+// so giving an input to a council gives it to every member. The council's
+// residence is therefore the MOST permissive of its members' and not the
+// least. Computing it the other way round, as "the council is on_device because
+// it has an on-device adversary" is the fail-open reading, and it is the one
+// that would let a council whose members are all cloud-placed read, to a
+// reviewer, like a confinement structure.
+//
+// The members are still placed SEPARATELY, which is the whole construct: each
+// names its own `model role` and each carries that role's residence. The
+// refusing twin names the member whose residence made the join, not the
+// council, because "the council is off_device" is a derived fact and the
+// actionable one is which member derived it.
+//
+// The council still contributes NOTHING to the IR: this file emits byte for
+// byte what it would emit with the council and the route deleted.
+
+model role edge   on_device
+model role local2 on_device
+model role vast   off_device
+
+service Answer {
+  fn classify(text: Str) -> Str
+}
+
+model council Release {
+  proposer  -> local2,
+  adversary -> edge,
+  aggregate unanimous quorum declared on_tie split
+}
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> Release
+  }
+  provide out {
+    fn classify(text) = text
+  }
+}

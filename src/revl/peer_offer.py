@@ -88,9 +88,21 @@ from .tee_quote import AttestationRoot
 OFFER_KIND = "revl.peer-offer"
 OFFER_VERSION = "1.0"
 
-# One signature algorithm today; the member exists and is VALIDATED so an
-# asymmetric upgrade is an additive change, exactly as `attest.SIGN_ALG`.
+# The member exists and is VALIDATED so an asymmetric upgrade is an additive
+# change, exactly as `attest.SIGN_ALG`. Issue #1278 is that upgrade: a second
+# spelling, never a second meaning. `sign_alg` SELECTS the verifier and a record
+# is checked under the one it names and no other, so a record whose asymmetric
+# signature fails is refused rather than retried under the shared key. That is
+# the fail-closed direction, and the absence of a fallback is the whole point:
+# a downgrade an attacker can trigger is not a migration path.
 SIGN_ALG = "hmac-sha256"
+
+#: The asymmetric spelling, owned by `peer_identity` so the two cannot drift.
+SIGN_ALG_ECDSA = "ecdsa-p256-sha256"
+
+#: Every algorithm a peer-offer envelope may name. A record naming anything else
+#: is refused; nothing is defaulted.
+SIGN_ALGS: tuple[str, ...] = (SIGN_ALG, SIGN_ALG_ECDSA)
 
 #: The domain-separation prefix folded into every peer-offer MAC. It carries the
 #: envelope version, so a v1 offer cannot be replayed as a future v2 one, and it
@@ -280,11 +292,13 @@ def _validate_envelope(record: Mapping) -> str:
     fixed-meaning member is checked here (mirrors ``attest._validate_envelope``).
     """
     for member, expected in (("kind", OFFER_KIND),
-                             ("version", OFFER_VERSION),
-                             ("sign_alg", SIGN_ALG)):
+                             ("version", OFFER_VERSION)):
         if record.get(member) != expected:
             return (f"envelope refused: {member} is {record.get(member)!r}, "
                     f"expected {expected!r}")
+    if record.get("sign_alg") not in SIGN_ALGS:
+        return (f"envelope refused: sign_alg is {record.get('sign_alg')!r}, "
+                f"expected one of {', '.join(SIGN_ALGS)}")
 
     peer_id = record.get("peer_id")
     if not isinstance(peer_id, str) or not peer_id:
@@ -364,6 +378,44 @@ def verify_offer(record: Mapping, key: bytes) -> tuple[bool, str]:
     if envelope:
         return False, envelope
     return True, "valid: peer offer is authentic and well formed"
+
+
+def sign_offer_identity(offer: PeerOffer, identity) -> dict:
+    """Sign a peer offer with the peer's own ASYMMETRIC identity (issue #1278).
+
+    Same body, same domain, a different signer. The record that comes back is
+    verifiable by any holder of the peer's public key, where the
+    :func:`sign_offer` record is verifiable only by a holder of the peer's
+    secret, which in a shared-key deployment is also everyone who could have
+    forged it.
+
+    ``identity`` is a :class:`revl.peer_identity.PeerIdentity`. The import is
+    local so ``peer_offer`` keeps no import-time dependency on the identity
+    module, which depends on ``tee_quote``."""
+    from .peer_identity import sign_record  # noqa: PLC0415
+
+    body = offer.body()
+    body["sign_alg"] = SIGN_ALG_ECDSA
+    return sign_record(SIGN_DOMAIN, body, identity)
+
+
+def verify_offer_identity(record: Mapping, public_key: bytes) -> tuple[bool, str]:
+    """Check an asymmetrically signed peer offer against a PINNED public key.
+
+    ``(ok, reason)``; never raises, exactly as :func:`verify_offer` does not.
+    Order is the same too: prove authenticity first, then validate the envelope,
+    so nothing is read off a record whose author is not established."""
+    from .peer_identity import verify_record  # noqa: PLC0415
+
+    if not isinstance(record, Mapping):
+        return False, "peer offer is not an object"
+    ok, reason = verify_record(SIGN_DOMAIN, record, public_key)
+    if not ok:
+        return False, reason
+    envelope = _validate_envelope(record)
+    if envelope:
+        return False, envelope
+    return True, "valid: peer offer is authentic under the pinned public key"
 
 
 @dataclass(frozen=True)

@@ -2981,16 +2981,36 @@ def _build_java(ir: dict, tmp: Path) -> str:
 def _build_rust(ir: dict, tmp: Path) -> str:
     """Regenerate the runner's components.rs (proxies/stub/plugin table) from the
     running IR, then cargo build. Regenerating per composition is what makes the
-    rust runner general; for user_cache it reproduces the committed module."""
+    rust runner general; for user_cache it reproduces the committed module.
+
+    The module is put back once cargo has read it (issue #1288). It is a
+    COMMITTED golden — tools/regen_goldens.py's rust target owns it, and owns it
+    as the same bytes as backends/rust/golden/user_cache.rs — so leaving another
+    composition's emission in the checkout is a modified golden, not scratch.
+    `revl run --backend rust` already restored it around this call
+    (src/revl/run_rust.py); the placement path reached the same write through
+    `ensure_backend` and never did, and a `swap ... --to rust` reaches it again
+    mid-run. An examples/outcome.rvl emission left here this way was swept into
+    an unrelated commit and surfaced days later as a one-file drift on someone
+    else's PR. Restoring at the one site that writes covers every caller."""
     ir_json = tmp / "rust_ir.json"
     ir_json.write_text(json.dumps(ir), encoding="utf-8")
     emitted = subprocess.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
                              capture_output=True, text=True)
     if emitted.returncode:
         raise RuntimeError(f"rust emit failed:\n{emitted.stderr.strip()}")
-    (_RUST_RUNNER / "src" / "components.rs").write_text(emitted.stdout, encoding="utf-8")
-    build = subprocess.run(["cargo", "build", "--manifest-path", str(_RUST_RUNNER / "Cargo.toml")],
-                           capture_output=True, text=True)
+    components = _RUST_RUNNER / "src" / "components.rs"
+    committed = components.read_bytes() if components.exists() else None
+    try:
+        components.write_text(emitted.stdout, encoding="utf-8")
+        build = subprocess.run(["cargo", "build", "--manifest-path",
+                                str(_RUST_RUNNER / "Cargo.toml")],
+                               capture_output=True, text=True)
+    finally:
+        # cargo has compiled the module by now, so the built binary keeps this
+        # composition while the checkout keeps its golden.
+        if committed is not None:
+            components.write_bytes(committed)
     if build.returncode:
         raise RuntimeError(f"cargo build (rust runner) failed:\n{build.stderr.strip()}")
     return str(_RUST_RUNNER / "target" / "debug" / "revl_placement_runner")
