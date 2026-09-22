@@ -57,23 +57,16 @@ import docgen  # noqa: E402
 # generated block and in prose beside it. The fix is
 # `python3 tools/docgen.py --write` for the blocks and prose edits for the
 # figures, in that issue's branch, not here.
-KNOWN_STALE_BLOCKS = {
-    "docs/selfhost-compile.md: block 'selfhost-residual' is stale "
-    "(source: LOWER_GAP_DOCS + the six emitter corpora)",
-    "docs/selfhost-findings.md: block 'selfhost-residual' is stale "
-    "(source: LOWER_GAP_DOCS + the six emitter corpora)",
-    "docs/selfhost-findings.md: block 'selfhost-residual-docs' is stale "
-    "(source: LOWER_GAP_DOCS)",
-}
+KNOWN_STALE_BLOCKS: set[str] = set()
 
-KNOWN_COVERAGE_FAILURES = {
-    ("residual-claims", "docs/selfhost-compile.md", "a `py` table row opening `| 56 |`, but the py corpus is 57"),
-    ("residual-claims", "docs/selfhost-compile.md", "a `ts` table row opening `| 60 |`, but the ts corpus is 61"),
-    ("residual-claims", "docs/selfhost-compile.md", "`41 residual documents`, but the residual is 43"),
-    ("residual-claims", "docs/selfhost-findings.md", "a `py` table row opening `| 56 |`, but the py corpus is 57"),
-    ("residual-claims", "docs/selfhost-findings.md", "a `ts` table row opening `| 60 |`, but the ts corpus is 61"),
-    ("residual-claims", "docs/selfhost-findings.md", "`41 residual documents`, but the residual is 43"),
-}
+#: Emptied 2026-09-22. PR #1330 regenerated the selfhost-residual blocks and
+#: PR #1375 cleared the residual-claims coverage failures, so every entry that
+#: used to live here is fixed. The ratchet is SHRINK-ONLY in both directions:
+#: a new finding reds, and a baselined finding that no longer fires reds too,
+#: which is what happened here. That second direction is the point - a baseline
+#: that silently keeps stale entries rots into a permitted-failure list, which
+#: is the opposite of a ratchet.
+KNOWN_COVERAGE_FAILURES: set[tuple[str, str, str]] = set()
 
 _LOCATION = re.compile(r"^(?P<doc>[^\s:]+):(?P<line>\d+): says (?P<claim>.*?)\. ")
 
@@ -144,12 +137,13 @@ def test_the_baseline_is_the_whole_of_what_is_wrong_today():
     """What the gate was not saying, stated once as a number so it is readable
     without running anything. 3 stale blocks and 6 coverage failures is the 9
     findings #1358 counts, and issue #1342 owns all nine."""
-    assert len(KNOWN_STALE_BLOCKS) == 3
-    assert len(KNOWN_COVERAGE_FAILURES) == 6
-    assert {doc for _, doc, _ in KNOWN_COVERAGE_FAILURES} == {
-        "docs/selfhost-compile.md",
-        "docs/selfhost-findings.md",
-    }, "the baseline reached a document outside the #1342 residual, which is a new owner"
+    assert len(KNOWN_STALE_BLOCKS) == 0
+    assert len(KNOWN_COVERAGE_FAILURES) == 0, (
+        "the baseline is empty as of 2026-09-22: PR #1330 regenerated the "
+        "selfhost-residual blocks and PR #1375 cleared the residual-claims "
+        "failures. An entry here again means a NEW finding nobody has owned, "
+        "and it needs an owner named beside it, not a silent addition."
+    )
 
 
 def test_this_module_covers_the_whole_generator():
@@ -182,15 +176,29 @@ def test_the_coverage_baseline_is_seen_to_fire():
     assert planted not in KNOWN_COVERAGE_FAILURES
     assert planted == ("residual-claims", "docs/new-doc.md", "`7 things`, but there are 8")
 
-    moved = _identity(
-        "residual-claims",
-        "docs/selfhost-compile.md:9999: says `41 residual documents`, but the "
-        "residual is 43. the residual is generated: state it inside the block.",
-    )
-    assert moved in KNOWN_COVERAGE_FAILURES, (
+    # The line-number strip is what keeps an ordinary documentation edit from
+    # reading as a new finding. It is asserted directly rather than against a
+    # live baseline entry, because the baseline is empty and a test that needs
+    # a real failure to prove itself stops working the day the failure is fixed
+    # - which is exactly what happened here on 2026-09-22.
+    same_claim_two_lines = {
+        _identity(
+            "residual-claims",
+            f"docs/selfhost-compile.md:{line}: says `41 residual documents`, "
+            "but the residual is 43. the residual is generated: state it "
+            "inside the block.",
+        )
+        for line in (12, 9999)
+    }
+    assert len(same_claim_two_lines) == 1, (
         "the line-number strip stopped working, so every documentation edit "
-        f"now reads as a new finding: {moved}"
+        f"now reads as a new finding: {same_claim_two_lines}"
     )
+    assert same_claim_two_lines == {(
+        "residual-claims",
+        "docs/selfhost-compile.md",
+        "`41 residual documents`, but the residual is 43",
+    )}
 
     unparsed = _identity("verbs-documented", "docs/mcp-reference.md has no section for `revl.plan`")
     assert unparsed not in KNOWN_COVERAGE_FAILURES
