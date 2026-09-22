@@ -323,12 +323,14 @@ cleanly reverted". That is the same shape as the over-reported read this module
 exists to fix, in the other direction, and it is why this is a semantic change
 and not a listing change.
 
-Measured over every program in the tree that gets a plan at all, which is the
-embedded programs of the six item-521/522 suites (25 distinct compositions, 20
-with a plan): 12 plans move and 9 of the 12 change their aggregate, all 9 from
-a state that reads clean (`untouched` or `restored`) to `uncompensated`. The
-item-525 flagship demo does not move -- it has no crossing in any of the seven
-positions -- and its erase report is byte-identical.
+Measured over every program in the tree that gets a plan at all. No `.rvl`
+file in the tree declares a computer-use verb, so the population is the
+programs embedded in the six item-521/522 suites plus the compiled fences of
+`docs/design/532-typed-computer-use.md`: 115 distinct compositions compiled,
+21 with a plan. 13 plans move, and 10 of the 13 change their aggregate, all 10
+from a state that reads clean (`untouched` or `restored`) to `uncompensated`.
+The item-525 flagship demo does not move -- it has no crossing in any of the
+seven positions -- and its erase report is byte-identical.
 
 #### The one neighbouring fold, and why only this one had the hole
 
