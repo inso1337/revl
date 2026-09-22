@@ -612,13 +612,35 @@ code" was revisited by item 1190 and
 `G-COUNCIL-SPLIT` for eleven of the thirteen; nothing else in this slice
 moved.
 
-**S2. Binding a council to an action.** A `route model` arm names a council
-where it today names a role, and the council's residence (section 6) is what
-item 514's ceiling reads, so a confidential origin routed to a council with one
-`off_device` member is refused naming **that member**. This is the slice that
-makes the separate placement bite on a value. It reads
+**S2. Binding a council to an action. LANDED** (issue #1366). A `route model`
+arm names a council where it today names a role, and the council's residence
+(section 6) is what item 514's ceiling reads, so a confidential origin routed to
+a council with one `off_device` member is refused naming **that member**. This
+is the slice that makes the separate placement bite on a value. It reads
 `revl.model_council.check()`'s table and `revl.model_route.check()`'s route
 table and re-derives neither.
+
+Three things landed with it that this sketch did not say.
+
+The rule lives in `src/revl/model_route.py` and carries `G-MODEL-PLACE`, not
+`G-COUNCIL-SPLIT`: by note 557 section 3's own line a council refusal carries
+item 512's code exactly when it is about a `model role`, and this one is about
+a member's. `revl.model_council` gained no import and no caller, which is what
+keeps `test_the_council_checker_imports_none_of_item_471s_machinery` and the
+no-approval-vocabulary test meaningful.
+
+The PHASE ORDER moved. `model_council.check` runs ahead of `model_route.check`,
+because an arm may name a council and a placement is resolved before anything
+that names one. Slice 1 ran the councils after the routes, which was right
+while a council was bound to nothing; the order moved with the dependency and
+not with the construct. `selfhost/lower.rvl` swapped its two phases to match.
+
+The SELF-HOST followed, against note 556 section 1.3's expectation. The
+declaration half of the binding is written down in the token stream and needs
+no flow walk, so the gate decides it under the tag `MODEL` rather than
+declining by name. What the gate still does not decide is item 514's ceiling on
+a council-placed value, which is the half that really does read a flow
+position.
 
 **S3. The answer type.** `Answer[T]` and `Aggregate[T]` of section 3 as real
 types over the item-257 boundary, and the exhaustiveness rule: a match on an

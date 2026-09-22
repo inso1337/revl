@@ -7755,7 +7755,20 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # flow walk able to ask, at a `model.*` crossing, where this action's model
     # calls are declared to go. A program with no block hands over `{}` and
     # every lookup in the walk misses, so nothing moves.
-    taint_model.model_routes = _model_route.check(program)
+    # Model councils (roadmap item 516) are resolved BEFORE the routes, because
+    # a `route model` arm may name a council where it names a role (slice 2)
+    # and a placement is resolved before anything that names one - the same
+    # sentence that puts the whole model-placement phase ahead of
+    # `_validate_declared_types`. Slice 1 ran this after the routes, which was
+    # right while a council was bound to nothing; the order moved with the
+    # dependency and not with the construct. A council is a DECLARATION checked
+    # at admission and writes no IR, exactly as a route does, so an admitted
+    # program is byte-identical to the same program with the declaration
+    # deleted (docs/design/543-model-council.md). A program declaring no
+    # council walks an empty list and is byte-identical through here.
+    model_councils = _model_council.check(program)
+    taint_model.model_routes = _model_route.check(program,
+                                                  councils=model_councils)
     # item 512 slice 4: the role TABLE, which is what makes a `model.<tail>`
     # capability token readable as a placement rather than as an operation
     # name. `check()` validated it on the line above (it calls `roles()` first
@@ -7764,15 +7777,6 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # note promised item 514. An empty table leaves every `model.*` crossing
     # the operation token it has always been.
     taint_model.model_roles = _model_route.roles(program)
-
-    # Model councils (roadmap item 516). After the routes, because a council's
-    # members are `model role` declarations and `roles()` is the table both
-    # read; before any component is lowered, for the reason above. A council is
-    # a DECLARATION checked at admission and writes no IR, exactly as a route
-    # does: slice 1 binds a council to no action, so an admitted program is
-    # byte-identical to the same program with the declaration deleted
-    # (docs/design/543-model-council.md).
-    _model_council.check(program)
 
     ambient_services = {
         name: _service_from_ir(name, spec)

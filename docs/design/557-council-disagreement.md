@@ -360,9 +360,13 @@ existing thirteen refusals across two codes. It adds no rule, no syntax and no
 IR, so an admitted program is still byte-identical to the same program with the
 council declaration deleted (`test_the_refusals_cost_the_ir_nothing`).
 
-Item 516's slices 2 to 4 are untouched and still open: binding a council to an
-action, the `Aggregate[T]` answer type and its exhaustiveness rule, and
-per-member inputs. Slice 5, the self-host port, is NOT among them: it landed in
+Item 516's slices 3 and 4 are untouched and still open: the `Aggregate[T]`
+answer type and its exhaustiveness rule, and per-member inputs. Slice 2,
+binding a council to an action, was open when this was written and landed with
+issue #1366; a `route model` arm now names a council, and a confidentiality
+origin routed to one whose member is `off_device` is refused naming that
+member, under `G-MODEL-PLACE` by section 3's own line. Slice 5, the self-host
+port, is NOT among the open ones either: it landed in
 this same merge as `docs/design/556-model-council-selfhost.md`, which ports all
 seventeen refusals `model_council._check_one` raises into `selfhost/lower.rvl`
 and carries a census row of its own. An earlier draft of this paragraph counted
