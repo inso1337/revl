@@ -62,8 +62,13 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    nothing is the model being weaker than what revl enforces, and
    `formal-strict` / `formal-found-other` because the model refusing what
    revl accepts, or for a reason revl does not give, is a claim about a
-   different language than the one that ships (issue #1169). Only the
-   `agree-*` and `out-of-fragment*` buckets are informational.
+   different language than the one that ships (issue #1169). The
+   `out-of-fragment-G5` and `out-of-fragment-G6` buckets record an ABSENCE,
+   which cannot disagree with anything, so they are gated on MEMBERSHIP
+   instead: `formal/out_of_fragment_ledger.json` names the files in each,
+   shrinks only, and a file joining one without a line in it fails the
+   gate. Only `agree-*` and the generic `out-of-fragment` are purely
+   informational.
 5. render the census and those buckets into `formal/STATUS.md` between the
    `GENERATED alignment` markers, and fail the gate when the checked-in
    block is not what this run produced. The document's "0 formal-strict"
@@ -325,15 +330,21 @@ def attenuation_coverage() -> list[str]:
 # `Leaker requires kv: KvB` reaches a different boundary under the same key,
 # and the fold saw `kv` on both sides and derived no widening
 # (`tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`).
-_WIRE_NS = "key:"
+# The same hole one declaration weaker: `Supervisor requires net: Net` spawning
+# `Worker requires net: Kv` where NEITHER service declares a token. The key is
+# not the boundary's name there either, so the element is the SERVICE
+# (`lower._undeclared_cap`, item 561).
+_UNDECLARED_NS = "svc:"
 
 
-def _wire_cap(key: str) -> str:
-    """`lower._wire_cap`: the attenuation-fold element for a wiring key that no
-    declaration tokens (a bare `emission`, a plain or unresolvable service).
-    The key gets its OWN namespace so a key spelling can never masquerade as a
-    declared token, and so two such boundaries still compare by name."""
-    return _WIRE_NS + key
+def _undeclared_cap(service: str) -> str:
+    """`lower._undeclared_cap`: the attenuation-fold element for an emission
+    that no declaration tokens (a bare `emission`, a plain or unresolvable
+    service), named by the SERVICE it is declared on. It gets its OWN namespace
+    so a derived spelling can never masquerade as a declared token, and two
+    such boundaries compare by the declaration rather than by a consumer's
+    local key."""
+    return _UNDECLARED_NS + service
 
 
 def _declared_cap(declared: str) -> str:
@@ -711,10 +722,10 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
             else:
                 mode, entries = bounds[(svc, meth)]
                 if mode == "any":
-                    # No declared token: the wiring key names the
-                    # boundary, in its own namespace for the fold and
-                    # bare for the bound.
-                    out.add((_wire_cap(root), root))
+                    # No declared token: the SERVICE names the boundary
+                    # for the fold, in its own namespace; the BOUND
+                    # column still reads the wiring key (item 561).
+                    out.add((_undeclared_cap(svc), root))
                 else:
                     for e in entries:
                         out.add((_declared_cap(e), _canon_cap(root, e)))
@@ -1395,18 +1406,18 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # service's emission declarations (the held side of attenuation).
             # K feeds the attenuation fold and nothing else, so it carries the
             # ATTENUATION spelling only: the declared token where the service
-            # declares one, the namespaced wiring key where it does not
+            # declares one, the namespaced SERVICE where it does not
             # (`lower._held_capabilities_pairs`, clause for clause).
             krows: list[tuple[str, str]] = []
             for local, svc in requires:
                 em = [(mode, ents) for (s, _m), (mode, ents) in bounds.items()
                       if s == svc and mode != "plain"]
                 if not em:
-                    krows.append((local, _wire_cap(local)))
+                    krows.append((local, _undeclared_cap(svc)))
                     continue
                 for mode, ents in em:
                     if mode == "any":
-                        krows.append((local, _wire_cap(local)))
+                        krows.append((local, _undeclared_cap(svc)))
                     else:
                         for e in ents:
                             krows.append((local, _declared_cap(e)))
@@ -3331,6 +3342,156 @@ def checker_alignment(file_facts: dict, componentless: list[str],
     return [f"{k}: {rel}" for k in FATAL_BUCKETS for rel in samples.get(k, [])]
 
 
+# ------------------------------- the out-of-fragment membership ratchet
+#
+# `out-of-fragment-G5` and `out-of-fragment-G6` say "the model has no fact
+# here", and issue #1169's own work could not name an input that makes
+# either of them FAIL: by construction they record an ABSENCE, and an
+# absence has no wrong answer to catch. That is the same shape as the two
+# buckets #1169 promoted to fatal, one level down — a bucket that cannot
+# fire is not a gate — and it is the reason eleven files can sit in these
+# two and nothing in the tree notices.
+#
+# What can be judged without judging the contents is MEMBERSHIP. The ledger
+# below names the corpus files in each bucket today, and the gate holds the
+# tree to it in BOTH directions:
+#
+#   * a file that JOINS one of these buckets and is not in the ledger fails
+#     the gate. A new `undo` shape the `Prog` cannot resolve, or a new
+#     G6-coded fixture, can no longer arrive while the model stays silent:
+#     somebody has to model it, or write its name down and own the hole.
+#   * a ledger entry that is NO LONGER in its bucket fails the gate too and
+#     must be DELETED. So the list shrinks only, and a file cannot be parked
+#     in it once the model does have a fact about it.
+#
+# The inputs that make it fail, named: dropping a new
+# `examples/rejections/g5_undo_*.rvl` whose `undo` reads its crossing off a
+# handle into the corpus reds the gate with `joined out-of-fragment-G5`;
+# teaching the `U5` fold to follow a handle reds it with `left
+# out-of-fragment-G5` on each of the ten files it newly resolves, until
+# their lines go. Deleting the ledger reds it as well — a missing ratchet
+# reads as a failure, never as nothing to check.
+#
+# It records NAMES ONLY — no counts, no totals, no line numbers — so the
+# file is byte-identical whether it is written under CI's python 3.11 or a
+# 3.14 developer venv, which is the shape PR #1214's construct-reach ledger
+# settled on for the same reason.
+#
+# `--write-status` does NOT write it. Regenerating the census is routine and
+# a ratchet that widens itself as a side effect of a routine regeneration is
+# not a ratchet; widening it takes `--write-ledger` and shows up as its own
+# diff hunk.
+#
+# NOT extended to the generic `out-of-fragment` bucket, deliberately. That
+# one collects every checker code the model states no row about at all (G1,
+# G7, T1, REVL, HOST-METHOD, ...) and grows with any new type-error fixture
+# anywhere in revl, so a ratchet there would red the formal gate on work
+# that never touched the formal layer. G5 and G6 are different in kind: the
+# model carries a row aimed at each of them — the `U5` registration fold and
+# the `C` confinement surface — so "no fact about this file" is a claim
+# about a specific row that exists, and that is the claim worth pinning.
+OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
+OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6")
+OOF_LEDGER_ABOUT = [
+    "The corpus files the checker refuses G5 or G6 and the model has NO",
+    "fact about: `out-of-fragment-G5` and `out-of-fragment-G6` in",
+    "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
+    "",
+    "Both buckets record an absence, so neither can disagree with anything",
+    "and neither could fail the gate on its own (issue #1169). This ledger",
+    "is what makes them fire: MEMBERSHIP is checkable even when the",
+    "contents are not. A file that joins a bucket without a line here is a",
+    "gate failure, and a line that is no longer in its bucket is a gate",
+    "failure that must be DELETED -- so the lists shrink only, and every",
+    "name left is a hole someone still owes the model a row for.",
+    "",
+    "Regenerate with `python3 formal/harness/diff_corpus.py --write-ledger`",
+    "and read the diff: a new name is a new hole, not a formality.",
+    "`--write-status` deliberately does not touch this file.",
+    "",
+    "It records NAMES only -- never counts, totals or line numbers -- so it",
+    "is identical under CI's python 3.11 and a 3.14 developer venv.",
+]
+
+
+def _oof_ledger_path() -> Path:
+    """Read the module attribute at call time so a test can repoint it."""
+    return OOF_LEDGER_PATH
+
+
+def _shown(path: Path) -> str:
+    """The path a finding names: repo-relative in the tree, and whatever it
+    is when a test has pointed the ledger at a scratch directory."""
+    try:
+        return str(path.relative_to(REPO))
+    except ValueError:
+        return str(path)
+
+
+def out_of_fragment_ledger(samples: dict[str, list[str]]) -> dict:
+    """The ledger this run's buckets would produce, ready to serialize."""
+    doc: dict = {"_about": list(OOF_LEDGER_ABOUT)}
+    for bucket in OOF_RATCHET_BUCKETS:
+        doc[bucket] = sorted(set(samples.get(bucket, [])))
+    return doc
+
+
+def out_of_fragment_ratchet(samples: dict[str, list[str]],
+                            write: bool = False) -> list[str]:
+    """Hold this run's `out-of-fragment-G5`/`-G6` membership to the committed
+    ledger, in both directions. Returns gate-failure strings; `write`
+    regenerates the ledger instead and returns nothing.
+
+    Called from `main()` over the WHOLE corpus, never from
+    `checker_alignment`: the ratchet is a statement about the corpus, and a
+    single-file run of the alignment arms would read every other name in the
+    ledger as stale."""
+    path = _oof_ledger_path()
+    doc = out_of_fragment_ledger(samples)
+    text = json.dumps(doc, indent=2, ensure_ascii=True) + "\n"
+    if write:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+        print(f"{_shown(path)}: out-of-fragment ledger rewritten "
+              + " ".join(f"{b}={len(doc[b])}" for b in OOF_RATCHET_BUCKETS))
+        return []
+    try:
+        committed = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return [f"{_shown(path)} is missing — the out-of-fragment "
+                "buckets have no ratchet, so a file can join them silently; "
+                "regenerate with `python3 formal/harness/diff_corpus.py "
+                "--write-ledger`"]
+    except json.JSONDecodeError as e:
+        return [f"{_shown(path)} is not readable JSON ({e})"]
+    findings: list[str] = []
+    for bucket in OOF_RATCHET_BUCKETS:
+        have = set(doc[bucket])
+        listed = committed.get(bucket)
+        if not isinstance(listed, list) or any(
+                not isinstance(x, str) for x in listed):
+            findings.append(f"{_shown(path)} has no list of names "
+                            f"under {bucket!r}")
+            continue
+        was = set(listed)
+        for rel in sorted(have - was):
+            findings.append(
+                f"joined {bucket}: {rel} — the model has no fact about a "
+                "file it did not have to cover before. Give the row that "
+                "should see it a case, or record the hole with "
+                "`--write-ledger`")
+        for rel in sorted(was - have):
+            findings.append(
+                f"left {bucket}: {rel} — no longer in the bucket, so the "
+                "ledger line is stale and must be deleted "
+                "(`--write-ledger`)")
+    if not findings:
+        print("out-of-fragment ratchet: "
+              + ", ".join(f"{b} {len(doc[b])}" for b in OOF_RATCHET_BUCKETS)
+              + f" — held to {_shown(path)} (shrink-only)")
+    return findings
+
+
 # --------------------------------------------- the census STATUS.md prints
 #
 # `formal/STATUS.md` used to STATE the census and the alignment buckets in
@@ -3395,16 +3556,29 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             "Every bucket recording a DISAGREEMENT fails the gate, in both "
             "directions: `missed-*` is the model weaker than the checker, "
             "`formal-strict` and `formal-found-other` are the model stricter "
-            "than the language that ships. `agree-*` and `out-of-fragment*` "
-            "are informational, and `out-of-fragment*` means the model has "
-            "no fact about the rule the checker refused under, not that it "
-            "disagrees."),
+            "than the language that ships. `out-of-fragment*` means the "
+            "model has no fact about the rule the checker refused under, not "
+            "that it disagrees."),
+        "",
+        para(
+            "An absence cannot disagree, so the two buckets aimed at a row "
+            "the model does carry are `ratcheted` instead: "
+            f"`{'` and `'.join(OOF_RATCHET_BUCKETS)}` are held to the names "
+            f"in `{OOF_LEDGER_PATH.relative_to(REPO)}`, which shrinks only. "
+            "A file that JOINS one fails the gate, and a line no longer in "
+            "its bucket fails it until it is deleted. So a new `undo` shape "
+            "the `Prog` cannot resolve, or a new G6 fixture, cannot arrive "
+            "while the model stays silent about it. `agree-*` and the "
+            "generic `out-of-fragment` stay informational; that one collects "
+            "every code the model states no row about at all, so it grows "
+            "with corpus work that never touched this layer."),
         "",
         "| bucket | files | gate |",
         "| --- | --- | --- |",
     ]
     for k in sorted(set(align) | set(FATAL_BUCKETS)):
-        gate = "**FATAL**" if k in FATAL_BUCKETS else "informational"
+        gate = ("**FATAL**" if k in FATAL_BUCKETS else
+                "ratcheted" if k in OOF_RATCHET_BUCKETS else "informational")
         lines.append(f"| `{k}` | {align.get(k, 0)} | {gate} |")
     lines.append("")
     named = [(k, rel)
@@ -3452,19 +3626,28 @@ def sync_status(block: str, write: bool) -> str | None:
             "--write-status` and commit the result")
 
 
-def write_status() -> int:
+def write_status(ledger: bool = False) -> int:
     """`--write-status`: regenerate the block without the Lean toolchain.
+    `--write-ledger`: regenerate the out-of-fragment membership ratchet the
+    same way, and NOTHING else.
 
     The alignment arms read verdicts, and the gate's own differential proves
     the reference and the oracle produce the SAME ones, so the reference side
     alone is enough to render the document. A divergence between them is not
-    a STATUS.md question; it fails `main` long before this."""
+    a STATUS.md question; it fails `main` long before this.
+
+    The two writers are separate on purpose. Rewriting the census is routine
+    housekeeping; widening the set of files the model admits it has no fact
+    about is not, and must not ride along on it."""
     tsv, file_facts, census = export()
     if not tsv:
         print("nothing extracted — nothing to write")
         return 1
     ref = reference_from_tsv(tsv)
     checker_alignment(file_facts, census["componentless"], ref, tsv)
+    if ledger:
+        out_of_fragment_ratchet(_ALIGN_SAMPLES, write=True)
+        return 0
     block = status_block(census, file_facts, census["componentless"],
                          census["refusals"], ref, _ALIGN)
     problem = sync_status(block, write=True)
@@ -3560,6 +3743,9 @@ def main() -> int:
         print(f"  ... and {len(mismatches) - 10} more")
 
     fatal = checker_alignment(file_facts, componentless, formal, tsv)
+    # The two buckets that record an absence rather than a disagreement, held
+    # to their committed membership so they can fail at all.
+    fatal.extend(out_of_fragment_ratchet(_ALIGN_SAMPLES))
     drift = sync_status(
         status_block(census, file_facts, componentless, refusals, ref, _ALIGN,
                      len(mismatches)),
@@ -3572,4 +3758,7 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    sys.exit(write_status() if "--write-status" in sys.argv[1:] else main())
+    _argv = sys.argv[1:]
+    if "--write-ledger" in _argv:
+        sys.exit(write_status(ledger=True))
+    sys.exit(write_status() if "--write-status" in _argv else main())

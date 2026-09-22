@@ -1,0 +1,36 @@
+// Fixture for tests/test_promotion_barrier_543.py (item 543, issue #1222) and
+// tests/test_canary.py — a CANDIDATE generation of tenant_a's store whose
+// recorded world is identical to the baseline's step-for-step, and whose G8
+// boundary surface is strictly WIDER.
+//
+// `fn get` is an expression body, so nothing it calls becomes a recorded step:
+// the canary's replay comparison walks effects, emissions, awaits and
+// provisions, and a pure extern reached from an expression is none of those.
+// The two timelines are therefore equal and `diverged` is false, while
+// `revl audit --diff` reports the new crossing `host:TenantAStore:host_fmt`.
+//
+// That is issue #1222's shape exactly: the rare path that widens reach is the
+// one the slice's recorded behaviour does not exhibit, so the comparison is
+// the wrong KIND of evidence about it and cannot be allowed to buy the
+// promotion. Compare with canary_candidate_same.rvl, the control: identical
+// timeline AND identical boundary surface, which still promotes.
+
+service Kv {
+  fn get(k: Str) -> Opt[Str]
+  fn set(k: Str, v: Str)
+}
+
+extern pure fn host_fmt(line: Opt[Str]) -> Opt[Str]
+  = @py { return line }
+
+component TenantAStore provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  let store = effect Map.new() undo store.drop()
+  provide kv {
+    fn get(k) = host_fmt(store.get(k))
+    fn set(k, v) {
+      effect store.insert(k, v)
+      undo   store.remove(k)
+    }
+  }
+}

@@ -30,11 +30,6 @@
       ],
       "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
         "kind=name"
-      ],
-      "Item 130's stream DIVERSION, read by selfhost/emit_go.rvl's `document_holds_stream` (a mirror of backends/go/emit.py's `_document_holds_stream`, issue #81, design note 563). The reference diverts a stream-holding document off the pure typed-core path this port mirrors and onto the live stc-go path; the port cannot emit that path, so it reads the same three discriminants only to decide that the document's components are NOT carried and to name each one with an `<<UNSUPPORTED-COMPONENT:...>>` marker. This is a refusal predicate, not a lowering: no stream surface is emitted on this tier, and the `kind=host` read is the `Stream.*` provider test inside that predicate rather than a port of host acquisition. No corpus document can reach any of the three, because a document that reaches them is one this port refuses and so can never be a byte-agreement case. Pinned instead by tests/test_selfhost_emit_go.py::test_the_stream_diversion_with_top_level_declarations_names_its_component and the two single-arm cases beside it, over backends/go/testdata/stream_event_130.rvl and two synthesized documents, each holding the reference to emitting `stc-go` where the port emits the marker.": [
-        "kind=host",
-        "step=stream-iter",
-        "subscribe=<true>"
       ]
     },
     "unported": {
@@ -74,10 +69,11 @@
       "Lifecycle fault/teardown harness assertion checks runtime residue; in-file lifecycle tests and the live component teardown ABI are outside emit_go.rvl.": [
         "step=assert_no_residue"
       ],
-      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all. Item 130's DIVERSION predicate (`document_holds_stream`, issue #81) is ported, and the three constructs it reads (`step=stream-iter`, `subscribe=<true>`, `kind=host`) moved to this tier's `blind` list; they left this entry for that reason and not because any stream lowering arrived.": [
+      "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all.": [
         "has_config=<true>",
         "idempotent=<true>",
         "kind=config",
+        "kind=host",
         "kind=instance-get",
         "kind=req",
         "kind=spawn",
@@ -99,9 +95,11 @@
         "step=let-effect",
         "step=load",
         "step=provide",
+        "step=stream-iter",
         "step=timer",
         "step=unload",
-        "step=var"
+        "step=var",
+        "subscribe=<true>"
       ],
       "Surviving service/config/extern secret markings select runtime redaction through _declares_secret only after Go's pure-module early return. The corpus already covers a Secret extern return wrapper, but it does not establish parameter/call-descriptor or secret-witness WAL redaction parity (roadmap 421F6).": [
         "secret=<true>"
