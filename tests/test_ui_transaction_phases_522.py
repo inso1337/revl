@@ -262,7 +262,7 @@ def test_a_non_ui_token_gets_no_phase_and_no_verdict() -> None:
     assert uitx.eligible_phases("db.write") == ()
     assert uitx.residue_state("db.write", False) is None
     assert uitx.confirmation("db.write", covered=False, raised=True) is None
-    assert uitx.postcondition("db.write", followed_by_read=True) is None
+    assert uitx.postcondition("db.write", checked_by_read=True) is None
 
 
 # ---------------------------------------------------------- the revert split
@@ -440,10 +440,18 @@ def test_an_actuation_with_no_following_read_is_unverified() -> None:
     assert states["actuate"] == uitx.UNVERIFIED
 
 
-def test_an_actuation_followed_by_a_read_is_verified_against_that_read(
+def test_an_actuation_checked_by_a_read_is_verified_against_that_read(
 ) -> None:
-    assert uitx.postcondition("ui.click", followed_by_read=True) \
+    """Slice 5 (issue #1370) moved the parameter that decides this from a
+    POSITION to a BINDING. `checked_by_read` is the fact that a later read
+    resolves the target this step acted on; a read that merely follows is
+    `read-not-bound-to-this-step` and is not this word."""
+    assert uitx.postcondition("ui.click", checked_by_read=True) \
         == uitx.VERIFIED_AGAINST_UNTRUSTED
+    assert uitx.postcondition("ui.click", checked_by_read=False,
+                              followed_by_read=True) == uitx.UNBOUND
+    assert uitx.postcondition("ui.click", checked_by_read=False,
+                              followed_by_read=False) == uitx.UNVERIFIED
 
 
 def test_there_is_no_plain_verified_verdict() -> None:
@@ -455,9 +463,11 @@ def test_there_is_no_plain_verified_verdict() -> None:
     assert "verified" not in vocabulary
     assert uitx.VERIFIED_AGAINST_UNTRUSTED == "verified-against-untrusted-read"
     for token in ui_family.spellings():
-        for followed in (True, False):
-            assert uitx.postcondition(token, followed_by_read=followed) \
-                != "verified"
+        for checked in (True, False):
+            for followed in (True, False):
+                assert uitx.postcondition(token, checked_by_read=checked,
+                                          followed_by_read=followed) \
+                    != "verified"
 
 
 # ------------------------------------------------------ the confirmation raise

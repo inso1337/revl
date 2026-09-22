@@ -880,6 +880,12 @@ def _render_transactions(plans: list[dict]) -> list[str]:
                 f"{step['confirmation']} | {step['postcondition']}")
             out.append("            eligible phases: "
                        + ", ".join(step["eligiblePhases"]))
+            checked = step.get("postconditionCheckedBy")
+            if checked:
+                out.append(
+                    f"            postcondition read: {checked}() resolves "
+                    f"the target this step acted on, from an observation "
+                    f"taken after it")
         unconfirmed = plan.get("unconfirmedIrreversibleSteps") or []
         if unconfirmed:
             out.append(
@@ -896,6 +902,23 @@ def _render_transactions(plans: list[dict]) -> list[str]:
                 + " — no read follows the actuation. A return value says the "
                   "actuation was delivered, which is not the claim that the "
                   "business effect occurred")
+        unbound = plan.get("unboundPostconditionSteps") or []
+        if unbound:
+            out.append(
+                "        READ NOT BOUND TO THE STEP: " + ", ".join(unbound)
+                + " — a read follows and it checks something else: a "
+                  "different target, or an observation taken before the "
+                  "actuation. Position is not a postcondition (item 522 "
+                  "slice 5)")
+        undetectable = plan.get("undetectableFailureSteps") or []
+        if undetectable:
+            out.append(
+                "        NO FAILURE DETECTION: " + ", ".join(undetectable)
+                + " — these actuations carry no postcondition, so a failure "
+                  "at one of them triggers no compensation run at all. A LIFO "
+                  "run is started by an unmet postcondition, and a step with "
+                  "no postcondition never reports one unmet")
+        out += _render_runs(plan.get("compensationRuns") or [])
         out.append(
             "        note: the strongest postcondition word available here is "
             "`verified-against-untrusted-read`. The read came from the "
@@ -906,4 +929,41 @@ def _render_transactions(plans: list[dict]) -> list[str]:
             "in a `provide` method cannot acquire one, which is why the "
             "unconfirmed steps above are named rather than refused "
             "(docs/design/553-ui-transaction-phases.md §3)")
+    return out
+
+
+def _render_runs(runs: list[dict]) -> list[str]:
+    """The LIFO compensation run for each step whose failure this transaction
+    can detect (roadmap item 522 slice 3, issue #1369).
+
+    One run per step that HAS a postcondition, because that is what starts a
+    run. The word `run` is as far as it goes: revl computes the order, the
+    membership and the per-step outcome, and the compensating crossings are
+    performed by the computer-use substrate (roadmap item 539), exactly as the
+    actuations are."""
+    if not runs:
+        return []
+    out = ["        LIFO COMPENSATION RUN, per detectable failure (item 522 "
+           "slice 3) — revl computes the run; the substrate performs the "
+           "crossings"]
+    for run in runs:
+        ran = ", ".join(f"{label}()" for label in run["ran"]) or "nothing"
+        out.append(f"          if {run['failedStep']}() fails: {ran}")
+        residue = [entry["step"] for entry in run["outcomes"]
+                   if entry["executed"] and entry["outcome"] in uitx.RESIDUE]
+        if residue:
+            out.append("            residue after the run: "
+                       + ", ".join(f"{label}() {state}" for label, state in (
+                           (entry["step"], entry["outcome"])
+                           for entry in run["outcomes"]
+                           if entry["executed"]
+                           and entry["outcome"] in uitx.RESIDUE)))
+        # only the ACTUATIONS after the failure. A read that never executed is
+        # not news; an actuation that never executed is the whole difference
+        # between this run and the `compensateOrder` it is keyed against.
+        never = [entry["step"] for entry in run["outcomes"]
+                 if not entry["executed"] and entry["actuation"]]
+        if never:
+            out.append("            never executed, so nothing to undo: "
+                       + ", ".join(f"{label}()" for label in never))
     return out

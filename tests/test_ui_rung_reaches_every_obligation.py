@@ -138,9 +138,12 @@ def test_a_rung_inherits_every_item_522_verdict(rung, verb) -> None:
         assert uitx.residue_state(rung, has_compensate) is not None
     assert uitx.eligible_phases(rung) == uitx.eligible_phases(verb)
     assert uitx.may_compensate(rung) == uitx.may_compensate(verb)
-    for followed in (True, False):
-        assert uitx.postcondition(rung, followed_by_read=followed) \
-            == uitx.postcondition(verb, followed_by_read=followed)
+    for checked in (True, False):
+        for followed in (True, False):
+            assert uitx.postcondition(rung, checked_by_read=checked,
+                                      followed_by_read=followed) \
+                == uitx.postcondition(verb, checked_by_read=checked,
+                                      followed_by_read=followed)
 
 
 @pytest.mark.parametrize(("rung", "verb"), RUNGS_AND_VERBS)
