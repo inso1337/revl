@@ -242,7 +242,7 @@ already has the crossing's IR in hand. Nothing in slice 2 changes what the
 compiler derives. Section 9 is the seam, and section 11 is what a real provider
 did with it.
 
-**Slice 3, `model.json[T](prompt)` (NOT landed).** The surface the issue
+**Slice 3, `model.json[T](prompt)` (NOT landed, deferred; 6.1).** The surface the issue
 sketches. It is a sugar over a `validated` emission whose return type is `T`,
 and it is deliberately last: the derivation and its refusal are the checkable
 part, and adding syntax before them would have shipped a keyword with nothing
@@ -279,6 +279,97 @@ says. Section 10 is the dialect. It landed with slice 2 rather than after it
 because the measurement in section 11 could not be taken without it: the
 endpoint available to measure against honours a JSON Schema and ignores a GBNF
 grammar, so a seam that spoke only GBNF had no real provider to be tested by.
+
+### 6.1 Slice 3 measured, and the decision not to build it yet
+
+The paragraph above says slice 3 is a language feature and names its cost.
+Issue #1187 was then held open against that estimate rather than closed, so the
+estimate was taken. This subsection is the measurement and what it decided.
+Everything below is a count taken on the tree, not an estimate.
+
+**What the IR migration actually moves.** `response_schema` and
+`response_grammar` are bound in two places, `_method_validated_ir` (a service
+method) and the `decl.validated` arm of the extern walk, both in `lower.py`.
+Across the whole repository:
+
+| measured | count |
+| --- | --- |
+| checked-in `.ir.json` documents carrying either key | 0 of 54 |
+| backend golden files mentioning either key | 0 of 28 |
+| `.rvl` sources declaring a `validated` emission | 0 of 1066 |
+| `regen_goldens.py` targets whose bytes would change | 0 of 8 |
+
+So the golden cost of relocating the keys is zero, and the four-golden-set
+precedent the estimate was measured against does not apply. That is not an
+argument for doing it. It is the reason the cost has to be looked for
+somewhere other than the goldens, and it is there.
+
+**What the six emitters do with the keys.** One reads them. A differential over
+the six tiers, compiling one program twice with the only difference being the
+`validated` modifier on a `Model.complete` emission returning a variant:
+
+| tier | emitted output |
+| --- | --- |
+| python | differs (2988 vs 1487 chars), grammar text present |
+| typescript | byte-identical |
+| rust | byte-identical |
+| wasm | byte-identical |
+| go | byte-identical |
+| java | refuses both, for an unrelated pre-existing reason |
+
+Four tiers emit the same bytes for a validated crossing as for an unvalidated
+one. Every occurrence of the word `validated` in those four emitters, and in
+java's, is a prose comment about item 130's `event` item validation; none of
+the five reads `validated`, `response_schema` or `response_grammar` off a
+method or an extern. The modifier and both derived keys are dropped in silence,
+which is the fail-open direction and exactly the shape
+`go/emit.py::_refuse_stream_document_top_level` was written to close for item
+130: a tier that cannot lower a section says so by name instead of answering
+with a module missing what its author wrote.
+
+**Two costs section 6 did not list.**
+
+1. The slice-2 runtime seam is keyed per method. `_grammar_registry` builds
+   `registry[f"{svc_name}.{m_name}"]`, and section 9.1 documents
+   `revl_decode_grammar(key)` and `revl_constrain(key, dialects)` with the
+   crossing's identity spelled `"Service.method"`. Two call sites of one
+   generic method state two grammars under one key, so slice 3 changes a
+   shipped, documented seam API and not only the IR.
+2. The keys are additive today. Relocating them without an `ir_version` bump
+   leaves an older document's method-level keys read by nobody, which is a
+   silent loss of the constraint rather than a refusal. A bump is the honest
+   form, and `backends/python/emit.py` already gates on `ir_version` while the
+   other tiers gate loosely or not at all.
+
+**What slice 3 would buy, measured.** Less than the sketch suggests. Issue
+#1348 established over 1560 constructed types that item 513's grammar *gate* is
+unreachable on a validated emission, because issue #1263 made item 257's
+`fully_expressible` refuse every shape the grammar walk refuses, and 257 runs
+first. That is pinned as
+`test_the_grammar_gate_is_shadowed_by_257_on_every_shape_it_refuses`. So the
+half of slice 3 that is a compile-time refusal is already covered by a stricter
+gate; what per-use `T` adds is reachable *derivation*, in the one tier that
+reads the derivation.
+
+**The decision.** Not now, and the blocker is an ordering one rather than a
+budget one. Slice 3's whole content is that two call sites of one method state
+two different grammars. In five of six tiers neither call site states a grammar
+at all, so the distinction slice 3 pays an IR migration and a seam-API change
+to express is unobservable in five of the six places it would have to hold. A
+differential written today could only be checked against python, which is the
+shape of evidence this document's section 8 already lists as insufficient.
+
+The prerequisite is not more of slice 3. It is that a tier which cannot express
+a `validated` crossing refuses it by name, on the item 130 model. That is a
+smaller change, it closes a live fail-open hole rather than adding a feature on
+top of one, and after it the slice 3 differential has six honest answers to
+check instead of one and five silences. Until it lands, an argued deferral is
+worth more than a half-done migration.
+
+Reopen the question when a second tier reads `response_grammar`, or when the
+other five refuse a validated crossing by name. At that point re-measure: the
+golden count is zero today only because nothing in the corpus uses the feature,
+and a corpus case added by the refusal work will change that number.
 
 ## 7. Recursion, and what would have to change together
 
