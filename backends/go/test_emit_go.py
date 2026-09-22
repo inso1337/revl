@@ -1306,3 +1306,60 @@ def test_str_helpers_do_not_materialize_the_whole_string():
     _has(src, "\t\t\treturn string([]rune(s)[a:b])")
     _has(src, "\t\trs := []rune(s)")
     assert "[]rune" not in src.split("func revlStrSplit")[1].split("\n}")[0]
+
+
+# ---------------------------------------------------------------------------
+# `Int.to_int32` in a component method body, and the arrow beside it (#1347).
+#
+# The conformance matrix reads a refusal as "this tier cannot express this
+# construct". Two go cells were unclassified after issue #1321 carried the
+# mixed document, and they were not the same kind of thing: one was a stdlib
+# arm that had never been written on this path, the other is a real limit of
+# the component world. These pin the difference, which is what the matrix
+# publishes.
+
+_TO_INT32_COMPONENT = (
+    "service S { fn f(x: Int) -> Int }\n"
+    "component C provides s: S {\n"
+    "  provide s { fn f(x) { let a = x.to_int32()\n"
+    "    return a.to_int() } }\n"
+    "}"
+)
+
+
+def test_to_int32_lowers_in_a_provide_method():
+    """The narrow had an arm on the pure typed-core path and none in a method
+    body, while the widen `to_int` beside it had both — so `.to_int32()` in a
+    component reached the unknown-method fall-through. It is the same checked
+    helper either way."""
+    src = emit.emit(_compile(_TO_INT32_COMPONENT), package="emitted")
+    _has(src, "\ta := revlToI32(x)")
+    assert src.count("func revlToI32") == 1, (
+        "the checked narrow must be declared exactly once — Go rejects a "
+        "redeclaration, and both the typed-core assembly and the component "
+        "preamble can ask for it")
+
+
+def test_to_int32_is_declared_once_when_a_top_level_fn_narrows_too():
+    """The combined path renders the typed-core tier and the live components
+    into ONE package, so the two producers of the helper must not both write
+    it."""
+    src = emit.emit(_compile(
+        "fn narrow(x: Int) -> Int32 { return x.to_int32() }\n"
+        + _TO_INT32_COMPONENT), package="emitted")
+    assert src.count("func revlToI32") == 1, src.count("func revlToI32")
+
+
+def test_an_arrow_in_a_method_body_is_refused_with_no_top_level_declaration():
+    """The other cell, and the reason it IS published as a tier limit: the
+    refusal is not about the document carrying a top-level declaration beside
+    the component (issue #721's shape, carried since issue #1321). It fires on
+    a document that is only a component, because the stc-go component world has
+    no type to render a general arrow's closure against."""
+    with pytest.raises(emit.EmitError, match="arrow is not lowerable"):
+        emit.emit(_compile(
+            "service S { fn f(x: Int) -> Int }\n"
+            "component C provides s: S {\n"
+            "  provide s { fn f(x) { let g = v => v + 1\n"
+            "    return g(x) } }\n"
+            "}"), package="emitted")
