@@ -6,16 +6,20 @@ refuses at compile time a type that has no unambiguous one.
 
 Three things are pinned here, and one deliberately is not.
 
-  * `decode_grammar.py`: the grammar-side admission gate and the GBNF
+  * `decode_grammar.py`: the grammar-side admission walk and the GBNF
       rendering, including that the renderer raises rather than emitting a
-      permissive rule for a node it does not know.
+      permissive rule for a node it does not know. The walk is shadowed by item
+      257's gate and runs as a drift assertion (issue #1348); the sweep below is
+      the evidence, and one test forces the gate open so the assertion's own
+      branch is executed rather than merely carried.
   * agreement: a miniature GBNF recogniser (below) checks that the derived
       grammar accepts exactly the completions item 257's validator accepts, on
       a corpus that includes the near misses. This is the non-vacuity evidence
       for the rendering: a grammar that accepted everything would fail it.
   * `lower.py`: the crossing carries `response_grammar` beside
       `response_schema`, and a null-ambiguous response type is refused with the
-      position named.
+      position named (by item 257, which is upstream of the walk since issue
+      #1263).
 
   NOT pinned, and not testable from here: that a real decoder honours the
   grammar. revl emits text and a digest; enforcement is the provider's, and
@@ -39,12 +43,17 @@ from revl.decode_grammar import (  # noqa: E402
     GRAMMAR_FORMAT,
     GRAMMAR_ROOT,
     GrammarDerivationError,
+    _admits_null,
     decode_grammar_for,
     gbnf_from_schema,
     grammar_digest,
     grammar_refusal_reason,
 )
-from revl.mcp.schema import fully_expressible, json_schema_for  # noqa: E402
+from revl.mcp.schema import (  # noqa: E402
+    admits_json_null,
+    fully_expressible,
+    json_schema_for,
+)
 
 from runtime import ResponseValidationError, validate_response  # noqa: E402
 
@@ -352,23 +361,24 @@ def test_scalar_and_container_grammars(surface, ok, bad):
 
 
 # --------------------------------------------------------------------------
-# The grammar-side admission gate.
+# The grammar-side admission walk, and what shadows it.
 # --------------------------------------------------------------------------
 
 @pytest.mark.parametrize("surface", [
     "Opt[Opt[Str]]", "Opt[Unit]", "Opt[Opt[Opt[Int]]]",
     "List[Opt[Opt[Str]]]", "Map[Str, Opt[Unit]]",
 ])
-def test_null_ambiguous_opt_is_refused_by_both_gates(surface):
-    """This gate was written on the premise that item 257 ACCEPTS a
-    null-ambiguous `Opt`, so the grammar walk was the only place the ambiguity
-    was visible. Issue #1263 (PR #1270) then made 257 refuse the same shape for
-    the stronger reason that it has no exact schema at all, and recorded the
-    grammar walk as staying with 257 upstream of it
+def test_null_ambiguous_opt_is_refused_by_257_and_named_by_the_walk(surface):
+    """The grammar walk was written on the premise that item 257 ACCEPTS a
+    null-ambiguous `Opt`, so it was the only place the ambiguity was visible.
+    Issue #1263 (PR #1270) then made 257 refuse the same shape for the stronger
+    reason that it has no exact schema at all, and recorded the grammar walk as
+    staying with 257 upstream of it
     (docs/design/1263-opt-nesting-at-a-json-boundary.md, "What follows").
 
-    Both gates hold. The grammar walk is pinned here on its own so that
-    relaxing 257 cannot retire it by accident.
+    Both still answer. 257 is the one an author hears (issue #1348 measured the
+    walk as unreachable behind it, see the sweep below); the walk is pinned here
+    on its own so that relaxing 257 cannot retire the rule by accident.
     """
     assert fully_expressible(surface, {}) is False
     reason = grammar_refusal_reason(surface, {})
@@ -376,31 +386,102 @@ def test_null_ambiguous_opt_is_refused_by_both_gates(surface):
     assert "`null`" in reason
 
 
-def test_the_grammar_gate_is_shadowed_by_257_on_every_shape_it_refuses():
-    """Recorded, not celebrated. `decode_grammar._admits_null` and
-    `mcp.schema.admits_json_null` are the same predicate over the same surface
-    positions, so on a `validated` emission the grammar gate cannot be reached:
-    257 refuses first on every shape. This sweep is the evidence for that claim
-    and the alarm if it stops holding. A type that passes 257 and fails the
-    grammar walk is a real 513 admission and belongs in the list above."""
-    types = {
-        "Row": {"kind": "record", "fields": {"a": "Str", "b": "Opt[Unit]"}},
-        "Var": {"kind": "variant", "cases": [
-            {"name": "N", "payload": None},
-            {"name": "P", "payload": "Opt[Opt[Int]]"}]},
-        "Clean": {"kind": "record", "fields": {"a": "Str"}},
-    }
+_SWEEP_TYPES = {
+    "Row": {"kind": "record", "fields": {"a": "Str", "b": "Opt[Unit]"}},
+    "Var": {"kind": "variant", "cases": [
+        {"name": "N", "payload": None},
+        {"name": "P", "payload": "Opt[Opt[Int]]"}]},
+    "Clean": {"kind": "record", "fields": {"a": "Str"}},
+    "Deep": {"kind": "record", "fields": {"r": "Row", "v": "Var", "c": "Clean"}},
+    "Rec": {"kind": "variant", "cases": [{"name": "R", "payload": "List[Rec]"}]},
+}
+
+
+def _sweep_pool():
+    """Every surface position both walks descend through, three levels deep:
+    `Opt` inner, `List` element, `Map` value (with an expressible and an
+    inexpressible key), `Result` arm, plus nominal records and variants carrying
+    a null-ambiguous payload, a clean one, a nested nominal and a cycle."""
     pool = {"Str", "Int", "Bool", "Float", "Bytes", "Unit",
-            "Row", "Var", "Clean", "Unknown"}
+            "Row", "Var", "Clean", "Deep", "Rec", "Unknown"}
     for _ in range(3):
         pool |= {shape.format(t) for t in list(pool) for shape in
                  ("Opt[{}]", "List[{}]", "Map[Str, {}]", "Map[Int, {}]",
                   "Result[{}, Str]")}
-    reaches_the_grammar_gate = [
-        t for t in sorted(pool)
+    return sorted(pool)
+
+
+def test_the_two_admission_predicates_are_one_predicate():
+    """The mechanism behind the sweep below, pinned separately so a change to
+    either predicate says WHICH half moved rather than only that the
+    containment broke. `decode_grammar._admits_null` and
+    `mcp.schema.admits_json_null` are the same function written twice: `Unit`,
+    and any `Opt[_]`, and nothing else."""
+    pool = _sweep_pool()
+    assert len(pool) > 1500
+    disagree = [t for t in pool if _admits_null(t) != admits_json_null(t)]
+    assert disagree == []
+    # and the predicate is not vacuously equal on both sides
+    assert [t for t in pool if _admits_null(t)]
+    assert [t for t in pool if not _admits_null(t)]
+    assert _admits_null(None) is False and admits_json_null(None) is False
+
+
+def test_the_grammar_gate_is_shadowed_by_257_on_every_shape_it_refuses():
+    """Recorded, not celebrated, and the reason `lower.py` treats a non-`None`
+    answer as drift rather than as a refusal (issue #1348).
+
+    `decode_grammar._admits_null` and `mcp.schema.admits_json_null` are the same
+    predicate over the same surface positions, so on a `validated` emission the
+    grammar walk cannot be reached: 257 refuses first on every shape. This sweep
+    is the evidence for that claim and the alarm if it stops holding. A type that
+    passes 257 and fails the grammar walk is a real 513 admission, belongs in the
+    list above, and means the walk has to go back to being an author-facing
+    refusal.
+
+    Both directions are counted. `reaches_the_grammar_walk` empty is the claim;
+    `refused_by_257_alone` non-empty is the containment's direction, and it is
+    what says removing the walk would lose no surface while removing 257's
+    refusal would lose a great deal."""
+    types = _SWEEP_TYPES
+    pool = _sweep_pool()
+    reaches_the_grammar_walk = [
+        t for t in pool
         if fully_expressible(t, types) and grammar_refusal_reason(t, types)]
-    assert len(pool) > 1000
-    assert reaches_the_grammar_gate == []
+    refused_by_257_alone = [
+        t for t in pool
+        if not fully_expressible(t, types) and not grammar_refusal_reason(t, types)]
+    assert len(pool) > 1500
+    assert reaches_the_grammar_walk == []
+    # 257 refuses an untagged `Result`, a non-`Str` map key, a cycle and an
+    # unknown nominal, none of which the grammar walk has an opinion about.
+    assert len(refused_by_257_alone) > 1000
+    # and the walk is not vacuous: it does refuse, 257 just refuses first.
+    assert [t for t in pool if grammar_refusal_reason(t, types)]
+
+
+def test_the_shadowed_walk_still_runs_at_the_call_site(monkeypatch):
+    """The walk is unreachable, not removed, and this is the one test that
+    executes the branch behind it: with 257's gate forced open, a null-ambiguous
+    response type reaches the grammar walk and `lower.py` raises the internal
+    drift message rather than compiling a crossing whose grammar derives `null`
+    twice.
+
+    Without this, the assertion would be code no test runs, which is the shape
+    issue #1348 was filed about."""
+    import revl.lower as lower
+
+    monkeypatch.setattr(lower, "fully_expressible", lambda *a, **k: True)
+    with pytest.raises(RevlError) as exc:
+        compile_source(_method_program("Opt[Opt[Str]]"), "g.rvl")
+    monkeypatch.undo()
+    message = str(exc.value)
+    assert "internal:" in message
+    assert "gate drift" in message
+    assert "derives the string `null`" in message
+    # unchanged with the gate back in place: the author hears 257
+    ir = compile_source(_method_program("AgentTurn"), "g.rvl")
+    assert ir["services"]["Model"]["methods"]["complete"]["response_grammar"]
 
 
 def test_the_schema_still_cannot_express_the_nesting():

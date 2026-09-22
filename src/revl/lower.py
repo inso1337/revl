@@ -3957,7 +3957,13 @@ def _validated_response_ir(name: str, returns: str | None, is_emission: bool,
                            kind_word: str) -> dict:
     """Items 257 and 513: check a `validated` emission and derive the two
     response-shape IR keys, refusing at COMPILE TIME when the response type has
-    no exact schema (257) or no unambiguous decoding grammar (513).
+    no exact schema (257).
+
+    Item 513's grammar walk runs here too, but as an internal drift assertion
+    and not as a second refusal: since issue #1263 put 257's null-ambiguity
+    refusal upstream of it, there is no type it refuses that 257 accepts (issue
+    #1348, measured over 1872 types). The comment at the walk says what a firing
+    would mean.
 
     Returns `{"response_schema": ..., "response_grammar": ...}`. The schema is
     what the boundary validates a completion against; the grammar is what a
@@ -4006,26 +4012,31 @@ def _validated_response_ir(name: str, returns: str | None, is_emission: bool,
                  "than ship a vacuous guarantee "
                  "(docs/design/257-typed-model-boundary.md, §3.3)",
             code="G4", category="validated")
-    # Item 513 (§4): the grammar gate, which runs on the SURFACE type and after
-    # the expressibility gate. A type can have an exact schema and still have no
-    # unambiguous grammar: the schema derivation collapses a null-ambiguous
-    # `Opt` (`Opt[Opt[Str]]` and `Opt[Str]` derive the same schema), so the
-    # validator cannot see the ambiguity and this is the only place it is
-    # visible. Refusing here is the fail-closed half of the item: a response
-    # type is never demoted to an unconstrained decode.
+    # Item 513 (§4.2): the grammar walk, kept as an INTERNAL drift assertion
+    # rather than an author-facing refusal, because on a type the gate above
+    # accepted it cannot fire. `decode_grammar._admits_null` and
+    # `mcp.schema.admits_json_null` are the same predicate over the same surface
+    # positions (`Opt` inner, `List` element, `Map` value, record field, variant
+    # payload), so every shape this walk refuses `fully_expressible` refused one
+    # line up. Measured over 1872 constructed types (issue #1348): 0 reach here,
+    # and 1288 are refused by 257 alone, so the containment runs 257-covers-513
+    # and this walk guards no surface of its own.
+    #
+    # It still runs on every validated emission rather than only in a unit
+    # sweep, which is the point of keeping it: if 257's coverage ever narrows,
+    # the grammar rule stops being enforced by anything, and this says so on
+    # real source at the moment it happens. Same idiom as the two assertions
+    # below it, and worded the same way, so nothing here reads as a rule an
+    # author can break.
     grammar_reason = grammar_refusal_reason(stripped, types)
     if grammar_reason is not None:
         raise RevlError(
             filename, line,
-            f"`validated` emission `{name}` has response type `{stripped}`, which "
-            f"{grammar_reason}",
-            hint="a validated crossing compiles its response type to a decoding "
-                 "grammar, and a grammar that derives one string from two values "
-                 "cannot tell a constrained decode which one to produce. Refuse "
-                 "it at compile time rather than fall back to an unconstrained "
-                 "decode the caller believes is constrained "
-                 "(docs/design/542-grammar-constrained-decoding.md, §4)",
-            code="G4", category="validated")
+            f"internal: `validated` emission `{name}` has response type "
+            f"`{stripped}`, which {grammar_reason}, and still passed the "
+            "expressibility gate (gate drift: item 257 no longer refuses a "
+            "shape item 513 §4.2 refuses, so the grammar rule is load-bearing "
+            "again and has to go back to being an author-facing refusal)")
     schema = json_schema_for(stripped, types, validated=True)
     # Defense in depth (§3.3): the `fully_expressible` predicate already accepted
     # this type, so the renderer must leave no unconstrained `x-revlType` stub. A
