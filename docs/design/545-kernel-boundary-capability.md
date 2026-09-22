@@ -240,24 +240,28 @@ same injection against a first-party compile is inert.
 Stated plainly, because a design that claims its own completeness is the thing
 this repository keeps finding.
 
-**The undeclared-reach residual.** A service method that declares `emission`
-with no capability list yields a reserved-namespace fold element: a declared
-*wiring* with an undeclared *reach*. It was `key:` plus the consumer's wiring
-key when this note was written; item 561 moved it onto the service the method
-is declared on, `svc:`. That changes what it is named by, not whether it is
-undeclared, so this section reads the same either way.
+**The undeclared-reach residual is closed** (issue #1265). A service method
+that declares `emission` with no capability list yields a reserved-namespace
+fold element: a declared *wiring* with an undeclared *reach*. It was `key:`
+plus the consumer's wiring key when this note was written; item 561 moved it
+onto the service the method is declared on, `svc:`.
 
-Treating it as provably disjoint from the kernel is the weaker answer, and this
-slice takes it. The reason is a measurement, not a preference: on this tree it
-is the ordinary spelling, so refusing it turns tests red and changes what
-`mcp.session.admit` accepts on every turn whose granted services spell
-`emission` bare. This note measured 14 tests across 7 files; item 561 re-ran
-the same experiment at its own head, after PR #1292 declared this repository's
-own compositions, and measured 13 across the same 7. Making the remaining
-services declare their tokens is a composition-side change on the operator's
-side of the boundary, and it is its own item.
-`test_the_key_namespaced_residual_is_still_admitted` pins the residual so it
-stays visible.
+This slice treated it as provably disjoint from the kernel and pinned the gap.
+The reason given was a measurement: 14 tests across 7 files here, 13 at item
+561's head, and a change to what `mcp.session.admit` accepts. Re-measured at
+`32db56d9` that experiment gives 17 across the same 7 files, and the number was
+the wrong one all along. The `svc:` namespace carries two facts - a bare
+`emission` method, whose reach is undeclared, and a service with no emission
+method at all, whose reach is provably empty - and only the first is this
+question's. Reading the namespace alone refuses a candidate composing only pure
+services, which is 16 of those 17 reds.
+
+Asking the declarations instead (`lower._undeclared_emission_services`) costs 1
+test: `test_the_key_namespaced_residual_is_still_admitted` flipping from
+documenting the gap to asserting its closure, as
+`test_the_undeclared_service_element_is_refused`.
+`docs/design/561-undeclared-emission-boundary.md` carries the argument and the
+operator-facing statement of what stops being accepted.
 
 **The `*` arm is dormant for a candidate's own reach on `main`.** Both routes
 that would put a `*` into an untrusted-authored component's own reach are
