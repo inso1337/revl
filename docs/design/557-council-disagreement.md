@@ -360,13 +360,17 @@ existing thirteen refusals across two codes. It adds no rule, no syntax and no
 IR, so an admitted program is still byte-identical to the same program with the
 council declaration deleted (`test_the_refusals_cost_the_ir_nothing`).
 
-Item 516's slices 2 to 5 are untouched and still open: binding a council to an
-action, the `Aggregate[T]` answer type and its exhaustiveness rule, per-member
-inputs, and the self-host port. The roadmap's first exit clause, "a two-member
-council that disagrees does not admit", is a statement about a call and belongs
-to slice 3; what this note and item 516 deliver together is the second, "an
-aggregation written to admit on a tie is refused at compile time", with a code
-an agent can act on.
+Item 516's slices 2 to 4 are untouched and still open: binding a council to an
+action, the `Aggregate[T]` answer type and its exhaustiveness rule, and
+per-member inputs. Slice 5, the self-host port, is NOT among them: it landed in
+this same merge as `docs/design/556-model-council-selfhost.md`, which ports all
+seventeen refusals `model_council._check_one` raises into `selfhost/lower.rvl`
+and carries a census row of its own. An earlier draft of this paragraph counted
+it open and was stale the moment it landed. The roadmap's first exit
+clause, "a two-member council that disagrees does not admit", is a statement
+about a call and belongs to slice 3; what this note and item 516 deliver
+together is the second, "an aggregation written to admit on a tie is refused at
+compile time", with a code an agent can act on.
 
 ---
 
