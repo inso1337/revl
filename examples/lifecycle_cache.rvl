@@ -9,12 +9,12 @@
 
 service Database {
   fn query(sql: Str) -> List[Row]
-  emission fn execute(sql: Str) -> Int
+  emission[db] fn execute(sql: Str) -> Int
 }
 
 service Cache {
   fn get(key: Str) -> Opt[Str]
-  emission fn put(key: Str, value: Str)
+  emission[db] fn put(key: Str, value: Str)
 }
 
 component PgDatabase provides db: Database {

@@ -580,13 +580,95 @@ fn qual_test_end(ts: List[Token], i: Int) -> Int {
   return close_brace(ts, j)
 }
 
+// item 512: `model role NAME <residence>` is a CONTEXTUAL top-level
+// declaration, on the `boot`/`event`/`lifecycle test` discipline — `model` and
+// `role` are both ordinary identifiers, so `requires model: Model` (the common
+// spelling for the very key this construct places) keeps parsing and neither
+// lexer's KEYWORDS table moves. The reference recognises the head only in the
+// four-token shape its `model_role_decl` reads, and so does this: anything
+// looser would swallow a parameter, a record field or a requirement named
+// `model`.
+//
+// Without this the gate answered `BAD|unexpected token at top level` for every
+// program that declares a model role, which is the generic parse refusal
+// `docs/design/531-model-placement.md` section 7 measured and slice 3 replaces
+// with a named one.
+fn at_model_role(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (!(t.kind == "ident" && t.text == "model")) { return false }
+  let r = tkc(ts, i + 1)
+  if (!(r.kind == "ident" && r.text == "role")) { return false }
+  return atk(ts, i + 2, "ident") && atk(ts, i + 3, "ident")
+}
+
+// Index just past a `model role` declaration. The reference reads four tokens
+// today, `model role NAME <residence>`; anything written between the residence
+// and the next top-level declaration is stepped over STRUCTURALLY rather than
+// by line, so a clause a later item adds in that slot (roadmap items 515 and
+// 519 both propose one) is skipped whole instead of leaving the cursor
+// mid-clause and turning a shipped program into `unexpected token at top
+// level`. The gate carries no verdict for such a clause, which is the answer
+// it gives every construct it does not decide.
+fn model_role_end(ts: List[Token], i: Int) -> Int {
+  var j = i + 4
+  while (j < ts.length() && !atk(ts, j, "eof") && !atk(ts, j, "}")
+         && tkc(ts, j).kind != "kw" && !at_top_decl(ts, j)) {
+    if (atk(ts, j, "[")) {
+      let e = match_bracket(ts, j)
+      j = e == 0 - 1 ? j + 1 : e + 1
+    } else {
+      if (atk(ts, j, "{")) {
+        let e = close_brace(ts, j)
+        j = e == 0 - 1 ? j + 1 : e
+      } else { j += 1 }
+    }
+  }
+  return j
+}
+
+// item 516: `model council NAME { <function> -> <role>, ..., aggregate <rule> }`
+// is the SECOND contextual shape `model` heads, on exactly the discipline
+// `at_model_role` above records — the pair `model council` is what makes this a
+// declaration, so `model` alone stays an ordinary identifier and neither
+// lexer's KEYWORDS table moves. The brace is part of the recogniser because it
+// is what separates this shape from `model role`: `model role NAME <residence>`
+// has an ident in the fourth slot and a council has its body brace.
+//
+// Without this the gate answered `BAD|unexpected token at top level` for every
+// program that declares a council — the generic top-level parse marker, which
+// says only that something did not parse and not which construct the gate
+// declined.
+fn at_model_council(ts: List[Token], i: Int) -> Bool {
+  let t = tkc(ts, i)
+  if (!(t.kind == "ident" && t.text == "model")) { return false }
+  let c = tkc(ts, i + 1)
+  if (!(c.kind == "ident" && c.text == "council")) { return false }
+  return atk(ts, i + 2, "ident") && atk(ts, i + 3, "{")
+}
+
+// Index just past a `model council` declaration: the match of its body brace.
+// STRUCTURAL, not a token count, for the reason `model_role_end` is — the
+// clauses inside a council body are an open surface (items 517 and 519 both
+// propose reading one) and a brace match steps over whatever is written there
+// whole, instead of leaving the cursor mid-clause and turning a shipped program
+// back into `unexpected token at top level`.
+//
+// A body whose braces do not balance is a reference PARSE refusal this gate
+// carries no verdict for, so the cursor advances one token and the ordinary
+// top-level refusal stands rather than a verdict being invented — the
+// `event_decl_end` discipline.
+fn model_council_end(ts: List[Token], i: Int) -> Int {
+  let e = close_brace(ts, i + 3)
+  return e == 0 - 1 ? i + 1 : e
+}
+
 // Whether a token starts a TOP-LEVEL declaration — where a `type` declaration's
 // token span ends. Kept next to `type_ctors`, its only reader.
 fn at_top_decl(ts: List[Token], i: Int) -> Bool {
   return atw(ts, i, "type") || atw(ts, i, "fn") || atw(ts, i, "extern")
       || atw(ts, i, "service") || atw(ts, i, "component") || atw(ts, i, "use")
       || atw(ts, i, "test") || at_boot(ts, i) || at_event(ts, i)
-      || at_qual_test(ts, i)
+      || at_qual_test(ts, i) || at_model_role(ts, i) || at_model_council(ts, i)
 }
 
 // `pub` is a visibility PREFIX, not a declaration head. The reference accepts it
@@ -2602,6 +2684,37 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
     return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
                        setup, iso, rts, icept.push(key), hoff, action)
   }
+  // `route model on <action> { <origin> -> <role>, ... }` (item 512) is a
+  // component-prelude clause, the sibling of `isolate`/`intercept`: it names
+  // what an action may reach before any dependency access, so it must precede
+  // every action. Exactly two things happen here. The PRELUDE ordering rule,
+  // which is lower.py's `ModelRouteStmt` branch and carries the same wording
+  // every other prelude declaration carries; and stepping over the block
+  // structurally, because 512 is a PERMISSION checked at admission and writes
+  // no IR, so there is nothing in the block for the body walk to read.
+  //
+  // The ARMS are decided program-wide by `model_place_refusal`, which runs
+  // where the reference runs `model_route.check` — ahead of every component —
+  // so a block that is both misplaced and wrong is reported by its arm here
+  // too, and a valid block is not an action (the reference `continue`s).
+  if (ati(ts, i, "route") && ati(ts, i + 1, "model")) {
+    if (action) {
+      return mk_provr(provs, setup, iso, rts,
+                      tagged("PRELUDE", prelude_msg("route model")),
+                      skip_line(ts, i), true)
+    }
+    var rk = i + 2
+    while (rk < end && !atk(ts, rk, "{")) { rk += 1 }
+    if (atk(ts, rk, "{")) {
+      let rce = close_brace(ts, rk)
+      if (rce != 0 - 1) {
+        return p_comp_body(ts, rce, end, provh, reqh, cname, provs, setup, iso,
+                           rts, icept, hoff, action)
+      }
+    }
+    return p_comp_body(ts, skip_line(ts, i), end, provh, reqh, cname, provs,
+                       setup, iso, rts, icept, hoff, action)
+  }
   // `config { <field>: <Type> ... }` is a component-level declaration, not a
   // body action (the reference reads it off the component header, never the
   // statement stream) — so it neither gates as setup nor trips the prelude
@@ -2803,6 +2916,21 @@ fn p_top(ts: List[Token], i: Int, pg: Prog) -> Prog {
   if (at_qual_test(ts, i)) {
     let qe = qual_test_end(ts, i)
     if (qe != 0 - 1) { return p_top(ts, qe, pg) }
+  }
+  // item 512: `model role NAME <residence>`, stepped over WHOLE. The roles are
+  // read off the token stream by `model_place_refusal`, which is where the
+  // reference reads them too (`model_route.roles` walks `Program.model_roles`
+  // before any component is lowered), so nothing about a role rides in `Prog`
+  // and every program that declares none is byte-identical through here.
+  if (at_model_role(ts, i)) { return p_top(ts, model_role_end(ts, i), pg) }
+  // item 516: `model council NAME { ... }`, stepped over WHOLE for the same
+  // reason. The councils are read off the token stream by
+  // `model_council_refusal`, which is where the reference reads them too
+  // (`model_council.check` walks `Program.model_councils` after the routes and
+  // before any component is lowered), so nothing about a council rides in
+  // `Prog` and every program that declares none is byte-identical through here.
+  if (at_model_council(ts, i)) {
+    return p_top(ts, model_council_end(ts, i), pg)
   }
   if (t.kind != "kw") {
     return p_top(ts, skip_line(ts, i),
@@ -12196,6 +12324,963 @@ type NoLink = { done: Bool, refs: List[Verd] }
 // instead, so a LINE TIE between a withdrawal and one of those two fell the
 // opposite way on the two sides. `admit_src` passes `[]`, so the single-source
 // path is byte-identical.
+// ========================================================== model placement
+//
+// item 512, `docs/design/531-model-placement.md`. The reference half is
+// `src/revl/model_route.py`, run from `check_and_lower` BEFORE
+// `_validate_declared_types` and before any component is lowered, because a
+// `route model` arm reads a `model role` declared anywhere in the compilation.
+// This is that phase, and it is the design note's slice 3.
+//
+// WHAT THE GATE DECIDES AND WHAT IT DOES NOT. The DECLARATION half — the ten
+// refusals `model_route.check` raises over the written arms, plus the prelude
+// ordering rule `p_comp_body` carries — is decided here, spelled byte for byte
+// as the reference spells it and tagged "MODEL" so the oracle compares tag AND
+// message. The VALUE half (item 514's origin ceiling) is NOT: it walks taint
+// through a component body to a `model.*` crossing, this gate has no flow
+// walk, and its messages all open "a `<origin>` value reaches the model
+// crossing", which is why the oracle's classifier excludes exactly that
+// opening. A program the ceiling refuses is one this gate raises no objection
+// to, which is a no-objection and not an admission.
+//
+// WHICH WAY IT FAILS. Every unknown is a refusal. A role with a residence
+// outside the closed pair, an arm keyed by an origin the lattice does not
+// name, an arm naming a role nobody declared — each is refused rather than
+// treated as an arm that never matches, because the shape this item exists to
+// remove is a placement that quietly admits "any model" for an input nobody
+// thought about. The one place that reading could go wrong is the catch-all,
+// and it is narrowed by definition rather than by warning: `*` never covers a
+// confidentiality origin, so `* -> cloud` can never be the sentence that sends
+// a confidential input off the device. Nothing in THIS file needs that rule —
+// it bites on a value, which is item 514's — but the arm-level refusals below
+// are what make it true of what an author can WRITE.
+
+type MRole = { rname: Str, rres: Str, rline: Int }
+
+type MArm = { aorig: Str, arole: Str, aline: Int }
+
+// One `route model on <action> { ... }` block. `bok` is false when the block
+// is not in the arm form this gate reads; see `model_blocks_in`.
+type MBlock = { bact: Str, barms: List[MArm], bline: Int, bok: Bool }
+
+type MArmR = { xarms: List[MArm], xok: Bool }
+
+// One component's name and the token span of its body, the two facts every
+// block-level refusal below names.
+type MSpan = { sname: Str, slo: Int, shi: Int }
+
+// The closed residence vocabulary (`model_route.RESIDENCES`): validated at
+// compile time so a typo is a refusal and never a silent placement, the same
+// reason `known_strategies` is closed for `isolate ... in realms(...)`.
+fn model_residences() -> List[Str] { return ["on_device", "off_device"] }
+
+// The item-249 origin lattice an arm may be keyed by (`taint.ORIGIN_CLASSES`,
+// the public frozen view the declaration surface reads so a new origin class
+// cannot reach the checker without reaching this surface too).
+fn model_origin_classes() -> List[Str] {
+  return ["confidential", "fs", "input", "model", "net", "secret", "web"]
+}
+
+// The origins a role may never receive off the device
+// (`model_route.CONFIDENTIALITY_ORIGINS`). `secret` is refused at EVERY
+// residence one rule further down and cites `G-SECRET-FLOW`, which already
+// named an LLM prompt a disclosure sink for a capability-bound key.
+fn model_confidentiality_origins() -> List[Str] {
+  return ["confidential", "secret"]
+}
+
+fn mres_msg(res: Str, name: Str) -> Str {
+  return "unknown residence `".concat(res).concat("` for model role `")
+    .concat(name).concat("`")
+}
+
+fn mrole_twice_msg(name: Str, fline: Int, fres: Str, res: Str) -> Str {
+  return "model role `".concat(name)
+    .concat("` is declared twice (first on line ").concat(fline.to_str())
+    .concat(", as `").concat(fres).concat("`; here as `").concat(res)
+    .concat("`)")
+}
+
+fn maction_twice_msg(act: Str, cname: Str) -> Str {
+  return "action `".concat(act).concat("` is routed twice in ").concat(cname)
+}
+
+fn mempty_block_msg(act: Str, cname: Str) -> Str {
+  return "`route model on ".concat(act).concat("` in ").concat(cname)
+    .concat(" names no role")
+}
+
+fn mno_action_msg(act: Str, cname: Str) -> Str {
+  return "`route model on ".concat(act).concat("` names no action of ")
+    .concat(cname)
+}
+
+fn morigin_msg(orig: Str, act: Str) -> Str {
+  return "unknown origin class `".concat(orig)
+    .concat("` in `route model on ").concat(act).concat("`")
+}
+
+fn morigin_twice_msg(orig: Str, act: Str, cname: Str) -> Str {
+  return "origin `".concat(orig).concat("` is routed twice in `route model on ")
+    .concat(act).concat("` (").concat(cname).concat(")")
+}
+
+fn mundeclared_role_msg(orig: Str, role: Str, act: Str, cname: Str) -> Str {
+  return "`".concat(orig).concat(" -> ").concat(role)
+    .concat("` in `route model on ").concat(act).concat("` (").concat(cname)
+    .concat(") names no declared model role")
+}
+
+fn msecret_arm_msg(act: Str, cname: Str, role: Str) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `secret` origin to model role `").concat(role)
+    .concat("`: a capability-bound secret never reaches a model prompt, on ")
+    .concat("the device or off it (G-SECRET-FLOW)")
+}
+
+// The same sentence for an arm that names a `model council` (item 516 slice
+// 2). Only the noun moves: a council is not a role, and sending the author to
+// a `model role Release` declaration that does not exist would be worse than
+// no diagnostic.
+fn msecret_council_msg(act: Str, cname: Str, name: Str) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `secret` origin to model council `").concat(name)
+    .concat("`: a capability-bound secret never reaches a model prompt, on ")
+    .concat("the device or off it (G-SECRET-FLOW)")
+}
+
+// An arm that routes a confidentiality origin to a COUNCIL one of whose
+// members is placed off the device (item 516 slice 2, `model_route`'s
+// `_council_ceiling_refusal`).
+//
+// It names the MEMBER, and that is the whole reason it is a second sentence
+// rather than the role one with a different name in it. A council's members
+// are placed SEPARATELY (`docs/design/543-model-council.md` section 6), so
+// "the council is off_device" is a derived fact and the actionable one is
+// which member derived it. `rline` is the line the member's `model role` was
+// DECLARED on, which is the line every other placement refusal here cites;
+// the verdict's own line is the arm's.
+fn mcouncil_off_device_msg(act: Str, cname: Str, orig: Str, name: Str,
+                           fun: Str, role: Str, res: Str, rline: Int) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `").concat(orig)
+    .concat("` origin to model council `").concat(name)
+    .concat("`, whose member `").concat(fun)
+    .concat("` runs on model role `").concat(role).concat("`, declared `")
+    .concat(res).concat("` on line ").concat(rline.to_str()).concat(": a ")
+    .concat(orig).concat(" input may not leave the device (G-MODEL-PLACE)")
+}
+
+fn moff_device_msg(act: Str, cname: Str, orig: Str, role: Str, res: Str,
+                   rline: Int) -> Str {
+  return "action `".concat(act).concat("` (").concat(cname)
+    .concat(") routes the `").concat(orig)
+    .concat("` origin to model role `").concat(role)
+    .concat("`, which is declared `").concat(res).concat("` on line ")
+    .concat(rline.to_str()).concat(": a ").concat(orig)
+    .concat(" input may not leave the device (G-MODEL-PLACE)")
+}
+
+// The block this gate cannot read. It is a REFUSAL and not a silent step-over,
+// because the alternative is the only genuinely dangerous answer available
+// here: a block whose arms the gate skipped is a block whose arms it did not
+// decide, and raising no objection to one would let a placement the reference
+// refuses through a gate that claims to decide placements. The crate is
+// allowed to err toward refusing and is not allowed to err the other way, so
+// an unreadable block errs toward refusing, BY NAME.
+fn mundecided_msg(act: Str, cname: Str) -> Str {
+  return "`route model on ".concat(act).concat("` in ").concat(cname)
+    .concat(" is written in a form this gate does not decide")
+}
+
+fn mverd(msg: Str, line: Int) -> Verd { return mk_verd(tagged("MODEL", msg), line) }
+
+// ---------------------------------------------------------------- the roles
+//
+// Every `model role NAME <residence>` declared at top level, in declaration
+// order, which is the order `model_route.roles` refuses in. Brace-structural
+// and ITERATIVE, the `boot_names` discipline: an extern's verbatim `@py { ... }`
+// body is one `hostbody` token, so its braces cannot perturb the depth.
+fn model_roles_of(ts: List[Token]) -> List[MRole] {
+  var i = 0
+  var depth = 0
+  var out: List[MRole] = []
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atk(ts, i, "{")) { depth += 1 }
+    if (atk(ts, i, "}")) { depth -= 1 }
+    if (depth == 0 && at_model_role(ts, i)) {
+      out = out.push({ rname: tkc(ts, i + 2).text, rres: tkc(ts, i + 3).text,
+                       rline: tkc(ts, i).line })
+    }
+    i += 1
+  }
+  return out
+}
+
+fn mrole_at(rs: List[MRole], n: Str, i: Int) -> Int {
+  if (i >= rs.length()) { return 0 - 1 }
+  if (rs[i].rname == n) { return i }
+  return mrole_at(rs, n, i + 1)
+}
+
+// `model_route.roles`: the residence vocabulary and the one-declaration rule,
+// in that order, per declaration. A program that declares no role walks an
+// empty list and is byte-identical through here.
+fn model_roles_refusal(rs: List[MRole]) -> Verd {
+  var i = 0
+  while (i < rs.length()) {
+    let r = rs[i]
+    if (!contains(model_residences(), r.rres)) {
+      return mverd(mres_msg(r.rres, r.rname), r.rline)
+    }
+    let p = mrole_at(rs, r.rname, 0)
+    if (p != i) {
+      return mverd(mrole_twice_msg(r.rname, rs[p].rline, rs[p].rres, r.rres),
+                   r.rline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// ----------------------------------------------------------- the components
+//
+// Component NAME and body span, read off the token stream the way
+// `p_component` reads them: the header runs to the first `{`, and the body is
+// that brace's match. A component whose braces do not balance is a parse
+// refusal `p_top` already carries, so the walk simply stops there.
+fn model_comp_spans(ts: List[Token]) -> List[MSpan] {
+  var i = 0
+  var depth = 0
+  var out: List[MSpan] = []
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (depth == 0 && atw(ts, i, "component") && atk(ts, i + 1, "ident")) {
+      var j = i + 2
+      while (j < ts.length() && !atk(ts, j, "{") && !atk(ts, j, "eof")) { j += 1 }
+      if (!atk(ts, j, "{")) {
+        i = j
+      } else {
+        let e = close_brace(ts, j)
+        if (e == 0 - 1) {
+          i = ts.length()
+        } else {
+          out = out.push({ sname: tkc(ts, i + 1).text, slo: j + 1, shi: e - 1 })
+          i = e
+        }
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+// The `fn` names declared directly inside one `provide` block.
+fn model_fn_names_in(ts: List[Token], lo: Int, hi: Int,
+                     acc: List[Str]) -> List[Str] {
+  var i = lo
+  var depth = 0
+  var out = acc
+  while (i < hi) {
+    if (depth == 0 && atw(ts, i, "fn") && atk(ts, i + 1, "ident")) {
+      let n = tkc(ts, i + 1).text
+      if (!contains(out, n)) { out = out.push(n) }
+    }
+    if (atk(ts, i, "{")) { depth += 1 }
+    if (atk(ts, i, "}")) { depth -= 1 }
+    i += 1
+  }
+  return out
+}
+
+// `model_route._action_names`: every provide-method name the component
+// declares. Read straight off the tokens, because a `route model` clause is a
+// PRELUDE declaration validated before any provide block is lowered — the
+// reference reads the same set off the AST for the same reason.
+fn model_action_names(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
+  var i = lo
+  var depth = 0
+  var out: List[Str] = []
+  while (i < hi) {
+    if (depth == 0 && atw(ts, i, "provide") && atk(ts, i + 2, "{")) {
+      let e = close_brace(ts, i + 2)
+      if (e == 0 - 1) {
+        i = hi
+      } else {
+        out = model_fn_names_in(ts, i + 3, e - 1, out)
+        i = e
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+// The arms of one block: `<origin> -> <role>` separated by `,` or `;`, with a
+// trailing separator allowed exactly as the reference allows one. `xok` is
+// false for anything else, which is what `mundecided_msg` then refuses by name
+// rather than stepping over — see that function for why the direction matters.
+fn model_arms_in(ts: List[Token], lo: Int, hi: Int) -> MArmR {
+  var i = lo
+  var out: List[MArm] = []
+  while (i < hi) {
+    if (atk(ts, i, ",") || atk(ts, i, ";")) {
+      i += 1
+    } else {
+      var orig = ""
+      if (atk(ts, i, "*")) {
+        orig = "*"
+      } else if (atk(ts, i, "ident")) {
+        orig = tkc(ts, i).text
+      } else {
+        return { xarms: out, xok: false }
+      }
+      if (!atk(ts, i + 1, "arrow")) { return { xarms: out, xok: false } }
+      if (!atk(ts, i + 2, "ident")) { return { xarms: out, xok: false } }
+      out = out.push({ aorig: orig, arole: tkc(ts, i + 2).text,
+                       aline: tkc(ts, i).line })
+      i += 3
+    }
+  }
+  return { xarms: out, xok: true }
+}
+
+// Every `route model on <action> { ... }` written directly in one component
+// body, in declaration order — the order `model_route.check` refuses in. A
+// clause whose head is not `route model on IDENT {` is a reference PARSE
+// refusal this gate carries no verdict for, so it is left out entirely rather
+// than reported as an undecided block.
+fn model_blocks_in(ts: List[Token], lo: Int, hi: Int) -> List[MBlock] {
+  var i = lo
+  var depth = 0
+  var out: List[MBlock] = []
+  while (i < hi) {
+    if (depth == 0 && ati(ts, i, "route") && ati(ts, i + 1, "model")
+        && ati(ts, i + 2, "on") && atk(ts, i + 3, "ident")
+        && atk(ts, i + 4, "{")) {
+      let e = close_brace(ts, i + 4)
+      if (e == 0 - 1) {
+        i = hi
+      } else {
+        let r = model_arms_in(ts, i + 5, e - 1)
+        out = out.push({ bact: tkc(ts, i + 3).text, barms: r.xarms,
+                         bline: tkc(ts, i).line, bok: r.xok })
+        i = e
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+fn marm_origin_at(as_: List[MArm], o: Str, i: Int) -> Int {
+  if (i >= as_.length()) { return 0 - 1 }
+  if (as_[i].aorig == o) { return i }
+  return marm_origin_at(as_, o, i + 1)
+}
+
+// The first member of a council placed off the device, in DECLARATION order,
+// or -1 when every member stays on it (item 516 slice 2,
+// `model_route.off_device_members`). Declaration order, so the member a
+// refusal names is the first one an author reading the council top to bottom
+// would reach.
+//
+// A member whose role is not declared cannot be judged and is stepped over
+// here rather than guessed at: the council phase, which runs BEFORE this one,
+// already refuses that council by name, so this loop never sees one.
+fn ccl_off_member(c: CDecl, rs: List[MRole]) -> Int {
+  var i = 0
+  while (i < c.cmems.length()) {
+    let ri = mrole_at(rs, c.cmems[i].crole, 0)
+    if (ri != 0 - 1 && rs[ri].rres == "off_device") { return i }
+    i += 1
+  }
+  return 0 - 1
+}
+
+// One block's arms, in the reference's own order: the origin vocabulary, then
+// one arm per origin, then the role's (or COUNCIL's) existence, then `secret`
+// at any residence, then a confidentiality origin against an `off_device`
+// placement.
+//
+// `cs` is the council table (item 516 slice 2): the right of an arm names a
+// `model role` or a `model council`, and the two share one namespace. A
+// council's placement is the MOST permissive of its members', so the last rule
+// splits in two: against the role's own residence, or against the first
+// member of the council that is off the device, which the refusal NAMES.
+fn model_arms_refusal(b: MBlock, cname: Str, rs: List[MRole],
+                      cs: List[CDecl]) -> Verd {
+  var i = 0
+  while (i < b.barms.length()) {
+    let a = b.barms[i]
+    if (a.aorig != "*" && !contains(model_origin_classes(), a.aorig)) {
+      return mverd(morigin_msg(a.aorig, b.bact), a.aline)
+    }
+    if (marm_origin_at(b.barms, a.aorig, 0) != i) {
+      return mverd(morigin_twice_msg(a.aorig, b.bact, cname), a.aline)
+    }
+    let ri = mrole_at(rs, a.arole, 0)
+    let ci = ri == 0 - 1 ? ccl_at(cs, a.arole, 0) : 0 - 1
+    if (ri == 0 - 1 && ci == 0 - 1) {
+      return mverd(mundeclared_role_msg(a.aorig, a.arole, b.bact, cname),
+                   a.aline)
+    }
+    if (a.aorig == "secret") {
+      if (ci != 0 - 1) {
+        return mverd(msecret_council_msg(b.bact, cname, a.arole), a.aline)
+      }
+      return mverd(msecret_arm_msg(b.bact, cname, a.arole), a.aline)
+    }
+    if (ci != 0 - 1) {
+      if (contains(model_confidentiality_origins(), a.aorig)) {
+        let mi = ccl_off_member(cs[ci], rs)
+        if (mi != 0 - 1) {
+          let m = cs[ci].cmems[mi]
+          let mr = rs[mrole_at(rs, m.crole, 0)]
+          return mverd(mcouncil_off_device_msg(b.bact, cname, a.aorig, a.arole,
+                                               m.cfun, m.crole, mr.rres,
+                                               mr.rline), a.aline)
+        }
+      }
+    } else if (contains(model_confidentiality_origins(), a.aorig)
+               && rs[ri].rres == "off_device") {
+      return mverd(moff_device_msg(b.bact, cname, a.aorig, a.arole,
+                                   rs[ri].rres, rs[ri].rline), a.aline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+fn mblock_action_at(bs: List[MBlock], a: Str, i: Int) -> Int {
+  if (i >= bs.length()) { return 0 - 1 }
+  if (bs[i].bact == a) { return i }
+  return mblock_action_at(bs, a, i + 1)
+}
+
+// One component's blocks, in the reference's own order: routed-once per
+// action, a block that names no role, the action's existence, then the arms.
+fn model_comp_refusal(ts: List[Token], sp: MSpan, rs: List[MRole],
+                      cs: List[CDecl]) -> Verd {
+  let bs = model_blocks_in(ts, sp.slo, sp.shi)
+  if (bs.length() == 0) { return no_verd() }
+  let acts = model_action_names(ts, sp.slo, sp.shi)
+  var i = 0
+  while (i < bs.length()) {
+    let b = bs[i]
+    if (mblock_action_at(bs, b.bact, 0) != i) {
+      return mverd(maction_twice_msg(b.bact, sp.sname), b.bline)
+    }
+    if (!b.bok) { return mverd(mundecided_msg(b.bact, sp.sname), b.bline) }
+    if (b.barms.length() == 0) {
+      return mverd(mempty_block_msg(b.bact, sp.sname), b.bline)
+    }
+    if (!contains(acts, b.bact)) {
+      return mverd(mno_action_msg(b.bact, sp.sname), b.bline)
+    }
+    let av = model_arms_refusal(b, sp.sname, rs, cs)
+    if (av.v != "") { return av }
+    i += 1
+  }
+  return no_verd()
+}
+
+// The whole phase: the role table first (`model_route.check` calls `roles()`
+// before it looks at a single component), then every component in declaration
+// order. Returns the reference's first refusal, tagged "MODEL", or the empty
+// verdict for a program that declares no role and no block — which is every
+// program on the tree that predates item 512, and which walks two empty lists.
+//
+// The COUNCIL table is read here rather than rebuilt per component, the way
+// the role table is, and it is the table `model_council_refusal` has already
+// walked: that phase runs BEFORE this one (item 516 slice 2 made a route arm
+// able to name a council, so a council is resolved before anything that names
+// one), so every council this pass resolves an arm against has passed its own
+// rules.
+fn model_place_refusal(ts: List[Token]) -> Verd {
+  let rs = model_roles_of(ts)
+  let rv = model_roles_refusal(rs)
+  if (rv.v != "") { return rv }
+  let cs = model_councils_of(ts)
+  let sps = model_comp_spans(ts)
+  var i = 0
+  while (i < sps.length()) {
+    let cv = model_comp_refusal(ts, sps[i], rs, cs)
+    if (cv.v != "") { return cv }
+    i += 1
+  }
+  return no_verd()
+}
+
+// ============================================================ model councils
+//
+// item 516, `docs/design/543-model-council.md`. The reference half is
+// `src/revl/model_council.py`, run from `check_and_lower` BEFORE
+// `model_route.check` and before any component is lowered, because a `route
+// model` arm may name a council where it names a role (slice 2) and a
+// placement is resolved before anything that names one. This is that phase,
+// and it runs in the same place for the same reason. Slice 1 ran it after the
+// routes; the order moved with the dependency.
+//
+// WHAT A COUNCIL IS FOR, and therefore which way every rule fails. A council
+// that degrades to "whichever member answered" is STRICTLY WORSE than one
+// model, because the caller believes several agreed. So the two spellings that
+// would resolve disagreement toward an answer — `aggregate first` and
+// `on_tie allow` — parse and are refused BY NAME, and the rule's floor is
+// counted over the DECLARED members and never over the ones that answered:
+// `quorum answered` is refused for the same reason. This gate spells each of
+// those refusals byte for byte as the reference spells it.
+//
+// WHAT THE GATE DECIDES AND WHAT IT DOES NOT. The DECLARATION half — the
+// seventeen refusals `model_council._check_one` raises over what is written —
+// is decided here under the tag "COUNCIL".
+//
+// Slice 2's BINDING is decided too, and it is decided in the model-PLACEMENT
+// section above under the tag "MODEL", because what it refuses is a `route
+// model` arm and the arm is item 512's surface. `docs/design/556-model-council
+// -selfhost.md` section 1.3 declined the binding on the grounds that it reads
+// a flow position; that is true of the VALUE half and not of this one. An arm
+// naming a council is written down, the council's residence is the join of its
+// members' declared residences, and both are in the token stream, so the gate
+// decides them rather than declining by name.
+//
+// What is still NOT decided is everything a council does with a VALUE: item
+// 514's ceiling at a `model.*` crossing and item 517's record of what the
+// members answered both read a flow position this gate has no walk for. It
+// raises no objection to either, which is a no-objection and not an admission,
+// and the oracle's classifier names neither so the gap stays a measured
+// out-of-slice row rather than a claimed agreement.
+//
+// THE TAG IS ITS OWN. `MODEL` is the model-PLACEMENT family (item 512,
+// `src/revl/model_route.py`); a council is a second construct with its own
+// reference module and its own seventeen sentences, so a consumer reading the
+// wire learns which of the two was refused instead of having to parse the
+// message to find out.
+//
+// A TAG IS NOT A CODE. Issue #1190 registered `G-COUNCIL-SPLIT` and moved
+// eleven of the reference's thirteen council refusals onto it, leaving the two
+// whose subject is a `model role` on `G-MODEL-PLACE`
+// (`docs/design/557-council-disagreement.md` section 3). The tag did not move,
+// because the construct did not. So `COUNCIL` stands for two registered codes
+// and `MODEL` for one, which is what `SELFHOST_TAG_CODES`
+// (`tools/tier_guarantees.py`) records, and which of the two a given refusal
+// is evidence for is decided by the SENTENCE, not by the tag. That is another
+// reason the messages here are the reference's byte for byte.
+
+type CMem = { cfun: Str, crole: Str, cmline: Int }
+
+// One `aggregate <rule> [quorum <basis>] [on_tie <outcome>]` clause. `cquorum`
+// and `ctie` are "" when the clause was OMITTED, which is not the same as
+// writing the default: the reference records the omission rather than filling
+// it in (`None`), because a written word is validated and an omission defaults
+// to the fail-closed reading. Only a written one can be refused, so "" is the
+// one value the two rules below skip.
+type CAgg = { crule: Str, cquorum: Str, ctie: Str, caline: Int }
+
+// One `model council NAME { ... }` declaration. `cok` is false when the body
+// is not in the form this gate reads; see `ccl_undecided_msg`.
+type CDecl = { ccname: Str, cmems: List[CMem], caggs: List[CAgg],
+               ccline: Int, cok: Bool }
+
+type CBody = { ymems: List[CMem], yaggs: List[CAgg], yok: Bool }
+
+// What a member is FOR (`model_council.FUNCTIONS`). A CLOSED vocabulary, for
+// the same reason the residence vocabulary is closed: a typo is a refusal
+// rather than a member with no job in the aggregation.
+fn council_functions() -> List[Str] {
+  return ["proposer", "adversary", "verifier"]
+}
+
+// The rules that turn the members' answers into one outcome
+// (`model_council.AGGREGATIONS`). None of the three resolves a disagreement:
+// each either names one value or names none, and naming none is `split`.
+fn council_aggregations() -> List[Str] {
+  return ["unanimous", "majority", "veto"]
+}
+
+// The spellings that resolve disagreement toward whichever member answered
+// (`model_council.PICK_ONE_AGGREGATIONS`). They PARSE so that the refusal can
+// give the reason rather than a syntax complaint — the `*`-on-the-right
+// discipline item 512 already uses.
+fn council_pick_one() -> List[Str] {
+  return ["first", "any", "fastest", "cheapest", "best", "random"]
+}
+
+// What the rule's floor is counted over (`model_council.QUORUM_BASES` and
+// `REFUSED_QUORUM_BASES`). `declared` is the only admitted reading and the
+// default; the four refused spellings parse so the refusal can say why a floor
+// over the answering set lets an unreachable member disappear.
+fn council_quorum_bases() -> List[Str] { return ["declared"] }
+
+fn council_refused_quorums() -> List[Str] {
+  return ["answered", "reachable", "available", "responding"]
+}
+
+// What happens when the rule names no value (`model_council.TIE_OUTCOMES` and
+// `ADMITTING_TIE_OUTCOMES`). There is no admitting outcome, and the spellings
+// for one parse so that the refusal can be roadmap item 516's exit test.
+fn council_tie_outcomes() -> List[Str] { return ["split", "deny"] }
+
+fn council_admitting_ties() -> List[Str] {
+  return ["allow", "admit", "proceed", "accept", "first", "any"]
+}
+
+// ------------------------------------------------------------ the sentences
+
+fn ccl_twice_msg(name: Str, fline: Int) -> Str {
+  return "model council `".concat(name)
+    .concat("` is declared twice (first on line ").concat(fline.to_str())
+    .concat(")")
+}
+
+fn ccl_role_name_msg(name: Str, rline: Int) -> Str {
+  return "model council `".concat(name)
+    .concat("` has the name of the model role declared on line ")
+    .concat(rline.to_str())
+}
+
+fn ccl_unknown_fn_msg(fun: Str, name: Str) -> Str {
+  return "unknown council function `".concat(fun)
+    .concat("` in model council `").concat(name).concat("`")
+}
+
+fn ccl_fn_twice_msg(fun: Str, name: Str, fline: Int, frole: Str) -> Str {
+  return "council function `".concat(fun)
+    .concat("` is declared twice in model council `").concat(name)
+    .concat("` (first on line ").concat(fline.to_str()).concat(", as `")
+    .concat(frole).concat("`)")
+}
+
+fn ccl_no_role_msg(fun: Str, name: Str, role: Str) -> Str {
+  return "member `".concat(fun).concat("` of model council `").concat(name)
+    .concat("` names model role `").concat(role)
+    .concat("`, which is not declared")
+}
+
+fn ccl_same_role_msg(ffun: Str, fun: Str, name: Str, role: Str) -> Str {
+  return "members `".concat(ffun).concat("` and `").concat(fun)
+    .concat("` of model council `").concat(name)
+    .concat("` are both placed on model role `").concat(role).concat("`")
+}
+
+fn ccl_too_few_msg(name: Str, have: Int) -> Str {
+  return "model council `".concat(name).concat("` declares ")
+    .concat(have.to_str()).concat(" member")
+    .concat(have == 1 ? "" : "s")
+}
+
+fn ccl_no_proposer_msg(name: Str) -> Str {
+  return "model council `".concat(name).concat("` declares no `proposer`")
+}
+
+fn ccl_no_agg_msg(name: Str) -> Str {
+  return "model council `".concat(name)
+    .concat("` declares no `aggregate` rule")
+}
+
+fn ccl_two_agg_msg(name: Str, frule: Str, fline: Int, srule: Str) -> Str {
+  return "model council `".concat(name)
+    .concat("` declares two `aggregate` rules (`").concat(frule)
+    .concat("` on line ").concat(fline.to_str()).concat(", `").concat(srule)
+    .concat("` here)")
+}
+
+fn ccl_pick_one_msg(rule: Str, name: Str) -> Str {
+  return "`aggregate ".concat(rule).concat("` in model council `")
+    .concat(name)
+    .concat("` resolves disagreement toward one member's answer")
+}
+
+fn ccl_unknown_rule_msg(rule: Str, name: Str) -> Str {
+  return "unknown aggregation rule `".concat(rule)
+    .concat("` in model council `").concat(name).concat("`")
+}
+
+fn ccl_veto_msg(name: Str) -> Str {
+  return "`aggregate veto` in model council `".concat(name)
+    .concat("`, which declares no `adversary`")
+}
+
+fn ccl_quorum_answered_msg(q: Str, name: Str) -> Str {
+  return "`quorum ".concat(q).concat("` in model council `").concat(name)
+    .concat("` counts the rule's floor over the members that answered")
+}
+
+fn ccl_unknown_quorum_msg(q: Str, name: Str) -> Str {
+  return "unknown quorum basis `".concat(q).concat("` in model council `")
+    .concat(name).concat("`")
+}
+
+fn ccl_tie_admits_msg(o: Str, name: Str) -> Str {
+  return "`on_tie ".concat(o).concat("` in model council `").concat(name)
+    .concat("` admits when the members disagree")
+}
+
+fn ccl_unknown_tie_msg(o: Str, name: Str) -> Str {
+  return "unknown tie outcome `".concat(o).concat("` in model council `")
+    .concat(name).concat("`")
+}
+
+// The body this gate cannot read. A REFUSAL and not a silent step-over, for the
+// reason `mundecided_msg` records one construct up: a body whose items the gate
+// skipped is a body whose members and aggregation it did not decide, and
+// raising no objection to one would let a council the reference refuses — an
+// `on_tie allow`, say — through a gate that claims to decide councils. The
+// crate is allowed to err toward refusing and is not allowed to err the other
+// way.
+//
+// That arm is not hypothetical. Roadmap item 517 proposes recording what each
+// member answered and item 519 proposes a clause on a role; either may put a
+// word in this body the reader below does not know. The gate then refuses the
+// council by name until the port is extended, which is visible in the census
+// the moment a corpus file uses the form, rather than silently admitting it.
+fn ccl_undecided_msg(name: Str) -> Str {
+  return "model council `".concat(name)
+    .concat("` is written in a form this gate does not decide")
+}
+
+fn cverd(msg: Str, line: Int) -> Verd {
+  return mk_verd(tagged("COUNCIL", msg), line)
+}
+
+// ---------------------------------------------------------------- the reader
+//
+// The body items, in the reference parser's own shape (`model_council_decl`):
+// `,` and `;` are separators that carry no meaning, an item whose first token
+// is the contextual `aggregate` is a clause, and anything else is a member arm
+// `<function> -> <role>`. A trailing separator is allowed exactly as the
+// reference allows one. `yok` is false for anything else, which
+// `ccl_undecided_msg` then refuses by name.
+fn council_body(ts: List[Token], lo: Int, hi: Int) -> CBody {
+  var i = lo
+  var mems: List[CMem] = []
+  var aggs: List[CAgg] = []
+  while (i < hi) {
+    if (atk(ts, i, ",") || atk(ts, i, ";")) {
+      i += 1
+    } else if (ati(ts, i, "aggregate")) {
+      if (!atk(ts, i + 1, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      let aline = tkc(ts, i).line
+      let rule = tkc(ts, i + 1).text
+      var j = i + 2
+      var q = ""
+      if (ati(ts, j, "quorum")) {
+        if (!atk(ts, j + 1, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+        q = tkc(ts, j + 1).text
+        j += 2
+      }
+      var ot = ""
+      if (ati(ts, j, "on_tie")) {
+        if (!atk(ts, j + 1, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+        ot = tkc(ts, j + 1).text
+        j += 2
+      }
+      aggs = aggs.push({ crule: rule, cquorum: q, ctie: ot, caline: aline })
+      i = j
+    } else {
+      if (!atk(ts, i, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      if (!atk(ts, i + 1, "arrow")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      if (!atk(ts, i + 2, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      mems = mems.push({ cfun: tkc(ts, i).text, crole: tkc(ts, i + 2).text,
+                         cmline: tkc(ts, i).line })
+      i += 3
+    }
+  }
+  return { ymems: mems, yaggs: aggs, yok: true }
+}
+
+// Every `model council` declared at top level, in declaration order, which is
+// the order `model_council.check` refuses in. Brace-structural and ITERATIVE,
+// the `model_roles_of` discipline: an extern's verbatim `@py { ... }` body is
+// one `hostbody` token, so its braces cannot perturb the depth.
+fn model_councils_of(ts: List[Token]) -> List[CDecl] {
+  var i = 0
+  var depth = 0
+  var out: List[CDecl] = []
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (depth == 0 && at_model_council(ts, i)) {
+      let e = close_brace(ts, i + 3)
+      if (e == 0 - 1) {
+        i = ts.length()
+      } else {
+        let b = council_body(ts, i + 4, e - 1)
+        out = out.push({ ccname: tkc(ts, i + 2).text, cmems: b.ymems,
+                         caggs: b.yaggs, ccline: tkc(ts, i).line,
+                         cok: b.yok })
+        i = e
+      }
+    } else {
+      if (atk(ts, i, "{")) { depth += 1 }
+      if (atk(ts, i, "}")) { depth -= 1 }
+      i += 1
+    }
+  }
+  return out
+}
+
+fn ccl_at(cs: List[CDecl], n: Str, i: Int) -> Int {
+  if (i >= cs.length()) { return 0 - 1 }
+  if (cs[i].ccname == n) { return i }
+  return ccl_at(cs, n, i + 1)
+}
+
+fn cmem_fn_at(ms: List[CMem], f: Str, i: Int) -> Int {
+  if (i >= ms.length()) { return 0 - 1 }
+  if (ms[i].cfun == f) { return i }
+  return cmem_fn_at(ms, f, i + 1)
+}
+
+fn cmem_role_at(ms: List[CMem], r: Str, i: Int) -> Int {
+  if (i >= ms.length()) { return 0 - 1 }
+  if (ms[i].crole == r) { return i }
+  return cmem_role_at(ms, r, i + 1)
+}
+
+// One council's members, in the reference's own order per member: the function
+// vocabulary, then one member per function, then the role's existence, then one
+// member per role. A duplicate names the EARLIER member, which is what the
+// reference's `by_function` / `by_role` tables hold when the second is read.
+fn council_members_refusal(c: CDecl, rs: List[MRole]) -> Verd {
+  var i = 0
+  while (i < c.cmems.length()) {
+    let m = c.cmems[i]
+    if (!contains(council_functions(), m.cfun)) {
+      return cverd(ccl_unknown_fn_msg(m.cfun, c.ccname), m.cmline)
+    }
+    let pf = cmem_fn_at(c.cmems, m.cfun, 0)
+    if (pf != i) {
+      return cverd(ccl_fn_twice_msg(m.cfun, c.ccname, c.cmems[pf].cmline,
+                                    c.cmems[pf].crole), m.cmline)
+    }
+    if (mrole_at(rs, m.crole, 0) == 0 - 1) {
+      return cverd(ccl_no_role_msg(m.cfun, c.ccname, m.crole), m.cmline)
+    }
+    let pr = cmem_role_at(c.cmems, m.crole, 0)
+    if (pr != i) {
+      return cverd(ccl_same_role_msg(c.cmems[pr].cfun, m.cfun, c.ccname,
+                                     m.crole), m.cmline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// One council's aggregation clause, in the reference's own order: exactly one
+// clause written down, then the rule itself (the pick-one spellings before the
+// vocabulary check, so an author who reaches for one gets the REASON rather
+// than "unknown"), then `veto` needing an adversary to be the veto of, then the
+// quorum basis, then the tie outcome. A clause omitted is not a clause written
+// with the default, so only a written `quorum` / `on_tie` is judged.
+fn council_aggregate_refusal(c: CDecl) -> Verd {
+  if (c.caggs.length() == 0) {
+    return cverd(ccl_no_agg_msg(c.ccname), c.ccline)
+  }
+  if (c.caggs.length() > 1) {
+    return cverd(ccl_two_agg_msg(c.ccname, c.caggs[0].crule,
+                                 c.caggs[0].caline, c.caggs[1].crule),
+                 c.caggs[1].caline)
+  }
+  let cl = c.caggs[0]
+  if (contains(council_pick_one(), cl.crule)) {
+    return cverd(ccl_pick_one_msg(cl.crule, c.ccname), cl.caline)
+  }
+  if (!contains(council_aggregations(), cl.crule)) {
+    return cverd(ccl_unknown_rule_msg(cl.crule, c.ccname), cl.caline)
+  }
+  if (cl.crule == "veto" && cmem_fn_at(c.cmems, "adversary", 0) == 0 - 1) {
+    return cverd(ccl_veto_msg(c.ccname), cl.caline)
+  }
+  if (cl.cquorum != "") {
+    if (contains(council_refused_quorums(), cl.cquorum)) {
+      return cverd(ccl_quorum_answered_msg(cl.cquorum, c.ccname), cl.caline)
+    }
+    if (!contains(council_quorum_bases(), cl.cquorum)) {
+      return cverd(ccl_unknown_quorum_msg(cl.cquorum, c.ccname), cl.caline)
+    }
+  }
+  if (cl.ctie != "") {
+    if (contains(council_admitting_ties(), cl.ctie)) {
+      return cverd(ccl_tie_admits_msg(cl.ctie, c.ccname), cl.caline)
+    }
+    if (!contains(council_tie_outcomes(), cl.ctie)) {
+      return cverd(ccl_unknown_tie_msg(cl.ctie, c.ccname), cl.caline)
+    }
+  }
+  return no_verd()
+}
+
+// One council, in `model_council._check_one`'s own order: the name (declared
+// once, and not a role's), then the members, then the two counting rules over
+// the member set, then the aggregation clause.
+fn council_one_refusal(cs: List[CDecl], i: Int, rs: List[MRole]) -> Verd {
+  let c = cs[i]
+  let p = ccl_at(cs, c.ccname, 0)
+  if (p != i) {
+    return cverd(ccl_twice_msg(c.ccname, cs[p].ccline), c.ccline)
+  }
+  let ri = mrole_at(rs, c.ccname, 0)
+  if (ri != 0 - 1) {
+    return cverd(ccl_role_name_msg(c.ccname, rs[ri].rline), c.ccline)
+  }
+  let mv = council_members_refusal(c, rs)
+  if (mv.v != "") { return mv }
+  // two members at least, and a proposer among them. One member wearing a
+  // council's name is the misrepresentation the item exists to remove, and with
+  // no member to make a proposal the aggregation has nothing to name.
+  if (c.cmems.length() < 2) {
+    return cverd(ccl_too_few_msg(c.ccname, c.cmems.length()), c.ccline)
+  }
+  if (cmem_fn_at(c.cmems, "proposer", 0) == 0 - 1) {
+    return cverd(ccl_no_proposer_msg(c.ccname), c.ccline)
+  }
+  return council_aggregate_refusal(c)
+}
+
+// The whole phase. The UNREADABLE bodies are refused first, all of them ahead
+// of any rule, because in the reference an unreadable body is a PARSE refusal
+// and parsing precedes every check in this module. Then every council in
+// declaration order. A program that declares none walks an empty list and is
+// byte-identical through here, which is every program on the tree that predates
+// item 516.
+fn model_council_refusal(ts: List[Token]) -> Verd {
+  let cs = model_councils_of(ts)
+  if (cs.length() == 0) { return no_verd() }
+  var i = 0
+  while (i < cs.length()) {
+    if (!cs[i].cok) {
+      return cverd(ccl_undecided_msg(cs[i].ccname), cs[i].ccline)
+    }
+    i += 1
+  }
+  let rs = model_roles_of(ts)
+  // `model_council.check` calls `model_route.roles(program)` before it reads a
+  // single council, and `roles()` RAISES on an unknown residence or a
+  // re-declared name. Since slice 2 put this phase ahead of the route phase,
+  // that raise is the first refusal the reference produces for a program that
+  // declares both a malformed role and a refusable council, so it has to be
+  // the first one here too. It carries the MODEL tag, because it is item 512's
+  // refusal wherever it is reached from. A program that declares no council
+  // returned above and never reaches this, which is exactly where the
+  // reference returns `{}` without calling `roles()` at all.
+  let rv = model_roles_refusal(rs)
+  if (rv.v != "") { return rv }
+  i = 0
+  while (i < cs.length()) {
+    let v = council_one_refusal(cs, i, rs)
+    if (v.v != "") { return v }
+    i += 1
+  }
+  return no_verd()
+}
+
 fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
                    wrefs: List[Verd], ambSvcs: List[Str],
                    ambSvcsKnown: Bool, ambOps: List[SvcOps]) -> NoLink {
@@ -12215,6 +13300,23 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // the DECLARED-TYPE validation runs at the head of `_validate_declared_types`,
   // ahead of the config-is-data walk that closes the same function, so a
   // malformed annotation on a `fn`/`extern` signature is decided before it.
+  // MODEL COUNCILS (item 516) are the earliest phase of all, and they run
+  // AHEAD of the routes, which is where `check_and_lower` runs
+  // `model_council.check` since slice 2: a `route model` arm may name a
+  // council where it names a role, and a placement is resolved before anything
+  // that names one. Slice 1 ran the councils after the routes, which was right
+  // while a council was bound to nothing; the order moved with the dependency
+  // and not with the construct. See the model-council section above for what
+  // it decides and what it leaves to the slices that have not landed.
+  let cclv = model_council_refusal(ts)
+  if (cclv.v != "") { return { done: true, refs: [cclv] } }
+  // MODEL PLACEMENT (item 512) then, still ahead of
+  // `_validate_declared_types`, because a `route model` arm reads a `model
+  // role` declared anywhere in the compilation. See the model-placement
+  // section above for what it decides and what it deliberately leaves to the
+  // reference's flow walk.
+  let mdlv = model_place_refusal(ts)
+  if (mdlv.v != "") { return { done: true, refs: [mdlv] } }
   let wfv = declared_types_refusal(ts)
   if (wfv.v != "") { return { done: true, refs: [wfv] } }
   // the program-wide declared-type table (the `field <Type>.<name>` rows, the
@@ -12418,8 +13520,12 @@ fn fmt_all(rs: List[Verd]) -> Str {
 }
 
 // The bare verdict tag ("" | "G1" | "G2" | "G3" | "G4" | "G6" | "A1" |
-// "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "BAD") — the coarse
-// oracle. "G6" is the fn-body binding discipline (item 391).
+// "PRELUDE" | "SPAWN" | "HANDOFF" | "ROUTE" | "BOOT" | "MODEL" | "COUNCIL" |
+// "BAD") — the coarse oracle. "G6" is the fn-body binding discipline (item
+// 391); "MODEL" is the model-placement declaration half (item 512, slice 3) and
+// "COUNCIL" the model-council declaration (item 516). Both stand for the
+// registered code `G-MODEL-PLACE`, under two names because they are two
+// constructs with two reference modules.
 pub fn admit_tag(src: Str) -> Str {
   let v = admit_src(src)
   if (v == "") { return "" }
@@ -20005,4 +21111,519 @@ component C requires sink: Sink provides api: Api {
   provide api { fn go() { return sink.write("x") } }
 }""")
   assert v == "G4|call to emission `sink.write` must be marked `emit` (G4)"
+}
+
+// ------------------------------------------------- model placement (item 512)
+//
+// `docs/design/531-model-placement.md` slice 3. Every program here rides
+// through the differential oracle in `tests/test_selfhost_lower.py`
+// (`test_in_file_test_programs_agree`), so a message eyeballed in this file
+// cannot drift from the reference's.
+
+test "a model placement that keeps a confidential input on the device admits" {
+  let v = admit_src("""model role local on_device
+model role cloud off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> local,
+    * -> cloud
+  }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+}
+
+test "routing a confidential origin off the device is refused by name" {
+  // roadmap item 512's exit test, verbatim: the diagnostic names the action,
+  // the origin and the role, and the tag is MODEL rather than the generic
+  // top-level parse marker this gate answered before the port.
+  let v = admit_src("""model role local on_device
+model role cloud off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> cloud }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `cloud`, which is declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"
+}
+
+test "the residence vocabulary is closed, so a typo is a refusal" {
+  let v = admit_src("""model role local on_devise
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|unknown residence `on_devise` for model role `local`"
+  assert admit_tag("""model role local on_devise
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "MODEL"
+}
+
+test "a role is declared once, and the refusal names both residences" {
+  let v = admit_src("""model role local on_device
+model role local off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|model role `local` is declared twice (first on line 1, as `on_device`; here as `off_device`)"
+}
+
+test "an arm names an origin from the lattice and a declared role" {
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidental -> local }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|unknown origin class `confidental` in `route model on classify`"
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> edge }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|`confidential -> edge` in `route model on classify` (Classifier) names no declared model role"
+}
+
+test "an origin is routed once, an action is routed once, a block names a role" {
+  assert admit_src("""model role local on_device
+model role cloud off_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { web -> local, web -> cloud }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|origin `web` is routed twice in `route model on classify` (Classifier)"
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { web -> local }
+  route model on classify { net -> local }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` is routed twice in Classifier"
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|`route model on classify` in Classifier names no role"
+}
+
+test "a route keyed to an action the component renamed away protects nothing" {
+  // the shape this repository keeps finding on the wrong side: state keyed to
+  // a thing that outlived the thing meant to bound it, still READING as a
+  // placement. Refused, naming the component.
+  let v = admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify_text { web -> local }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|`route model on classify_text` names no action of Classifier"
+}
+
+test "the secret origin reaches no role, at either residence" {
+  assert admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { secret -> local }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` (Classifier) routes the `secret` origin to model role `local`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"
+}
+
+// ------------------------------------------- binding a council (item 516 S2)
+//
+// An arm's right names a `model role` or a `model council`. The pair below is
+// the slice's exit test and its control: the two programs differ in ONE word,
+// the role the proposer names, and only one of them compiles. Both are checked
+// in as corpus files (`examples/model_council_binding.rvl` and
+// `examples/rejections/gmodelplace_council_member_off_device.rvl`), so the
+// census measures the same pair against the reference on every run.
+
+test "an arm may name a council whose members all stay on the device" {
+  assert admit_src("""model role edge on_device
+model role local2 on_device
+service Answer { fn classify(text: Str) -> Str }
+model council Review { proposer -> local2, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> Review }
+  provide out { fn classify(text) = text }
+}""") == ""
+}
+
+test "a confidential origin routed to a council names the off-device MEMBER" {
+  // the council's residence is the JOIN of its members', so one off-device
+  // member makes the whole council an off-device placement. The refusal names
+  // that member rather than the council, because "the council is off_device"
+  // is derived and the member is what the author has to edit.
+  let v = admit_src("""model role edge on_device
+model role vast off_device
+service Answer { fn classify(text: Str) -> Str }
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> Release }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"
+}
+
+test "the secret origin reaches no council either" {
+  assert admit_src("""model role edge on_device
+model role local2 on_device
+service Answer { fn classify(text: Str) -> Str }
+model council Review { proposer -> local2, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { secret -> Review }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` (Classifier) routes the `secret` origin to model council `Review`: a capability-bound secret never reaches a model prompt, on the device or off it (G-SECRET-FLOW)"
+}
+
+test "a name that is neither a role nor a council is still refused" {
+  assert admit_src("""model role edge on_device
+model role local2 on_device
+service Answer { fn classify(text: Str) -> Str }
+model council Review { proposer -> local2, adversary -> edge, aggregate unanimous }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> ghost }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|`confidential -> ghost` in `route model on classify` (Classifier) names no declared model role"
+}
+
+test "the council phase runs ahead of the route phase" {
+  // slice 2 moved `model_council.check` in front of `model_route.check` in the
+  // reference, because an arm may name a council. A program that trips both
+  // gets the COUNCIL verdict on both sides, and this is where an order that
+  // drifted apart would show.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+service Answer { fn classify(text: Str) -> Str }
+model council Release { proposer -> vast, adversary -> edge, aggregate first }
+component Classifier provides out: Answer {
+  route model on classify { confidental -> edge }
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"
+}
+
+test "a malformed role is still decided before a refusable council" {
+  // `model_council.check` calls `model_route.roles(program)` before it reads a
+  // single council, and `roles()` raises. Putting the council phase first must
+  // not move that raise behind a COUNCIL verdict.
+  assert admit_src("""model role edge on_device
+model role vast off_devise
+service Answer { fn classify(text: Str) -> Str }
+model council Release { proposer -> edge, adversary -> vast, aggregate first }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "MODEL|unknown residence `off_devise` for model role `vast`"
+}
+
+test "a model placement is a prelude declaration" {
+  let v = admit_src("""model role local on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+  route model on classify { web -> local }
+}""")
+  assert v == "PRELUDE|`route model` must precede every effect, emit, await, and provide statement"
+}
+
+test "`model` and `route` stay ordinary identifiers" {
+  // the contextual-keyword claim, measured rather than asserted: the very
+  // spelling item 512 is about (`requires model: Model`) still parses, and so
+  // does a parameter named `model`.
+  assert admit_src("""service Model { fn c(x: Str) -> Str }
+service M { fn go(x: Str) -> Str }
+component C requires model: Model provides out: M {
+  provide out { fn go(x) = x }
+}""") == ""
+  assert admit_src("""service M { fn go(model: Str) -> Str }
+component C provides out: M {
+  provide out { fn go(model) = model }
+}""") == ""
+}
+
+// --------------------------------------------------- model councils (item 516)
+//
+// `docs/design/543-model-council.md`, the declaration slice. Every program here
+// rides through the differential oracle in `tests/test_selfhost_lower.py`
+// (`test_in_file_test_programs_agree`), so a message eyeballed in this file
+// cannot drift from the reference's.
+
+test "a council of three placed members with a written aggregation admits" {
+  let v = admit_src("""model role edge on_device
+model role local2 on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  verifier -> local2,
+  aggregate unanimous
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+  // the two optional clauses, written with their admitted values, and the
+  // `;` separator the reference also allows.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast; adversary -> edge;
+  aggregate majority quorum declared on_tie deny }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == ""
+}
+
+test "an aggregation that admits on a tie is refused by name" {
+  // roadmap item 516's exit test: the spelling PARSES so that the refusal can
+  // give the reason, and the tag is COUNCIL rather than the generic top-level
+  // parse marker this gate answered before the port.
+  let v = admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie allow
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "COUNCIL|`on_tie allow` in model council `Release` admits when the members disagree"
+  assert admit_tag("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie allow
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL"
+}
+
+test "a rule that picks one member's answer is refused, and so is a typo" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate first }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`aggregate first` in model council `Release` resolves disagreement toward one member's answer"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimus }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown aggregation rule `unanimus` in model council `Release`"
+}
+
+test "the floor is counted over the declared members, never the answering set" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate majority quorum answered
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`quorum answered` in model council `Release` counts the rule's floor over the members that answered"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate majority quorum declaired
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown quorum basis `declaired` in model council `Release`"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous on_tie splitt
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown tie outcome `splitt` in model council `Release`"
+}
+
+test "a council is several models, each with its own placement" {
+  // the four member rules, in the reference's own order: the function
+  // vocabulary, one member per function, the role's existence, one member per
+  // role. Each names the EARLIER member, which is what makes the diagnostic
+  // actionable.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, critic -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown council function `critic` in model council `Release`"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, proposer -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|council function `proposer` is declared twice in model council `Release` (first on line 3, as `vast`)"
+  assert admit_src("""model role edge on_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|member `proposer` of model council `Release` names model role `vast`, which is not declared"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> edge, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|members `proposer` and `adversary` of model council `Release` are both placed on model role `edge`"
+}
+
+test "one member wearing a council's name is refused, and so is no proposer" {
+  assert admit_src("""model role vast off_device
+model council Release { proposer -> vast, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares 1 member"
+  assert admit_src("""model role vast off_device
+model council Release { aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares 0 members"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { adversary -> vast, verifier -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares no `proposer`"
+}
+
+test "a council declares exactly one aggregation, written down" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares no `aggregate` rule"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous,
+  aggregate majority
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares two `aggregate` rules (`unanimous` on line 6, `majority` here)"
+}
+
+test "`veto` needs the adversary it is the veto of" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, verifier -> edge, aggregate veto }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|`aggregate veto` in model council `Release`, which declares no `adversary`"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate veto }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == ""
+}
+
+test "a council has one name, and it is not a role's" {
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+model council Release { proposer -> edge, adversary -> vast, aggregate majority }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` is declared twice (first on line 3)"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council edge { proposer -> vast, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `edge` has the name of the model role declared on line 1"
+}
+
+test "the role table is decided before any council indexes it" {
+  // `check_and_lower` runs `model_route.check` (which calls `roles()`) before
+  // `model_council.check`, so a malformed role table is refused as a PLACEMENT
+  // and not as a council that names an undeclared member.
+  let v = admit_src("""model role edge on_devise
+model council Release { proposer -> edge, adversary -> edge, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|unknown residence `on_devise` for model role `edge`"
+}
+
+test "a council leaves the rest of the document checked, and `council` is a name" {
+  // the gap this port closes, measured from the other side: before it the
+  // whole document failed at its top-level parse, so the G1 below was never
+  // reached. And the contextual-keyword claim: `council` alone is still an
+  // ordinary identifier.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast, adversary -> edge, aggregate unanimous }
+service Kv { fn get(k: Str) -> Str }
+service Api { fn go(k: Str) -> Str }
+component C provides api: Api {
+  provide api { fn go(k) { return kv.get(k) } }
+}""") == "G1|`kv` is not a declared requirement of C"
+  assert admit_src("""service M { fn go(council: Str) -> Str }
+component C provides out: M {
+  provide out { fn go(council) = council }
+}""") == ""
+}
+
+test "a council and a route model block are decided in the same compilation" {
+  let v = admit_src("""model role local on_device
+model role cloud off_device
+model council Release { proposer -> cloud, adversary -> local, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> local, * -> cloud }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+  // and the COUNCIL refusal now outranks the placement's, because item 516
+  // slice 2 made a `route model` arm able to name a council and the reference
+  // therefore decides the councils first. Before that slice this pair pinned
+  // the opposite order, which was right while a council was bound to nothing.
+  assert admit_src("""model role local on_device
+model role cloud off_device
+model council Release { proposer -> cloud, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> cloud }
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|model council `Release` declares 1 member"
 }

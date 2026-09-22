@@ -2055,21 +2055,22 @@ def _normalize_ir_for_attest(ir: dict) -> dict:
     """The IR spelling an attestation binds - each component's `file` reduced to
     its basename, the same normalization `_audit_document` and `truc reproduce`
     apply so an attestation verifies regardless of the path the entry compiled
-    from (mirrors reproduce._normalized_ir)."""
+    from (mirrors reproduce._normalized_ir).
+
+    The rewriting is `attest.path_normalized_ir`, called rather than
+    re-implemented. `attest.canonical_hash` now applies the same normalization
+    at the hashing boundary itself, so every producer gets the property and no
+    two copies of this rule can drift apart again — which is what already
+    happened once, between this function and `truc.reproduce._normalized_ir`
+    (issue #1276). The deep copy stays here because callers pass the result on
+    to `_audit_document`, which rewrites file paths IN PLACE, and the shared
+    normalizer returns its argument untouched when there is nothing to
+    rewrite."""
     import copy  # noqa: PLC0415
 
-    out = copy.deepcopy(ir)
-    for comp in (out.get("manifest") or {}).get("components") or []:
-        if comp.get("file"):
-            comp["file"] = os.path.basename(comp["file"])
-    # The compiled IR also stamps each component with its `source` path, which is
-    # cwd-dependent (a full path under `compile_files`, a bare name under
-    # `compile_source`). Basename it too so the attested composition hash is a
-    # pure function of the source, not of where the entry was compiled.
-    for comp in out.get("components") or []:
-        if comp.get("source"):
-            comp["source"] = os.path.basename(comp["source"])
-    return out
+    from . import attest  # noqa: PLC0415
+
+    return attest.path_normalized_ir(copy.deepcopy(ir))
 
 
 def _assess_match(match: "_Match", *, key: bytes | None,

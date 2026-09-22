@@ -1,0 +1,50 @@
+// Model placement as a checked route condition (roadmap item 512,
+// `docs/design/531-model-placement.md`).
+//
+// revl already routes runtime behaviour, and the route is checked rather than
+// advised: `isolate <key> in realms(...)` names where a dependency resolves and
+// the linker refuses a realm with no provider. This is the missing sibling for
+// a MODEL call. A `model role` is a declared placement — a name plus where a
+// call to it runs — and a `route model on <action>` block places one action's
+// model calls by the origin class of what the action is given.
+//
+// The block is a PERMISSION checked at admission, not a scheduler: which of two
+// admissible roles is cheaper is a policy question. The mechanical consequence
+// is that it contributes NOTHING to the IR, so this file emits byte for byte
+// what it would emit with the block deleted.
+//
+// Read the two arms together. `confidential -> local` is the only way a
+// confidential input is placed at all, because `*` is DEFINED not to cover a
+// confidentiality origin: `* -> cloud` covers `web`, `net`, `fs`, `input` and
+// `model`, and it can never be the sentence that sends a confidential input off
+// the device. `examples/rejections/gmodelplace_confidential_off_device.rvl` is
+// the program one arrow away from this one that does not compile.
+//
+// This file is also the self-host's ADMITTING reproducer. The gate built from
+// `selfhost/lower.rvl` refused every `route model` program at parse until slice
+// 3 ported the construct; it now admits this one and refuses the rejection
+// fixture beside it with the reference's own message.
+
+model role local on_device
+model role cloud off_device
+
+service Answer {
+  fn classify(text: Str) -> Str
+  fn summarize(doc: Str) -> Str
+}
+
+component Classifier provides out: Answer {
+  route model on classify {
+    confidential -> local,
+    * -> cloud
+  }
+
+  route model on summarize {
+    confidential -> local
+  }
+
+  provide out {
+    fn classify(text) = text
+    fn summarize(doc) = doc
+  }
+}

@@ -667,10 +667,18 @@ def _run_replay(args) -> int:
     if getattr(args, "under", None):
         return _run_counterfactual(args)
 
+    from ..errors import RevlError  # noqa: PLC0415
+    from ..model_evidence import resolve_key  # noqa: PLC0415
     from ..replay_modes import ReplayPlanError, plan, render  # noqa: PLC0415
 
     try:
-        doc = plan(args.wal, mode=args.mode)
+        key = resolve_key(getattr(args, "evidence_key", None))
+    except RevlError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+
+    try:
+        doc = plan(args.wal, mode=args.mode, evidence_key=key)
     except ReplayPlanError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

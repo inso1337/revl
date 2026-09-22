@@ -53,6 +53,28 @@ def _parse_type(name: str | None):
     return head, args
 
 
+def admits_json_null(type_name: str | None) -> bool:
+    """Does this surface type's JSON derivation accept a bare `null` document?
+
+    Exactly two surface shapes do: `Unit`, which renders as `{"type": "null"}`,
+    and any `Opt[_]`, which adds `null` alongside its inner rendering. A variant
+    never does at a validated boundary (every case is a tagged object, so a
+    nullary case is `{"tag": "Nil"}`, not `null`), a record renders as an object,
+    and a `List`/`Map` renders as an array/object.
+
+    This is asked of the SURFACE type, never of the derived schema, because a
+    JSON document carries ONE `null` and a derived schema carries ONE nullability
+    flag: by the time the nesting has been rendered, the thing that distinguishes
+    `Opt[Opt[T]]` from `Opt[T]` is already gone (issue #1263).
+    """
+    if not type_name:
+        return False
+    if type_name == "Unit":
+        return True
+    head, args = _parse_type(type_name)
+    return head == "Opt" and bool(args)
+
+
 def json_schema_for(type_name: str | None, types: dict | None = None,
                     *, validated: bool = False,
                     seen: frozenset = frozenset()) -> dict:
@@ -93,6 +115,17 @@ def json_schema_for(type_name: str | None, types: dict | None = None,
         return {"type": "array",
                 "items": json_schema_for(args[0], types, validated=validated, seen=seen)}
     if head == "Opt" and args:
+        # A NULL-AMBIGUOUS `Opt` has no JSON rendering at all (issue #1263).
+        # `{**inner, "nullable": True}` folds the outer layer into a flag on the
+        # inner schema, so when the inner type already accepts `null` the outer
+        # layer vanishes and `Opt[Opt[Str]]` derives the SAME dict as `Opt[Str]`.
+        # Renaming the flag does not help: JSON has one `null`, so no document
+        # can say which layer produced it. Degrade to the honest stub rather than
+        # hand back a schema that claims two distinct types are one. A `validated`
+        # boundary never reaches this line, having been refused by
+        # `fully_expressible` below.
+        if admits_json_null(args[0]):
+            return {"x-revlType": type_name}
         inner = json_schema_for(args[0], types, validated=validated, seen=seen)
         return {**inner, "nullable": True} if inner else {"nullable": True}
     if head == "Map" and len(args) == 2:
@@ -167,6 +200,12 @@ def fully_expressible(type_name: str | None, types: dict | None = None,
     - an **unknown nominal** type (a name `types` does not carry);
     - an **untagged `Result[T, E]`** (its derivation is an untagged `oneOf`,
       which cannot name a constructor and, for `T == E`, admits no valid value);
+    - a **null-ambiguous `Opt`** (`Opt[Unit]`, `Opt[Opt[U]]`, issue #1263): the
+      inner type already accepts `null`, and a JSON document carries one `null`,
+      so the outer layer has no document of its own. Both spellings derive the
+      same schema and a validator built on it accepts values for the wrong type;
+      a caller who needs to tell two absences apart declares a named variant that
+      tags each one;
     - a **`Map[K, V]` with `K != Str`** (the mapping drops `K`, so a validator
       cannot enforce the key type; JSON object keys are strings, so `Map[Str, V]`
       is expressible and any non-`Str`-key map is refused);
@@ -187,6 +226,11 @@ def fully_expressible(type_name: str | None, types: dict | None = None,
     if head == "List" and args:
         return fully_expressible(args[0], types, seen)
     if head == "Opt" and args:
+        # a NULL-AMBIGUOUS `Opt` (issue #1263): `Opt[Unit]`, `Opt[Opt[U]]`. Its
+        # inner type already accepts `null`, so the outer layer has no JSON
+        # document of its own and the derivation erases it.
+        if admits_json_null(args[0]):
+            return False
         return fully_expressible(args[0], types, seen)
     if head == "Map" and len(args) == 2:
         # JSON object keys are strings: only a `Str` key survives derivation.
@@ -227,6 +271,11 @@ def expressibility_reason(type_name: str | None, types: dict | None = None,
     if head == "List" and args:
         return expressibility_reason(args[0], types, seen)
     if head == "Opt" and args:
+        if admits_json_null(args[0]):
+            return (f"reaches `{type_name}`, whose inner type `{args[0]}` already "
+                    "accepts `null`, so the outer `Opt` has no JSON document of "
+                    "its own and both layers derive the same schema (declare a "
+                    "named variant that gives each absence a tag)")
         return expressibility_reason(args[0], types, seen)
     if head == "Map" and len(args) == 2:
         if args[0] != "Str":
