@@ -201,15 +201,31 @@ def test_sweep_block_carries_no_wall_clock():
 # an unclassified refusal is refused, not downgraded (issue #1342, #1347)
 # ---------------------------------------------------------------------------
 # `lim` reads as "this tier cannot express this construct". An emitter also
-# refuses for reasons about the DOCUMENT this corpus builds, and both arrive as
-# the tier's own EmitError. Publishing the second as `lim` understates the
+# refuses because of the DOCUMENT this corpus builds, and because a stdlib
+# method has no arm on the path the case takes; all three arrive as the tier's
+# own EmitError. Publishing either of the last two as `lim` understates the
 # tier, in the direction a reader deciding whether revl suits them would be
-# misled by. Measured: go refuses 24 of the 61 cases under the issue-#721 rule
-# (a document holding both a top-level declaration and an observable
-# component), which is the shape `_component()` builds nearly every case in,
-# and all 24 emit on go once the component half is removed.
-def test_an_unclassified_refusal_stops_the_generator(capsys):
+# misled by.
+#
+# The go column was the worked example and is now settled (issue #1347). It was
+# 24 unclassified cells: 22 were the issue-#721 mixed-document refusal, carried
+# since issue #1321 (PR #1355); `expr/Int32 bitwise` was a missing `to_int32`
+# arm in the component method path, now implemented; the arrow in method scope
+# is the one real capability limit and is written down as one. The tests below
+# no longer have an unclassified cell to work with, so the refusal path is
+# driven with an injected one instead of whatever the corpus happens to leave
+# unclassified — the guard must not evaporate the day the corpus goes clean.
+def _one_unclassified(monkeypatch):
+    """Drop the arrow classification, which puts exactly one unclassified
+    refusal back into the run without inventing an emitter or a case."""
+    limits = dict(conformance.tier_limits())
+    limits.pop("go::method/arrow param binds in method scope (FR-1)")
+    monkeypatch.setattr(conformance, "_TIER_LIMITS_CACHE", limits)
+
+
+def test_an_unclassified_refusal_stops_the_generator(capsys, monkeypatch):
     """The load-bearing one. `--write-readme` must REFUSE, not write."""
+    _one_unclassified(monkeypatch)
     rc = conformance._write_readme(check_only=False)
     assert rc == 2, (
         "the generator produced a matrix while cells carried an unclassified "
@@ -222,32 +238,41 @@ def test_an_unclassified_refusal_stops_the_generator(capsys):
     assert "conformance_tier_limits.json" in err
 
 
-def test_the_check_refuses_too_rather_than_reporting_staleness(capsys):
+def test_the_check_refuses_too_rather_than_reporting_staleness(capsys, monkeypatch):
     """`--check-readme` may not answer a question the generator cannot ask."""
+    _one_unclassified(monkeypatch)
     assert conformance._write_readme(check_only=True) == 2
     assert "REFUSING to generate" in capsys.readouterr().err
 
 
-def test_the_document_is_not_touched_by_a_refused_generation():
+def test_the_document_is_not_touched_by_a_refused_generation(monkeypatch):
     """The failure mode this exists to prevent is a matrix published with a
     false claim in it, so the refusal must happen BEFORE the write."""
+    _one_unclassified(monkeypatch)
     doc = ROOT / "docs" / "conformance.md"
     before = doc.read_bytes()
-    conformance._write_readme(check_only=False)
+    assert conformance._write_readme(check_only=False) == 2
     assert doc.read_bytes() == before
 
 
-def test_the_go_721_refusals_are_the_unclassified_set():
+def test_nothing_is_unclassified():
     """Names the measurement, so a change in it is visible rather than
-    absorbed. If issue #1347 settles and these are classified or the corpus is
-    split, this test is what says so."""
+    absorbed. This read 24 go cells under the issue-#721 mixed-document
+    refusal; issue #1347 classified or closed every one, so the corpus now
+    leaves the generator nothing it may not publish. A cell arriving here again
+    is a new refusal somebody has to judge, not a number to bump."""
+    unclassified = conformance.unclassified_refusals(conformance.run())
+    assert unclassified == [], unclassified
+
+
+def test_the_go_arrow_is_the_one_classified_go_limit():
+    """The other half of the same measurement: go publishes exactly one `lim`,
+    and it is the arrow in method scope. A second one appearing is a tier that
+    lost a capability, or a refusal somebody classified too easily."""
     report = conformance.run()
-    unclassified = conformance.unclassified_refusals(report)
-    tiers = {tier for tier, _case, _msg in unclassified}
-    assert tiers == {"go"}, sorted(tiers)
-    assert len(unclassified) == 24, len(unclassified)
-    for _tier, _case, message in unclassified:
-        assert "go lowers a document with a top-level declaration" in message
+    limits = conformance.classified_limits(report)
+    assert limits["go"] == {"method/arrow param binds in method scope (FR-1)"}, \
+        sorted(limits["go"])
 
 
 def test_a_classified_refusal_is_still_published_as_a_limit():
