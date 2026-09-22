@@ -58,9 +58,40 @@ shrinks only: a baselined PR whose merge commit becomes reachable was merged
 properly after all, and that is a FAILURE too, with the instruction to delete
 the entry. A baseline that may grow silently is not a ratchet.
 
+FETCH BEFORE JUDGING (issue #1377). The PR list is read from GitHub and the
+ancestry is read from a local clone, so the two are snapshots of the same
+repository taken at different moments. A PR that merges AFTER the clone and
+BEFORE `gh pr list` returns names a merge commit the clone has never heard of,
+and reporting that as anything but "refresh and look again" is a false alarm.
+Pre-fetching in the workflow does not close it: the fetch runs before the PR
+list is read, so the list is always the fresher of the two. The refresh has to
+happen on the MISS, after the question is asked. So a merge commit that does
+not resolve refreshes the remote-tracking refs once, then asks the remote for
+that one commit, and only then gives an answer. `main` is re-read after the
+refresh too, because the commit that just merged is on it.
+
+THREE ANSWERS, THREE WORDS. The failure paths used to share the word UNKNOWN,
+which is what made the false alarm indistinguishable from the real thing:
+
+    UNREACHABLE  the merge commit resolves, and is not an ancestor of `main`.
+                 This is the finding. It is stated as the fact it is: the
+                 baseline note, not this tool, says whether that means the
+                 work is stranded or was carried under another commit.
+    UNRESOLVED   the merge commit could not be resolved even after a refresh.
+                 Nothing has been decided about `main`; the clone is stale, or
+                 the object is gone from the remote.
+    UNRECORDED   GitHub records no merge commit for the PR at all.
+
+The distinction is not cosmetic. A real stranding whose base branch was
+deleted is absent from a fresh clone exactly like a commit from the future is,
+so before this the gate's own evidence read as noise. Asking the remote for
+the commit by sha resolves the stranding and leaves only the genuinely
+unanswerable as UNRESOLVED.
+
 USAGE
     python3 tools/check_merged_prs_landed.py                  # live, via gh
     python3 tools/check_merged_prs_landed.py --from-json f.json  # offline
+    python3 tools/check_merged_prs_landed.py --no-fetch       # never touch the network
 Exit 0 when every merged PR is accounted for, 1 on any finding, 2 when the
 question could not be asked (no `gh`, no network, an absent merge commit). An
 unanswered question is never reported as a pass.
@@ -72,6 +103,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 BASELINE = ROOT / "tools" / "merged_pr_landing_baseline.json"
@@ -120,21 +152,138 @@ def object_exists(root: Path, sha: str) -> bool:
     ).returncode == 0
 
 
-def audit(prs, root: Path, main_ref: str, baseline: dict[str, str]):
-    """Returns (findings, known, unanswerable), each a list of report lines."""
+def remote_of(main_ref: str) -> str | None:
+    """`origin/main` -> `origin`. A ref with no slash names a local branch, so
+    there is no remote to refresh from and nothing to do."""
+    head, sep, rest = main_ref.partition("/")
+    return head if sep and rest else None
+
+
+class Remote:
+    """The clone's link to the remote, refreshed lazily and at most once.
+
+    Every call here is on the MISS path. A run where every merge commit
+    resolves makes no network call at all, which is the common case and keeps
+    this as cheap as it was. `enabled=False` is the offline mode: the tests
+    drive a synthetic repository with no remote, and a gate that quietly
+    reaches the network during a unit test is its own kind of dishonest.
+    """
+
+    def __init__(self, root: Path, main_ref: str, enabled: bool = True,
+                 timeout: float = 120.0) -> None:
+        self.root = root
+        self.name = remote_of(main_ref) if enabled else None
+        self.timeout = timeout
+        self._refreshed: bool | None = None
+        self.note = ""
+
+    def _git(self, *args: str) -> bool:
+        try:
+            proc = subprocess.run(
+                ["git", "-C", str(self.root), *args],
+                capture_output=True, text=True, check=False,
+                timeout=self.timeout)
+        except (OSError, subprocess.SubprocessError) as exc:
+            self.note = str(exc)
+            return False
+        if proc.returncode != 0:
+            self.note = (proc.stderr or proc.stdout).strip().splitlines()[-1:]
+            self.note = self.note[0] if self.note else "git fetch failed"
+        return proc.returncode == 0
+
+    def refresh(self) -> bool:
+        """Bring every branch up to date, once per run. The merge commits sit
+        on the base branches rather than on `main`, so refreshing `main` alone
+        would leave exactly the commits this reads behind."""
+        if self.name is None:
+            return False
+        if self._refreshed is None:
+            self._refreshed = self._git(
+                "fetch", "--no-tags", "--quiet", self.name,
+                f"+refs/heads/*:refs/remotes/{self.name}/*")
+        return self._refreshed
+
+    def fetch_commit(self, sha: str) -> bool:
+        """Last resort: ask the remote for one commit by sha. This is what
+        rescues a real finding whose base branch has since been deleted, which
+        no branch refspec will ever bring in."""
+        if self.name is None:
+            return False
+        return self._git("fetch", "--no-tags", "--quiet", self.name, sha)
+
+    def resolve(self, sha: str) -> bool:
+        """True once `sha` is a commit in this clone, refreshing to get there."""
+        if object_exists(self.root, sha):
+            return True
+        self.refresh()
+        if object_exists(self.root, sha):
+            return True
+        self.fetch_commit(sha)
+        return object_exists(self.root, sha)
+
+    def why_unresolved(self) -> str:
+        """What a human should do about a commit that would not resolve. The
+        three cases want three different actions, so they get three sentences
+        rather than one that covers them all and helps with none."""
+        if self.name is None:
+            return ("no refresh was attempted: fetching is off, or "
+                    "--main-ref names a local branch with no remote behind it")
+        if not self.refresh():
+            reason = f": {self.note}" if self.note else ""
+            return f"the refresh did not reach `{self.name}`{reason}"
+        return (f"`{self.name}` was refreshed and the commit is still not "
+                f"there, so it is on no ref the remote still serves")
+
+
+class Audit(NamedTuple):
+    """Four outcomes, kept apart on purpose (issue #1377).
+
+    `findings` and `known` are answers. `unresolved` and `unrecorded` are the
+    two ways the question does not get answered, and they are separate because
+    a human does different things about them: refresh a clone, or go and look
+    at a pull request GitHub has no merge commit for.
+    """
+
+    findings: list[str]
+    known: list[str]
+    unresolved: list[str]
+    unrecorded: list[str]
+
+
+def audit(prs, root: Path, main_ref: str, baseline: dict[str, str],
+          remote: "Remote | None" = None) -> Audit:
+    """Read every PR's merge commit against `main_ref`. One git call per PR on
+    the happy path; a refresh only where a commit does not resolve."""
     findings: list[str] = []
     known: list[str] = []
-    unanswerable: list[str] = []
+    unresolved: list[str] = []
+    unrecorded: list[str] = []
     for pr in prs:
         num = str(pr.get("number"))
         title = (pr.get("title") or "").strip()
         base = pr.get("baseRefName") or "?"
         merge = (pr.get("mergeCommit") or {}).get("oid")
         if not merge:
-            unanswerable.append(
+            unrecorded.append(
                 f"#{num}: GitHub records no merge commit, so whether its work "
                 f"reached {main_ref} cannot be decided here ({title})")
             continue
+        if not is_ancestor(root, merge, main_ref):
+            # The miss path, and the only place that touches the network. A
+            # commit that does not resolve has decided nothing yet; one that
+            # merged since this clone was made becomes an ancestor the moment
+            # `main_ref` itself is refreshed, which is the false alarm.
+            if not object_exists(root, merge):
+                if remote is None or not remote.resolve(merge):
+                    why = ("no refresh was attempted" if remote is None
+                           else remote.why_unresolved())
+                    unresolved.append(
+                        f"#{num}: merge commit {merge[:12]} could not be "
+                        f"resolved ({why}). NOTHING is claimed about "
+                        f"{main_ref} here: this is a clone that cannot see "
+                        f"the commit, not a pull request whose work is "
+                        f"missing ({title})")
+                    continue
         if is_ancestor(root, merge, main_ref):
             if num in baseline:
                 findings.append(
@@ -144,19 +293,13 @@ def audit(prs, root: Path, main_ref: str, baseline: dict[str, str]):
                     f"{BASELINE.relative_to(ROOT)} so the ratchet keeps "
                     f"shrinking.")
             continue
-        if not object_exists(root, merge):
-            unanswerable.append(
-                f"#{num}: merge commit {merge[:12]} is not in this clone, so "
-                f"reachability from {main_ref} is unknown. Fetch it "
-                f"(`git fetch origin {merge}`) or check out with full history.")
-            continue
         line = (f"#{num}: MERGED into `{base}`, but its merge commit "
                 f"{merge[:12]} is NOT reachable from {main_ref} ({title})")
         if num in baseline:
             known.append(f"{line} [known: {baseline[num]}]")
         else:
             findings.append(line)
-    return findings, known, unanswerable
+    return Audit(findings, known, unresolved, unrecorded)
 
 
 def main(argv=None) -> int:
@@ -169,6 +312,10 @@ def main(argv=None) -> int:
                     help="read the PR list from a file instead of calling gh")
     ap.add_argument("--baseline", type=Path, default=BASELINE)
     ap.add_argument("--root", type=Path, default=ROOT)
+    ap.add_argument("--no-fetch", action="store_true",
+                    help="never refresh from the remote. A merge commit this "
+                         "clone cannot resolve is then reported UNRESOLVED "
+                         "rather than looked up, which is honest but weaker.")
     args = ap.parse_args(argv)
 
     if args.from_json is not None:
@@ -196,28 +343,39 @@ def main(argv=None) -> int:
         return 2
 
     baseline = load_baseline(args.baseline)
-    findings, known, unanswerable = audit(
-        prs, args.root, args.main_ref, baseline)
+    remote = Remote(args.root, args.main_ref, enabled=not args.no_fetch)
+    result = audit(prs, args.root, args.main_ref, baseline, remote=remote)
 
     print(f"read {len(prs)} merged pull request(s) against {args.main_ref}")
-    for line in known:
-        print(f"  known  {line}")
-    for line in findings:
-        print(f"  FOUND  {line}")
-    for line in unanswerable:
-        print(f"  UNKNOWN {line}")
+    for line in result.known:
+        print(f"  known       {line}")
+    for line in result.findings:
+        print(f"  UNREACHABLE {line}")
+    for line in result.unresolved:
+        print(f"  UNRESOLVED  {line}")
+    for line in result.unrecorded:
+        print(f"  UNRECORDED  {line}")
 
-    if findings:
-        print(f"\n{len(findings)} merged pull request(s) whose work is not in "
-              f"{args.main_ref}.", file=sys.stderr)
+    if result.findings:
+        print(f"\n{len(result.findings)} merged pull request(s) whose work is "
+              f"not in {args.main_ref}.", file=sys.stderr)
         return 1
-    if unanswerable:
-        print(f"\n{len(unanswerable)} merged pull request(s) could not be "
-              f"decided.", file=sys.stderr)
+    # Not a finding and not a pass. These two say the check did not get an
+    # answer, and they are counted apart so the line says which it was.
+    if result.unresolved or result.unrecorded:
+        bits = []
+        if result.unresolved:
+            bits.append(f"{len(result.unresolved)} whose merge commit this "
+                        f"clone could not resolve")
+        if result.unrecorded:
+            bits.append(f"{len(result.unrecorded)} for which GitHub records "
+                        f"no merge commit")
+        print(f"\nnothing is claimed about {args.main_ref} for "
+              f"{', '.join(bits)}.", file=sys.stderr)
         return 2
-    if known:
-        print(f"\nno new finding: {len(known)} merged pull request(s) have an "
-              f"unreachable merge commit and are accounted for in "
+    if result.known:
+        print(f"\nno new finding: {len(result.known)} merged pull request(s) "
+              f"have an unreachable merge commit and are accounted for in "
               f"{args.baseline}.")
     else:
         print(f"every merged pull request's merge commit is reachable from "

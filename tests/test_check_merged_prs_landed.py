@@ -103,20 +103,18 @@ def _prs(t: dict[str, str]) -> list[dict]:
 
 def test_the_check_fires_on_a_pr_merged_into_a_squashed_base(tmp_path):
     t = _build_repo(tmp_path)
-    findings, known, unanswerable = chk.audit(
-        _prs(t), Path(t["repo"]), "main", {})
-    assert known == [] and unanswerable == []
-    assert len(findings) == 1, findings
-    assert findings[0].startswith("#2:"), findings
-    assert "not_a_real_pr" not in findings[0]
+    r = chk.audit(_prs(t), Path(t["repo"]), "main", {})
+    assert r.known == [] and r.unresolved == [] and r.unrecorded == []
+    assert len(r.findings) == 1, r.findings
+    assert r.findings[0].startswith("#2:"), r.findings
+    assert "not_a_real_pr" not in r.findings[0]
 
 
 def test_the_healthy_squash_merge_is_not_a_finding(tmp_path):
     """The negative control. A squash merge onto main leaves the PR head
     unreachable, so a head-based check would report this one too."""
     t = _build_repo(tmp_path)
-    findings, _, _ = chk.audit(_prs(t)[:1], Path(t["repo"]), "main", {})
-    assert findings == []
+    assert chk.audit(_prs(t)[:1], Path(t["repo"]), "main", {}).findings == []
 
 
 def test_the_pr_head_cannot_tell_the_two_apart(tmp_path):
@@ -133,10 +131,9 @@ def test_the_pr_head_cannot_tell_the_two_apart(tmp_path):
 
 def test_a_baselined_pr_is_known_and_not_a_finding(tmp_path):
     t = _build_repo(tmp_path)
-    findings, known, _ = chk.audit(
-        _prs(t), Path(t["repo"]), "main", {"2": "carried by PR #99"})
-    assert findings == []
-    assert len(known) == 1 and "carried by PR #99" in known[0]
+    r = chk.audit(_prs(t), Path(t["repo"]), "main", {"2": "carried by PR #99"})
+    assert r.findings == []
+    assert len(r.known) == 1 and "carried by PR #99" in r.known[0]
 
 
 def test_the_ratchet_shrinks_only(tmp_path):
@@ -144,29 +141,35 @@ def test_the_ratchet_shrinks_only(tmp_path):
     entry is stale, and a baseline allowed to keep entries it no longer needs
     stops being evidence of anything."""
     t = _build_repo(tmp_path)
-    findings, known, _ = chk.audit(
-        _prs(t), Path(t["repo"]), "main", {"1": "was never stranded"})
-    assert known == []
-    assert len(findings) == 2, findings
-    stale = [f for f in findings if f.startswith("#1:")]
+    r = chk.audit(_prs(t), Path(t["repo"]), "main", {"1": "was never stranded"})
+    assert r.known == []
+    assert len(r.findings) == 2, r.findings
+    stale = [f for f in r.findings if f.startswith("#1:")]
     assert len(stale) == 1 and "IS now reachable" in stale[0]
 
 
-def test_a_missing_merge_commit_is_unknown_and_never_a_pass(tmp_path):
-    """Two ways the question cannot be asked: GitHub records no merge commit,
-    or the commit is not in this clone. Neither may report green."""
+def test_the_two_unanswerable_cases_are_kept_apart(tmp_path):
+    """Two ways the question cannot be asked, and they are NOT the same thing
+    (issue #1377). GitHub recording no merge commit is a fact about the pull
+    request; a commit this clone cannot resolve is a fact about the clone. The
+    first needs somebody to look at the PR, the second needs a fetch. Neither
+    may report green, and neither may be reported as the other."""
     t = _build_repo(tmp_path)
     repo = Path(t["repo"])
     no_merge = [{"number": 3, "title": "no merge commit",
                  "baseRefName": "main", "mergeCommit": None}]
-    _, _, unanswerable = chk.audit(no_merge, repo, "main", {})
-    assert len(unanswerable) == 1 and "no merge commit" in unanswerable[0]
+    r = chk.audit(no_merge, repo, "main", {})
+    assert r.unresolved == []
+    assert len(r.unrecorded) == 1 and "no merge commit" in r.unrecorded[0]
 
     absent = [{"number": 4, "title": "not in this clone", "baseRefName": "main",
                "mergeCommit": {"oid": "0" * 40}}]
-    findings, _, unanswerable = chk.audit(absent, repo, "main", {})
-    assert findings == []
-    assert len(unanswerable) == 1 and "not in this clone" in unanswerable[0]
+    r = chk.audit(absent, repo, "main", {})
+    assert r.findings == [] and r.unrecorded == []
+    assert len(r.unresolved) == 1
+    assert "could not be resolved" in r.unresolved[0]
+    # and it must not be worded as a claim about main
+    assert "NOTHING is claimed" in r.unresolved[0]
 
 
 def test_exit_status_separates_finding_from_unanswerable(tmp_path):
@@ -216,3 +219,208 @@ def test_an_empty_pull_request_list_is_not_a_pass(tmp_path):
     rc = chk.main(["--from-json", str(src), "--root", t["repo"],
                    "--main-ref", "main", "--baseline", str(empty)])
     assert rc == 2
+
+
+# --------------------------------------------------------------------------
+# Issue #1377: the merge that lands during the runner's clone.
+#
+# The PR list comes from GitHub and the ancestry comes from a local clone, so
+# they are snapshots taken at different moments. Pre-fetching in the workflow
+# does not close the window, because the fetch runs BEFORE the PR list is
+# read. These build that race deterministically -- clone, then merge -- rather
+# than waiting for it to happen again on a runner.
+
+
+def _build_remote_and_clone(tmp_path: Path) -> dict[str, str]:
+    """A remote with the usual topology, plus a clone taken at a known sha.
+
+    `clone` is what the runner has: every branch, fetched, and then the world
+    moves on. `stranded_deleted` is a second clone taken after the base branch
+    was deleted upstream, which is the state a real finding is usually in by
+    the time anybody looks.
+    """
+    remote = tmp_path / "remote"
+    remote.mkdir()
+    _git(remote, "init", "-q", "-b", "main")
+    _git(remote, "config", "user.email", "t@example.invalid")
+    _git(remote, "config", "user.name", "t")
+    _commit(remote, "base.txt", "base\n")
+
+    _git(remote, "checkout", "-q", "-b", "feature")
+    _commit(remote, "feature.txt", "feature\n")
+    _git(remote, "checkout", "-q", "main")
+    squash = _commit(remote, "feature.txt", "feature\n", msg="feature (#1)")
+    _git(remote, "checkout", "-q", "-b", "stacked", "feature")
+    _commit(remote, "stacked.txt", "stacked\n")
+    _git(remote, "checkout", "-q", "feature")
+    _git(remote, "merge", "-q", "--no-ff", "-m", "merge stacked", "stacked")
+    stranded = _git(remote, "rev-parse", "HEAD")
+    _git(remote, "checkout", "-q", "main")
+
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(remote),
+                    str(clone)], check=True, capture_output=True)
+
+    # the base branch is deleted upstream, as it is after a normal merge
+    _git(remote, "branch", "-q", "-D", "stacked")
+    _git(remote, "update-ref", "-d", "refs/heads/feature")
+    gone = tmp_path / "clone-deleted"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(remote),
+                    str(gone)], check=True, capture_output=True)
+
+    # AND NOW a pull request merges, after both clones were taken
+    late = _commit(remote, "late.txt", "late\n", msg="merged during the clone")
+
+    return {"remote": str(remote), "clone": str(clone),
+            "clone_deleted": str(gone), "squash": squash,
+            "stranded": stranded, "late": late}
+
+
+def _pr(num: int, oid: str, base: str = "main") -> list[dict]:
+    return [{"number": num, "title": "t", "baseRefName": base,
+             "mergeCommit": {"oid": oid}}]
+
+
+def test_a_merge_during_the_clone_is_not_reported_without_a_refresh(tmp_path):
+    """The defect, stated as the tool saw it. With no refresh the commit does
+    not resolve, and the run ends with something that is not a pass."""
+    t = _build_remote_and_clone(tmp_path)
+    r = chk.audit(_pr(1372, t["late"]), Path(t["clone"]), "origin/main", {})
+    assert r.findings == []
+    assert len(r.unresolved) == 1, r
+
+
+def test_a_merge_during_the_clone_resolves_after_the_refresh(tmp_path):
+    """The fix. Refreshing on the miss makes the commit resolve AND makes
+    `origin/main` current, and the pull request is then plainly fine. This is
+    the false alarm from the issue, gone."""
+    t = _build_remote_and_clone(tmp_path)
+    remote = chk.Remote(Path(t["clone"]), "origin/main")
+    r = chk.audit(_pr(1372, t["late"]), Path(t["clone"]), "origin/main", {},
+                  remote=remote)
+    assert r == chk.Audit([], [], [], []), r
+
+
+def test_the_refresh_does_not_disarm_a_real_finding(tmp_path):
+    """The repair must not buy quiet by admitting everything. The stranded
+    merge commit is in this clone already, and stays a finding."""
+    t = _build_remote_and_clone(tmp_path)
+    remote = chk.Remote(Path(t["clone"]), "origin/main")
+    r = chk.audit(_pr(2, t["stranded"], base="feature"), Path(t["clone"]),
+                  "origin/main", {}, remote=remote)
+    assert len(r.findings) == 1 and r.findings[0].startswith("#2:")
+    assert r.unresolved == [] and r.unrecorded == []
+
+
+def test_the_refresh_recovers_a_finding_whose_base_branch_was_deleted(tmp_path):
+    """The case that made the two answers look alike. Once the base branch is
+    gone from the remote, a fresh clone has no more of the stranded merge
+    commit than it has of one from the future, so before the refresh both read
+    as `not in this clone`. Asking the remote for the commit by sha resolves
+    it, and the finding is reported as the finding it is."""
+    t = _build_remote_and_clone(tmp_path)
+    gone = Path(t["clone_deleted"])
+    assert not chk.object_exists(gone, t["stranded"])
+
+    blind = chk.audit(_pr(2, t["stranded"], base="feature"), gone,
+                      "origin/main", {})
+    assert blind.findings == [] and len(blind.unresolved) == 1
+
+    seeing = chk.audit(_pr(2, t["stranded"], base="feature"), gone,
+                       "origin/main", {},
+                       remote=chk.Remote(gone, "origin/main"))
+    assert len(seeing.findings) == 1, seeing
+    assert seeing.unresolved == []
+
+
+def test_the_refresh_is_only_attempted_on_a_miss(tmp_path):
+    """A run where every merge commit resolves makes no network call at all.
+    A gate that fetches once per pull request would be its own problem."""
+    t = _build_remote_and_clone(tmp_path)
+    clone = Path(t["clone"])
+    calls: list[tuple] = []
+
+    class Counting(chk.Remote):
+        def _git(self, *args):
+            calls.append(args)
+            return super()._git(*args)
+
+    r = chk.audit(_pr(1, t["squash"]), clone, "origin/main", {},
+                  remote=Counting(clone, "origin/main"))
+    assert r == chk.Audit([], [], [], []), r
+    assert calls == [], calls
+
+
+def test_the_refresh_happens_once_however_many_misses(tmp_path):
+    t = _build_remote_and_clone(tmp_path)
+    clone = Path(t["clone"])
+    fetches: list[tuple] = []
+
+    class Counting(chk.Remote):
+        def _git(self, *args):
+            fetches.append(args)
+            return super()._git(*args)
+
+    prs = _pr(1372, t["late"]) + _pr(1373, t["late"]) + _pr(1374, t["late"])
+    r = chk.audit(prs, clone, "origin/main", {}, remote=Counting(clone,
+                                                                "origin/main"))
+    assert r == chk.Audit([], [], [], []), r
+    refreshes = [c for c in fetches if any(a.startswith("+refs/heads/")
+                                           for a in c)]
+    assert len(refreshes) == 1, fetches
+
+
+def test_no_fetch_never_touches_the_remote(tmp_path):
+    """`--no-fetch` has to mean it, or the offline mode is a lie."""
+    t = _build_remote_and_clone(tmp_path)
+    clone = Path(t["clone"])
+    remote = chk.Remote(clone, "origin/main", enabled=False)
+    assert remote.name is None
+    assert remote.refresh() is False
+    assert remote.fetch_commit(t["late"]) is False
+    assert not chk.object_exists(clone, t["late"])
+
+
+def test_a_local_main_ref_has_no_remote_to_refresh_from():
+    """`--main-ref main` names a local branch. There is nothing behind it to
+    fetch from, and inventing `origin` would fetch from somewhere nobody
+    asked for."""
+    assert chk.remote_of("origin/main") == "origin"
+    assert chk.remote_of("upstream/main") == "upstream"
+    assert chk.remote_of("main") is None
+    assert chk.remote_of("origin/") is None
+
+
+def test_the_three_outcomes_print_three_different_words(tmp_path, capsys):
+    """Issue #1377's third ask, asserted on the output rather than trusted.
+    A real finding and a stale clone used to share the word UNKNOWN, which is
+    what made the false alarm indistinguishable from the thing the gate is
+    for."""
+    t = _build_remote_and_clone(tmp_path)
+    src = tmp_path / "prs.json"
+    src.write_text(json.dumps(
+        _pr(2, t["stranded"], base="feature")
+        + [{"number": 3, "title": "t", "baseRefName": "main",
+            "mergeCommit": None}]
+        + _pr(4, "0" * 40)), encoding="utf-8")
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"unreachable": {}}), encoding="utf-8")
+
+    rc = chk.main(["--from-json", str(src), "--root", t["clone"],
+                   "--main-ref", "origin/main", "--baseline", str(empty),
+                   "--no-fetch"])
+    out = capsys.readouterr().out
+    assert rc == 1
+    assert "UNREACHABLE #2:" in out
+    assert "UNRECORDED  #3:" in out
+    assert "UNRESOLVED  #4:" in out
+    # the old word is gone from every one of them
+    assert "UNKNOWN" not in out
+
+
+def test_the_baseline_ratchet_did_not_absorb_the_false_alarm():
+    """Issue #1377 point 4. The repair must not have quietly added an entry to
+    make the run green: #1372 merged normally and its work is in main."""
+    entries = json.loads(BASELINE.read_text(encoding="utf-8"))["unreachable"]
+    assert "1372" not in entries
+    assert len(entries) == 8, sorted(entries)
