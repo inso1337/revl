@@ -1048,6 +1048,23 @@ def _comp_infer(node, env: _Env):
         # could not tell a Str receiver from a List one and picked the List
         # helper, so `revlListLen` was handed a string (issue #1321).
         return _FN_RET.get(node.get("name"))
+    if k == "call":
+        # a call on a REQUIRED service (`gate.begin_turn(sid)`): the declared
+        # return type off the document's service table. The `fn` arm above does
+        # the same for a top-level fn; without this one a Str-returning service
+        # method answered None and `begin_turn(x) + ":"` picked the List
+        # concat helper over the Str one (issue #1356).
+        target = node.get("target") or {}
+        if target.get("kind") == "req":
+            service = _REQ_SERVICE.get(target.get("name"))
+            methods = (_SERVICES.get(service) or {}).get("methods") or {}
+            return (methods.get(node.get("method")) or {}).get("returns")
+        return None
+    if k == "config":
+        # a config field read: its declared surface type. Without this
+        # `config.label.length` could not tell a Str field from a List one and
+        # lowered to `revlListLen` on a string (issue #1356).
+        return _CONFIG_TYPES.get(node.get("field"))
     if k == "match":
         # a match's value type is its scrutinee's
         return _comp_infer(node.get("scrutinee"), env)
@@ -2050,6 +2067,8 @@ def _scan_step_for_inserts(step, bind, env, candidates):
 
 
 _REQ_SERVICE = {}  # req name -> service type
+_CONFIG_TYPES: dict = {}  # config field name -> declared surface type
+_SERVICES: dict = {}  # the document's service table, for method return types
 
 
 def _service_of_req(name, services, reqs_map):
@@ -2116,6 +2135,7 @@ def _refuse_required_stream(component: dict, tier: str) -> None:
 
 def _emit_component(comp, services, out):
     global _BIND_HOST, _REQ_SERVICE, _BIND_MAP_VALUE, _BIND_IS_PTR
+    global _CONFIG_TYPES, _SERVICES
     name = comp["name"]
     _refuse_required_stream(comp, "cordis-go")
     cname = _camel(name)
@@ -2125,6 +2145,13 @@ def _emit_component(comp, services, out):
 
     # per-component maps
     _REQ_SERVICE = dict(requires)
+    # the declared surface type of each config field, and the document's
+    # service table. `_comp_infer` reads both to type a method-body receiver
+    # (`config.label.length`, `svc.begin(x) + ":"`); without them the receiver
+    # answered None and the builtin renderer guessed the List form.
+    _CONFIG_TYPES = {f.get("name"): f.get("type")
+                     for f in (comp.get("config") or []) if f.get("name")}
+    _SERVICES = services or {}
     _BIND_HOST = {}
     _BIND_MAP_VALUE = {}
     _BIND_IS_PTR = {}
@@ -10110,8 +10137,10 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
     global _COMP_NEEDS_STRCONV
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
-    global _COMP_NEEDS_STREAM_DRAIN
+    global _COMP_NEEDS_STREAM_DRAIN, _COMP_NEEDS_STREAM_EVENT
+    global _STREAM_ITER_COUNTER
     global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+    global _WITNESSED_EXTERNS, _WITNESSED_COUNTER
     global _FN_RET
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
@@ -10132,12 +10161,34 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     _COMP_NEEDS_STRCONV = False
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
+    _STREAM_ITER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
     _COMP_NEEDS_STREAM_DRAIN = False
+    _COMP_NEEDS_STREAM_EVENT = False
     _COMP_NEEDS_TEARDOWN = False
     _COMP_NEEDS_METHOD_WITNESSED = False
+    # items 243/247: the document's witnessed externs by name. `_emit` has
+    # built this registry since item 243; this path never did, so
+    # `_witnessed_extern` matched nothing and a witnessed effect in a carried
+    # component lowered as an ORDINARY bracket with a nil inverse: the proof
+    # inverse silently dropped, no teardown frame, no compensation phase. The
+    # emitted module compiled, which is why nothing caught it.
+    _WITNESSED_EXTERNS = {
+        ext["name"]: ext for ext in externs
+        if ext.get("class") == "witnessed"
+    }
+    _WITNESSED_COUNTER = 0
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
+    # item 102: a lifecycle test's `advance` step drives the clock coeffect,
+    # which lives in the timer preamble. A component with a timer normally
+    # flags it, but an `advance` alone is enough (`_emit` does the same scan).
+    if any(
+        s.get("step") == "advance"
+        for t in tests if t.get("lifecycle")
+        for s in (t.get("body") or [])
+    ):
+        _COMP_NEEDS_TIMER = True
     has_spawn = _spawn_targets(ir) and any(
         comp.get("body") or comp.get("provides") for comp in components)
 
@@ -10185,7 +10236,35 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         used_opt = True
     used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
     # the Map SUBSCRIPT helper (issue #957), gated on its own like above
-    used_map_index = "revlMapIndex(" in "\n".join(body)
+    body_blob = "\n".join(body)
+    used_map_index = "revlMapIndex(" in body_blob
+
+    # The two tiers in this one package disagree about what a Result IS. The
+    # pure typed-core renderer builds the FLAT STRUCT form (item 434 (d):
+    # `.Ok` / `.OkV` / `.ErrV`, `_V3_RESULT_PREAMBLE`); the component renderer
+    # and a witnessed `@go` extern body build the SEALED INTERFACE form
+    # (`RevlOk[T, E]` / `RevlErr[T, E]`, `_COMP_RESULT_PREAMBLE`). Only one of
+    # the two can be declared in a package. `_emit` declares the sealed form
+    # and `_emit_v3_go` the struct form, each on a path that renders one tier;
+    # this path renders BOTH, and picked the struct form unconditionally, so a
+    # witnessed extern's hand-written `RevlOk[...]` did not resolve.
+    #
+    # Decide from what the RENDERED body actually built (the discipline
+    # `_emit` already uses for its own Result scan) rather than from the IR:
+    # a declared `Result[T, E]` return type alone builds neither form.
+    sealed_result = ("RevlOk[" in body_blob) or ("RevlErr[" in body_blob)
+    struct_result = ("OkV" in body_blob) or ("ErrV" in body_blob)
+    if sealed_result and struct_result:
+        raise EmitError(
+            "this document needs BOTH Result representations in one Go "
+            "package: the component tier builds the sealed-interface form "
+            "(RevlOk/RevlErr, from a witnessed extern or a witnessed effect "
+            "step) and the pure typed-core tier builds the flat-struct form "
+            "(Ok/OkV/ErrV, from a `match` on a Result or a checked division). "
+            "Go declares one `RevlResult[T, E]` per package, so the two "
+            "cannot share this module. Split the witnessed extern and the "
+            "Result-matching pure fn into separate documents"
+        )
 
     imports: list[str] = []
     if pure_tests or has_lifecycle:
@@ -10229,6 +10308,12 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         imports.append('\t"time"')
         imports.append('\t"os"')
         imports.append('\t"strconv"')
+    if (_RECORD_MODE and _COMP_NEEDS_TEARDOWN) or _COMP_NEEDS_STREAM_EVENT:
+        # item 322 Slice 1 (the durable WAL sink) and item 130 Slice 5 (a typed
+        # event decodes the delivered item against its derived schema) both
+        # marshal with encoding/json, the way `_emit` imports it for the same
+        # two producers.
+        imports.append('\t"encoding/json"')
     if ctx.needs_strings:
         imports.append('\t"strings"')
     # The host runtime's Map.Keys and _V3_MAP_PREAMBLE's revlMapKeys both sort
@@ -10383,7 +10468,12 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     if ctx.needs_parse_int or _COMP_NEEDS_PARSE_INT:
         # after the Opt preamble: revlParseInt's return type is RevlOpt
         out.append(_V3_PARSE_INT_HELPER)
-    if used_result:
+    if sealed_result:
+        # the component tier's form (see the fork above): a witnessed extern's
+        # `@go` body hand-constructs RevlOk/RevlErr, and `_emit_witnessed_step`
+        # asserts on them.
+        out.append(_COMP_RESULT_PREAMBLE)
+    elif used_result:
         out.append(_V3_RESULT_PREAMBLE)
     if used_map or _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)
@@ -10393,12 +10483,20 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         out.append(_V3_STDLIB_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _RECORD_MODE:
+            # item 322 Slice 1: the durable WAL sink the teardown records
+            # through. `_emit` appends it beside the teardown preamble; a
+            # carried document emitted with `--record` got the teardown and
+            # not the sink.
+            out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
     if _COMP_NEEDS_STREAM:
         out.append(_STREAM_PREAMBLE)
     if _COMP_NEEDS_STREAM_DRAIN:
         out.append(_STREAM_DRAIN_PREAMBLE)
+    if _COMP_NEEDS_STREAM_EVENT:
+        out.append(_STREAM_EVENT_PREAMBLE)
     out.extend(body)
     out.extend(host_stubs)
 
@@ -10426,6 +10524,12 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
 
 
 def _emit_placement(ir: dict, package: str = "emitted") -> str:
+    # `--record` is an `emit` option; placement never sets it. Pin it here so
+    # the flag cannot arrive holding whatever the previous `emit(record=True)`
+    # left behind (`_reset_v3_typed_component_state` restores three globals,
+    # not this one).
+    global _RECORD_MODE
+    _RECORD_MODE = False
     ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
