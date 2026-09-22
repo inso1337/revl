@@ -46,8 +46,23 @@ def programs() -> list[tuple[str, str]]:
     return cases
 
 
+@pytest.fixture(scope="module")
+def limits() -> dict:
+    """tier -> the cases it refuses with a refusal the corpus has classified as
+    a capability limit, i.e. the cells the matrix publishes as `lim`.
+
+    A tier that cannot express a construct has no answer to compute for it, so
+    such a case is not a disagreement. The excuse is narrow on purpose: it
+    comes from the same classification the matrix publishes, so an UNclassified
+    refusal is still a failure here. That is the direction that matters — "the
+    emitter refused and nobody said why" is what this differential exists to
+    surface, and it must not be silenced by a blanket skip on refusals.
+    """
+    return conformance.classified_limits(conformance.run())
+
+
 @pytest.mark.parametrize("tier", sorted(EXECUTORS))
-def test_every_tier_computes_the_declared_answer(tier, programs):
+def test_every_tier_computes_the_declared_answer(tier, programs, limits):
     """One source, one declared answer, every tier that can run it.
 
     A tier without its runtime skips *loudly* with the reason its own runner
@@ -60,12 +75,39 @@ def test_every_tier_computes_the_declared_answer(tier, programs):
 
     results = executor.check(programs)
     assert len(results) == len(programs), f"{tier}: not every case was executed"
+    excused = limits.get(tier, set())
     disagreements = {label: detail for label, (status, detail) in results.items()
-                     if status != "ok"}
+                     if status != "ok" and label not in excused}
     assert not disagreements, (
         f"{tier} built and ran these constructs and computed a different answer "
         f"than the corpus declares — a compile-depth matrix cannot see this: "
         f"{disagreements}")
+
+
+@pytest.mark.parametrize("tier", sorted(EXECUTORS))
+def test_an_excused_case_is_one_the_tier_really_refuses(tier, programs, limits):
+    """The excuse above is only honest while the tier is still refusing. A case
+    named a capability limit that now runs is a stale classification, and a
+    stale classification publishes a `lim` cell for something the tier does."""
+    excused = limits.get(tier, set())
+    if not excused:
+        return
+    executor = EXECUTORS[tier]
+    reason = executor.unavailable()
+    if reason:
+        pytest.skip(f"{tier}: {reason}")
+    named = [item for item in programs if item[0] in excused]
+    assert len(named) == len(excused), (
+        f"{tier}: a classified limit names a case with no probe: "
+        f"{sorted(excused - {label for label, _ in named})}")
+    for label, (status, detail) in executor.check(named).items():
+        assert status != "ok", (
+            f"{tier}/{label} is classified as a capability limit but the tier "
+            f"ran it and agreed — remove the entry from "
+            f"tools/conformance_tier_limits.json")
+        assert "emitter refused" in detail, (
+            f"{tier}/{label} is classified as a capability limit but did not "
+            f"fail by refusing to emit: {detail}")
 
 
 def test_the_probe_programs_are_still_admissible(programs):

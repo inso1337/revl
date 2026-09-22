@@ -859,3 +859,209 @@ component Relay provides sink: Sink {
     assert seen == []                      # the guard was false: no crossing
     assert sink.accept("hello", True) == "ok"
     assert seen == [("audit", ("hello",))]  # fired exactly once, with the arg
+
+
+# ---------------------------------------------------------------------------
+# item 458 / issue #721 — COMPOUND ASSIGNMENT in a provide-method body.
+# ---------------------------------------------------------------------------
+
+COMPOUND_DRAFT = """
+service Trail { fn walk(path: Str, n: Int) -> Str }
+component T provides trail: Trail {
+  provide trail {
+    fn walk(path, n) {
+      var out = ""
+      var i = 0
+      while (i < n) {
+        out += path
+        i += 1
+      }
+      return out
+    }
+  }
+}
+"""
+
+PLAIN_DRAFT = COMPOUND_DRAFT.replace("out += path", "out = out + path") \
+                            .replace("i += 1", "i = i + 1")
+
+
+def test_compound_assignment_is_the_plain_assignment():
+    # The method grammar carries `var`, assignment, `if`, `while` and `for`, so
+    # a loop that accumulates is ordinary code here — but only the plain
+    # spelling parsed, and `out += path` failed as "expected a statement …
+    # found 'out'", which reads as though assignment itself were out of bounds.
+    # Both spellings lower to ONE `assign` step, so no tier learns a second
+    # shape and no emitter had to change.
+    assert (_emit_steps(COMPOUND_DRAFT, "T", "walk")
+            == _emit_steps(PLAIN_DRAFT, "T", "walk"))
+
+
+@pytest.mark.parametrize("backend", BACKENDS)
+def test_compound_assignment_emits_on_every_tier(backend):
+    def text_of(draft):
+        out = _emit(draft, backend)
+        return "\n".join(out.values()) if isinstance(out, dict) else out
+
+    assert text_of(COMPOUND_DRAFT) == text_of(PLAIN_DRAFT)
+
+
+@pytest.mark.parametrize("op", ["+=", "-=", "*=", "/=", "%="])
+def test_every_compound_operator_parses_in_a_method(op):
+    src = """
+service Count { fn tick(n: Int) -> Int }
+component C provides count: Count {
+  provide count {
+    fn tick(n) {
+      var acc = 10
+      acc %s n
+      return acc
+    }
+  }
+}
+""" % op
+    body = _emit_steps(src, "C", "tick")
+    assert body[1]["step"] == "assign"
+    assert body[1]["value"]["kind"] == "bin"
+    assert body[1]["value"]["op"] == op[:-1]
+
+
+# ---------------------------------------------------------------------------
+# item 458 / issue #721 — go refuses the component drop by name.
+# ---------------------------------------------------------------------------
+
+DROPPED_COMPONENT_DRAFT = """
+service Gate { emission fn claim(tool: Str) -> Str }
+service Web { emission fn dispatch(path: Str) -> Str }
+fn refused(verdict: Str) -> Str { return "refused: " + verdict }
+component Shell requires gate: Gate provides web: Web {
+  provide web {
+    fn dispatch(path) {
+      let claim = emit gate.claim(path)
+      if (claim != "ok") {
+        return refused(claim)
+      }
+      return "ok"
+    }
+  }
+}
+"""
+
+
+def test_go_carries_a_component_the_pure_path_would_drop():
+    # A module `fn` beside a component with provide methods is the ordinary
+    # shape of real revl code — every revl-harness component file is exactly it,
+    # and it is what a migrated dispatch looks like once `maybe_run`-style
+    # helpers come out and the route calls a plain helper from an `if` arm.
+    #
+    # go routed any v3 document carrying a top-level declaration to the pure
+    # typed-core path, which renders ordinary Go for the declarations and drops
+    # every component it routes past. For this draft it answered with 6185 bytes
+    # of stdlib preamble and two free functions: no services, no component, no
+    # routes, and no error on either side of the fork (issue #721). PR #1317
+    # made it refuse by name; issue #1321 carries it instead, on the combined
+    # renderer the placement path has used since 6d258f9fe.
+    #
+    # Both halves have to be in the answer. Rendering the component at the cost
+    # of the `fn` the pure path was chosen for would be the same defect pointed
+    # the other way.
+    emitter = backend_emitter("go")
+    ir = compile_source(DROPPED_COMPONENT_DRAFT, "x.rvl")
+    out = emitter.emit(ir)
+    assert "func refused(verdict string) string {" in out, (
+        "the top-level `fn` the pure path was chosen for")
+    assert 'Name: "Shell",' in out, "the component the pure path was dropping"
+    assert "func (revlSelf *Shell_web) Dispatch(path string) string {" in out
+    assert "revlSelf.gate.Claim(path)" in out, "the route's crossing"
+    assert "func LoadShell(" in out, "and something that can boot it"
+    assert "return refused(claim)" in out, (
+        "the `if` arm calls the module helper from inside the method body, "
+        "the crossing between the two halves this fork used to make impossible")
+
+
+def test_the_carried_module_brings_the_preamble_its_component_needs():
+    # Carrying the component is only half of it: the module has to BUILD.
+    #
+    # `tests/fixtures/emit_java_corpus/comp_multi_effect.rvl` is a `fn` beside a
+    # component whose provide method writes `emit bus.send(…) compensate
+    # bus.retract(…)`, which lowers to a `RevlFrame` teardown accumulator. The
+    # live stc-go path in `_emit` appends that preamble (and the `time` / `os` /
+    # `strconv` imports `runCompensationPhase` reads its budget from) when
+    # `_COMP_NEEDS_TEARDOWN` is set; the combined renderer did neither, because
+    # until issue #1321 only `emit_placement` reached it and its own callers had
+    # not hit the case. `go build` over the carried corpus said so: 56 of 123
+    # modules failed, 40 of them on `undefined: newRevlFrame` alone.
+    #
+    # A compile error is loud, unlike the drop this issue is about, but a tier
+    # that answers with Go that does not build has not carried anything.
+    emitter = backend_emitter("go")
+    doc = ROOT / "tests" / "fixtures" / "emit_java_corpus" / "comp_multi_effect.rvl"
+    ir = compile_source(doc.read_text(encoding="utf-8"))
+    out = emitter.emit(ir)
+    assert 'Name: "Relay",' in out, "the component is carried"
+    assert "func origin() int64 {" in out, "beside the `fn` that routed it"
+    assert "_revlFrame := newRevlFrame()" in out, "the method opens a frame"
+    assert "func newRevlFrame() *RevlFrame {" in out, (
+        "...and the module has to DEFINE it: the combined renderer used to "
+        "emit the call site with no preamble behind it")
+    for module in ('"time"', '"os"', '"strconv"'):
+        assert "\t%s\n" % module in out, (
+            "runCompensationPhase reads its budget from %s" % module)
+
+
+def test_go_still_carries_the_same_component_without_the_top_level_fn():
+    # The boundary: the fork was about the ROUTING, not about the control
+    # flow. Drop the module `fn` and the identical component lowers on the live
+    # stc-go path, if-chain and crossing intact.
+    emitter = backend_emitter("go")
+    source = DROPPED_COMPONENT_DRAFT \
+        .replace('fn refused(verdict: Str) -> Str { return "refused: " + verdict }\n', "") \
+        .replace("return refused(claim)", "return claim")
+    out = emitter.emit(compile_source(source, "x.rvl"))
+    assert "func (revlSelf *Shell_web) Dispatch(path string) string {" in out
+    assert "revlSelf.gate.Claim(path)" in out
+
+
+def test_go_still_routes_past_a_component_with_nothing_to_drop():
+    # The other boundary: a component with no activation body and no provide
+    # method loses nothing when it is routed past, so the pure path still takes
+    # it silently and the record/pure-fn corpus cases are untouched.
+    emitter = backend_emitter("go")
+    out = emitter.emit(compile_source(
+        "fn f() -> Int { return 1 }\ncomponent C { }\n", "x.rvl"))
+    assert "func f() int64 {" in out
+
+
+def test_the_component_drop_census_reports_zero_silent_drops():
+    # tools/go_component_drop_census.py is the reproducible half of the #721
+    # finding: it reads the routing predicate off the go emitter, calls the
+    # emitter, and counts the documents that come back as Go with a declared
+    # component's name absent. At PR #1317's base (ae8533ce3) it reported 126
+    # such documents tree-wide. The count is zero either way now: #1317 by
+    # refusing, #1321 by carrying. A regression that reintroduces the
+    # silent path shows up here as a non-zero SILENT count rather than as a
+    # quietly emptier artifact.
+    #
+    # The walk is the whole tree and takes minutes, so this case runs the
+    # census predicate over one document: the corpus fixture the migration
+    # added, which is routed past an observable component and was silent before
+    # either change.
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "go_drop_census", ROOT / "tools" / "go_component_drop_census.py")
+    census = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(census)
+
+    doc = ROOT / "tests" / "fixtures" / "emit_py_corpus" / "services_control_flow.rvl"
+    ir = compile_source(doc.read_text(encoding="utf-8"))
+    assert any(census._observable(comp) for comp in ir["components"]), (
+        "the fixture must declare a component worth not dropping, or this "
+        "case proves nothing"
+    )
+    out = backend_emitter("go").emit(ir)
+    missing = [comp["name"] for comp in ir["components"]
+               if comp["name"] not in out]
+    assert not missing, (
+        "the census counts exactly this: go returned Go source with %r absent "
+        "and raised nothing" % (missing,))

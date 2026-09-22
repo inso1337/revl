@@ -14,18 +14,18 @@
 
 service Assistant {
   // an LLM call is irreversible and returns data: the canonical emission
-  emission fn complete(prompt: Str) -> Str
+  emission[host_complete] fn complete(prompt: Str) -> Str
 }
 
 service Runtime {
   // compiling is not a boundary crossing — it answers a question
   fn check(source: Str) -> Str
   // proposing changes what will be running: irreversible, so `emission`
-  emission fn propose(source: Str) -> Str
+  emission[host_propose] fn propose(source: Str) -> Str
 }
 
 service Evolve {
-  emission fn once(goal: Str) -> Str
+  emission[assistant, compiler] fn once(goal: Str) -> Str
 }
 
 service Greeter {

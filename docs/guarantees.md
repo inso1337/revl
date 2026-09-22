@@ -93,6 +93,7 @@ groups "the `Secret` families" with G9 as the same no-paper-anchor family.
 | [G-SECRET](rejections.md#the-families) | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
 | [G-SECRET-FLOW](rejections.md#the-families) | a `Secret[T]` value never reaches a disclosure sink; it crosses only at a declared `Secret[T]` receiver and downgrades only at a declared `endorse[confidential]` | lower (taint flow) | revl-original (items 249 / 256); no paper anchor |
 | [G-MODEL-PLACE](rejections.md#the-families) | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration; `src/revl/model_route.py`) | revl-original (item 512); no paper anchor |
+| [G-COUNCIL-SPLIT](rejections.md#the-families) | a model council never resolves disagreement toward allow: its aggregation is written down, is total over the DECLARED members, and names no value rather than admitting when the members disagree or one of them is silent | checker (declaration; `src/revl/model_council.py`) | revl-original (item 516); no paper anchor |
 | [G-RETAIN](rejections.md#the-families) | a `Retained[T, P]` value past `P`'s retention deadline never reaches a persistence sink (a `db`/`fs`/`store`/`kv`/`blob`/`archive`/`index`/`cache`/`queue`/`wal` crossing), unless `P` declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) | revl-original (item 472); no paper anchor |
 
 `G-MODEL-PLACE` is the placement half of the same family. A model role is a
@@ -106,6 +107,21 @@ refusal cites `G-SECRET-FLOW` rather than this code, because an LLM prompt was
 already a disclosure sink for a bound secret. Today the code refuses the
 DECLARATION; the value side is roadmap item 514. See
 `docs/design/531-model-placement.md`.
+
+`G-COUNCIL-SPLIT` is the aggregation half. A `model council` binds several
+model roles under declared functions (`proposer`, `adversary`, `verifier`) and
+one written-down rule, and the code refuses every way a council could report
+agreement it does not have: an `on_tie` outcome that admits, a floor counted
+over the members that ANSWERED rather than over the ones the program declared,
+an aggregation that is missing, doubled, or picks one member's answer, and two
+members sharing one placement. Two council refusals cite `G-MODEL-PLACE`
+instead, and the line between them is one sentence: the placement code is for a
+refusal whose subject is a `model role`, which is also the refusal item 512's
+fix line already answers. Council votes come from MODELS and carry no identity;
+a multi-party human approval (`require N of {...}`, items 471 and 509) is a
+different family that shares no code with this one. See
+`docs/design/543-model-council.md` and
+`docs/design/557-council-disagreement.md`.
 
 A declared receiver is not a licence to RECORD. A `Secret[T]` declaration
 authorises disclosure to the receiver it names; it says nothing about a durable

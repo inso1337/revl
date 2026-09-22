@@ -17,6 +17,9 @@ artifact scoped to a single realm:
      reached host extern the realm's components make, read from the G8
      boundary surface (`revl.query.Composition`), each tagged as compensated
      (a `compensate` clause is attached) or bare (nothing was done about it).
+     A computer-use crossing is tagged with one of item 522's five residue
+     states instead, because `bare` covers three outcomes there and two of the
+     three readings are false for it.
 
   3. OTHER REALMS PROVABLY UNTOUCHED — the withdrawal cascade (`revl.query.
      withdrawal`, EXACT precision) of the realm's components. G2 makes each
@@ -42,19 +45,90 @@ discipline for the `--json` form.
 
 from __future__ import annotations
 
+from . import ui_transaction as uitx
 from .lower import SHARED_REALM
 from .query import Composition, classify_compensation, withdrawal
 
 # Report identity — a versioned, self-describing artifact, in the spirit of
 # `interchange.stamp`. Bump MINOR for an additive change, MAJOR for a breaking
 # one (a removed or re-shaped member).
-ERASE_REPORT_VERSION = "1.0"
+ERASE_REPORT_VERSION = "1.1"
 ERASE_REPORT_KIND = "revl.erase-report"
 
 # The header the report states about itself. This is load-bearing prose: it is
 # the difference between "we deleted the data" (false) and "we can prove the
 # in-process state is gone and here is exactly what already left the system"
 # (what this artifact actually establishes).
+#: What an auditor must do about one computer-use crossing, one clause per
+#: residue state `ui_transaction` computes (roadmap item 522, issue #1293).
+#:
+#: THE VOCABULARY IS DERIVED, NOT RESTATED. `_residue_caveats` builds the
+#: printed lines from `uitx.WEAKEST_FIRST` and refuses to build them at all
+#: when the two sets differ, so the English note below and the states the
+#: report actually tags cannot drift apart. That is the same shape as the
+#: `layer_state.OUTCOMES` set-equality oracle in
+#: `tests/test_ui_transaction_phases_522.py`: one definition, checked, rather
+#: than a second copy kept by hand.
+#:
+#: The clause each state gets is the reason this mapping exists. One sentence
+#: used to cover all five, and it was false for two of them: it told an
+#: auditor that a crossing "left the system with nothing done about it ... so
+#: it can be handled out of band", which is wrong for `untouched` (a read
+#: changed nothing, so there is nothing to handle) and wrong for
+#: `uncompensated` (no inverse exists, so it cannot be handled by running
+#: one). Those two readings are what item 522 measured and what this note now
+#: states separately.
+OUT_OF_BAND: dict[str, str] = {
+    uitx.UNREGISTERED:
+        "an `unregistered` computer-use crossing left the system and an "
+        "inverse for it EXISTS that nobody declared. That one can be handled "
+        "out of band, and this report cannot tell you with what: the "
+        "declaration that would have named the inverse is the thing that is "
+        "missing.",
+    uitx.UNCOMPENSATED:
+        "an `uncompensated` computer-use crossing left the system and NO "
+        "inverse exists. It cannot be handled out of band by running one, and "
+        "no run of any compensation set changes that. It is residue and this "
+        "report names it as residue.",
+    uitx.COMPENSATED:
+        "a `compensated` computer-use crossing left the system and an offset "
+        "landed. The offset is not a restoration: the first crossing still "
+        "happened and anything that already observed it still observed it "
+        "(paper §6.1).",
+    uitx.RESTORED:
+        "a `restored` computer-use crossing had its declared inverse run and "
+        "the state the step changed is back the way it was. What the step "
+        "showed or sent on the way there still left the system; `restored` "
+        "is a claim about the target's state, not about observation.",
+    uitx.UNTOUCHED:
+        "an `untouched` computer-use crossing changed no state the target "
+        "owns. There is nothing to restore and nothing to handle out of "
+        "band, and a report that asks an auditor to handle it is wrong.",
+}
+
+
+def _residue_caveats() -> list[str]:
+    """The DOES NOT PROVE clauses for the computer-use residue states, weakest
+    first — one per state, built from `uitx.WEAKEST_FIRST` rather than written
+    out again.
+
+    FAILURE DIRECTION: a state that `ui_transaction` computes and this module
+    has no clause for fails the import, loudly, here. The alternative is a
+    report that tags a crossing with a word its own honest-scope header never
+    explains, and a header that goes quiet about a state is the defect this
+    function exists to prevent.
+    """
+    states, clauses = set(uitx.WEAKEST_FIRST), set(OUT_OF_BAND)
+    if states != clauses:
+        raise AssertionError(
+            "erase_report.OUT_OF_BAND and ui_transaction.WEAKEST_FIRST "
+            "disagree: no clause for "
+            f"{sorted(states - clauses) or 'nothing'}, clause for unknown "
+            f"state {sorted(clauses - states) or 'nothing'}. The DOES NOT "
+            "PROVE note must name every residue state the report can tag.")
+    return [OUT_OF_BAND[state] for state in uitx.WEAKEST_FIRST]
+
+
 HONEST_SCOPE = {
     "title": "What this report proves — and what it does not",
     "proves": [
@@ -78,8 +152,12 @@ HONEST_SCOPE = {
         "a downstream trigger, a webhook, a human that observed a crossing) is "
         "outside this system and outside this proof. The state-gone proof is "
         "about in-process runtime state only.",
-        "a bare crossing left the system with nothing done about it; the "
-        "report lists it precisely so it can be handled out of band.",
+        "a bare emission or bare host extern left the system with nothing "
+        "done about it; the report lists it precisely so it can be handled "
+        "out of band. `bare` is still the right word for those: nothing "
+        "classifies them more finely, and the two-state tag says everything "
+        "the boundary surface knows.",
+        *_residue_caveats(),
     ],
     "reference": "paper §6.1; docs/replay.md §4.2; docs/erase-report.md",
 }
@@ -180,6 +258,66 @@ def _network_boundary(all_cross: list[dict], witnessed: list[dict]) -> dict:
                 "inversion (§6.1) — a compensable crossing still left the system, "
                 "it is not un-issued.",
     }
+
+
+def _ui_residue(crossing: dict) -> str | None:
+    """The item-522 residue state of a crossing whose capability is a
+    computer-use verb, or `None` for every other crossing.
+
+    `None` is the whole compatibility story: a composition that crosses no
+    computer-use verb gets `None` on every crossing, no `uiResidue` section,
+    and a report byte-identical to the one before this change. The split only
+    speaks where the registry can tell it something.
+
+    WHY IT EXISTS. `bare` is one word covering three outcomes, and two of the
+    three readings are false for a computer-use verb. Measured on the item-525
+    flagship agent before this change: `read_pane` (`screen.observe`, a READ)
+    and `actuate` (`ui.click`, no inverse EXISTS) both printed `[BARE]`, under
+    a note reading "a bare crossing left the system with nothing done about it
+    ... so it can be handled out of band". Nothing needs handling for the read,
+    and nothing CAN be done about the click. `compensated` collapses the same
+    way at the other end: a `ui.text` inverse RESTORES the field it typed into,
+    which is a stronger fact than an offset that merely counteracts.
+    """
+    for cap in crossing.get("capabilities") or []:
+        state = uitx.residue_state(cap, bool(crossing.get("compensated")))
+        if state is not None:
+            return state
+    return None
+
+
+def _ui_residue_section(all_cross: list[dict]) -> dict | None:
+    """The realm's computer-use revert split, or `None` when the realm crosses
+    no computer-use verb (so a UI-free report is unchanged).
+
+    Five DISJOINT lists under five names. A revert reports what it RESTORED
+    and what it only COMPENSATED separately: they are different facts about
+    the world and one word for both is the defect this section removes. The
+    aggregate is the WEAKEST part (item 546 rule 3, PR #1256), so a realm with
+    one uncompensated click does not read as compensated because four other
+    steps were."""
+    steps = []
+    for crossing in all_cross:
+        for cap in crossing.get("capabilities") or []:
+            if uitx.residue_state(cap, bool(crossing.get("compensated"))) \
+                    is not None:
+                steps.append((crossing.get("name") or crossing.get("label")
+                              or crossing.get("token"), cap,
+                              bool(crossing.get("compensated"))))
+                break
+    if not steps:
+        return None
+    report = uitx.revert_report(steps)
+    report["note"] = (
+        "the computer-use split (roadmap item 522). `untouched` is a read and "
+        "is NOT residue; `restored` put the state back; `compensated` attached "
+        "an offset that is not a restoration; `uncompensated` has no inverse "
+        "and never will; `unregistered` had one and nobody declared it. The "
+        "aggregate is the WEAKEST of these, never their average.")
+    report["meaning"] = {state: uitx.MEANING[state]
+                         for state in uitx.WEAKEST_FIRST
+                         if report.get(state)}
+    return report
 
 
 def _crossings(index: Composition, members: list[str],
@@ -324,6 +462,15 @@ def _crossings(index: Composition, members: list[str],
     unresolved_tokens = sorted(
         c["token"] for c in unresolved if c.get("token"))
     network = _network_boundary(all_cross, witnessed)
+    # item 522: tag each crossing with its computer-use residue state, and fold
+    # the realm's computer-use crossings into the five-way revert split. Both
+    # are additive and both are `None`/absent for a realm that crosses no
+    # computer-use verb, so every existing report is byte-identical.
+    for crossing in all_cross:
+        state = _ui_residue(crossing)
+        if state is not None:
+            crossing["uiResidue"] = state
+    ui_residue = _ui_residue_section(all_cross)
     return {
         "emissions": emissions,
         "externs": externs,
@@ -359,6 +506,10 @@ def _crossings(index: Composition, members: list[str],
         # touches no network boundary, so a network-free report is byte-identical
         # but for this additive member.
         "networkBoundary": network,
+        # item 522 (issue #1196): the computer-use revert split. Absent for a
+        # realm that crosses no computer-use verb — which is every realm in the
+        # tree today — so a report without one is unchanged.
+        **({"uiResidue": ui_residue} if ui_residue is not None else {}),
         "note": "a crossing is bare when nothing was done about it, "
                 "compensated when an offset landed, unresolved when an offset "
                 "was owed but did not land. Compensation is not inversion "
@@ -492,6 +643,21 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
     }
     crossings = _crossings(index, members, compensation_residue)
     others = _others_untouched(ir, index, members, realm)
+    # item 522: the static transaction plan for each of the realm's provide
+    # methods that crosses a computer-use verb — the phase eligibility, the
+    # confirmation state and the postcondition state, per step, in source
+    # order. `[]` for every composition in the tree today, so a report without
+    # one is unchanged.
+    #
+    # `approval_tokens` is empty here ON PURPOSE. The erase report is not
+    # handed a policy, so it reports the state a crossing is in with NO
+    # operator rule raising it, which is `unconfirmed` for every actuating
+    # step. That is the state this item exists to make visible: the gap is not
+    # that revl allows the click, it is that nothing said the click was
+    # unconfirmed. Enumerating them by name is what stops the absence of a
+    # policy rule from being silence.
+    transactions = [plan for plan in uitx.plans(ir)
+                    if plan.get("component") in set(members)]
 
     return {
         "ok": True,
@@ -503,6 +669,8 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
         "components": components,
         "inProcessStateGone": state_gone,
         "boundaryCrossings": crossings,
+        # item 522 (issue #1196): absent for a realm with no computer-use verb.
+        **({"uiTransactions": transactions} if transactions else {}),
         "otherRealmsUntouched": others,
         "summary": {
             "components": len(members),
@@ -517,12 +685,42 @@ def build_report(ir: dict, realm: str, *, prove_residue: bool = True,
             "networkCompensableFraction":
                 crossings["networkBoundary"]["compensableFraction"],
             "stateGoneProven": residue.get("proven"),
+            # item 522: the weakest computer-use residue state in the realm, or
+            # `None` when the realm crosses no computer-use verb. The WEAKEST,
+            # never an average — one uncompensated click is not diluted by four
+            # clean steps (item 546 rule 3).
+            "uiResidueAggregate":
+                (crossings.get("uiResidue") or {}).get("aggregate"),
             "otherRealmsUntouched": others["untouched"],
         },
     }
 
 
 # --------------------------------------------------------------- rendering
+
+#: item 522: the tag a computer-use crossing prints instead of the two-state
+#: `[compensated]` / `[BARE]`. Upper case is reserved for the states that are
+#: RESIDUE AN AUDITOR MUST HANDLE, so the shout means the same thing it always
+#: meant in this report and `[untouched]` never shouts at a reader about a read.
+_UI_TAG: dict[str, str] = {
+    uitx.UNTOUCHED: "[untouched]",
+    uitx.RESTORED: "[restored]",
+    uitx.COMPENSATED: "[compensated]",
+    uitx.UNCOMPENSATED: "[UNCOMPENSATED]",
+    uitx.UNREGISTERED: "[UNREGISTERED]",
+}
+
+
+def _tag(crossing: dict) -> str:
+    """The residue tag for one crossing. A computer-use crossing prints its
+    item-522 state; every other crossing prints the two-state tag it always
+    printed, so a report over a composition with no computer-use verb is
+    byte-identical to the one before this change."""
+    state = crossing.get("uiResidue")
+    if state in _UI_TAG:
+        return _UI_TAG[state]
+    return "[compensated]" if crossing.get("compensated") else "[BARE]"
+
 
 def render(report: dict) -> str:
     """Human rendering. The structured report is the product; this is the
@@ -576,19 +774,24 @@ def render(report: dict) -> str:
     header = (f"  [2] BOUNDARY CROSSINGS — {cross['total']} "
               f"({cross['compensatedCount']} compensated, {cross['bareCount']} bare")
     header += f", {unresolved_n} UNRESOLVED)" if unresolved_n else ")"
+    # item 522: the two-state counts above are kept byte-for-byte (a consumer
+    # gates on them), and they are COARSE for a computer-use crossing — they
+    # count a read as bare. Say so on the same line rather than leaving the
+    # headline number to be read as the finding.
+    if cross.get("uiResidue"):
+        header += ("  [computer-use crossings are counted coarsely here; the "
+                   "split below is the finding]")
     out.append(header)
     if not cross["emissions"] and not cross["externs"] \
             and not cross.get("widenings"):
         out.append("      none — this realm made no irreversible boundary "
                    "crossing (fully revertible, G8)")
     for c in cross["emissions"]:
-        tag = "[compensated]" if c["compensated"] else "[BARE]"
-        out.append(f"      {tag:<14} {c['component']}  emit {c['label']}")
+        out.append(f"      {_tag(c):<14} {c['component']}  emit {c['label']}")
     for c in cross["externs"]:
         # item 254: an emission extern that owns a `compensate` slot is
         # compensated, not bare (the network compensate-grade case).
-        tag = "[compensated]" if c["compensated"] else "[BARE]"
-        out.append(f"      {tag:<14} {c['component']}  host {c['name']}()")
+        out.append(f"      {_tag(c):<14} {c['component']}  host {c['name']}()")
     # item 414: a `*` widening, an emitting callable escaping in value
     # position, reaching a boundary that cannot be named.
     for c in cross.get("widenings") or []:
@@ -613,6 +816,25 @@ def render(report: dict) -> str:
             f"{net['total']} API crossing(s) witnessed/compensable ({pct}) — "
             f"{net['witnessedCount']} witnessed, {net['compensatedCount']} "
             f"compensated, {net['bareCount']} bare")
+    # item 522: the computer-use revert split, printed only when the realm
+    # crosses a computer-use verb. Five names for five outcomes, because a
+    # revert reports what it RESTORED and what it only COMPENSATED separately.
+    ui = cross.get("uiResidue")
+    if ui:
+        out.append("")
+        out.append(f"      computer-use revert split (item 522) — aggregate: "
+                   f"{ui['aggregate'].upper()} (the WEAKEST part, not the "
+                   f"average)")
+        for state in uitx.WEAKEST_FIRST:
+            names = ui.get(state) or []
+            if names:
+                out.append(f"        {state:<14} {', '.join(names)}")
+        order = ui.get("compensateOrder") or []
+        out.append("        compensate LIFO: "
+                   + (" -> ".join(order) if order
+                      else "none — no step in this realm has an inverse to run"))
+        out.append(f"        claim: {ui['claim']}")
+        out.append(f"        note: {ui['note']}")
     out.append(f"      note: {cross['note']}")
 
     # 3. others untouched
@@ -629,4 +851,119 @@ def render(report: dict) -> str:
         out.append(f"        realm `{label}`: {', '.join(names)}")
     out.append(f"      {others['guarantee']}")
 
+    # 4. the computer-use transaction plan (item 522). Printed only for a realm
+    # that crosses a computer-use verb, so every other report ends at [3].
+    out += _render_transactions(report.get("uiTransactions") or [])
+
     return "\n".join(out)
+
+
+def _render_transactions(plans: list[dict]) -> list[str]:
+    """Section [4]: the static phase plan, per provide method.
+
+    The word `PLAN` is load-bearing. Nothing here executes: revl does not run a
+    phase, does not run a compensation, and does not drive a desktop (the
+    substrate is roadmap item 539, upstream `inso1337/revl-harness#11`). This
+    section says which phases each step is ELIGIBLE for, what confirmed it, and
+    what its postcondition is worth — all decided at compile time."""
+    if not plans:
+        return []
+    out = ["", "  [4] COMPUTER-USE TRANSACTION PLAN (item 522) — a static "
+                "reading; revl executes no phase"]
+    for plan in plans:
+        out.append(f"      {plan['component']}.{plan['key']}."
+                   f"{plan['method']}()")
+        for step in plan["steps"]:
+            out.append(
+                f"        {step['extern']}() [{step['token']}] "
+                f"{step['class']} | residue {step['residue']} | "
+                f"{step['confirmation']} | {step['postcondition']}")
+            out.append("            eligible phases: "
+                       + ", ".join(step["eligiblePhases"]))
+            checked = step.get("postconditionCheckedBy")
+            if checked:
+                out.append(
+                    f"            postcondition read: {checked}() resolves "
+                    f"the target this step acted on, from an observation "
+                    f"taken after it")
+        unconfirmed = plan.get("unconfirmedIrreversibleSteps") or []
+        if unconfirmed:
+            out.append(
+                "        UNCONFIRMED AND UNCOMPENSATED: "
+                + ", ".join(unconfirmed)
+                + " — each leaves residue no inverse describes and no "
+                  "authority required a human to see it. revl does not refuse "
+                  "these (see the note below); it refuses to let them go "
+                  "unnamed")
+        unverified = plan.get("unverifiedSteps") or []
+        if unverified:
+            out.append(
+                "        UNVERIFIED: " + ", ".join(unverified)
+                + " — no read follows the actuation. A return value says the "
+                  "actuation was delivered, which is not the claim that the "
+                  "business effect occurred")
+        unbound = plan.get("unboundPostconditionSteps") or []
+        if unbound:
+            out.append(
+                "        READ NOT BOUND TO THE STEP: " + ", ".join(unbound)
+                + " — a read follows and it checks something else: a "
+                  "different target, or an observation taken before the "
+                  "actuation. Position is not a postcondition (item 522 "
+                  "slice 5)")
+        undetectable = plan.get("undetectableFailureSteps") or []
+        if undetectable:
+            out.append(
+                "        NO FAILURE DETECTION: " + ", ".join(undetectable)
+                + " — these actuations carry no postcondition, so a failure "
+                  "at one of them triggers no compensation run at all. A LIFO "
+                  "run is started by an unmet postcondition, and a step with "
+                  "no postcondition never reports one unmet")
+        out += _render_runs(plan.get("compensationRuns") or [])
+        out.append(
+            "        note: the strongest postcondition word available here is "
+            "`verified-against-untrusted-read`. The read came from the "
+            "application under test, so it raises confidence and does not "
+            "establish a fact. A confirmation is `confirmed-per-crossing` only "
+            "when the `emit` carries an `Approval[C]` edge, which today can be "
+            "minted only in a component activation body — a computer-use loop "
+            "in a `provide` method cannot acquire one, which is why the "
+            "unconfirmed steps above are named rather than refused "
+            "(docs/design/553-ui-transaction-phases.md §3)")
+    return out
+
+
+def _render_runs(runs: list[dict]) -> list[str]:
+    """The LIFO compensation run for each step whose failure this transaction
+    can detect (roadmap item 522 slice 3, issue #1369).
+
+    One run per step that HAS a postcondition, because that is what starts a
+    run. The word `run` is as far as it goes: revl computes the order, the
+    membership and the per-step outcome, and the compensating crossings are
+    performed by the computer-use substrate (roadmap item 539), exactly as the
+    actuations are."""
+    if not runs:
+        return []
+    out = ["        LIFO COMPENSATION RUN, per detectable failure (item 522 "
+           "slice 3) — revl computes the run; the substrate performs the "
+           "crossings"]
+    for run in runs:
+        ran = ", ".join(f"{label}()" for label in run["ran"]) or "nothing"
+        out.append(f"          if {run['failedStep']}() fails: {ran}")
+        residue = [entry["step"] for entry in run["outcomes"]
+                   if entry["executed"] and entry["outcome"] in uitx.RESIDUE]
+        if residue:
+            out.append("            residue after the run: "
+                       + ", ".join(f"{label}() {state}" for label, state in (
+                           (entry["step"], entry["outcome"])
+                           for entry in run["outcomes"]
+                           if entry["executed"]
+                           and entry["outcome"] in uitx.RESIDUE)))
+        # only the ACTUATIONS after the failure. A read that never executed is
+        # not news; an actuation that never executed is the whole difference
+        # between this run and the `compensateOrder` it is keyed against.
+        never = [entry["step"] for entry in run["outcomes"]
+                 if not entry["executed"] and entry["actuation"]]
+        if never:
+            out.append("            never executed, so nothing to undo: "
+                       + ", ".join(f"{label}()" for label in never))
+    return out

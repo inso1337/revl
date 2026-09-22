@@ -1,0 +1,82 @@
+{
+  "comment": [
+    "Which deliberate emitter refusals the conformance matrix is allowed to",
+    "publish as `lim`, a tier limit. Issue #1342, issue #1347.",
+    "",
+    "`lim` is read as 'this tier cannot express this construct'. An emitter",
+    "can also refuse for a reason that is about the DOCUMENT the corpus built",
+    "rather than about the construct under test, and it can refuse because a",
+    "stdlib method simply has no arm on that path yet. The matrix has no way",
+    "to tell the three apart from the exception alone: all of them arrive as",
+    "the tier's own EmitError. Publishing either of the last two as `lim`",
+    "understates the tier, in the fail-open direction for a reader deciding",
+    "whether revl suits them.",
+    "",
+    "So a refusal is `lim` only if it is written down here, with the reason it",
+    "is a capability limit. Anything else is UNCLASSIFIED, and an unclassified",
+    "cell stops `--write-readme` and `--check-readme` rather than being",
+    "downgraded. `message_prefix` is what makes an entry perishable: the entry",
+    "applies only while the emitter still refuses for the reason recorded, so",
+    "a rewritten refusal drops back to unclassified instead of inheriting a",
+    "judgement made about different words.",
+    "",
+    "The go column's history is the worked example. Issue #1321 (PR #1355)",
+    "carried the mixed document the pure path used to drop, which closed 22 of",
+    "the 24 cells that were unclassified here. Of the two left, one was never a",
+    "capability limit either: `expr/Int32 bitwise` refused with 'unknown stdlib",
+    "method: to_int32' because the narrow had an arm on the pure typed-core",
+    "path and none in a component method body, while the widen beside it did.",
+    "That is a missing arm, so it was implemented rather than classified, and",
+    "the cell now executes. Only the arrow below is a real tier limit."
+  ],
+  "limits": {
+    "java::method/arrow param binds in method scope (FR-1)": {
+      "reason": "a declared function type has no nominal target type on the JVM, so the emitter has nothing to emit the lambda against. A capability limit of the tier.",
+      "message_prefix": "a declared function type"
+    },
+    "wasm::component/config field": {
+      "reason": "the cordis-wasm runtime has no instantiation-config channel, so a config block has no lowering. A capability limit of the runtime.",
+      "message_prefix": "C: config blocks are not lowerable"
+    },
+    "wasm::component/fail (A8)": {
+      "reason": "the cordis-wasm runtime has no instantiation-config channel, so a config block has no lowering. The same capability limit as component/config field.",
+      "message_prefix": "C: config blocks are not lowerable"
+    },
+    "wasm::component/effect + undo": {
+      "reason": "the host builtin Map.new is not on the cordis-wasm tier. A capability limit of the runtime's builtin set.",
+      "message_prefix": "C: host builtin 'Map.new' is not available"
+    },
+    "wasm::component/block effect setup": {
+      "reason": "the host builtin Map.new is not on the cordis-wasm tier. A capability limit of the runtime's builtin set.",
+      "message_prefix": "C: host builtin 'Map.new' is not available"
+    },
+    "wasm::method/method-time effect": {
+      "reason": "the host builtin Map.new is not on the cordis-wasm tier. A capability limit of the runtime's builtin set.",
+      "message_prefix": "C: host builtin 'Map.new' is not available"
+    },
+    "wasm::method/arrow param binds in method scope (FR-1)": {
+      "reason": "arrow values have no lowering on this tier. A capability limit.",
+      "message_prefix": "C.s.f: arrow values are not lowerable"
+    },
+    "wasm::expr/true division": {
+      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "C.s.f: type 'Float' is not lowerable"
+    },
+    "wasm::expr/float equality": {
+      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "feq: parameter a: type 'Float' is not lowerable"
+    },
+    "wasm::type/Float service": {
+      "reason": "Float is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "C: s.f param 'x': type 'Float' is not lowerable"
+    },
+    "wasm::type/Map service": {
+      "reason": "Map is not in the tier's lowerable value set. A capability limit.",
+      "message_prefix": "C: s.f param 'x': type 'Map[Str, Int]' is not lowerable"
+    },
+    "go::method/arrow param binds in method scope (FR-1)": {
+      "reason": "the stc-go component world has no arrow lowering: a general arrow in a component body has no type to render the closure against, so the emitter has nothing to emit it as. A capability limit of the component tier, not a document-shape refusal — it fires the same way on a document that is ONLY a component, with no top-level declaration beside it. The go tier does lower an arrow on the pure typed-core path and in a stream combinator (both have a known item type); the case measured here is the arrow in METHOD scope, which is what the cell claims.",
+      "message_prefix": "arrow is not lowerable in the stc-go component world"
+    }
+  }
+}
