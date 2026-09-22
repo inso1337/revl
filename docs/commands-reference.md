@@ -15,7 +15,7 @@ audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
 dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
-profile  attest  dash  repair  bundle  emit  verify  deploy
+profile  pool  attest  dash  repair  bundle  emit  verify  deploy
 deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -1168,6 +1168,96 @@ of [revl-attest.md](revl-attest.md) for the trust boundary.
 - `--signer NAME` - an optional signer label recorded in (and signed into) the
   record; falls back to the `REVL_ATTEST_SIGNER` env var.
 - `--json` - machine-readable output.
+
+### `revl pool`
+
+Stand up and operate a private peer pool (roadmap item 524): several
+independent operators running work for each other without trusting each other's
+machines. The verbs declare a pool, admit a peer that proves its identity and
+its artifact, read the roster, and withdraw a peer. See
+[design/550-private-peer-pool.md](design/550-private-peer-pool.md) for the trust
+progression and the failure direction of every step in it.
+
+The pool is a signed charter plus an append-only roster, and a directory of the
+peers' public keys. A peer's identity is a key, not an address, and its join
+request pins the charter by digest, so a peer agrees to a set of terms rather
+than to a pool name. Every refusal names one lowercase link (`artifact-digest`,
+`replayed-join`, `grant-ceiling`, ...), and the verb exits nonzero on one.
+
+A peer's identity is an asymmetric key pair by default (issue #1278): the peer
+draws it with `pool keygen`, the operator pins only the public half with `pool
+register`, and a join, an offer and a withdrawal are each verifiable by any
+holder of that public key rather than only by the operator. A compromised
+operator key therefore forges no peer's join. The original shared-key MAC
+backing is still available as `--identity shared-key`, and `--identity mixed`
+admits both during a migration, in which case `pool status` names the members
+still on the weaker one. There is no fallback between the two: `sign_alg`
+selects one verifier and its failure is a refusal, and a peer with a pinned
+public key may never present a shared-key join. See
+[design/555-asymmetric-peer-identity.md](design/555-asymmetric-peer-identity.md)
+for the key lifecycle and what the signature binds.
+
+- `init` - declare a pool and sign its charter.
+  - `--dir DIR` - where `charter.json` and `roster.json` are written.
+  - `--pool-id ID` - the pool's name. A peer pins the charter by digest, so
+    renaming a pool does not let old terms be reused.
+  - `--ceiling CAP` - the most authority this pool will ever delegate to any
+    member at any tier. Repeatable. Every tier grant is diffed against it.
+  - `--entry-caps CAP` - the grant the entry tier hands a newly admitted peer.
+    Repeatable. Not covered by `--ceiling` means the pool admits nobody.
+  - `--artifact DIGEST` - an artifact digest this pool admits. Repeatable.
+  - `--trust-floor LEVEL` - the minimum attested trust a joining peer clears.
+  - `--identity MODE` - `asymmetric` (default), `shared-key` or `mixed`. The
+    mode is inside the signed charter body, so it cannot be flipped without
+    re-signing.
+  - `--revoke-identity PATH` - a public identity file whose fingerprint may
+    also revoke. Repeatable. Give this when withdrawals should be signed with a
+    key pair.
+  - `--key PATH` - the operator signing key (falls back to
+    `REVL_ATTEST_KEY_FILE` / `REVL_ATTEST_KEY`).
+- `keygen` - the peer side: draw a key pair on this machine. The private half is
+  written 0600 and never leaves it; the public half is what the operator pins.
+  - `--peer-id ID`, `--out PATH` (private), `--public PATH`
+- `register` - pin a peer's public key. The only way a key enters the
+  directory: a join request cannot introduce the key it is checked under. Check
+  the fingerprint over a second channel before pinning.
+  - `--dir DIR`, `--public PATH`
+- `rotate` - replace a peer's active key. The old key stays in the directory and
+  keeps verifying what it signed; it authorises nothing from the rotation on.
+  - `--dir DIR`, `--public PATH` (the NEW public half), `--reason TEXT`
+- `revoke-key` - withdraw a key's authority. It keeps verifying, so the records
+  it signed stay checkable by anyone holding the public half.
+  - `--dir DIR`, `--peer-id ID`, `--key-id FP`, `--reason TEXT`
+- `request` - the peer side: sign a join request against a charter it was
+  given, carrying its signed peer offer and the artifact digest it will run.
+  - `--charter PATH`, `--peer-id ID`, `--artifact DIGEST`, `--out PATH`
+  - `--ceiling CAP` - the most authority this peer will accept. Repeatable. A
+    tier grant not covered by it is refused.
+  - `--trust LEVEL`, `--region NAME`, `--hardware NAME` - the facets this peer
+    attests.
+  - `--identity-key PATH` - this peer's private identity file from `pool
+    keygen`. The join and the offer are both signed with it.
+  - `--key PATH` - this peer's shared key, exchanged with the operator out of
+    band. Used only when `--identity-key` is not given.
+- `join` - the operator side: decide a peer's signed join request against the
+  charter. Admits at the entry tier or refuses, naming the link.
+  - `--dir DIR`, `--join PATH`, `--key PATH`
+  - `--peer-key PATH` - needed only for a legacy shared-key join. A peer with a
+    pinned public key is verified against that.
+- `status` - members, tiers, what each holds, the effect class each tier
+  admits, who may admit, revoke and attest, and which members are on which
+  identity backing. Needs no key.
+  - `--dir DIR`, `--json`
+- `withdraw` - remove a peer and report, in three disjoint sets, what that
+  revokes (an inverse exists), what it retains (no inverse: the work is done
+  and the ledger keeps it) and what it orphans (outstanding work, handed to the
+  lawful-retry dispatcher). Every key the directory pins for the peer is
+  revoked, not only the one that signed its join: each confers no authority and
+  each still verifies what it signed, so the ledger stays checkable.
+  - `--dir DIR`, `--peer ID`, `--reason TEXT`, `--key PATH`
+  - `--identity-key PATH` - sign the withdrawal receipt with an operator key
+    pair, so any holder of the matching public key can check who removed whom.
+    Its fingerprint must be in the charter's revoke authority.
 
 ### `revl erase-report`
 

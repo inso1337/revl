@@ -4,7 +4,7 @@ The distiller folds a list of item-248 ledger records to typed offers and typed
 "cannot distill" verdicts, all pure data, applying NO policy. These tests pin:
 
   * a settled repeated BARE-token shape distills to a rule with an honest blast
-    radius and the correct negative-guarantee complement over the five origins;
+    radius and the correct negative-guarantee complement over the taint-fold origins;
   * the resource-scoped shape key (§1.2): a single recorded host distills to a
     host-scoped rule; sibling `path=` cones join to their common ancestor;
   * every fail-closed / refusal path returns its FIRST-CLASS typed reason:
@@ -57,9 +57,9 @@ def test_settled_bare_token_shape_distills():
     assert set(offer.sessions) == {"s0", "s1", "s2"}
 
 
-def test_bare_token_negative_guarantee_is_all_five():
+def test_bare_token_negative_guarantee_is_every_origin():
     """An untainted bare-token rule admits no origin, so it can never approve any
-    of the five - the negative guarantee is the whole set."""
+    of them - the negative guarantee is the whole set."""
     offer = distill(_settled("kv.get")).offers[0]
     assert offer.blast.negative_guarantee == TAINT_FOLD_ORIGINS
     assert offer.rule.admitting == frozenset()
@@ -76,8 +76,10 @@ def test_component_glob_folds_multiple_components():
 def test_recorded_taint_becomes_the_admitting_set():
     offer = distill(_settled("gateway.send", taintOrigins=["web"])).offers[0]
     assert offer.rule.admitting == frozenset({"web"})
-    assert offer.blast.negative_guarantee == frozenset(
-        {"net", "fs", "model", "input"})
+    # the complement is read from the constant, not restated: item 521 Slice 2
+    # added `screen` to it, and a hand-written list would have made a WIDER and
+    # therefore truer negative guarantee look like a regression.
+    assert offer.blast.negative_guarantee == TAINT_FOLD_ORIGINS - {"web"}
 
 
 # --------------------------------------------------- the resource-scoped key
@@ -191,11 +193,11 @@ def test_blast_radius_partitions_the_window_with_reasons():
     assert reasons == {"resource", "realm", "taint"}
 
 
-def test_blast_radius_negative_guarantee_over_five_origins():
+def test_blast_radius_negative_guarantee_over_every_origin():
     rule = AutoApproveRule("billing:*", ("gateway.send",), realm="billing",
                            admitting=frozenset({"web"}))
     blast = blast_radius(rule, _settled("gateway.send", taintOrigins=["web"]))
-    assert blast.negative_guarantee == frozenset({"net", "fs", "model", "input"})
+    assert blast.negative_guarantee == TAINT_FOLD_ORIGINS - {"web"}
 
 
 def test_blast_fold_host_scoped_rule_excludes_other_hosts():
@@ -212,7 +214,7 @@ def test_blast_fold_host_scoped_rule_excludes_other_hosts():
     assert all(nc.reason == "resource" for nc in other.not_covered)
 
 
-def test_blast_fold_empty_admission_taint_floors_to_all_five():
+def test_blast_fold_empty_admission_taint_floors_to_every_origin():
     """The H2 enforcement floor: a taint-RELEVANT crossing whose admission taint
     set is empty is treated as ALL FIVE origins (fail-closed), so it is NOT
     waved through a `{} subset admitting` test by an untainted rule."""

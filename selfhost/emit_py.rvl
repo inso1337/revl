@@ -1815,7 +1815,63 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     if (value_is_null(value_field(step, "expr"))) { return { lines: [line(indent, "return")], counter: counter } }
     return { lines: [line(indent, `return ${cexpr(value_field(step, "expr"))}`)], counter: counter }
   }
+  if (kind == "break") { return { lines: [line(indent, "break")], counter: counter } }
+  if (kind == "continue") { return { lines: [line(indent, "continue")], counter: counter } }
+  if (kind == "if" || kind == "while" || kind == "for") {
+    return method_control(step, indent, provide_name, method_name, comp_name, counter, externs)
+  }
   return { lines: [line(indent, `<<UNSUPPORTED-METHODSTEP:${kind}>>`)], counter: counter }
+}
+
+// `_method_control`: an `if`/`while`/`for` step in a provide-method body
+// (issue #548, ported for issue #721 / item 458). The arms hold ordinary
+// method steps — registration inside a branch is refused at lowering — so they
+// recurse through `method_step` and the rendering is byte-for-byte the
+// fn-grammar shape, with `cexpr`/`mangle` (the method stratum) in place of the
+// module expression renderer. An EMPTY arm renders `pass`, which is the only
+// place the reference's `block` helper adds a line of its own.
+//
+// The effect counter threads through every nested step in document order,
+// exactly as it does at the top level: a method `effect` inside a branch must
+// take the same `#N` label the reference gives it, or the two labels diverge
+// and the byte agreement is lost for a reason that has nothing to do with the
+// branch.
+fn method_block(steps: List[Any], indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> EmitLines {
+  if (steps.length() == 0) { return { lines: [line(indent, "pass")], counter: counter } }
+  var out = []
+  var c = counter
+  for (s of steps) {
+    let r = method_step(s, indent, provide_name, method_name, comp_name, c, externs)
+    out = out.concat(r.lines)
+    c = r.counter
+  }
+  return { lines: out, counter: c }
+}
+
+fn method_control(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> EmitLines {
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "while") {
+    var out = [line(indent, `while ${cexpr(value_field(step, "cond"))}:`)]
+    let b = method_block(value_list(value_field(step, "body")), indent + 1, provide_name, method_name, comp_name, counter, externs)
+    return { lines: out.concat(b.lines), counter: b.counter }
+  }
+  if (kind == "for") {
+    let binder = mangle(value_str(value_field(step, "bind")))
+    var out = [line(indent, `for ${binder} in ${cexpr(value_field(step, "iterable"))}:`)]
+    let b = method_block(value_list(value_field(step, "body")), indent + 1, provide_name, method_name, comp_name, counter, externs)
+    return { lines: out.concat(b.lines), counter: b.counter }
+  }
+  var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
+  let t = method_block(value_list(value_field(step, "then")), indent + 1, provide_name, method_name, comp_name, counter, externs)
+  out = out.concat(t.lines)
+  var c = t.counter
+  if (!value_is_null(value_field(step, "else"))) {
+    out = out.push(line(indent, "else:"))
+    let e = method_block(value_list(value_field(step, "else")), indent + 1, provide_name, method_name, comp_name, c, externs)
+    out = out.concat(e.lines)
+    c = e.counter
+  }
+  return { lines: out, counter: c }
 }
 
 // item 421 F6 (ported per item 429(d)): the SURFACE names of this method's

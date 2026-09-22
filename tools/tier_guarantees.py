@@ -82,6 +82,62 @@ ROADMAP = ROOT / "docs" / "v2.0-roadmap.md"
 
 SELFHOST_TIER = "revl"
 
+#: Gate verdict tags that stand for REGISTERED guarantee codes under another
+#: name. `selfhost/lower.rvl` tags a refusal by the FAMILY it belongs to, and
+#: almost every family it decides is code-less in the reference (`PRELUDE`,
+#: `ROUTE`, `SPAWN`, `HANDOFF`, `BOOT`), so none of them ever indexes a row in
+#: this matrix. Item 512's is the first that is not code-less: the gate decides
+#: the model-placement DECLARATION half and spells its refusals byte for byte,
+#: under the tag `MODEL` (`docs/design/554-route-model-remaining.md`).
+#:
+#: Without this row the cell below reads `unimplemented` — whose own definition
+#: is "the gate raises no objection at all, or refuses for an unrelated reason"
+#: — for a rule the gate demonstrably enforces with the reference's own
+#: sentence. That is the matrix reporting the opposite of what it measured, and
+#: "nothing checked it" and "it passed" being different answers cuts both ways.
+#: Kept as a table rather than a prefix rule so a new tag has to be DECIDED
+#: here: a tag that silently matched a code would be the fail-open direction.
+#:
+#: A tag maps to a SET, because one gate FAMILY is not one guarantee. Item
+#: 516's council is the case that forced it. The gate tags every council
+#: refusal `COUNCIL`, and that tag is right: it names the CONSTRUCT, which is
+#: what a consumer reading the wire needs in order to know which of two
+#: reference modules refused (`src/revl/model_route.py` or
+#: `src/revl/model_council.py`). Issue #1190 then split that one construct
+#: across two codes. The eleven refusals that would let a council report
+#: agreement it does not have carry `G-COUNCIL-SPLIT`; the two whose subject
+#: is a `model role` carry `G-MODEL-PLACE`
+#: (`docs/design/557-council-disagreement.md` section 3). One tag therefore
+#: cannot name one code, and naming one is wrong in both directions.
+#: `COUNCIL -> G-COUNCIL-SPLIT` alone would deny the two role refusals the
+#: evidence they have. `COUNCIL -> G-MODEL-PLACE` alone, which is what the
+#: port was written against, leaves `G-COUNCIL-SPLIT` reading `unimplemented`
+#: for eleven rules the gate decides with the reference's own sentence, and on
+#: a tag-only test it credits item 512's row for ANY refusal the gate tags
+#: `COUNCIL`, eleven of the thirteen of which are evidence for the other code.
+#: That is the fail-open direction, and the message test below closes it.
+#:
+#: The set does not make the table guess, and it is not read as "any of
+#: these". It records which codes a tag CAN stand for, and being in it is not
+#: on its own enough to credit a cell: `selfhost_verdicts` credits a refusal
+#: resolved through this table only when the gate's MESSAGE is the reference's
+#: message byte for byte. That is the same agreement test
+#: `tools/gate_reference_census.py` applies to this same corpus, and it is the
+#: only thing in the tree that tells the two halves of `COUNCIL` apart without
+#: this file restating the rule that splits them. A restatement would be a
+#: second copy of `docs/design/557-council-disagreement.md` section 3, free to
+#: drift away from the one the compiler actually runs.
+#:
+#: The stricter test is why a set is safe where a guess would not be. `MODEL`
+#: has one code and is held to it too: both families spell the reference's
+#: sentence byte for byte by construction (design notes 554 and 556), so
+#: nothing here is weakened by measuring it, and a family that stopped doing
+#: so would read `divergence` rather than quietly keep its `proved`.
+SELFHOST_TAG_CODES: dict[str, frozenset[str]] = {
+    "MODEL": frozenset({"G-MODEL-PLACE"}),
+    "COUNCIL": frozenset({"G-COUNCIL-SPLIT", "G-MODEL-PLACE"}),
+}
+
 #: The verdicts a cell may carry, strongest first.
 PROVED = "proved"
 DIVERGENCE = "divergence"
@@ -112,7 +168,6 @@ ACKNOWLEDGED: dict[str, str] = {
           "`compile_files`, so a hole fixture compiles here and is refused one "
           "stage later; the reproducers live with the gate "
           "(`src/revl/holes.py`, `docs/holes.md`).",
-    "G-MODEL-PLACE": "item 512 lands the rule with its reproducers as INLINE\n                      strings in `tests/test_model_placement_512.py` and\n                      `tests/test_model_ceiling_514.py` rather than as fixture\n                      files, deliberately: `examples/rejections/` is a census\n                      corpus root, and the self-host port of `route model` is\n                      slice 3, so until a named `MODEL` marker exists the\n                      self-host answers a fixture here `BAD|unexpected token at\n                      top level` and it would enter the census as\n                      `refuse-out-of-slice/BAD`. Remove this entry when slice 3\n                      lands; a stale acknowledgement fails this gate.",
     "T-UNRESOLVED": "refused by the checker (`src/revl/typecheck.py`) for a "
                     "type the compilation does not declare, which is a "
                     "multi-file condition a single-file fixture in this corpus "
@@ -200,17 +255,31 @@ def guarantee_text(code: str) -> str:
 def enforcement_sites(code: str) -> list[str]:
     """The reference modules that raise under `code`, read off the source.
 
-    Two spellings, because the compiler uses both: an explicit
-    `code="G9"` keyword on the RevlError, and the `(G9)` tag the message
-    convention embeds. A code with neither is not enforced by this frontend at
-    all, which is a verdict rather than a gap in this tool.
+    Three spellings, because the compiler uses all three: an explicit
+    `code="G9"` keyword on the RevlError, the `(G9)` tag the message convention
+    embeds, and a module-level `CODE = "G-MODEL-PLACE"` constant that every
+    raise in the file then passes by name. A code with none of the three is not
+    enforced by this frontend at all, which is a verdict rather than a gap in
+    this tool.
+
+    The constant spelling was added for issue #1190. `src/revl/model_council.py`
+    holds its code in `CODE` and passes it through one `_err` helper, so no
+    literal reaches a raise site and the module read as "not an enforcement
+    site" while it was refusing eleven shapes. That is the wrong direction for
+    a matrix to be wrong in: it reported a checked guarantee as unimplemented
+    on every tier. The pattern is anchored to a module-level assignment
+    (`^[A-Z_]*CODE = "..."`), so naming a code in prose still does not count as
+    enforcing it.
     """
     tag = re.compile(r"\(" + re.escape(code) + r"\)")
     keyword = re.compile(r"""code\s*=\s*["']""" + re.escape(code) + r"""["']""")
+    constant = re.compile(
+        r"""^[A-Z_]*CODE\s*=\s*["']""" + re.escape(code) + r"""["']""",
+        re.MULTILINE)
     hits = []
     for path in sorted((ROOT / "src" / "revl").glob("*.py")):
         text = path.read_text(encoding="utf-8")
-        if keyword.search(text) or tag.search(text):
+        if keyword.search(text) or tag.search(text) or constant.search(text):
             hits.append(f"src/revl/{path.name}")
     return hits
 
@@ -242,6 +311,37 @@ def reproducers() -> dict[str, list[str]]:
             continue
         index.setdefault(code, []).append(f"examples/rejections/{path.name}")
     return index
+
+
+_REF_MESSAGES: dict[str, str] = {}
+
+
+def reference_message(rel: str) -> str:
+    """The SENTENCE the reference refuses `rel` with, or `""` if it does not.
+
+    Only `selfhost_verdicts` needs this, and only for a reproducer the gate
+    answers under a tag that is not itself a code (`SELFHOST_TAG_CODES`). The
+    tag has already said which FAMILY the gate decided; the message is the only
+    thing in the tree that says which of the family's guarantees, and it says
+    it without this file restating the rule that splits them.
+
+    Cached per path because the caller walks the same fixtures once per code.
+    """
+    if rel in _REF_MESSAGES:
+        return _REF_MESSAGES[rel]
+    from revl import compile_files  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+
+    try:
+        compile_files([str(ROOT / rel)])
+    except RevlError as error:
+        message = error.message
+    except Exception:  # noqa: BLE001 — a crash is not this file's evidence
+        message = ""
+    else:
+        message = ""
+    _REF_MESSAGES[rel] = message
+    return message
 
 
 # --------------------------------------------------------------------------
@@ -289,6 +389,19 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]
       unimplemented  none is. The gate either raises no objection at all (the
                      fail-open direction item 391 measures) or refuses for an
                      unrelated reason, which is not this guarantee holding.
+
+    WHEN THE TAG IS NOT THE CODE. A tag the gate spells that is not itself a
+    registered code is resolved through `SELFHOST_TAG_CODES`, and a tag there
+    is credited on a STRICTER test than `tag == code`: the gate's message has
+    to be the reference's message byte for byte (`reference_message`, the
+    agreement test `tools/gate_reference_census.py` already applies to this
+    same corpus). The reason is that a tag names a gate FAMILY and a family is
+    not a guarantee. `COUNCIL` stands for two codes, so the tag alone cannot
+    say which of them a refusal is evidence for, and the sentence can. A
+    reproducer the gate refuses under the right family with a different
+    sentence therefore counts as a divergence, not as evidence: crediting the
+    family would credit whichever of its guarantees the reader assumed, which
+    is the fail-open direction this table exists to keep shut.
     """
     admit = _selfhost_admit()
     if admit is None:
@@ -301,20 +414,29 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]
     for code, paths in index.items():
         agreed = 0
         other_tags: set[str] = set()
+        # the tag the gate actually spelled, when it is not the code itself
+        # (`SELFHOST_TAG_CODES`), so the generated sentence names what a reader
+        # will see on the wire rather than the code it stands for.
+        under: set[str] = set()
         for rel in paths:
             answer = (ROOT / rel).read_text(encoding="utf-8")
             try:
                 verdict = admit(answer)
             except Exception:  # noqa: BLE001 — a crash is a divergence, not a pass
                 verdict = ""
-            tag = verdict.split("|", 1)[0] if verdict else ""
+            tag, _, message = verdict.partition("|")
+            stands_for = SELFHOST_TAG_CODES.get(tag, frozenset())
             if tag == code:
                 agreed += 1
+            elif code in stands_for and message == reference_message(rel):
+                agreed += 1
+                under.add(tag)
             elif tag:
                 other_tags.add(tag)
         if agreed == len(paths):
+            spelling = ", ".join(sorted(under)) or code
             out[code] = (PROVED, "the self-host gate refuses every reproducer "
-                                 f"for {code} under {code}")
+                                 f"for {code} under {spelling}")
         elif agreed:
             rest = ("answers under " + ", ".join(sorted(other_tags))
                     if other_tags else "admits")
@@ -457,6 +579,20 @@ def matrix() -> dict:
          "acknowledged": {...}}
     """
     tiers = host_tiers()
+    codes = guarantee_codes()
+    # A tag aliased to a code the compiler's register does not carry would
+    # never match a row, so it would sit here reading like a decision while
+    # crediting nothing. Same direction as the rest of this file: say so
+    # rather than generate around it.
+    aliased = {code for names in SELFHOST_TAG_CODES.values() for code in names}
+    unregistered = sorted(aliased - set(codes))
+    if unregistered:
+        raise MatrixError(
+            "tier_guarantees: SELFHOST_TAG_CODES aliases a gate tag to "
+            f"{', '.join(unregistered)}, which `revl.diagnostics.GUARANTEES` "
+            "does not carry. Name a registered code or drop the entry: an "
+            "alias to a code with no row credits nothing and reads as if it "
+            "did.")
     index = reproducers()
     selfhost = selfhost_verdicts(index)
     parity = parity_divergences(tiers)
@@ -464,7 +600,7 @@ def matrix() -> dict:
 
     rows = []
     missing: list[tuple[str, str]] = []
-    for code in guarantee_codes():
+    for code in codes:
         paths = index.get(code, [])
         sites = enforcement_sites(code)
         row: dict = {"code": code, "text": guarantee_text(code),

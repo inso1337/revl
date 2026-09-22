@@ -379,12 +379,26 @@ same program admitted with a confirmation and refused without it, plus a
 control on an ordinary capability. This is the slice that turns section 6's
 honest gap into a check, and it is the largest remaining piece of the item.
 
-**Slice 3: the transaction unit and LIFO compensation.** A declared sequence
-whose registered compensations run in reverse on an unmet postcondition. Needs
-slice 2 for `confirm`, and needs item 521's slice 4 for a target that survives
-a phase boundary. Oracle: a five-step transaction whose third step fails runs
-exactly the compensations of steps two and one, in that order, and reports the
-third as uncompensated.
+**Slice 3: the transaction unit and LIFO compensation. LANDED** (issue
+#1369). `ui_transaction.compensation_run(steps, failed_at)` computes the run
+keyed on the step the transaction failed at: the LIFO order, its membership,
+and each step's outcome. Oracle, in the sentence this slice was filed with:
+`tests/test_ui_transaction_run_1369.py::test_the_five_step_oracle`. The control
+that makes it a measurement is `compensateOrder`, the artifact it is keyed
+against: that one is not keyed on the failure, so on the same five steps it
+names three compensations and one of them belongs to a step the failure means
+never executed.
+
+Two rules the oracle does not pin, decided here rather than left to the next
+reader. A step AFTER the failure never executed, so it is `untouched` and not
+residue. The FAILING step's own registered compensation does run: an unmet
+postcondition says revl could not see the effect land, which is not knowing it
+did not, and restoring a field is correct either way.
+
+What did not land with it: revl performs nothing. It computes the run, and the
+compensating crossings are the substrate's (item 539), exactly as the
+actuations are. A compensation that is performed and FAILS has no word in
+section 2's five states, and none was invented for it.
 
 **Slice 4: `uncompensated` on the residue report.** Extend the residue and
 erase surfaces so a UI transaction's outcome is a third value beside
@@ -394,10 +408,23 @@ still reports `uncompensated`. Oracle: the report for the transaction in slice
 3 names both the compensated steps and the uncompensated one, and does not
 print `no_residue`.
 
-**Slice 5: the postcondition.** A typed postcondition per step, read by a
-fresh `observe`/`find` pair rather than from a return code, with the honest
-limit of section 4 recorded in the report: verified-against-a-spoofable-read
-is not the same word as verified.
+**Slice 5: the postcondition. LANDED** (issue #1370). The verdict was
+POSITIONAL: any later reversible crossing in the same method made every earlier
+actuation `verified-against-untrusted-read`, which reports that a read follows
+an actuation and not that the read checks it. A read now carries a step's
+postcondition only when it resolves the same target by provenance and derives
+from crossings later than the actuation, and the plan NAMES the read
+(`postconditionCheckedBy`). A read that follows and checks something else gets
+its own word, `read-not-bound-to-this-step`, because `unverified` would say no
+read follows and the verified word would credit the step with a check of
+another control. Oracle: `tests/test_ui_postcondition_binding_1370.py`, whose
+two programs differ in one string literal and are both
+`verified-against-untrusted-read` before the change.
+
+Section 4's limit is kept rather than engineered away: the read is
+`Untrusted`, the strongest word is still `verified-against-untrusted-read`,
+and the binding says WHICH control was looked at, not that the application's
+answer about it can be believed.
 
 **Not in this item:** the fallback ladder rungs and the target record are item
 521's; accumulated state inside the target application is item 546's; the
@@ -411,12 +438,23 @@ Written down so a reader does not infer more than was measured.
   is clean. An `unknown` or `irreversible` UI crossing is still admitted with
   no confirmation, for the reason in section 6. That is the largest gap in
   this item today and it is deliberate, not an oversight.
-- **The check-to-use race is open.** Section 4 names it and item 521's slice 4
-  is the fix. Nothing in the tree resolves a UI target into a handle today, so
-  every phase boundary re-resolves by name.
-- **There is no transaction.** No phase list executes, nothing runs LIFO, and
-  no `uncompensated` value is produced anywhere. Section 3's table is a
-  division of responsibility, not an implementation.
+- **The check-to-use race is open** (issue #1371). Section 4 names it. Item
+  521's slice 4 landed a `UiTarget` carried BY VALUE, which is not a resolved
+  handle: `docs/design/565-ui-target-binding.md` §7 says revl checks the
+  signature and not the dataflow between two crossings, so every phase
+  boundary still re-resolves by name and the window between the check and the
+  use is unbounded. Slice 5's binding is that same re-resolution by name,
+  compared across two crossings. It is a stronger statement than position and
+  it is not the race, and slice 3 does not close it either.
+- **No phase executes.** Slice 3 COMPUTES the LIFO run and slice 5 computes
+  which read carries which postcondition; neither performs a crossing, drives
+  a desktop, or evaluates a postcondition against a real screen. Section 3's
+  table is still a division of responsibility, and the substrate is item 539.
+- **A step with no bound postcondition starts no run.** A LIFO run is
+  triggered by an unmet postcondition, so an actuation that has none is an
+  actuation whose failure the transaction never learns about. The plan
+  enumerates those steps (`undetectableFailureSteps`) rather than giving them
+  a run nothing would trigger.
 - **The claim that the residue report reads an extern-declared `compensate`
   was read, not re-measured here.** It is item 254's own finding and its
   fixture (`tests/fixtures/erase_net.rvl`) is the evidence. Slice 1 does not
