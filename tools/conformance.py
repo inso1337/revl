@@ -33,19 +33,23 @@ TIERS = ("python", "typescript", "rust", "java", "wasm", "go")
 # which refusals may be published as `lim` (issue #1342, issue #1347)
 # --------------------------------------------------------------------------
 # `lim` in the published matrix reads as "this tier cannot express this
-# construct". An emitter also refuses for reasons that are about the DOCUMENT
-# this corpus built rather than about the construct under test, and both arrive
-# here as the tier's own EmitError: the exception cannot tell them apart. The
-# matrix used to print `lim` for either, which understates the tier -- a false
-# claim in the project's headline table, in the fail-open direction for anyone
-# reading it to decide whether revl suits them.
+# construct". An emitter also refuses because of the DOCUMENT this corpus
+# built, and because a stdlib method has no arm on the path the case takes;
+# all three arrive here as the tier's own EmitError and the exception cannot
+# tell them apart. The matrix used to print `lim` for any of them, which
+# understates the tier -- a false claim in the project's headline table, in the
+# fail-open direction for anyone reading it to decide whether revl suits them.
 #
 # So the corpus says which refusals are capability limits, and everything else
 # is UNCLASSIFIED. An unclassified cell is not downgraded: it STOPS the
-# generator (see `unclassified_refusals` and `_write_readme`). Refusing to
-# publish is the only honest answer while the question is open, and it keeps
-# the decision -- split the corpus, give the mixed shape its own row, or
-# something else -- with issue #1347 rather than settling it by default.
+# generator (see `unclassified_refusals` and `_write_readme`).
+#
+# Issue #1347 settled the go column against that rule and both halves of the
+# rule earned their keep. 22 of the 24 cells were the mixed-document refusal
+# and issue #1321 (PR #1355) carried the document instead, so they were never
+# a tier limit; `expr/Int32 bitwise` was a missing `to_int32` arm in the
+# component method path, so it was implemented; only the arrow in method scope
+# is a capability limit, and it is written down as one.
 TIER_LIMITS_FILE = Path(__file__).resolve().parent / "conformance_tier_limits.json"
 
 _EMITTERS: dict = {}
@@ -484,6 +488,22 @@ def unclassified_refusals(report: dict) -> list[tuple[str, str, str]]:
     return out
 
 
+def classified_limits(report: dict) -> dict[str, set[str]]:
+    """tier -> the case labels it refused with a refusal classified as a
+    capability limit, i.e. exactly the cells the matrix publishes as `lim`.
+
+    Read off the measured run rather than off the JSON directly, so it carries
+    the same perishability: an entry stops applying the moment the emitter
+    rewords its refusal.
+    """
+    out: dict[str, set[str]] = {tier: set() for tier in TIERS}
+    for row in report["cases"]:
+        for tier in TIERS:
+            if row["emit_kind"][tier] == "limit":
+                out[tier].add(row["case"])
+    return out
+
+
 def _emit_kwargs(tier: str, index: int) -> dict:
     """Per-tier emitter options needed to validate many cases side by side.
 
@@ -591,7 +611,7 @@ def execute(report: dict | None = None) -> dict:
     Returns
 
         {"tiers": {tier: {status, depth, results|reason}},
-         "cases": {label: {tier: "agree"|"differs"|"-"}},
+         "cases": {label: {tier: "agree"|"differs"|"lim"|"-"}},
          "agreed": [label, ...], "diverged": {label: {tier: detail}},
          "executed": N, "compile_only": {reason: [label, ...]}}
 
@@ -599,12 +619,22 @@ def execute(report: dict | None = None) -> dict:
     corpus's declared answer held. Because every tier asserts the SAME literal,
     the set of `agree` tiers for a case is a cross-tier agreement, not N
     independent smoke tests.
+
+    `lim` is the fourth verdict and the narrow one: the tier refused to emit
+    this case and `conformance_tier_limits.json` classifies that refusal as a
+    capability limit, which the matrix already publishes as `lim`. Asking a
+    tier for the answer to something it cannot express is not a question, so
+    it is not a disagreement. Only a CLASSIFIED refusal is excused — an
+    unclassified one stays `differs`, because "the emitter refused and nobody
+    has said why" is exactly what this differential exists to surface.
     """
     sys.path.insert(0, str(Path(__file__).resolve().parent))
     from validate import EXECUTORS  # noqa: PLC0415 — resolved next to this file
 
     cases = executable_cases()
-    admitted = {row["case"] for row in (report or run())["cases"]}
+    measured = report or run()
+    admitted = {row["case"] for row in measured["cases"]}
+    limits = classified_limits(measured)
     out: dict = {"tiers": {}, "cases": {label: {} for label, _ in cases},
                  "executed": len(cases), "agreed": [], "diverged": {},
                  "compile_only": compile_only_index(admitted)}
@@ -647,6 +677,9 @@ def execute(report: dict | None = None) -> dict:
             continue
         failures = {}
         for label, (status, detail) in results.items():
+            if label in limits.get(tier, ()):
+                out["cases"][label][tier] = "lim"
+                continue
             agreed = status == "ok"
             out["cases"][label][tier] = "agree" if agreed else "differs"
             if not agreed:
@@ -658,7 +691,7 @@ def execute(report: dict | None = None) -> dict:
 
     for label, _ in cases:
         verdicts = out["cases"][label]
-        ran = [t for t, v in verdicts.items() if v != "-"]
+        ran = [t for t, v in verdicts.items() if v not in ("-", "lim")]
         if ran and all(verdicts[t] == "agree" for t in ran):
             out["agreed"].append(label)
     if report is not None:
@@ -1014,6 +1047,10 @@ _REFUSAL_RULES: tuple[tuple[str, str], ...] = (
     ("host builtin", "host builtin"),
     ("arrow values are not lowerable", "function-typed signature"),
     ("declared function type", "function-typed signature"),
+    # go says it a third way: the stc-go component world has no type to render
+    # a general arrow's closure against, so an arrow in a method body has no
+    # lowering. Same cause as the two above, named the same way here.
+    ("arrow is not lowerable", "function-typed signature"),
 )
 
 _EXTERN_BODY = "has no @"
@@ -1311,7 +1348,8 @@ def _execute_command(*, as_json: bool, require: bool) -> int:
         width = max((len(label) for label in result["cases"]), default=10) + 2
         print("execute — do the tiers that RAN agree on the answer?")
         print("  agree = ran and matched the declared answer   "
-              "differs = ran and disagreed   - = no runtime here\n")
+              "differs = ran and disagreed\n  lim = a classified tier limit, "
+              "so there is no answer to ask for   - = no runtime here\n")
         print("case".ljust(width) + "".join(t[:10].ljust(12) for t in tiers))
         print("-" * (width + 12 * len(tiers)))
         for label in result["cases"]:
