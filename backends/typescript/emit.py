@@ -5178,6 +5178,39 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
+def _refuse_validated_emissions(ir: dict) -> None:
+    """Items 257/513 tier gate: a `validated` emission is a CHECKED boundary
+    (validate the completion against the derived schema, build the declared value
+    from it, raise a typed validation fault, honour the stated decoding grammar
+    and the `retry` budget), and this tier has none of that seam. It used to drop
+    the modifier and both derived keys silently (byte-identical output with and
+    without `validated`), so it refuses by name instead, through EmitError, this
+    tier's existing refusal channel. The scan and the single canonical wording
+    live in `revl.validated_boundary`, shared by all five tiers so five backends
+    do not invent five messages; DECLARATION-keyed, not call-site keyed, because
+    the tier emits the crossing whether or not this document also calls it (issue
+    #1373)."""
+    try:
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    try:
+        refuse_validated_on_unvalidating_tier(ir, "typescript")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
 def _emit_temporal(ir: dict) -> str:
     """Dispatch to the Temporal emission target (roadmap item 253, §4).
 
@@ -5234,6 +5267,7 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
             f"(default) or `temporal` (roadmap item 253)")
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
+    _refuse_validated_emissions(ir)
 
     _refuse_fault_tests(ir)
 

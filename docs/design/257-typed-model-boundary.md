@@ -927,3 +927,79 @@ Open questions:
   (`OPT_NULLABLE_VS_ONEOF`). Settling it has to settle it on both sides or drop
   the entry from the table in
   `docs/design/1272-two-type-to-schema-mappings.md`.
+
+## 12. Tier support: one tier lowers it, five refuse it by name (issue #1373)
+
+The whole seam of sections 3 to 5 lives in the python tier.
+`validate_response`, `validate_retry`, `register_grammars`, `revl_constrain` and
+`ResponseValidationError` are declared in `backends/python/runtime.py` and
+emitted by `backends/python/emit.py`. Measured 2026-09-22 at 1c8e8e69e, those
+five names appear in 0 files under `backends/{typescript,rust,wasm,go,java}`.
+
+Before this section those five tiers did not refuse a `validated` emission, they
+dropped it. One program compiled twice, differing only in the modifier, on a
+document every tier can lower (no `config` block, no arrow or field access in the
+component body, no parameter named `ctx`, each of which refuses earlier on some
+tier):
+
+| tier | validated | plain | identical |
+|---|---|---|---|
+| python | 1961 chars | 943 chars | no |
+| typescript | 916 | 916 | **yes** |
+| rust | 5855 | 5855 | **yes** |
+| wasm | 1055 | 1055 | **yes** |
+| go | 5942 | 5942 | **yes** |
+| java | 5238 | 5238 | **yes** |
+
+The same holds for the other carrier of the three IR keys, a `validated`
+emission extern with a native body: byte-identical on all five (and on python,
+which by design never validates an extern's response, see `_grammar_registry`).
+
+Those five now refuse by name.
+`revl.validated_boundary.refuse_validated_on_unvalidating_tier` holds the scan
+and the single canonical diagnostic, wired into each backend's existing
+`EmitError` channel through a thin `_refuse_validated_emissions` wrapper, the
+same arrangement item 245's tier gate uses for `deferred`. The go
+`emit_placement` path repeats the call, because a v3 document with top-level
+declarations renders through `_emit_v3_placement` and never reaches the
+`emit()` that runs the other refusals.
+
+Two decisions worth stating.
+
+**Refuse rather than partly lower, including on typescript.** The typescript
+runtime's `_jsonSchemaError` is already a faithful mirror of the python
+`_json_schema_error`, over this section's derived subset, written for item 130's
+event contracts, so that tier could check the shape today. It is still refused,
+because the shape check is one of five parts. A tier lowering only the check
+would silently drop the declared-value construction of section 3.2 (leaking the
+tagged wire shape into the matched-over value), item 513's grammar claim, section
+5.2's `retry` budget and item 121's provenance token: the same silent drop one
+layer down, in a boundary that now reads as validated.
+
+**Keyed on the declaration, not the call site.** Item 245's gate is call-site
+keyed because a deferred extern's whole lowering is the enqueue at that site.
+`validated` is the other shape: the guarantee is attached to the crossing, and
+the tier emits that crossing (the interface a provider implements and a caller
+invokes) whether or not this document also calls it.
+
+**`--target temporal` is deliberately outside this gate.** It is a second
+rendering of the typescript tier (item 253 §4), `emit()` dispatches to it before
+the cordis refusals run, and on a service-method crossing it drops `validated`
+exactly as the cordis rendering did (7218 chars either way on the `booktrip`
+fixture). It is left alone because, unlike the five cordis renderings, it is not
+silent about the modifier: it pins a `validated` crossing to the at-most-once
+activity group and deliberately does not lower §5.2's budget to a Temporal
+`RetryPolicy`, because a completion is a read with a cost rather than an
+idempotent write. The two renderings of the same keyed extern differ, 5807 against
+6507 characters, and
+`backends/typescript/test_temporal_target.py::test_validated_pins_to_at_most_once_even_when_keyed`
+pins it, so a blanket refusal there would delete a tested guarantee along with the
+drop. What remains is narrower and needs its own decision: that target derives a
+retry class from `validated` and still emits no schema check.
+
+The gate moves no artefact. 0 of 1066 `.rvl` sources declare a `validated`
+emission, 0 of 54 checked-in `.ir.json` documents and 0 of 28 backend goldens
+carry `response_schema` or `response_grammar`, and
+`tools/regen_goldens.py --check` reports all 8 targets in sync after the change.
+`tests/test_validated_tier_refusal_1373.py` pins each refusal against a control
+that still emits.

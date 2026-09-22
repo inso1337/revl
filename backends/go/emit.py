@@ -9241,6 +9241,39 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         raise EmitError(exc.message) from None
 
 
+def _refuse_validated_emissions(ir: dict) -> None:
+    """Items 257/513 tier gate: a `validated` emission is a CHECKED boundary
+    (validate the completion against the derived schema, build the declared value
+    from it, raise a typed validation fault, honour the stated decoding grammar
+    and the `retry` budget), and this tier has none of that seam. It used to drop
+    the modifier and both derived keys silently (byte-identical output with and
+    without `validated`), so it refuses by name instead, through EmitError, this
+    tier's existing refusal channel. The scan and the single canonical wording
+    live in `revl.validated_boundary`, shared by all five tiers so five backends
+    do not invent five messages; DECLARATION-keyed, not call-site keyed, because
+    the tier emits the crossing whether or not this document also calls it (issue
+    #1373)."""
+    try:
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py` — put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    try:
+        refuse_validated_on_unvalidating_tier(ir, "go")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
 _REVL_SYNC_SUFFIX = "_revl_sync"
 
 
@@ -9319,6 +9352,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
+    _refuse_validated_emissions(ir)
     _refuse_fault_tests(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
@@ -10426,6 +10460,12 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
 
 
 def _emit_placement(ir: dict, package: str = "emitted") -> str:
+    # Items 257/513 (issue #1373): the v3-with-top-level branch below renders
+    # through `_emit_v3_placement`, which never reaches `emit()`, so the tier
+    # gate is run here too rather than only on the path that happens to
+    # delegate. A placement module drops a `validated` crossing exactly as the
+    # plain module did.
+    _refuse_validated_emissions(ir)
     ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
