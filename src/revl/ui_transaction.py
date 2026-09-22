@@ -495,25 +495,99 @@ def _extern_index(ir: dict) -> dict:
     return index
 
 
+#: Keys that hold a REGISTERED INVERSE rather than a crossing this plan walks
+#: in order: the site-spelled inverse of an `emit ... compensate ...` (item
+#: 247) and the `undo` half of an `effect`. Both are entries on the activation
+#: frame's teardown accumulator - they run on unwind, not in the forward order
+#: reported here - and whether a crossing HAS an inverse is already carried,
+#: per step, by `_extern_index`. Walking them would report a second crossing
+#: for every compensated one, which is the fail-CLOSED direction but still a
+#: wrong reading: the plan would claim an actuation the program never makes.
+_REGISTERED_INVERSE = frozenset({"compensate", "undo"})
+
+
 def _calls(node) -> list[tuple[str, bool]]:
     """Every `(extern name, carries an approval edge)` a statement calls, in
-    source order. Walks `let`, `emit` and plain expression statements; an
-    `emit ... with a` records its edge so `confirmation` can read it."""
+    evaluation order - INCLUDING the calls nested inside it.
+
+    WHY THIS IS A FULL WALK AND NOT A LIST OF STATEMENT KINDS. It used to read
+    exactly three shapes - `emit e`, `let x = e`, and a bare expression
+    statement - and only the TOP node of each one's expression. Seven
+    spellings of the same crossing therefore reached no plan at all:
+    `return emit click(t)`, the `then` arm and the `else` arm of an `if`, a
+    `while` body, a `for` body, `x = emit click(t)`, and a call nested inside
+    a larger expression (`emit click(t) + 0`). Each one produced a plan with
+    no step for the crossing, so it got no residue verdict, no confirmation
+    state, no postcondition verdict, no row in the erase report's `[4]`
+    section and no entry in `unconfirmedIrreversibleSteps`. That is the
+    fail-open direction, in the one namespace whose whole point is that an
+    irreversible actuation is never silently uncovered - and tail position is
+    where an actuation most naturally lands, since a provide method that
+    returns what it clicked has nothing left to bind.
+
+    A list of statement kinds is what let that happen, and a longer list would
+    only defer it: every step kind the language grows is a new way to hide a
+    crossing until someone remembers this table. So the walk is generic - it
+    descends everything - and the two keys it does NOT descend are named,
+    with the reason, in `_REGISTERED_INVERSE`. `emission_analysis._calls_in`
+    makes the same call for the same reason; this one differs only in keeping
+    ORDER and the approval edge, which a set cannot.
+
+    ORDER is evaluation order: a call is recorded after the subtree that
+    produces its arguments, so `outer(inner(x))` reads `inner`, `outer`.
+
+    WHAT A BRANCH MEANS HERE. This is a READING, not an execution (see the
+    section header). Both arms of an `if` are reported, because either can
+    run and the plan cannot know which; a loop body is reported once, because
+    a plan names the crossings a method makes, not how many times. Reporting
+    an arm that a given run skips over-states the plan by one crossing;
+    reporting neither under-states it by all of them, and only one of those
+    two directions can leave an irreversible actuation unnamed.
+
+    NOT WALKED, because it is not a syntactic question: a crossing reached
+    through a module `fn` the method calls. `method_plan` reads one body and
+    does not follow callees, exactly as before this walk; `emission_analysis`
+    owns the transitive question and the G4/G8 gates read it there.
+
+    The approval edge is a property of the `emit` STATEMENT that spells
+    `with e` - it is the only form the parser admits it on - so each nested
+    statement re-reads its own rather than inheriting an enclosing one.
+    """
     found: list[tuple[str, bool]] = []
-    if not isinstance(node, dict):
-        return found
-    step = node.get("step")
-    approved = bool(node.get("approval"))
-    expr = None
-    if step == "emit":
-        expr = node.get("expr")
-    elif step == "let":
-        expr = node.get("value")
-    elif step == "expr":
-        expr = node.get("expr")
-    if isinstance(expr, dict) and expr.get("kind") == "fn" and expr.get("name"):
-        found.append((expr["name"], approved))
+    _walk_calls(node, False, found)
     return found
+
+
+def _walk_calls(node, approved: bool, found: list[tuple[str, bool]]) -> None:
+    """`_calls`'s recursion. `approved` is the edge of the innermost enclosing
+    statement; it is re-read at every statement boundary."""
+    if isinstance(node, list):
+        for item in node:
+            _walk_calls(item, approved, found)
+        return
+    if not isinstance(node, dict):
+        return
+    if "step" in node:
+        approved = bool(node.get("approval"))
+    # the two lowered call shapes: a component body lowers a call to
+    # `{kind: fn, name}`, a pure fn body to `{kind: call, callee: {kind: var,
+    # name}}`. A method body is the first today; an arrow inside one is the
+    # second, and a walk that knew only one shape is the bug this replaces.
+    name = None
+    kind = node.get("kind")
+    callee = node.get("callee")
+    if kind == "fn" and isinstance(node.get("name"), str):
+        name = node["name"]
+    elif kind == "call" and isinstance(callee, dict) \
+            and callee.get("kind") == "var" \
+            and isinstance(callee.get("name"), str):
+        name = callee["name"]
+    for key, value in node.items():
+        if key in _REGISTERED_INVERSE:
+            continue
+        _walk_calls(value, approved, found)
+    if name is not None:
+        found.append((name, approved))
 
 
 def _is_raised(token: str, approval_tokens) -> bool:
