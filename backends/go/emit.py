@@ -1060,6 +1060,19 @@ def _comp_infer(node, env: _Env):
     return None
 
 
+# The checked Int -> Int32 narrow (docs/arithmetic.md), as a component-path
+# preamble. `_emit_v3_go` and `_emit_v3_combined` write the same function out
+# of their own assembly off `ctx.needs_overflow32`; a document that is only a
+# component has no such ctx, so the text lives here for that path.
+_V3_OVERFLOW32_HELPER = """func revlToI32(v int64) int32 {
+	if v < -2147483648 || v > 2147483647 {
+		panic("revl: Int32 overflow")
+	}
+	return int32(v)
+}
+"""
+
+
 # stdlib helpers referenced by component method bodies live in the shared v3
 # preamble; using any one flags the preamble + its imports into the module.
 _COMP_NEEDS_STDLIB = False
@@ -1073,6 +1086,11 @@ _COMP_NEEDS_PARSE_INT = False
 # strconv.FormatInt rather than fmt.Sprintf("%d") (item 434 (f)): flags the
 # `strconv` import, which this tier does not otherwise always carry.
 _COMP_NEEDS_STRCONV = False
+# `Int.to_int32` in a component body (docs/arithmetic.md): flags the checked
+# narrow helper `revlToI32`. The pure typed-core path already emits it off
+# `ctx.needs_overflow32`; a method body reaches the same helper through this
+# flag, so a component-only document carries it too (issue #1347).
+_COMP_NEEDS_OVERFLOW32 = False
 # A `timer` step (item 57) in a component body: flags the clock coeffect +
 # timer scheduler preamble (_TIMER_PREAMBLE). Timers lower to a revertible
 # schedule whose inverse is cancellation, wired into the same effect ledger.
@@ -1205,6 +1223,16 @@ def _comp_builtin(method, recv_surface, target, args):
             _COMP_NEEDS_PARSE_INT = True
             return "revlParseInt(%s)" % (target,)
         return "int64(%s)" % (target,)
+    # The narrow half of the same pair. It was missing here while the pure
+    # typed-core path had it (`revlToI32`, the checked narrow that panics out
+    # of range), so a method body calling `.to_int32()` hit the unknown-method
+    # fall-through and the conformance matrix read that as a go tier limit.
+    # It is not one: the helper exists, the checker admits the call, and the
+    # widen beside it was already lowered (issue #1347).
+    if method == "to_int32":
+        global _COMP_NEEDS_OVERFLOW32
+        _COMP_NEEDS_OVERFLOW32 = True
+        return "revlToI32(%s)" % (target,)
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): strconv.FormatInt
     # base 10 is exact decimal for an int64 and takes the int64 directly, where
     # fmt.Sprintf("%d", x) boxes it into an `any` first (item 434 (f)).
@@ -9390,7 +9418,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
-    global _COMP_NEEDS_STRCONV
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
@@ -9452,6 +9480,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
     _COMP_NEEDS_STRCONV = False
+    _COMP_NEEDS_OVERFLOW32 = False
 
     # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
     # block and preamble are assembled. For ir_version 1/2 no v3 feature is
@@ -9565,6 +9594,10 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append(_V3_MAP_PREAMBLE)
     if _COMP_NEEDS_PARSE_INT:
         out.append(_V3_PARSE_INT_HELPER)
+    if _COMP_NEEDS_OVERFLOW32:
+        # `Int.to_int32` in a method body: the same checked narrow the pure
+        # typed-core path emits off `ctx.needs_overflow32` (issue #1347).
+        out.append(_V3_OVERFLOW32_HELPER)
     if needs_result_preamble:
         # component tier keeps the sealed interface (see _COMP_RESULT_PREAMBLE):
         # witnessed `@go` externs hand-construct RevlOk/RevlErr.
@@ -10108,7 +10141,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
-    global _COMP_NEEDS_STRCONV
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
     global _COMP_NEEDS_STREAM_DRAIN
     global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
@@ -10130,6 +10163,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
     _COMP_NEEDS_STRCONV = False
+    _COMP_NEEDS_OVERFLOW32 = False
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
@@ -10313,7 +10347,10 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         out.append("\treturn p")
         out.append("}")
         out.append("")
-    if ctx.needs_overflow32:
+    # `or _COMP_NEEDS_OVERFLOW32`: the narrow can come from a component
+    # METHOD body as well as from a top-level fn (issue #1347), and the
+    # method renderer does not write into `ctx`.
+    if ctx.needs_overflow32 or _COMP_NEEDS_OVERFLOW32:
         out.append("func revlAddI32(a, b int32) int32 { return revlToI32("
                    "int64(a) + int64(b)) }")
         out.append("func revlSubI32(a, b int32) int32 { return revlToI32("

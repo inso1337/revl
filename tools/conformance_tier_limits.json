@@ -5,10 +5,12 @@
     "",
     "`lim` is read as 'this tier cannot express this construct'. An emitter",
     "can also refuse for a reason that is about the DOCUMENT the corpus built",
-    "rather than about the construct under test, and the matrix has no way to",
-    "tell those apart from the exception alone: both arrive as the tier's own",
-    "EmitError. Publishing the second as `lim` understates the tier, in the",
-    "fail-open direction for a reader deciding whether revl suits them.",
+    "rather than about the construct under test, and it can refuse because a",
+    "stdlib method simply has no arm on that path yet. The matrix has no way",
+    "to tell the three apart from the exception alone: all of them arrive as",
+    "the tier's own EmitError. Publishing either of the last two as `lim`",
+    "understates the tier, in the fail-open direction for a reader deciding",
+    "whether revl suits them.",
     "",
     "So a refusal is `lim` only if it is written down here, with the reason it",
     "is a capability limit. Anything else is UNCLASSIFIED, and an unclassified",
@@ -18,13 +20,14 @@
     "a rewritten refusal drops back to unclassified instead of inheriting a",
     "judgement made about different words.",
     "",
-    "NOT listed, on purpose: go's issue-#721 refusal of a document holding",
-    "both a top-level declaration and an observable component. It fires on 24",
-    "of the 61 cases because `_component()` builds nearly every case in that",
-    "shape, and all 24 emit on go once the component half is removed. That is",
-    "a fact about the corpus, not about the tier. Issue #1347 decides what the",
-    "matrix should say instead; until it does, this file leaves those cells",
-    "unclassified and the generator refuses to publish them."
+    "The go column's history is the worked example. Issue #1321 (PR #1355)",
+    "carried the mixed document the pure path used to drop, which closed 22 of",
+    "the 24 cells that were unclassified here. Of the two left, one was never a",
+    "capability limit either: `expr/Int32 bitwise` refused with 'unknown stdlib",
+    "method: to_int32' because the narrow had an arm on the pure typed-core",
+    "path and none in a component method body, while the widen beside it did.",
+    "That is a missing arm, so it was implemented rather than classified, and",
+    "the cell now executes. Only the arrow below is a real tier limit."
   ],
   "limits": {
     "java::method/arrow param binds in method scope (FR-1)": {
@@ -70,6 +73,10 @@
     "wasm::type/Map service": {
       "reason": "Map is not in the tier's lowerable value set. A capability limit.",
       "message_prefix": "C: s.f param 'x': type 'Map[Str, Int]' is not lowerable"
+    },
+    "go::method/arrow param binds in method scope (FR-1)": {
+      "reason": "the stc-go component world has no arrow lowering: a general arrow in a component body has no type to render the closure against, so the emitter has nothing to emit it as. A capability limit of the component tier, not a document-shape refusal — it fires the same way on a document that is ONLY a component, with no top-level declaration beside it. The go tier does lower an arrow on the pure typed-core path and in a stream combinator (both have a known item type); the case measured here is the arrow in METHOD scope, which is what the cell claims.",
+      "message_prefix": "arrow is not lowerable in the stc-go component world"
     }
   }
 }
