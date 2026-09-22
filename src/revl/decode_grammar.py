@@ -28,10 +28,10 @@ walk over the surface type. The surface type is consulted only for the
 
 ## What has no grammar
 
-Two gates, in order, both at compile time and both fail-closed.
+One gate at compile time, and one rule the gate already enforces.
 
-1. `fully_expressible` (item 257, `revl.mcp.schema`). A type with no exact
-   schema has no grammar either. This gate is inherited unchanged and is never
+1. `fully_expressible` (item 257, `revl.mcp.schema`) is the gate. A type with no
+   exact schema has no grammar either. It is inherited unchanged and is never
    widened here. A context-free grammar *can* express a recursive type, which
    the inline schema cannot, so the grammar domain is naturally wider than the
    schema domain. Admitting a type on the grammar side that the validator then
@@ -39,21 +39,27 @@ Two gates, in order, both at compile time and both fail-closed.
    it replaces, so the wider domain is deliberately not used. Lifting recursion
    is a change to both derivations at once (§7 of the design note).
 
-2. `grammar_refusal_reason` (below), a grammar-specific gate. A type can have
-   an exact schema and still have no *usable* grammar, because a grammar is
-   judged on the strings it accepts rather than on the values it validates. The
-   case that reaches the surface today is a **null-ambiguous `Opt`**: an
-   `Opt[T]` whose `T` already accepts `null` (`Opt[Unit]`, `Opt[Opt[U]]`, and
-   those nested in a list, map, record or variant payload). Its grammar has two
-   derivations of the string `null`, so a constrained decode that emits `null`
-   does not name which revl value was meant. Item 257's schema collapses those
-   types -- `Opt[Opt[Str]]` and `Opt[Str]` derive the same schema -- so the
-   validator cannot see the ambiguity and neither gate before this one catches
-   it.
+2. The grammar's own rule is the **null-ambiguous `Opt`**: an `Opt[T]` whose `T`
+   already accepts `null` (`Opt[Unit]`, `Opt[Opt[U]]`, and those nested in a
+   list, map, record or variant payload). Its grammar has two derivations of the
+   string `null`, so a constrained decode that emits `null` does not name which
+   revl value was meant. `grammar_refusal_reason` (below) states that rule as a
+   walk over the surface type.
 
-There is no third outcome. A type that passes both gates gets a grammar; a type
-that fails either is refused at compile time with the offending position named.
-A response type is never quietly demoted to an unconstrained decode, because a
+   It is not a second gate. It was one when this module was written, on the
+   premise that 257 accepted a null-ambiguous `Opt`; issue #1263 then made 257
+   refuse the same shape, for the stronger reason that it has no exact schema at
+   all, and `_admits_null` here and `admits_json_null` there are now the same
+   predicate over the same surface positions. Over 1872 constructed types, 0
+   pass 257 and fail this walk and 1288 are refused by 257 alone (issue #1348),
+   so 257's refusal covers this one and not the other way round.
+   `_validated_response_ir` still runs the walk, as an internal assertion that
+   the containment holds, which is what tells the next reader if 257's coverage
+   narrows and this rule stops being enforced by anything.
+
+There is no third outcome. A type that passes the gate gets a grammar; a type
+that fails it is refused at compile time with the offending position named. A
+response type is never quietly demoted to an unconstrained decode, because a
 caller who believes a decode is constrained and is wrong is worse off than one
 who was refused.
 
@@ -144,12 +150,20 @@ def _admits_null(type_name: str | None) -> bool:
 def grammar_refusal_reason(type_name: str | None, types: dict | None = None,
                            seen: frozenset = frozenset()) -> str | None:
     """Why this surface type has no unambiguous grammar, or `None` when it has
-    one (item 513, §4).
+    one (item 513, §4.2).
 
     Runs AFTER `fully_expressible` has accepted the type, so it may assume the
     schema derivation terminates and leaves no unconstrained stub. It walks the
     surface type rather than the schema because the ambiguity it looks for is
-    exactly the thing the schema derivation has already collapsed.
+    the thing the schema derivation cannot carry.
+
+    SHADOWED, and deliberately still called. Since issue #1263 every shape this
+    returns a reason for is a shape `fully_expressible` has already refused, so
+    at the one call site (`lower.py::_validated_response_ir`) a non-`None`
+    answer is unreachable and is treated as a drift assertion rather than as an
+    author-facing refusal (issue #1348). The sentence it builds is kept because
+    it is what a maintainer reads if the containment ever breaks; the sentence
+    an author reads today is 257's.
 
     Total for the same reason `fully_expressible` is: `seen` grows on every
     nominal descent and the set of nominal names is finite.
