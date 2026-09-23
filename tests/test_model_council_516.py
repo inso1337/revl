@@ -5,14 +5,21 @@ The executable spec for slice 1 of `docs/design/543-model-council.md`: the
 refusal the three carry.
 
 Slice 1's programs are written INLINE rather than dropped in `examples/` or
-`tests/fixtures/`, which was the right call when they were written and is no
-longer the rule for new ones. Both directories are census corpus roots
-(`tools/gate_reference_census.py` CORPUS_DIRS), and while the gate could not
-read a council an admitting fixture in either would have been a `false-reject`
-entry the moment it landed. The self-host port is slice 5 and it LANDED
-(`docs/design/556-model-council-selfhost.md`), so the gate now decides a
-council declaration and, since slice 2, an arm that names one. The slice-2
-section at the foot of this file therefore reads its two programs off disk.
+`tests/fixtures/`, which was the right call when they were written. Both
+directories are census corpus roots (`tools/gate_reference_census.py`
+CORPUS_DIRS), and while the gate could not read a council an admitting fixture
+in either would have been a `false-reject` entry the moment it landed.
+
+The rule that generalises from it, and that the two sections at the foot of
+this file follow in opposite directions, is: **a fixture goes on disk when the
+corpora that read that directory can decide it.** The self-host port is slice
+5 and it LANDED (`docs/design/556-model-council-selfhost.md`), so the gate
+decides a council declaration and, since slice 2, an arm that names one -
+which is why the SLICE 2 section reads its two programs off `examples/`.
+Slice 3's rule fires on a `match` in a function body, a flow position the gate
+has no walk for, and its admitting program carries a generic ADT the go tier
+cannot emit; so the SLICE 3 section is inline, and its own header says which
+corpus each of those two facts would have mislead.
 """
 
 import sys
@@ -683,3 +690,433 @@ component Summarizer provides out: Answer {
     assert err.code == PLACE_CODE
     assert "the catch-all `*` routes to model council `Release`" in err.message
     assert "model role `Release`" not in err.message
+
+
+# ---------------------------------------------------------------------------
+# SLICE 3: `Aggregate[T]` and the exhaustiveness rule (issue #1367)
+#
+# Slice 1 checked the declaration and slice 2 bound a council to an action.
+# Neither produced a value, so the roadmap's first exit clause - "a two-member
+# council that disagrees does not admit" - had no call site to be true at:
+# `Aggregate[` occurred once in all of `src/revl/`, in a comment. These tests
+# are that clause, at the call site.
+#
+# The pair below is INLINE, the way slice 1's programs are and unlike slice
+# 2's, and the reason is the one this file's header already gives for slice 1:
+# a fixture on disk is a claim about tiers that have to be able to decide it,
+# and this rule's tiers cannot.
+#
+#   * `examples/rejections/` is the TIER REPRODUCER set
+#     (`tools/tier_guarantees.py` globs exactly it). A fixture there asserts
+#     that every tier's verdict on it is measured. This refusal fires on a
+#     `match` inside a function body, which is a flow position the self-host
+#     gate has no walk for, so it would turn the whole `G-COUNCIL-SPLIT` row's
+#     `revl` column into a divergence for a reason that has nothing to do with
+#     the declaration refusal that row is about. Item 514's value-side ceiling
+#     is in the same position and is kept out of that directory for the same
+#     reason, which is why `G-MODEL-PLACE` reads `proved`: both
+#     `gmodelplace_*` fixtures there are declaration-half refusals.
+#   * `examples/` is carried by the GO tier
+#     (`tests/test_go_carried_set_builds.py` walks the whole tree for any
+#     document with a top-level `types` block beside an observable component).
+#     A generic ADT emits Go that does not build - `type BoxHeld struct
+#     { Value T }` with `T` undefined - and that is PRE-EXISTING and general,
+#     reproduced with a plain `type Box[T] = Held(T) | Empty`. Carrying a
+#     fixture through it would add a ratchet entry to
+#     `tests/fixtures/go_carried_build_known_bad.json` for a defect this slice
+#     did not cause.
+#
+# The measurement is not weakened by being inline: the twin is DERIVED from
+# the control by the one documented substitution, so "the same program one arm
+# apart" is a property of the construction rather than of two files that were
+# edited to look alike.
+# ---------------------------------------------------------------------------
+
+#: The one arm that differs between the control and its twin.
+ANSWER_EDIT = ('      Split(d)     => "held: the members did not agree",',
+               '      _            => "held: the members did not agree",')
+
+ANSWER_CONTROL_SRC = """
+model role edge   on_device
+model role local2 on_device
+
+service Review {
+  fn propose(plan: Str) -> Str
+  fn settle(answer: Aggregate[Str]) -> Str
+}
+
+model council Release {
+  proposer  -> local2,
+  adversary -> edge,
+  aggregate unanimous quorum declared on_tie split
+}
+
+component Reviewer provides out: Review {
+  route model on propose {
+    confidential -> Release
+  }
+  provide out {
+    fn propose(plan) = plan
+    fn settle(answer) = match answer {
+      Agreed(v)    => v,
+      Split(d)     => "held: the members did not agree",
+      Inquorate(d) => "held: the council did not answer",
+    }
+  }
+}
+"""
+
+#: The twin, DERIVED rather than written: one arm that named `Split` now names
+#: `_`. Everything else is the same bytes by construction.
+ANSWER_REFUSED_SRC = ANSWER_CONTROL_SRC.replace(*ANSWER_EDIT)
+
+#: The three constructors of `Aggregate[T]`, and the only three.
+AGGREGATE_CASES = ("Agreed", "Split", "Inquorate")
+
+#: The two a consumer may not leave unnamed.
+DISSENT_ARMS = ("Split", "Inquorate")
+
+
+def _consumer(arms: str, returns: str = "Str",
+              scrutinee: str = "Aggregate[Str]") -> str:
+    """A two-member council bound to an action, plus a consumer of its answer.
+
+    The council is real and bound: `propose` is routed to it, both members are
+    placed separately and on the device, so nothing here is refused for a
+    slice-1 or slice-2 reason and a refusal is about the ARMS.
+    """
+    return f"""
+model role edge   on_device
+model role local2 on_device
+
+service Review {{
+  fn propose(plan: Str) -> Str
+  fn settle(answer: {scrutinee}) -> {returns}
+}}
+
+model council Release {{
+  proposer  -> local2,
+  adversary -> edge,
+  aggregate unanimous quorum declared on_tie split
+}}
+
+component Reviewer provides out: Review {{
+  route model on propose {{
+    confidential -> Release
+  }}
+  provide out {{
+    fn propose(plan) = plan
+    fn settle(answer) = match answer {{
+{arms}
+    }}
+  }}
+}}
+"""
+
+
+ALL_ARMS = """      Agreed(v)    => v,
+      Split(d)     => "held",
+      Inquorate(d) => "held","""
+
+
+def test_a_consumer_that_handles_every_arm_compiles():
+    """The control for this whole section. A council bound to an action and a
+    consumer that names all three constructors admits, so every refusal below
+    is one edit away from a program that compiles."""
+    assert compile_source(_consumer(ALL_ARMS), "answer.revl")
+
+
+def test_a_consumer_that_handles_only_agreed_is_refused():
+    """The roadmap's first exit clause, at the call site. A caller that reads
+    the agreed value and writes nothing for the disagreement does not compile,
+    and the refusal NAMES the arms it left out rather than saying the match is
+    incomplete."""
+    err = refusal(_consumer("      Agreed(v) => v,"))
+    assert err.code == CODE
+    for arm in DISSENT_ARMS:
+        assert f"`{arm}`" in err.message, err.message
+    assert "Aggregate[Str]" in err.message
+
+
+def test_a_wildcard_does_not_stand_in_for_the_dissent_arms():
+    """The half that makes the rule bite rather than be spelled.
+
+    Everywhere else in revl a `_` arm satisfies exhaustiveness, and for an
+    ordinary ADT it should. Here the case a wildcard would swallow is the one
+    the construct exists to report: `_ => <proceed>` is `on_tie allow` written
+    at the call site, where the declaration checker that refuses `on_tie
+    allow` by name was not looking. If this test ever passes by admitting, the
+    answer type has stopped carrying the guarantee."""
+    err = refusal(_consumer('      Agreed(v) => v,\n      _ => "held",'))
+    assert err.code == CODE
+    for arm in DISSENT_ARMS:
+        assert f"`{arm}`" in err.message, err.message
+    assert "`_` arm does not answer for" in err.hint
+
+
+def test_the_refusal_names_only_the_arm_that_is_missing():
+    """A consumer that handled `Split` and forgot `Inquorate` is told about
+    `Inquorate`, not about both. The two are separate constructors because
+    `Split` is information about the QUESTION and `Inquorate` is information
+    about the DEPLOYMENT (design note 543 section 5), and a refusal that
+    named both would be telling the author to rewrite an arm that is right."""
+    err = refusal(_consumer(
+        '      Agreed(v) => v,\n      Split(d) => "held",'))
+    assert err.code == CODE
+    assert "`Inquorate`" in err.message
+    assert "`Split`" not in err.message.split("leaves")[1]
+
+
+@pytest.mark.parametrize("arm", DISSENT_ARMS)
+def test_a_dissent_path_cannot_reach_a_value(arm):
+    """"`Split` carries no `T`" is the type-level statement of the whole item
+    (design note 543 section 3), and this is where it is a property rather
+    than prose. There is no total projection `Aggregate[T] -> T`: the arm
+    binds the per-member dissent record, so returning the payload from a
+    function that must produce a `Str` does not typecheck.
+
+    Without this the rule would be satisfiable by writing the arm and reading
+    the value straight back out of it, which is `aggregate first` spelled at
+    the call site."""
+    arms = "\n".join(
+        f"      {case}(x) => x," if case == arm
+        else (f"      {case}(x) => x," if case == "Agreed"
+              else f'      {case}(x) => "held",')
+        for case in AGGREGATE_CASES)
+    err = refusal(_consumer(arms))
+    assert "List[DissentEntry]" in err.message, err.message
+    assert "`Str`" in err.message
+
+
+def test_agreed_binds_the_boundary_type():
+    """The other side of the same coin: `Agreed` is the one constructor that
+    DOES carry the value, and it carries the item-257 boundary type the
+    council was asked for. A council over `Aggregate[Int]` hands its caller an
+    `Int`, so the payload is usable without a cast and the type argument is
+    not decoration."""
+    assert compile_source(
+        _consumer("""      Agreed(v)    => v + 1,
+      Split(d)     => 0,
+      Inquorate(d) => 0,""", returns="Int", scrutinee="Aggregate[Int]"),
+        "answer.revl")
+    # and the SAME program over `Aggregate[Str]` does not, because `v` is then
+    # a `Str`: the argument is what decides, not the arm.
+    err = refusal(_consumer("""      Agreed(v)    => v + 1,
+      Split(d)     => 0,
+      Inquorate(d) => 0,""", returns="Int"))
+    assert "expects `Str`" in err.message or "`Int`" in err.message
+
+
+def test_the_dissent_record_is_per_member_and_readable():
+    """`Dissent` is a list of per-member rows, not an opaque blob: a caller
+    that wants to report WHICH member said what can. Design note 543 section 3
+    is the shape, and the answers in it are digests, which is why reading one
+    does not give the caller a `T`.
+
+    Written as a module `fn` rather than inside a `provide` body because a
+    match-arm payload does not pin a method receiver there - a PRE-EXISTING
+    limit that has nothing to do with this slice, pinned as parity by
+    `test_a_dissent_payload_dispatches_like_any_other_adt_payload` below so a
+    later reader does not mistake it for a property of the answer type."""
+    assert compile_source("""
+fn settle(a: Aggregate[Str]) -> Int {
+  return match a {
+    Agreed(v)    => 0,
+    Split(d)     => d.length(),
+    Inquorate(d) => d.length(),
+  }
+}
+""", "answer.revl")
+
+
+def test_a_dissent_payload_dispatches_like_any_other_adt_payload():
+    """The provided type is not special where it has no business being.
+
+    A match-arm payload does not pin a stdlib method receiver inside a
+    `provide` body, for a user ADT and for `Aggregate[T]` alike. That is a
+    pre-existing gap in method dispatch, not something this slice introduced
+    and not something it should paper over: the two behave the same way, and
+    this test is what says so."""
+    adt = """
+type Row = { id: Int }
+type Outcome = Ok(List[Row]) | Missing
+
+service S { fn f(o: Outcome) -> Int }
+component C provides out: S {
+  provide out { fn f(o) = match o { Ok(d) => d.length(), Missing => 0, } }
+}
+"""
+    adt_err = refusal(adt)
+    provided_err = refusal(_consumer("""      Agreed(v)    => 0,
+      Split(d)     => d.length(),
+      Inquorate(d) => d.length(),""", returns="Int"))
+    assert "on a value of unknown type" in adt_err.message
+    assert "on a value of unknown type" in provided_err.message
+
+
+@pytest.mark.parametrize("name", ("Aggregate", "Answer", "DissentEntry"))
+def test_a_program_may_not_declare_its_own_answer_type(name):
+    """Reserved, for the reason `Principal` is. A program allowed to declare
+    its own `Aggregate[T]` could declare one whose only case is `Agreed`,
+    match it exhaustively with a single arm, and satisfy every rule in this
+    section while having removed the constructor the rules are about."""
+    err = refusal(f"{ROLES}\ntype {name}[T] = OnlyMine(T)\n{TAIL}")
+    assert err.code == CODE
+    assert f"`type {name}`" in err.message
+
+
+def test_an_ordinary_adt_still_admits_a_wildcard():
+    """The negative control, and the one that keeps this slice honest. The
+    wildcard rule above is about the PROVIDED answer type and must not have
+    become a new opinion about matching in general: a user ADT still takes a
+    `_` arm exactly as it did before."""
+    assert compile_source("""
+type Outcome = Ok(Int) | NotFound | Invalid(Str)
+
+fn describe(o: Outcome) -> Int {
+  return match o {
+    Ok(v) => v,
+    _     => 0,
+  }
+}
+""", "adt.revl")
+
+
+def test_the_answer_type_costs_a_program_that_does_not_name_it_nothing():
+    """Design note 543 section 9's byte-identity, one level further out. A
+    council declaration writes no IR; a PROVIDED type that no signature names
+    must not write one either, or every program in the tree would have gained
+    three type entries it never asked for."""
+    plain = """
+model role edge   on_device
+model role local2 on_device
+
+service Answer { fn classify(text: Str) -> Str }
+
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}
+"""
+    doc = compile_source(plain, "council.revl")
+    assert "types" not in doc
+    # and a program that DOES name it gets exactly the three, and no more.
+    named = compile_source(_consumer(ALL_ARMS), "answer.revl")
+    assert sorted(named["types"]) == ["Aggregate", "Answer", "DissentEntry"]
+
+
+def test_the_answer_type_is_closed():
+    """Three constructors, and the aggregation names one value or none. A
+    fourth would be a way for the council to answer that is neither agreement
+    nor disagreement, which is the shape design note 543 exists to remove."""
+    from revl import model_answer
+
+    doc = compile_source(_consumer(ALL_ARMS), "answer.revl")
+    assert [c["name"] for c in doc["types"]["Aggregate"]["cases"]] \
+        == list(AGGREGATE_CASES)
+    assert [c["name"] for c in doc["types"]["Answer"]["cases"]] \
+        == ["Says", "Abstains", "Unreachable"]
+    assert model_answer.DISSENT_ARMS == DISSENT_ARMS
+    # `Agreed` is the ONLY constructor carrying the boundary type.
+    carries = [c["name"] for c in doc["types"]["Aggregate"]["cases"]
+               if c["payload"] == "T"]
+    assert carries == ["Agreed"]
+
+
+def test_the_answer_type_carries_the_same_code():
+    """One guarantee, spent in two places. The declaration rules and this one
+    are the same promise - disagreement is never resolved toward allow - so
+    they carry the same code, and an agent reading `classify()` gets the same
+    guarantee line whichever half refused."""
+    from revl import model_answer, model_council
+
+    assert model_answer.CODE == model_council.CODE == CODE
+    assert classify(refusal(_consumer("      Agreed(v) => v,")))["guarantee"] \
+        == GUARANTEES[CODE]
+
+
+def test_the_answer_refusal_never_reads_as_a_withheld_approval():
+    """The slice-1 vocabulary pin, extended to the call site. A council member
+    is a model with no identity and its disagreement is not a withheld
+    consent; item 471's words must be absent here too, or `Split` starts
+    reading as "an operator declined"."""
+    err = refusal(_consumer('      Agreed(v) => v,\n      _ => "held",'))
+    prose = f"{err.message} {err.hint}".lower()
+    for word in ("operator", "approval", "approve", "consent", "signer"):
+        assert word not in prose, word
+
+
+def test_the_answer_module_imports_none_of_item_471s_machinery():
+    """The slice-1 import pin, extended to the module this slice adds.
+
+    `revl.model_council` is pinned to an exact import set so it cannot reach
+    item 471's operator quorum. That pin is worth nothing if the answer type
+    beside it reaches the same machinery, so this module is held to the same
+    rule - and to a tighter set, because it needs only the error type."""
+    import ast
+
+    source = (ROOT / "src" / "revl" / "model_answer.py").read_text()
+    imported = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            imported.update(alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = "." * node.level + (node.module or "")
+            imported.add(base)
+            imported.update(f"{base}.{alias.name}" for alias in node.names)
+    for name in sorted(imported):
+        assert "mcp" not in name and "quorum" not in name.lower() \
+            and "polic" not in name.lower(), name
+    assert imported <= {
+        "__future__", "__future__.annotations",
+        ".errors", ".errors.RevlError",
+    }, sorted(imported)
+
+
+def test_the_two_slice_three_fixtures_are_the_same_one_arm_apart():
+    """The non-vacuity measurement. The control admits, the twin does not, and
+    the ONLY difference between the two programs is that one arm which named
+    `Split` now names `_`.
+
+    A rule whose refusing fixture differs from its admitting one in some other
+    way has not been shown to be the thing doing the refusing. Here the twin is
+    DERIVED from the control by that substitution, so the property is
+    structural: the assertion below would have to be edited, not merely
+    re-run, for the two to drift apart."""
+    assert compile_source(ANSWER_CONTROL_SRC, "answer.rvl")
+    err = refusal(ANSWER_REFUSED_SRC)
+    assert err.code == CODE
+    assert "`Split`" in err.message
+
+    def _code(src):
+        return [line.strip() for line in src.splitlines()
+                if line.strip() and not line.strip().startswith("//")]
+
+    a, b = _code(ANSWER_CONTROL_SRC), _code(ANSWER_REFUSED_SRC)
+    assert len(a) == len(b), (len(a), len(b))
+    differ = [(x, y) for x, y in zip(a, b) if x != y]
+    assert differ == [tuple(e.strip() for e in ANSWER_EDIT)], differ
+    # and the substitution really did fire: a no-op replace would make every
+    # assertion above vacuous.
+    assert ANSWER_REFUSED_SRC != ANSWER_CONTROL_SRC
+
+
+def test_the_admitting_fixture_binds_a_two_member_council():
+    """The control is not a program that merely mentions the type. It declares
+    a council with two separately placed members and ROUTES an action to it,
+    so the answer the consumer must handle is an answer this program actually
+    asks for."""
+    from revl import model_council, model_route
+    from revl.parser import Parser
+
+    program = Parser(ANSWER_CONTROL_SRC, "answer.rvl").parse()
+    councils = model_council.check(program)
+    assert sorted(councils) == ["Release"]
+    assert len(councils["Release"].members) == 2
+    assert {m.function for m in councils["Release"].members} \
+        == {"proposer", "adversary"}
+    # placed separately, and both on the device: the control admits for a
+    # reason rather than by omission.
+    assert {m.role for m in councils["Release"].members} == {"local2", "edge"}
+    assert councils["Release"].residence == "on_device"
+    placed = model_route.check(program, councils=councils)
+    assert placed["Reviewer"]["propose"]["confidential"]["council"] == "Release"
