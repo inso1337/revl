@@ -825,6 +825,9 @@
         },
         "item 872 additivity arm of the `.transactional(scope=...)` kwarg: every witnessed extern in the corpus declares a capability (`emit_py_corpus/witnessed.rvl` declares `witnessed[fs]`), so the branch that emits NO `scope=` for a cap-less witnessed extern never runs under the oracle. That branch is the byte-identical additivity guarantee a pre-872 witnessed extern depends on, and reaching it from a corpus document means adding a `tests/fixtures` input, which is a gate-crate census input this item must not move.": {
           "_transactional_scope_kwargs": 1
+        },
+        "issue #1382 added `_refuse_validated_externs` to the python reference emitter: the tier refuses a `validated` EXTERN rather than dropping the modifier and emitting a module byte-identical to one written without it. The loop header, the `validated` test and its `continue` are executed by every corpus document that declares any extern; the two statements that name the offender and raise are not, because no corpus document declares a validated extern (measured 2026-09-22: 0 of 1068 `.rvl` sources and 0 of 54 `.ir.json` documents). Adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_extern_python_1382.py, which asserts the message names the extern and that the sibling service-operation carrier still lowers.": {
+          "_refuse_validated_externs": 2
         }
       },
       "uncovered_statements": 649
