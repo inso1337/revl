@@ -421,7 +421,7 @@ def named_guarantees() -> list[str]:
 RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "taint", "retention", "placement", "emission_analysis",
                    "admit_profile", "holes", "diagnostics",
-                   "model_route", "model_council",
+                   "model_route", "model_council", "model_answer",
                    "typecheck", "lexer", "composition", "hostref", "hostfile",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
                    "cardinality", "decode_grammar")

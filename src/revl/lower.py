@@ -71,6 +71,7 @@ from .taint import (
     splice_declassifiers,
     strip_qualifiers,
 )
+from . import model_answer
 from . import model_council as _model_council
 from . import model_route as _model_route
 from .decode_grammar import (
@@ -1582,6 +1583,15 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
                 "`Principal` is the reserved opaque authorization principal and "
                 "cannot be declared as a revl type",
                 hint=PRINCIPAL_PRODUCER_HINT, code="G4", category="route")
+        if decl.name in model_answer.PROVIDED:
+            # item 516 slice 3: `Answer[T]` / `Aggregate[T]` are PROVIDED, for
+            # the reason `Principal` is reserved just above. A program that
+            # declares its own `Aggregate[T]` can declare it without the
+            # constructor that carries the members' disagreement, and the
+            # exhaustiveness rule over that constructor would then be checking
+            # a type the program had already opted out of.
+            raise model_answer.reserved_name_error(filename, decl.line,
+                                                   decl.name)
         if decl.fields:
             fields: dict[str, str] = {}
             for field in decl.fields:
@@ -1605,7 +1615,40 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
                 seen.add(case.name)
                 cases.append({"name": case.name, "payload": case.payload})
             types[decl.name] = {"params": decl.params, "kind": "variant", "cases": cases}
-    return types
+    # item 516 slice 3: the model council's answer type, seeded only into a
+    # program that NAMES it. `revl.model_answer` holds the table and the
+    # condition; see its docstring for why a program that names nothing gets
+    # nothing (every IR in the tree stays byte-identical).
+    return model_answer.seeded(types, _declared_type_strings(program))
+
+
+def _declared_type_strings(program: Program):
+    """Every type the program wrote down, as the author spelled it.
+
+    The same surface `_validate_declared_types` walks - module functions,
+    externs, service methods, record fields and case payloads - because a
+    value of a provided type can only enter a program through a declared
+    signature. A `let` annotation inside a body is NOT walked and does not
+    need to be: the value it annotates came from one of these.
+    """
+    for fn in program.fn_decls:
+        for p in fn.params:
+            yield p.type
+        yield fn.returns
+    for ext in program.externs:
+        for p in ext.params:
+            yield p.type
+        yield ext.returns
+    for svc in program.services:
+        for m in svc.methods.values():
+            for _, ptype in m.params:
+                yield ptype
+            yield m.returns
+    for decl in program.type_decls:
+        for field in decl.fields:
+            yield field.type
+        for case in decl.cases:
+            yield case.payload
 
 
 # item 130 Slice 5: the typed-event contract table, keyed like `FNS_KEY` /
@@ -2330,6 +2373,15 @@ def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> 
     user = _variant_case_payload(types, scrutinee_type, pattern)
     if user is not None:
         return user
+    # item 516 slice 3: an APPLIED provided type (`Aggregate[Str]`). The
+    # lookup above is keyed by the scrutinee's whole spelling and so finds
+    # nothing for any generic; for the council's answer that would leave every
+    # arm binding an unknown-typed value, and an unknown type unifies with
+    # whatever the arm must produce - which would make `Split(d) => d` compile
+    # in a function returning `T`. See `model_answer.arm_payload`.
+    provided = model_answer.arm_payload(scrutinee_type, pattern)
+    if provided is not None:
+        return provided
     head, args = parse_type(scrutinee_type)
     if head == "Opt" and pattern == "Some" and args:
         return args[0]
@@ -2343,6 +2395,24 @@ def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> 
 
 def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, filename: str) -> None:
     type_name = _expr_static_type(expr.scrutinee, type_env, types)
+    # item 516 slice 3: the model council's answer, checked BEFORE the general
+    # rule below and separately from it. Two reasons, both of which the
+    # general rule cannot serve without changing what it admits for programs
+    # that have nothing to do with councils:
+    #
+    #   * the scrutinee is `Aggregate[Str]`, and the general rule looks the
+    #     scrutinee up in `types` by its whole spelling, so it finds nothing
+    #     for any APPLIED generic. `Aggregate[T]` is never written without an
+    #     argument, so under the general rule alone the answer type would be
+    #     the one ADT in the language with no exhaustiveness at all;
+    #   * a `_` arm satisfies the general rule and must not satisfy this one.
+    #     `Split` is the case the construct exists to make un-ignorable, and a
+    #     catch-all that swallows it is `on_tie allow` moved from the
+    #     declaration, where `revl.model_council` refuses it by name, to the
+    #     call site, where nothing was looking.
+    model_answer.check_match(
+        type_name, [pattern for pattern, _, _ in expr.arms], filename,
+        expr.line)
     spec = types.get(type_name or "")
     if spec is None or spec.get("kind") != "variant":
         return
