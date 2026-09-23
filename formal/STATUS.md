@@ -1035,14 +1035,14 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**477 .rvl files -> 349 components -> 940 statements = 234 modeled + 215
-componentless + 28 refused at parse**, and **5488 verdicts compared (234
-files + 349 components + 69 provide methods + 19 spawn edges + 28 parse
-refusals + 267 teardown scenarios + 1620 recoveries + 940 confinements +
-940 surfaces + 340 teardowns + 252 provide-clause components + 81 config
-fields + 349 A2 bodies), 5488 agree, 0 mismatches**.
+**479 .rvl files -> 351 components -> 944 statements = 236 modeled + 215
+componentless + 28 refused at parse**, and **5504 verdicts compared (236
+files + 351 components + 69 provide methods + 19 spawn edges + 28 parse
+refusals + 267 teardown scenarios + 1620 recoveries + 944 confinements +
+944 surfaces + 340 teardowns + 254 provide-clause components + 81 config
+fields + 351 A2 bodies), 5504 agree, 0 mismatches**.
 
-Checker alignment over the 234 modeled files. Every bucket recording a
+Checker alignment over the 236 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1068,7 +1068,7 @@ with corpus work that never touched this layer.
 | `agree-G3` | 1 | informational |
 | `agree-G4` | 20 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 155 | informational |
+| `agree-accept` | 156 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1076,7 +1076,7 @@ with corpus work that never touched this layer.
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
-| `out-of-fragment` | 40 | informational |
+| `out-of-fragment` | 41 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 
