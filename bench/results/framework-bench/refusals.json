@@ -12,72 +12,41 @@
           "documents": []
         },
         "java": {
-          "residual": 9,
+          "residual": 0,
           "corpus": 59,
-          "reproduced": 50,
-          "documents": [
-            "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
-            "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
-            "../emit_ts_corpus/property_edges.rvl",
-            "../emit_ts_corpus/services_async.rvl",
-            "comp_await.rvl",
-            "component_branches.rvl",
-            "component_format.rvl",
-            "map_inference.rvl",
-            "stdlib_builtins.rvl"
-          ]
+          "reproduced": 59,
+          "documents": []
         },
         "py": {
-          "residual": 13,
-          "corpus": 56,
-          "reproduced": 43,
+          "residual": 5,
+          "corpus": 57,
+          "reproduced": 52,
           "documents": [
-            "../../../backends/typescript/tests/fixtures/conformance.rvl",
             "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-            "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
-            "../../../examples/java_match.rvl",
-            "../../../examples/v3_step_scheduler.rvl",
             "../../../src/revl/truc/components/cli.rvl",
-            "../policy_agents.rvl",
             "branches.rvl",
-            "services_interp.rvl",
-            "services_match.rvl",
-            "witnessed.rvl",
-            "witnessed_secret.rvl"
+            "services_control_flow.rvl"
           ]
         },
         "rust": {
-          "residual": 3,
+          "residual": 2,
           "corpus": 40,
-          "reproduced": 37,
+          "reproduced": 38,
           "documents": [
-            "comp_await_job.rvl",
             "comp_stream.rvl",
             "component_edges.rvl"
           ]
         },
         "ts": {
-          "residual": 16,
-          "corpus": 60,
-          "reproduced": 44,
+          "residual": 4,
+          "corpus": 61,
+          "reproduced": 57,
           "documents": [
-            "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
-            "../../../backends/typescript/tests/fixtures/async_http.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-            "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
             "../../../examples/java_match.rvl",
-            "async_arrow_emission.rvl",
-            "async_effects.rvl",
-            "cas_runtime.rvl",
-            "component_edges.rvl",
-            "component_exprs.rvl",
-            "components_await.rvl",
-            "instance_get.rvl",
-            "property_edges.rvl",
-            "services_async.rvl",
-            "services_composite.rvl",
-            "spawn.rvl"
+            "../emit_py_corpus/services_control_flow.rvl",
+            "component_edges.rvl"
           ]
         },
         "wasm": {
@@ -87,10 +56,11 @@
           "documents": []
         }
       },
-      "total_residual": 41,
-      "total_corpus": 259,
+      "total_residual": 11,
+      "total_corpus": 261,
       "clean_tiers": [
         "go",
+        "java",
         "wasm"
       ]
     },
@@ -492,37 +462,10 @@
       "source": "tools/gate_reference_census_baseline.json",
       "gate": "python3 tools/gate_reference_census.py --check",
       "means": "programs the embeddable gate admits that the reference compiler refuses; the fail-open direction",
-      "false_admit_buckets": {
-        "false-admit/T1": 6,
-        "false-admit/TYPE": 3
-      },
-      "false_admit_programs": {
-        "false-admit/T1": [
-          "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-          "examples/rejections/t17_arrow_body_unchecked.rvl",
-          "examples/rejections/t32_arrow_value_result_flows.rvl",
-          "examples/rejections/t33_arrow_value_arity.rvl",
-          "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-          "examples/rejections/v2_match_nonexhaustive.rvl"
-        ],
-        "false-admit/TYPE": [
-          "examples/rejections/t13_unknown_match_case.rvl",
-          "examples/rejections/t18_type_alias_cycle.rvl",
-          "examples/rejections/t5_destructure_nonrecord.rvl"
-        ]
-      },
-      "total_false_admit": 9,
-      "named_programs": [
-        "examples/rejections/t13_unknown_match_case.rvl",
-        "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-        "examples/rejections/t17_arrow_body_unchecked.rvl",
-        "examples/rejections/t18_type_alias_cycle.rvl",
-        "examples/rejections/t32_arrow_value_result_flows.rvl",
-        "examples/rejections/t33_arrow_value_arity.rvl",
-        "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-        "examples/rejections/t5_destructure_nonrecord.rvl",
-        "examples/rejections/v2_match_nonexhaustive.rvl"
-      ]
+      "false_admit_buckets": {},
+      "false_admit_programs": {},
+      "total_false_admit": 0,
+      "named_programs": []
     }
   },
   "unavailable": {}

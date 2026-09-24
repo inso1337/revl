@@ -17,8 +17,8 @@
     "gate_api": "1.0.0",
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
-    "compiler_path": "/private/tmp/claude-502/-Users-inso-Projects/372db844-380f-4093-b2af-62b41c212794/scratchpad/wt-1267-live/src/revl",
-    "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+    "compiler_path": "src/revl",
+    "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -740,72 +740,41 @@
                 "documents": []
               },
               "java": {
-                "residual": 9,
+                "residual": 0,
                 "corpus": 59,
-                "reproduced": 50,
-                "documents": [
-                  "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
-                  "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
-                  "../emit_ts_corpus/property_edges.rvl",
-                  "../emit_ts_corpus/services_async.rvl",
-                  "comp_await.rvl",
-                  "component_branches.rvl",
-                  "component_format.rvl",
-                  "map_inference.rvl",
-                  "stdlib_builtins.rvl"
-                ]
+                "reproduced": 59,
+                "documents": []
               },
               "py": {
-                "residual": 13,
-                "corpus": 56,
-                "reproduced": 43,
+                "residual": 5,
+                "corpus": 57,
+                "reproduced": 52,
                 "documents": [
-                  "../../../backends/typescript/tests/fixtures/conformance.rvl",
                   "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
                   "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-                  "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
-                  "../../../examples/java_match.rvl",
-                  "../../../examples/v3_step_scheduler.rvl",
                   "../../../src/revl/truc/components/cli.rvl",
-                  "../policy_agents.rvl",
                   "branches.rvl",
-                  "services_interp.rvl",
-                  "services_match.rvl",
-                  "witnessed.rvl",
-                  "witnessed_secret.rvl"
+                  "services_control_flow.rvl"
                 ]
               },
               "rust": {
-                "residual": 3,
+                "residual": 2,
                 "corpus": 40,
-                "reproduced": 37,
+                "reproduced": 38,
                 "documents": [
-                  "comp_await_job.rvl",
                   "comp_stream.rvl",
                   "component_edges.rvl"
                 ]
               },
               "ts": {
-                "residual": 16,
-                "corpus": 60,
-                "reproduced": 44,
+                "residual": 4,
+                "corpus": 61,
+                "reproduced": 57,
                 "documents": [
-                  "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
-                  "../../../backends/typescript/tests/fixtures/async_http.rvl",
                   "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-                  "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
                   "../../../examples/java_match.rvl",
-                  "async_arrow_emission.rvl",
-                  "async_effects.rvl",
-                  "cas_runtime.rvl",
-                  "component_edges.rvl",
-                  "component_exprs.rvl",
-                  "components_await.rvl",
-                  "instance_get.rvl",
-                  "property_edges.rvl",
-                  "services_async.rvl",
-                  "services_composite.rvl",
-                  "spawn.rvl"
+                  "../emit_py_corpus/services_control_flow.rvl",
+                  "component_edges.rvl"
                 ]
               },
               "wasm": {
@@ -815,10 +784,11 @@
                 "documents": []
               }
             },
-            "total_residual": 41,
-            "total_corpus": 259,
+            "total_residual": 11,
+            "total_corpus": 261,
             "clean_tiers": [
               "go",
+              "java",
               "wasm"
             ]
           },
@@ -1220,62 +1190,36 @@
             "source": "tools/gate_reference_census_baseline.json",
             "gate": "python3 tools/gate_reference_census.py --check",
             "means": "programs the embeddable gate admits that the reference compiler refuses; the fail-open direction",
-            "false_admit_buckets": {
-              "false-admit/T1": 6,
-              "false-admit/TYPE": 3
-            },
-            "false_admit_programs": {
-              "false-admit/T1": [
-                "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-                "examples/rejections/t17_arrow_body_unchecked.rvl",
-                "examples/rejections/t32_arrow_value_result_flows.rvl",
-                "examples/rejections/t33_arrow_value_arity.rvl",
-                "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-                "examples/rejections/v2_match_nonexhaustive.rvl"
-              ],
-              "false-admit/TYPE": [
-                "examples/rejections/t13_unknown_match_case.rvl",
-                "examples/rejections/t18_type_alias_cycle.rvl",
-                "examples/rejections/t5_destructure_nonrecord.rvl"
-              ]
-            },
-            "total_false_admit": 9,
-            "named_programs": [
-              "examples/rejections/t13_unknown_match_case.rvl",
-              "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-              "examples/rejections/t17_arrow_body_unchecked.rvl",
-              "examples/rejections/t18_type_alias_cycle.rvl",
-              "examples/rejections/t32_arrow_value_result_flows.rvl",
-              "examples/rejections/t33_arrow_value_arity.rvl",
-              "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-              "examples/rejections/t5_destructure_nonrecord.rvl",
-              "examples/rejections/v2_match_nonexhaustive.rvl"
-            ]
+            "false_admit_buckets": {},
+            "false_admit_programs": {},
+            "total_false_admit": 0,
+            "named_programs": []
           }
         },
         "unavailable": {}
       },
       "headline": {
-        "documents_refused": 41,
-        "corpus": 259,
-        "n": 259,
+        "documents_refused": 11,
+        "corpus": 261,
+        "n": 261,
         "per_tier": {
           "go": 0,
-          "java": 9,
-          "py": 13,
-          "rust": 3,
-          "ts": 16,
+          "java": 0,
+          "py": 5,
+          "rust": 2,
+          "ts": 4,
           "wasm": 0
         },
         "clean_tiers": [
           "go",
+          "java",
           "wasm"
         ],
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
       "unported_constructs": 205,
-      "fail_open_programs": 9
+      "fail_open_programs": 0
     },
     "unload-paths": {
       "status": "measured",
@@ -2636,11 +2580,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 41 of 259 corpus documents that the reference compiler accepts (n=259)",
+      "text": "the fully-native revl chain does not reproduce 11 of 261 corpus documents that the reference compiler accepts (n=261)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2650,7 +2594,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2660,7 +2604,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2670,7 +2614,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2680,7 +2624,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2690,7 +2634,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2700,7 +2644,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2710,7 +2654,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "d630dcb5da102bfc9f313d3246695e72a0890f5f",
+        "compiler_commit": "9af4b3606c80d4dd78cb09c006560e925f0d4836",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
