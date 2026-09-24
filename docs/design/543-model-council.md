@@ -323,21 +323,70 @@ this item warns about: a council whose members are all cloud-placed gives a
 confidential input to every one of them while reading, to a reviewer, like a
 confinement structure.
 
-### 6.1 The limit: one input, asked of every member
+### 6.1 The limit, and how slice 4 lifts it
 
 Slice 1 asks every member the same question with the same input. That is why
 the ceiling is a join.
 
 The sentence "a local adversary can read an origin the cloud proposer is not
 allowed to see" is literally true only once a council can give **different
-inputs to different members**, which needs a per-member input declaration and is
-slice 4 below. What slice 1 and slice 2 deliver is the half that has to come
-first and is useful on its own: the members are placed separately, so the
+inputs to different members**. Slice 1 and slice 2 deliver the half that has to
+come first and is useful on its own: the members are placed separately, so the
 ceiling is decided per member and the refusal names the member whose residence
 made it a refusal, rather than refusing "the council" and leaving the author to
 work out which of three placements was the problem. Until slice 4, the
 conservative join is enforced, which is the fail-closed direction of the same
-rule. Stated here rather than implied by silence, for the same reason item 512's
+rule.
+
+**Slice 4 lifts it** (issue #1368). A member may carry a `reads <origin>`
+clause, written after its role and inside the council braces:
+
+```revl
+model council Release {
+  proposer  -> vast,
+  adversary -> edge reads confidential,
+  aggregate unanimous
+}
+```
+
+Three sentences say what the clause means.
+
+**A member is given an origin, or it is not.** `reads` names the origin this
+member receives; a member without the clause receives no confidentiality
+origin. The ordinary question and its ordinary input still go to every member,
+which is what a council IS, so the only thing the clause can say is which
+member is given something the others are withheld from. That is why the
+admitted vocabulary is exactly the origins item 514's ceiling judges, and why
+`reads web` is refused by name rather than admitted as a restriction the
+council does not have.
+
+**A council withholds by declaration or it withholds from nobody.** The reading
+is a property of the whole council, not of each member: `Council.scoped` is
+true when any member carries a clause, and every member is then judged on what
+it declares. A per-member default would have made an undeclared member's input
+depend on what a SIBLING member declared, which is the silent pick this
+construct exists to remove. A council with no clause anywhere gets slice 1's
+reading unchanged, which is every council that predates the slice.
+
+**The ceiling is per origin.** `Council.residence` does not move: it is still
+the join over every member, and it is still what a reader that does not know
+about per-member inputs gets. What item 514's rule compares is
+`Council.ceiling(origin)`, the join over the members that RECEIVE that origin.
+In the council above, `residence` is `off_device` because the proposer is, and
+`ceiling("confidential")` is `on_device` because the adversary is the only
+member given it. Routing a confidential input to `Release` therefore admits,
+and routing it to the same council with the clause removed refuses naming the
+proposer.
+
+The rule that keeps the second sentence honest is a refusal in the declaration
+itself: a member declared `reads confidential` on a role declared `off_device`
+is refused, naming the member and the origin. Handing the confidential input to
+a member placed off the device is the same disclosure the council was built to
+avoid, written one level down, and refusing it in `revl.model_council` is what
+lets `revl.model_route` keep one rule: for a scoped council, every member that
+receives the origin is already on the device.
+
+Stated here rather than implied by silence, for the same reason item 512's
 section 2.1 states its slice-1 limit.
 
 ---
@@ -673,10 +722,27 @@ fires on a `match` inside a function body, which is the flow position the gate
 declines, unlike S2's binding, whose declaration half is written in the token
 stream.
 
-**S4. Per-member inputs.** The declaration that gives the adversary an input the
-proposer is not given, which is what makes section 6.1's sentence literally
-true. Needs the origin ceiling per member from S2 and is the reason this is not
-folded into it.
+**S4. Per-member inputs. LANDED** (issue #1368). The declaration that gives the
+adversary an input the proposer is not given, which is what makes section 6.1's
+sentence literally true. It needed the origin ceiling per member from S2, which
+is why it was not folded into it.
+
+Two things landed with it that this sketch did not say.
+
+The SELF-HOST port was required, and section 13's measurement is why: a
+per-member clause goes INSIDE the council braces, and `selfhost/lower.rvl`'s
+`council_body` is a closed reader, so an unrecognised item becomes a `COUNCIL`
+refusal the moment any corpus file uses the form. Contrast slice 3, which
+correctly needed no port because its rule fires on a `match` in a function
+body, a flow position the gate has no walk for. The port carries all five new
+refusals and makes `ccl_off_member` take the origin it is judging.
+
+The FIXTURES stay inline in `tests/test_model_council_516.py`, unlike slice
+2's. Section 13.1's rule is that a fixture goes on disk when the corpora
+reading that directory can decide it, and `examples/rejections/` is the tier
+reproducer set: a fixture there moved `G-COUNCIL-SPLIT`'s `revl` column from
+`proved` to `div` once already. A declaration-level placement rule is not
+something the tier corpus decides.
 
 **S5. The self-host port. LANDED** in
 `docs/design/556-model-council-selfhost.md`, which ports all seventeen refusals

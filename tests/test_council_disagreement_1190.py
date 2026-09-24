@@ -430,7 +430,14 @@ def test_the_council_checker_imports_none_of_item_471s_machinery():
         "dataclasses", "dataclasses.dataclass",
         ".errors", ".errors.RevlError",
         ".model_route", ".model_route.CATEGORY", ".model_route.CODE",
-        ".model_route.roles",
+        ".model_route.CONFIDENTIALITY_ORIGINS", ".model_route.roles",
+        # item 516 slice 4: a member's `reads <origin>` clause is judged
+        # against the ORIGIN vocabulary, which is item 249's and which
+        # `model_route` reads from the same module. Neither name is an
+        # identity or a consent: an origin class says where a value came
+        # from, and the list the assertion above walks is what keeps the
+        # approval vocabulary out.
+        ".taint", ".taint.ORIGIN_CLASSES",
     }, sorted(imported)
 
 

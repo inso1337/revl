@@ -271,23 +271,63 @@ def _council_placement(council, table: dict) -> dict:
         "role": council.name,
         "residence": council.residence,
         "council": council.name,
+        # item 516 slice 4: `scoped` says which of the two readings of
+        # `residence` applies. False is slice 1's - one question, one input,
+        # every member - and `residence` is the join over all of them. True
+        # means the council withholds by declaration, and the join that
+        # matters is over the members whose `inputs` name the origin.
+        "scoped": council.scoped,
         "members": tuple(
             {"function": m.function, "role": m.role,
-             "residence": m.residence, "line": table[m.role].line}
+             "residence": m.residence, "line": table[m.role].line,
+             "inputs": m.inputs}
             for m in council.members),
         "member_roles": tuple(m.role for m in council.members),
     }
 
 
-def off_device_members(placement) -> tuple:
+def receiving_members(placement, origin: str | None = None) -> tuple:
+    """The members of a council placement that are GIVEN `origin`.
+
+    Every member of an unscoped council, which is slice 1's reading and the
+    one every program that predates item 516 slice 4 gets. For a scoped
+    council it is the members whose `reads` clause names the origin, and that
+    tuple may be empty: a council that is handed an origin it gives to no
+    member places nothing, which `check` refuses by name.
+    """
+    members = tuple((placement or {}).get("members") or ())
+    if origin is None or not (placement or {}).get("scoped"):
+        return members
+    return tuple(m for m in members if origin in (m.get("inputs") or ()))
+
+
+def placement_ceiling(placement, origin: str) -> str | None:
+    """The residence item 514's rule compares for `origin` (item 516 slice 4).
+
+    A role placement's own residence, and for a council the join over the
+    members that RECEIVE the origin. The two differ only for a council that
+    withholds by declaration: its `residence` stays the join over EVERY
+    member, because that is what a reader who does not know about per-member
+    inputs must get, and this is what a reader judging one origin must use.
+    """
+    if not (placement or {}).get("scoped"):
+        return (placement or {}).get("residence")
+    return "off_device" if off_device_members(placement, origin) else "on_device"
+
+
+def off_device_members(placement, origin: str | None = None) -> tuple:
     """The members of a council placement that are placed off the device.
 
     Empty for a role placement and for a council whose members all stay on the
     device, which is the pair of cases the ceiling admits. In DECLARATION
     ORDER, so the member a refusal names is the first one an author reading
     the council top to bottom would reach.
+
+    With `origin`, only the members that RECEIVE it are judged (item 516 slice
+    4). Without it the whole declared set is, which is the conservative join
+    and stays the answer for every council that declares no per-member input.
     """
-    return tuple(m for m in (placement or {}).get("members") or ()
+    return tuple(m for m in receiving_members(placement, origin)
                  if m.get("residence") == "off_device")
 
 
@@ -417,7 +457,15 @@ def check(program, filename: str | None = None,
                     # member - and the refusal names the member that made the
                     # join `off_device`, not the council, because the members
                     # are placed separately and that IS the construct.
-                    off = off_device_members(placement)
+                    off = off_device_members(placement, arm.origin)
+                    # A SCOPED council (item 516 slice 4) never reaches the
+                    # refusal below for `confidential`, and that is the
+                    # point rather than an accident: `model_council` refuses
+                    # a member declared `reads confidential` on an
+                    # `off_device` role, so every member that RECEIVES the
+                    # origin is already on the device and `off` is empty. The
+                    # members that stay off the device are the ones the
+                    # declaration withholds it from.
                     if arm.origin in CONFIDENTIALITY_ORIGINS and off:
                         message, hint = _council_ceiling_refusal(
                             stmt.action, comp.name, arm.origin, arm.role, off)
@@ -545,19 +593,27 @@ def admits(arms: dict | None, origin: str, routed_component: bool) -> Verdict:
         star = arms.get("*") or {}
         return Verdict(False, "unplaced", star.get("role"),
                        star.get("residence"), star.get("council"))
-    if placement.get("residence") == "off_device":
+    # The ceiling this ORIGIN is judged against. For a role, and for a council
+    # asked one question with one input, it is the placement's own residence.
+    # For a council that withholds by declaration (item 516 slice 4) it is the
+    # join over the members that RECEIVE the origin - which is the whole point
+    # of the slice, and the reason it cannot be read off `residence`: a council
+    # with a cloud proposer and a local adversary is `off_device` as a council
+    # and `on_device` for the origin only the adversary is given.
+    residence = placement_ceiling(placement, origin)
+    if residence == "off_device":
         # A council placement carries its members, so the refusal can name the
         # one whose own residence made the join `off_device` (item 516 slice
         # 2). `check()` refuses writing this arm, so this is the same
         # belt-and-braces path the role case is: if a later slice ever admits
         # such an arm, the VALUE is still refused, and still by member.
-        off = off_device_members(placement)
+        off = off_device_members(placement, origin)
         first = off[0] if off else {}
         return Verdict(False, "off_device", placement.get("role"),
-                       placement.get("residence"), placement.get("council"),
+                       residence, placement.get("council"),
                        first.get("function"), first.get("role"))
     return Verdict(True, "ok", placement.get("role"),
-                   placement.get("residence"), placement.get("council"))
+                   residence, placement.get("council"))
 
 
 def ceiling_refusal(verdict: Verdict, origin: str, action: str,

@@ -743,8 +743,24 @@ class ModelRoleDecl:
 
 
 @dataclass
+class CouncilInput:
+    """`reads <origin>` on one council member (item 516 slice 4).
+
+    The origin class this member is GIVEN, which is what makes design note
+    543's section 6.1 sentence literally true: a local adversary may read an
+    origin the cloud proposer is not given. A member with no clause is given
+    no confidentiality origin.
+
+    SYNTAX ONLY. Which origins may be named, and what a member reading one
+    means for its placement, are `revl.model_council`'s."""
+    origin: str
+    line: int
+
+
+@dataclass
 class CouncilMember:
-    """One member of a `model council`: `<function> -> <role>` (item 516).
+    """One member of a `model council`: `<function> -> <role> [reads <origin>]`
+    (item 516).
 
     `function` is what the member is FOR (proposer, adversary, verifier) and
     `role` is the item-512 `model role` that places it. The two are separate
@@ -752,11 +768,18 @@ class CouncilMember:
     the role is where its call runs, which is what lets a council put a local
     adversary beside a cloud proposer.
 
-    SYNTAX ONLY. The function vocabulary, the distinctness rules and the
-    placement lookup are `revl.model_council`'s."""
+    `inputs` holds EVERY `reads` clause written on the member, which is
+    normally none or one. The parser neither drops a duplicate nor invents a
+    default, for the reason `aggregates` below keeps both clauses: "a member
+    declares at most one input" is a rule with a diagnostic that needs both
+    lines.
+
+    SYNTAX ONLY. The function vocabulary, the origin vocabulary, the
+    distinctness rules and the placement lookup are `revl.model_council`'s."""
     function: str
     role: str
     line: int
+    inputs: tuple = ()
 
 
 @dataclass
@@ -2872,6 +2895,14 @@ class Parser:
         semicolon-separated and a trailing comma is allowed, exactly as the
         `route model` block allows one.
 
+        A member arm may carry a `reads <origin>` clause (item 516 slice 4),
+        which is the per-member input: the declaration that gives the
+        adversary something the proposer is not given. `reads` is a CONTEXTUAL
+        identifier read only in this slot, so the lexer's `KEYWORDS` table and
+        the self-hosted lexer that mirrors it still need no sync. A SECOND
+        clause on one member is kept rather than dropped, for the same reason
+        a second `aggregate` is.
+
         The parser validates NOTHING beyond the shape: the function
         vocabulary, the aggregation vocabulary, the distinctness rules and the
         lookup of each member's `model role` are `revl.model_council`'s, so the
@@ -2907,7 +2938,16 @@ class Parser:
                 role = self.expect(
                     "ident",
                     what=f"a model role name after `{fn_tok.value} ->`").value
-                members.append(CouncilMember(fn_tok.value, role, fn_tok.line))
+                inputs: list = []
+                while self.at("ident", "reads"):
+                    reads_line = self.next().line
+                    origin = self.expect(
+                        "ident",
+                        what=f"an origin class after `{fn_tok.value} -> "
+                             f"{role} reads`").value
+                    inputs.append(CouncilInput(origin, reads_line))
+                members.append(CouncilMember(fn_tok.value, role, fn_tok.line,
+                                             tuple(inputs)))
             if self.at(","):
                 self.next()
         self.expect("}")
