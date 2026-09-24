@@ -13126,7 +13126,8 @@ fn model_residences() -> List[Str] { return ["on_device", "off_device"] }
 // the public frozen view the declaration surface reads so a new origin class
 // cannot reach the checker without reaching this surface too).
 fn model_origin_classes() -> List[Str] {
-  return ["confidential", "fs", "input", "model", "net", "secret", "web"]
+  return ["confidential", "fs", "input", "model", "net", "screen", "secret",
+          "web"]
 }
 
 // The origins a role may never receive off the device
@@ -13435,20 +13436,29 @@ fn marm_origin_at(as_: List[MArm], o: Str, i: Int) -> Int {
   return marm_origin_at(as_, o, i + 1)
 }
 
-// The first member of a council placed off the device, in DECLARATION order,
-// or -1 when every member stays on it (item 516 slice 2,
-// `model_route.off_device_members`). Declaration order, so the member a
-// refusal names is the first one an author reading the council top to bottom
-// would reach.
+// The first member of a council placed off the device AND given `orig`, in
+// DECLARATION order, or -1 when every member that receives it stays on the
+// device (item 516 slices 2 and 4, `model_route.off_device_members`).
+// Declaration order, so the member a refusal names is the first one an author
+// reading the council top to bottom would reach.
+//
+// `orig` is what makes the judgement per member rather than per council (slice
+// 4): an unscoped council gives every origin to every member, so the filter is
+// the whole declared set and slice 2's answer is unchanged, while a council
+// that withholds by declaration is judged only on the members it hands the
+// origin to. Those members are already on the device, because the council
+// phase refuses one that is not, so this returns -1 for a scoped council and
+// the refusal below is slice 2's alone.
 //
 // A member whose role is not declared cannot be judged and is stepped over
 // here rather than guessed at: the council phase, which runs BEFORE this one,
 // already refuses that council by name, so this loop never sees one.
-fn ccl_off_member(c: CDecl, rs: List[MRole]) -> Int {
+fn ccl_off_member(c: CDecl, rs: List[MRole], orig: Str) -> Int {
   var i = 0
   while (i < c.cmems.length()) {
     let ri = mrole_at(rs, c.cmems[i].crole, 0)
-    if (ri != 0 - 1 && rs[ri].rres == "off_device") { return i }
+    if (ri != 0 - 1 && rs[ri].rres == "off_device"
+        && ccl_member_reads(c, c.cmems[i], orig)) { return i }
     i += 1
   }
   return 0 - 1
@@ -13489,7 +13499,7 @@ fn model_arms_refusal(b: MBlock, cname: Str, rs: List[MRole],
     }
     if (ci != 0 - 1) {
       if (contains(model_confidentiality_origins(), a.aorig)) {
-        let mi = ccl_off_member(cs[ci], rs)
+        let mi = ccl_off_member(cs[ci], rs, a.aorig)
         if (mi != 0 - 1) {
           let m = cs[ci].cmems[mi]
           let mr = rs[mrole_at(rs, m.crole, 0)]
@@ -13623,7 +13633,12 @@ fn model_place_refusal(ts: List[Token]) -> Verd {
 // is evidence for is decided by the SENTENCE, not by the tag. That is another
 // reason the messages here are the reference's byte for byte.
 
-type CMem = { cfun: Str, crole: Str, cmline: Int }
+// One `reads <origin>` clause on a member (item 516 slice 4): the origin this
+// member is GIVEN. `ciline` is the line the clause was written on, which is
+// the line the reference's refusals cite.
+type CIn = { cio: Str, ciline: Int }
+
+type CMem = { cfun: Str, crole: Str, cmline: Int, cins: List[CIn] }
 
 // One `aggregate <rule> [quorum <basis>] [on_tie <outcome>]` clause. `cquorum`
 // and `ctie` are "" when the clause was OMITTED, which is not the same as
@@ -13680,6 +13695,20 @@ fn council_tie_outcomes() -> List[Str] { return ["split", "deny"] }
 fn council_admitting_ties() -> List[Str] {
   return ["allow", "admit", "proceed", "accept", "first", "any"]
 }
+
+// What a member's `reads <origin>` clause may name
+// (`model_council.MEMBER_INPUT_ORIGINS`). The clause says this member is given
+// an origin the members without it are WITHHELD from, and the ordinary
+// question and its ordinary input go to every member, so only a
+// confidentiality origin can be named.
+fn council_member_inputs() -> List[Str] { return ["confidential"] }
+
+// The spelling refused BY NAME, the `on_tie allow` discipline
+// (`model_council.REFUSED_MEMBER_INPUT_ORIGINS`): a capability-bound secret
+// reaches no model prompt at any residence, so no placement would make the
+// clause safe and the author is told why rather than told the word is not in
+// a list.
+fn council_refused_inputs() -> List[Str] { return ["secret"] }
 
 // ------------------------------------------------------------ the sentences
 
@@ -13777,6 +13806,42 @@ fn ccl_unknown_tie_msg(o: Str, name: Str) -> Str {
     .concat(name).concat("`")
 }
 
+// ---- the per-member input (item 516 slice 4) -------------------------------
+
+fn ccl_reads_secret_msg(fun: Str, name: Str, o: Str) -> Str {
+  return "member `".concat(fun).concat("` of model council `").concat(name)
+    .concat("` is declared `reads ").concat(o).concat("`")
+}
+
+fn ccl_reads_unknown_msg(o: Str, fun: Str, name: Str) -> Str {
+  return "unknown origin class `".concat(o).concat("` in member `").concat(fun)
+    .concat("` of model council `").concat(name).concat("`")
+}
+
+fn ccl_reads_not_conf_msg(fun: Str, name: Str, o: Str) -> Str {
+  return "member `".concat(fun).concat("` of model council `").concat(name)
+    .concat("` is declared `reads ").concat(o)
+    .concat("`, which is not a confidentiality origin")
+}
+
+fn ccl_reads_twice_msg(fun: Str, name: Str, o: Str) -> Str {
+  return "member `".concat(fun).concat("` of model council `").concat(name)
+    .concat("` reads `").concat(o).concat("` twice")
+}
+
+// The member GIVEN a confidentiality origin and placed off the device. It
+// carries the COUNCIL tag like every other council refusal here, and the
+// reference files it under item 512's code because its subject is a `model
+// role`; `SELFHOST_TAG_CODES` maps the tag to both.
+fn ccl_reads_off_device_msg(fun: Str, name: Str, o: Str, role: Str, res: Str,
+                            rline: Int) -> Str {
+  return "member `".concat(fun).concat("` of model council `").concat(name)
+    .concat("` is declared `reads ").concat(o)
+    .concat("` and runs on model role `").concat(role).concat("`, declared `")
+    .concat(res).concat("` on line ").concat(rline.to_str()).concat(": a ")
+    .concat(o).concat(" input may not leave the device")
+}
+
 // The body this gate cannot read. A REFUSAL and not a silent step-over, for the
 // reason `mundecided_msg` records one construct up: a body whose items the gate
 // skipped is a body whose members and aggregation it did not decide, and
@@ -13837,9 +13902,20 @@ fn council_body(ts: List[Token], lo: Int, hi: Int) -> CBody {
       if (!atk(ts, i, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
       if (!atk(ts, i + 1, "arrow")) { return { ymems: mems, yaggs: aggs, yok: false } }
       if (!atk(ts, i + 2, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+      // item 516 slice 4: the member's own input, `reads <origin>`, written
+      // after its role and INSIDE the council braces. A second clause is kept
+      // rather than dropped, for the reason a second `aggregate` is: "a
+      // member declares at most one input" is a rule with a diagnostic.
+      var k = i + 3
+      var ins: List[CIn] = []
+      while (ati(ts, k, "reads")) {
+        if (!atk(ts, k + 1, "ident")) { return { ymems: mems, yaggs: aggs, yok: false } }
+        ins = ins.push({ cio: tkc(ts, k + 1).text, ciline: tkc(ts, k).line })
+        k += 2
+      }
       mems = mems.push({ cfun: tkc(ts, i).text, crole: tkc(ts, i + 2).text,
-                         cmline: tkc(ts, i).line })
-      i += 3
+                         cmline: tkc(ts, i).line, cins: ins })
+      i = k
     }
   }
   return { ymems: mems, yaggs: aggs, yok: true }
@@ -13892,6 +13968,32 @@ fn cmem_role_at(ms: List[CMem], r: Str, i: Int) -> Int {
   return cmem_role_at(ms, r, i + 1)
 }
 
+fn cin_at(ins: List[CIn], o: Str, i: Int) -> Int {
+  if (i >= ins.length()) { return 0 - 1 }
+  if (ins[i].cio == o) { return i }
+  return cin_at(ins, o, i + 1)
+}
+
+// Whether the council withholds by declaration (item 516 slice 4,
+// `Council.scoped`). A council where no member declares an input is asked ONE
+// question with ONE input, which is slice 1's reading and the one every
+// council that predates the slice gets.
+fn ccl_scoped(c: CDecl) -> Bool {
+  var i = 0
+  while (i < c.cmems.length()) {
+    if (c.cmems[i].cins.length() > 0) { return true }
+    i += 1
+  }
+  return false
+}
+
+// Whether a member is GIVEN `o` (`Council.receivers`): every member of an
+// unscoped council, and otherwise exactly the members whose clause names it.
+fn ccl_member_reads(c: CDecl, m: CMem, o: Str) -> Bool {
+  if (!ccl_scoped(c)) { return true }
+  return cin_at(m.cins, o, 0) != 0 - 1
+}
+
 // One council's members, in the reference's own order per member: the function
 // vocabulary, then one member per function, then the role's existence, then one
 // member per role. A duplicate names the EARLIER member, which is what the
@@ -13916,7 +14018,43 @@ fn council_members_refusal(c: CDecl, rs: List[MRole]) -> Verd {
       return cverd(ccl_same_role_msg(c.cmems[pr].cfun, m.cfun, c.ccname,
                                      m.crole), m.cmline)
     }
+    // item 516 slice 4, in the reference's own order per clause: the spelling
+    // refused by name, then the origin vocabulary, then the narrowing to a
+    // confidentiality origin, then the clause written twice, then the member
+    // GIVEN the origin and placed off the device.
+    let iv = council_inputs_refusal(c, m, rs)
+    if (iv.v != "") { return iv }
     i += 1
+  }
+  return no_verd()
+}
+
+// One member's `reads` clauses. Split out so the member loop above stays the
+// reference's four rules in the reference's order and this is the fifth.
+fn council_inputs_refusal(c: CDecl, m: CMem, rs: List[MRole]) -> Verd {
+  var k = 0
+  while (k < m.cins.length()) {
+    let cl = m.cins[k]
+    if (contains(council_refused_inputs(), cl.cio)) {
+      return cverd(ccl_reads_secret_msg(m.cfun, c.ccname, cl.cio), cl.ciline)
+    }
+    if (!contains(model_origin_classes(), cl.cio)) {
+      return cverd(ccl_reads_unknown_msg(cl.cio, m.cfun, c.ccname), cl.ciline)
+    }
+    if (!contains(council_member_inputs(), cl.cio)) {
+      return cverd(ccl_reads_not_conf_msg(m.cfun, c.ccname, cl.cio), cl.ciline)
+    }
+    if (cin_at(m.cins, cl.cio, 0) != k) {
+      return cverd(ccl_reads_twice_msg(m.cfun, c.ccname, cl.cio), cl.ciline)
+    }
+    let ri = mrole_at(rs, m.crole, 0)
+    if (contains(model_confidentiality_origins(), cl.cio)
+        && ri != 0 - 1 && rs[ri].rres == "off_device") {
+      return cverd(ccl_reads_off_device_msg(m.cfun, c.ccname, cl.cio, m.crole,
+                                            rs[ri].rres, rs[ri].rline),
+                   cl.ciline)
+    }
+    k += 1
   }
   return no_verd()
 }
@@ -23528,6 +23666,95 @@ service Answer { fn classify(text: Str) -> Str }
 component Classifier provides out: Answer {
   provide out { fn classify(text) = text }
 }""") == "COUNCIL|members `proposer` and `adversary` of model council `Release` are both placed on model role `edge`"
+}
+
+test "a member may be given an origin its sibling is not (item 516 slice 4)" {
+  // the exit test, both halves. The adversary is GIVEN the confidential
+  // origin and runs on the device; the proposer is not given it and runs off
+  // the device. The arm admits, because the ceiling for that origin is the
+  // join over the members that RECEIVE it.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge reads confidential,
+  aggregate unanimous
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> Release }
+  provide out { fn classify(text) = text }
+}""") == ""
+  // the CONTROL: the identical program with the clause removed is slice 2's
+  // conservative join, and it refuses naming the proposer. One phrase apart,
+  // so what moved is the clause and nothing else.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release {
+  proposer -> vast,
+  adversary -> edge,
+  aggregate unanimous
+}
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { confidential -> Release }
+  provide out { fn classify(text) = text }
+}""") == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"
+}
+
+test "a member given a confidential input is not placed off the device" {
+  // the other half of the exit test, and the rule that lets the route phase
+  // keep ONE sentence: handing the origin to a member placed off the device
+  // is the disclosure the council was built to avoid, written one level down.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> vast reads confidential, adversary -> edge,
+  aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|member `proposer` of model council `Release` is declared `reads confidential` and runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device"
+}
+
+test "what a member may be declared to read is a closed vocabulary" {
+  // the pick-one discipline, one construct down: `secret` PARSES so that the
+  // refusal can say an LLM prompt is a disclosure sink for a capability-bound
+  // key at every residence, and an ordinary origin parses so the refusal can
+  // say every member is asked the same question with the same ordinary input.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> edge reads secret, adversary -> vast,
+  aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|member `proposer` of model council `Release` is declared `reads secret`"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> edge reads web, adversary -> vast,
+  aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|member `proposer` of model council `Release` is declared `reads web`, which is not a confidentiality origin"
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> edge reads confidentail, adversary -> vast,
+  aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|unknown origin class `confidentail` in member `proposer` of model council `Release`"
+  // the clause written twice is kept by the reader and refused by the rule,
+  // for the reason a second `aggregate` is.
+  assert admit_src("""model role edge on_device
+model role vast off_device
+model council Release { proposer -> edge reads confidential reads confidential,
+  adversary -> vast, aggregate unanimous }
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""") == "COUNCIL|member `proposer` of model council `Release` reads `confidential` twice"
 }
 
 test "one member wearing a council's name is refused, and so is no proposer" {

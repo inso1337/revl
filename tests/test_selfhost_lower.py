@@ -178,7 +178,14 @@ def _classify(e: RevlError) -> str:
     # no-objection the gate is entitled to as a bypass.
     if " value reaches the model crossing " not in m and (
             m.startswith("unknown residence `")
-            or m.startswith("unknown origin class `")
+            # item 516 slice 4 wrote a SECOND "unknown origin class `"
+            # sentence, for a council member's `reads` clause, and the marker
+            # here was an opening with nothing after it. The council one names
+            # the council, which is the phrase that fixes the rule; this is
+            # the same shaping the block below applies to every marker it
+            # shares an opening with.
+            or (m.startswith("unknown origin class `")
+                and " of model council `" not in m)
             or (m.startswith("model role `")
                 and " is declared twice (first on line " in m)
             or (m.startswith("action `") and " is routed twice in " in m)
@@ -253,7 +260,25 @@ def _classify(e: RevlError) -> str:
             or (m.startswith("member `") and " of model council `" in m
                 and m.endswith("`, which is not declared"))
             or (m.startswith("members `") and " of model council `" in m
-                and " are both placed on model role `" in m)):
+                and " are both placed on model role `" in m)
+            # ---- item 516 slice 4: the per-member input ---------------------
+            # A member's `reads <origin>` clause. Four of the five sentences
+            # open "member `" and name the council, and the phrase that fixes
+            # the rule is the clause itself; the fifth is the origin
+            # vocabulary, whose opening the MODEL block above shares and whose
+            # marker is shaped there for exactly that reason.
+            #
+            # The off-device one is in here rather than in MODEL although the
+            # reference files it under item 512's code: this function answers
+            # the FAMILY, and what it refuses is a clause inside the council
+            # braces, decided by `revl.model_council`. `SELFHOST_TAG_CODES`
+            # already maps `COUNCIL` to both codes.
+            or (m.startswith("member `") and " of model council `" in m
+                and " is declared `reads " in m)
+            or (m.startswith("member `") and " of model council `" in m
+                and "` reads `" in m and m.endswith("` twice"))
+            or (m.startswith("unknown origin class `")
+                and " in member `" in m and " of model council `" in m)):
         return "COUNCIL"
     if "provision conflict" in m and "(G2)" in m:
         return "G2"

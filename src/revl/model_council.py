@@ -64,7 +64,9 @@ from dataclasses import dataclass
 from .errors import RevlError
 from .model_route import CATEGORY as PLACE_CATEGORY
 from .model_route import CODE as PLACE_CODE
+from .model_route import CONFIDENTIALITY_ORIGINS
 from .model_route import roles
+from .taint import ORIGIN_CLASSES
 
 # The guarantee this module's refusals enforce (issue #1190,
 # `docs/design/557-council-disagreement.md`).
@@ -137,6 +139,24 @@ TIE_OUTCOMES = ("split", "deny")
 ADMITTING_TIE_OUTCOMES = ("allow", "admit", "proceed", "accept", "first",
                           "any")
 
+# What a `reads <origin>` clause on a member may name (item 516 slice 4).
+#
+# The clause is the per-member INPUT: it says this member is given an origin
+# the members without the clause are not. Only a CONFIDENTIALITY origin can be
+# withheld from a member, because the ordinary question and its ordinary input
+# go to every member - that is what a council IS, and design note 543's
+# section 6.1 says so. So the admitted vocabulary is exactly the origins item
+# 514's ceiling judges.
+#
+# `secret` parses and is refused BY NAME, the `on_tie allow` discipline: a
+# capability-bound secret never reaches a model prompt at any residence
+# (`G-SECRET-FLOW`), so there is no member this clause could name and the
+# author should be told why rather than told the word is not in a list.
+MEMBER_INPUT_ORIGINS = ("confidential",)
+REFUSED_MEMBER_INPUT_ORIGINS = ("secret",)
+
+_INPUT_VOCABULARY = ", ".join(MEMBER_INPUT_ORIGINS)
+
 _FUNCTION_VOCABULARY = ", ".join(FUNCTIONS)
 _AGGREGATION_VOCABULARY = ", ".join(AGGREGATIONS)
 _TIE_VOCABULARY = ", ".join(TIE_OUTCOMES)
@@ -147,15 +167,24 @@ _DESIGN = "docs/design/543-model-council.md"
 
 @dataclass(frozen=True)
 class Member:
-    """A validated council member: a function, and the role that places it."""
+    """A validated council member: a function, the role that places it, and
+    the origins it is GIVEN.
+
+    `inputs` is item 516 slice 4. It is empty for a member declared without a
+    `reads` clause, which is every member in every program that predates the
+    slice."""
     function: str
     role: str
     residence: str
     line: int
+    inputs: tuple = ()
 
     @property
     def off_device(self) -> bool:
         return self.residence == "off_device"
+
+    def reads(self, origin: str) -> bool:
+        return origin in self.inputs
 
 
 @dataclass(frozen=True)
@@ -194,6 +223,49 @@ class Council:
         if self.rule == "majority":
             return n // 2 + 1
         return n
+
+    @property
+    def scoped(self) -> bool:
+        """True when any member declares a `reads` clause (item 516 slice 4).
+
+        A council with none is asked ONE question with ONE input, which is
+        section 6.1's stated slice-1 limit, and `residence` above is its
+        ceiling. A council with one is asked one question whose CONFIDENTIAL
+        part reaches only the members that declared it, and the ceiling is
+        `ceiling(origin)` below.
+
+        Held as a property of the whole council rather than of each member so
+        that the two readings can never be mixed: a council either withholds
+        by declaration or withholds from nobody. A per-member default would
+        have made an undeclared member's input depend on what a SIBLING member
+        declared, which is the silent pick this construct exists to remove.
+        """
+        return any(m.inputs for m in self.members)
+
+    def receivers(self, origin: str) -> tuple:
+        """The members this council gives `origin` to.
+
+        Every member when the council declares no per-member input, which is
+        the conservative join slice 1 and slice 2 enforce and the reading
+        every program that predates slice 4 gets. Otherwise exactly the
+        members whose `reads` clause names it - and that set may be EMPTY,
+        which is a council that is given the origin and hands it to nobody.
+        """
+        if not self.scoped:
+            return self.members
+        return tuple(m for m in self.members if m.reads(origin))
+
+    def ceiling(self, origin: str) -> str:
+        """The residence item 514's rule compares for `origin`.
+
+        The most permissive residence among the members that RECEIVE it. A
+        council that gives the origin to nobody has no ceiling to compare, and
+        `on_device` would read as permission; `receivers()` being empty is the
+        case `revl.model_route` refuses by name rather than admitting here.
+        """
+        return ("off_device"
+                if any(m.off_device for m in self.receivers(origin))
+                else "on_device")
 
 
 def _err(filename, line, message, hint, code=CODE, category=CATEGORY):
@@ -316,7 +388,79 @@ def _check_one(decl, role_table, seen, where) -> Council:
                 "separate placement, which is the shape a council exists "
                 "instead of. Give each member its own role",
             )
-        member = Member(raw.function, raw.role, placed.residence, raw.line)
+        # 3a. the member's own input (item 516 slice 4). The clause is what
+        #     makes design note 543 section 6.1's sentence literally true, so
+        #     every rule about it is about withholding: which origin may be
+        #     withheld, that a member declares it once, and that a member
+        #     GIVEN a confidentiality origin is not placed off the device.
+        inputs: list[str] = []
+        for clause in getattr(raw, "inputs", ()) or ():
+            if clause.origin in REFUSED_MEMBER_INPUT_ORIGINS:
+                raise _err(
+                    where, clause.line,
+                    f"member `{raw.function}` of model council `{decl.name}` "
+                    f"is declared `reads {clause.origin}`",
+                    f"a capability-bound {clause.origin} is a host-scope local "
+                    f"handed to its capability's own provider call, and an LLM "
+                    f"prompt is a disclosure sink for it at every residence, "
+                    f"on the device or off it. There is no role this member "
+                    f"could be placed on that would make the clause safe, so "
+                    f"it is refused rather than placed. Drop it "
+                    f"(G-SECRET-FLOW, {_DESIGN})",
+                )
+            if clause.origin not in ORIGIN_CLASSES:
+                known = ", ".join(sorted(ORIGIN_CLASSES))
+                raise _err(
+                    where, clause.line,
+                    f"unknown origin class `{clause.origin}` in member "
+                    f"`{raw.function}` of model council `{decl.name}`",
+                    f"the origin is validated at compile time so a typo is not "
+                    f"a member silently given nothing; the origin classes are: "
+                    f"{known}",
+                )
+            if clause.origin not in MEMBER_INPUT_ORIGINS:
+                raise _err(
+                    where, clause.line,
+                    f"member `{raw.function}` of model council `{decl.name}` "
+                    f"is declared `reads {clause.origin}`, which is not a "
+                    f"confidentiality origin",
+                    f"every member of a council is asked the same question "
+                    f"with the same ordinary input - that is what a council IS "
+                    f"- so the only thing a `reads` clause can say is which "
+                    f"member is given an origin the others are WITHHELD from, "
+                    f"and only a confidentiality origin is withheld from "
+                    f"anyone. Naming `{clause.origin}` here would read as a "
+                    f"restriction the council does not have. The vocabulary "
+                    f"is: {_INPUT_VOCABULARY} ({_DESIGN})",
+                )
+            if clause.origin in inputs:
+                raise _err(
+                    where, clause.line,
+                    f"member `{raw.function}` of model council `{decl.name}` "
+                    f"reads `{clause.origin}` twice",
+                    "a member is given an origin or it is not; writing the "
+                    "clause twice says nothing the first one does not, and a "
+                    "reader counting inputs would count two. Drop the second",
+                )
+            if clause.origin in CONFIDENTIALITY_ORIGINS and placed.off_device:
+                raise _place_err(
+                    where, clause.line,
+                    f"member `{raw.function}` of model council `{decl.name}` "
+                    f"is declared `reads {clause.origin}` and runs on model "
+                    f"role `{raw.role}`, declared `{placed.residence}` on line "
+                    f"{placed.line}: a {clause.origin} input may not leave the "
+                    f"device",
+                    f"the per-member input is what lets a LOCAL adversary read "
+                    f"an origin the CLOUD proposer is not given; handing it to "
+                    f"a member placed off the device is the same disclosure "
+                    f"the council was built to avoid, written one level down. "
+                    f"Place `{raw.function}` on a role declared `on_device`, "
+                    f"or drop its `reads {clause.origin}` clause ({_DESIGN})",
+                )
+            inputs.append(clause.origin)
+
+        member = Member(raw.function, raw.role, placed.residence, raw.line,
+                        tuple(inputs))
         members.append(member)
         by_function[raw.function] = member
         by_role[raw.role] = member
