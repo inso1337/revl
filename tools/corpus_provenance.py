@@ -91,11 +91,63 @@ what generation the tree is on.
 GENERATION ZERO IS A DECLARATION, NOT A MEASUREMENT
 ---------------------------------------------------
 The generation-zero set records the tree as it stood before this file existed.
-No mechanism proves those documents were hand-written; the claim is asserted by
+No mechanism proves anything about those documents; the claim is asserted by
 the operator who recorded them, once, in a diff. What the mechanism holds from
 here on is different and checkable: every document that ARRIVES must name its
 generation, the set can only change in a diff somebody reads, and the fraction
 is computed rather than claimed.
+
+GENERATION IS NOT AUTHORSHIP (issue #1397)
+------------------------------------------
+This file used to read generation 0 as "hand-written / pre-loop", which made
+the reported figure sound like a claim about who typed the bytes. It is not,
+and the tree does not support that reading. Measured on `origin/main` at
+1a44b34c5, by taking each generation-zero entry's introducing commit
+(`git log --diff-filter=A`), resolving the first-parent landing commit for it
+and reading the branch off the squash subject or the merge subject:
+
+  * 153 of the 850 entries were added by a commit that landed from a branch
+    named `agent/*`.
+  * 132 more were added by a commit carrying an explicit `Co-Authored-By:
+    Claude` or `Co-authored-by: Copilot` trailer, with no overlap with the
+    first set: 285 by either signal.
+  * 415 were added by commits pushed straight to the trunk with no pull
+    request at all, so no branch name exists to read.
+  * The repository's ROOT commit, 12778014, itself carries a
+    `Co-Authored-By: Claude Fable 5` trailer. There is no pre-model era here
+    to be the stock that generation 0 describes.
+
+Both branch-name and trailer signals are LOWER BOUNDS: the trailer stops
+appearing after 2026-09-13, and 415 entries have no branch to read. The
+enclosing fact is that the whole of this corpus, 565 documents totalling
+70,858 lines of `.rvl` plus 285 oracle programs written inline, arrived in 39
+calendar days alongside 3,821 commits.
+
+So generation 0 means PRE-LOOP and nothing more, and the number this file
+gates is the share of the evidence that no generation of the self-improvement
+loop produced. That is a real and worthwhile number: the loop is the mechanism
+that would spend independence invisibly, and it has not run. It is NOT the
+share a person typed.
+
+To re-run the measurement, for each name in `generations["0"]` that ends in
+`.rvl`, take the newest `git log --diff-filter=A` commit for that path; walk
+`git log --ancestry-path <sha>..origin/main` down to the oldest commit that is
+also on `git log --first-parent origin/main`; read the branch off that
+commit's subject, which is either `Merge pull request #N from <owner>/<branch>`
+or a squash subject ending `(#N)` whose branch is `gh pr view N
+--json headRefName`. The 285 entries that are not paths are oracle programs
+written inline in `tests/test_selfhost_lower.py`; date them by scanning
+`git log --reverse -p -- tests/test_selfhost_lower.py` for the added line that
+first spells the quoted program name. Pin the ref: a stale local `main` makes
+the ancestry walk return nothing for a third of the set.
+
+That second question gets its own axis, `human_authored`, which is a flat list
+of case ids and is reported beside the generation table. It is fail-closed the
+same way: a document not named there reads as model-authored. It carries no
+floor, because a floor on it would be a floor at zero, and a floor at zero is
+not a floor. Recording it as a list rather than a flag keeps the two axes
+orthogonal, so declaring a document hand-typed never moves a generation and
+never rewrites a baseline that keys on the generation.
 
 NAMES ONLY
 ----------
@@ -123,7 +175,7 @@ ROOT = Path(__file__).resolve().parents[1]
 MANIFEST = ROOT / "tests" / "fixtures" / "corpus_provenance.json"
 
 # The generation an undeclared document resolves to. Not an integer on purpose:
-# it must compare as model-authored at EVERY threshold, including thresholds
+# it must compare as loop-authored at EVERY threshold, including thresholds
 # above any generation the tree has reached.
 UNDECLARED = "undeclared"
 
@@ -135,12 +187,17 @@ FLOOR_SINCE = 1
 
 MANIFEST_NOTE = (
     "Which generation authored each scoring document (roadmap item 542, issue "
-    "#1221). Generation 0 is hand-written / pre-loop. A name absent from every "
-    "list is UNDECLARED, which counts as model-authored at every threshold and "
-    "is an error under `python3 tools/corpus_provenance.py --check`: an "
-    "unknown provenance must never read as hand-written, or a document dropped "
-    "into a globbed corpus would raise the measured independence. Names only, "
-    "no counts and no fractions, for the same reason "
+    "#1221). Generation 0 is PRE-LOOP: it predates the self-improvement loop, "
+    "which is what the floors are about. It is not a claim that a person typed "
+    "it, and issue #1397 measured why not. A name absent from every list is "
+    "UNDECLARED, which counts as loop-authored at every threshold and is an "
+    "error under `python3 tools/corpus_provenance.py --check`: an unknown "
+    "provenance must never read as pre-loop, or a document dropped into a "
+    "globbed corpus would raise the measured independence. `human_authored` is "
+    "the second, orthogonal axis: the case ids a person typed, which a person "
+    "names one at a time. It is fail-closed the same way, a document not named "
+    "there reads as model-authored, and it carries no floor. Names only, no "
+    "counts and no fractions, for the same reason "
     "tests/fixtures/oracle_construct_reach_ledger.json records names only: a "
     "derived number in a recorded artifact rots against what it was derived "
     "from. `floors` is the minimum percent of each scoring corpus that must "
@@ -236,6 +293,10 @@ class Provenance:
     def __init__(self, data: dict):
         self.current_generation = int(data.get("current_generation", 0))
         self.floors = {k: int(v) for k, v in (data.get("floors") or {}).items()}
+        # The orthogonal axis (issue #1397): who TYPED the document, as opposed
+        # to which loop generation produced it. Absent means model-authored,
+        # the same fail-closed direction as an absent generation.
+        self.human_authored: set[str] = set(data.get("human_authored") or ())
         self._by_case: dict[str, int] = {}
         for key, names in (data.get("generations") or {}).items():
             gen = int(key)
@@ -277,6 +338,27 @@ class Provenance:
         return sorted(model), sorted(independent), sorted(unknown)
 
 
+    def is_human_authored(self, case_id: str) -> bool:
+        """True only when a person is NAMED as having typed this document.
+
+        There is no inference here and there cannot be. Issue #1397 measured
+        the four signals git offers -- the introducing commit's author, its
+        branch, its co-author trailers, and the date -- and none of them
+        separates the two populations: the author is one human identity by
+        policy, 415 of the 850 generation-zero entries landed with no branch
+        to read, the trailer stops appearing after 2026-09-13, and the root
+        commit itself carries one.
+        """
+        return case_id in self.human_authored
+
+    def human_split(self, case_ids):
+        """`(model, human)` as sorted lists, on the authorship axis."""
+        model, human = [], []
+        for case_id in case_ids:
+            (human if self.is_human_authored(case_id) else model).append(case_id)
+        return sorted(model), sorted(human)
+
+
 def independent_permille(model: int, total: int) -> int:
     """Independent share in tenths of a percent, floored, integer-only.
 
@@ -304,7 +386,7 @@ def crosses_floor(model: int, total: int, floor_percent: int) -> bool:
 
 def report(corpora: dict[str, list[str]], prov: Provenance,
            *, since: int = FLOOR_SINCE) -> str:
-    lines = [f"corpus provenance: model-authored at or after generation {since}",
+    lines = [f"corpus provenance: loop-authored at or after generation {since}",
              "",
              f"{'corpus':22s} {'model':>6s} {'total':>6s} {'indep':>8s} "
              f"{'floor':>6s}  verdict"]
@@ -324,6 +406,39 @@ def report(corpora: dict[str, list[str]], prov: Provenance,
         lines.append(
             f"{name:22s} {len(model):6d} {len(ids):6d} {share / 10:7.1f}% "
             f"{'--' if floor is None else str(floor) + '%':>6s}  {verdict}")
+    lines.append("")
+    lines.append(authorship_report(corpora, prov))
+    return "\n".join(lines)
+
+
+def authorship_report(corpora: dict[str, list[str]], prov: Provenance) -> str:
+    """The second axis: how much of the evidence a person typed.
+
+    Separate from the table above on purpose. That one answers "how much of
+    this did the loop write", which is what the floors gate. This one answers
+    "how much of this did a human write", which is the question a reader of
+    the published census will think the first table answered. They are
+    different numbers and issue #1397 exists because they were conflated.
+    """
+    lines = ["authorship: documents a person is declared to have typed",
+             "",
+             f"{'corpus':22s} {'human':>6s} {'total':>6s} {'human':>8s}"]
+    for name in sorted(corpora):
+        ids = corpora[name]
+        _, human = prov.human_split(ids)
+        share = independent_permille(len(ids) - len(human), len(ids))
+        lines.append(f"{name:22s} {len(human):6d} {len(ids):6d} "
+                     f"{share / 10:7.1f}%")
+    every = sorted({cid for ids in corpora.values() for cid in ids})
+    _, human = prov.human_split(every)
+    share = independent_permille(len(every) - len(human), len(every))
+    lines.append(f"{'ALL':22s} {len(human):6d} {len(every):6d} "
+                 f"{share / 10:7.1f}%")
+    lines.append("")
+    lines.append("This axis carries no floor. It is reported so the "
+                 "loop-authorship figure above")
+    lines.append("cannot be read as a claim about human authorship; see "
+                 "issue #1397.")
     return "\n".join(lines)
 
 
@@ -393,6 +508,10 @@ def check(corpora: dict[str, list[str]], prov: Provenance,
         problems.append(
             f"STALE provenance entry: {name} is in no scoring corpus -- "
             f"delete the line.")
+    for name in sorted(prov.human_authored - live):
+        problems.append(
+            f"STALE human_authored entry: {name} is in no scoring corpus -- "
+            f"delete the line.")
     return problems
 
 
@@ -413,6 +532,7 @@ def write(corpora: dict[str, list[str]], prov: Provenance, generation: int,
         {"note": MANIFEST_NOTE,
          "current_generation": max(prov.current_generation, generation),
          "floors": dict(sorted(prov.floors.items())),
+         "human_authored": sorted(prov.human_authored),
          "generations": {k: sorted(v) for k, v in sorted(
              generations.items(), key=lambda kv: int(kv[0]))}},
         indent=1, sort_keys=False) + "\n", encoding="utf-8")
