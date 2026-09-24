@@ -342,10 +342,20 @@ rule.
 clause, written after its role and inside the council braces:
 
 ```revl
+model role edge on_device
+model role vast off_device
+
 model council Release {
   proposer  -> vast,
   adversary -> edge reads confidential,
   aggregate unanimous
+}
+
+service Plan { fn review(plan: Str) -> Str }
+
+component Reviewer provides out: Plan {
+  route model on review { confidential -> Release }
+  provide out { fn review(plan) = plan }
 }
 ```
 
