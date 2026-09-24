@@ -231,7 +231,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `G7` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/v2_verified_direct_recursion.rvl`](../examples/rejections/v2_verified_direct_recursion.rvl) |
 | `G8` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/v2_extern_unclassified.rvl`](../examples/rejections/v2_extern_unclassified.rvl) |
 | `G9` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/g9_closure_capture_launders_taint.rvl`](../examples/rejections/g9_closure_capture_launders_taint.rvl) |
-| `A1` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/a1_async_arrow_sync_type.rvl`](../examples/rejections/a1_async_arrow_sync_type.rvl) |
+| `A1` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/a1_alias_of_async.rvl`](../examples/rejections/a1_alias_of_async.rvl) |
 | `A2` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/a2_acquire_after_provide.rvl`](../examples/rejections/a2_acquire_after_provide.rvl) |
 | `A3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/lower.py`](../src/revl/lower.py) |
 | `A5` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/lower.py`](../src/revl/lower.py) |
