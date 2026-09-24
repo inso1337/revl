@@ -1,7 +1,9 @@
 # 543: A model council with role-bound members and typed disagreement
 
 Roadmap: item 516 (issue #1190), from the 2026-09-19 external review. Slice 1
-is LANDED with this note; slices 2 to 5 are designed here and not written.
+was LANDED with this note and slices 2 to 5 were designed here and not written.
+Since then slices 2, 3 and 5 have landed and slice 4 is issue #1368; section 14
+carries the per-slice evidence and is the current answer.
 
 Builds on: item 512 and `docs/design/531-model-placement.md` (the `model role`
 declaration each member names, and section 9 of that note, which decided for
@@ -459,8 +461,14 @@ never be discharged BY a council.
 
 ## 11. Non-goals
 
-* **A runtime aggregator.** Slice 1 is the declaration. `Aggregate[T]` is
-  specified in section 3 and not written.
+* **A runtime aggregator.** `Aggregate[T]` is a written type since S3 (issue
+  #1367), and nothing asks the members or computes which constructor applies.
+  A program obtains an `Aggregate[T]` as a declared parameter or by writing a
+  constructor itself: `fn settle(plan) = Agreed(plan)` compiles beside a
+  declared and routed council, measured on `07a7058b`. The type's tie to a
+  particular council is by convention, and the exit clause is a compile-time
+  statement for that reason. This stays a non-goal of the item, and neither
+  exit clause asks for it.
 * **Naming a model.** A member names a role; a role is bound to a member by
   configuration (item 512 section 5). No vendor, weights hash or endpoint
   appears in a revl document.
@@ -642,11 +650,28 @@ declining by name. What the gate still does not decide is item 514's ceiling on
 a council-placed value, which is the half that really does read a flow
 position.
 
-**S3. The answer type.** `Answer[T]` and `Aggregate[T]` of section 3 as real
-types over the item-257 boundary, and the exhaustiveness rule: a match on an
-`Aggregate[T]` that omits `Split` or `Inquorate` is refused. This is the slice
-that completes the roadmap's first exit clause, "a two-member council that
-disagrees does not admit", at the call site rather than in the declaration.
+**S3. The answer type. LANDED** (issue #1367, PR #1392). `Answer[T]` and
+`Aggregate[T]` of section 3 are real types over the item-257 boundary in
+`src/revl/model_answer.py`, and a match on an `Aggregate[T]` that omits `Split`
+or `Inquorate` is refused. This is the slice that completes the roadmap's first
+exit clause, "a two-member council that disagrees does not admit", at the call
+site rather than in the declaration, and the clause was measured met on
+`07a7058b`: of six programs carrying the same two-member council bound to an
+action, the one naming both dissent arms admits and five are refused. Two of
+the five are worth keeping in mind, because neither is the exhaustiveness rule.
+`Split(d) => d` in a function returning `Str` is refused by the TYPE layer,
+"expects `Str`, got `List[DissentEntry]`", which is section 3's "no total
+projection" as a property rather than as a check. And the same `_` match moved
+into a pure `pub fn` is refused too, so the aggregate cannot be laundered
+through a pure helper.
+
+Two things landed with it that this sketch did not say. The provided names are
+RESERVED, for the reason `Principal` is: a program that could declare its own
+`Aggregate[T]` could declare one whose only case is `Agreed`. And there is no
+self-host port, deliberately, against note 556 section 1.3's line: this rule
+fires on a `match` inside a function body, which is the flow position the gate
+declines, unlike S2's binding, whose declaration half is written in the token
+stream.
 
 **S4. Per-member inputs.** The declaration that gives the adversary an input the
 proposer is not given, which is what makes section 6.1's sentence literally
