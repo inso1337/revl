@@ -225,6 +225,18 @@ def _go_type(t) -> str:
         return "map[%s]%s" % (_go_type(k), _go_type(v))
     if t == "Row":
         return "Row"
+    fn = _v3_split_fn_type(t)
+    if fn is not None:
+        # issue #1356: a function-typed position (a service method taking
+        # `f: (Int, Str) -> Bool`) used to fall through to `_camel`, which
+        # printed the surface spelling into the interface (`f (Int, Str) >
+        # Bool`) and the package did not parse. The v3 renderer has had the
+        # arm since it gained function types; this one never got it, because
+        # before issue #1321 no document put a function-typed service method
+        # beside the typed core.
+        params, returns = fn
+        rendered = ", ".join(_go_type(p) for p in params)
+        return ("func(%s) %s" % (rendered, _go_return(_erase_async(returns)))).rstrip()
     # v3 typed-core: a declared user type (record/variant) renders with the
     # name `_emit_v3_go_types` gave it (_v3_ident, not _camel — snake_case
     # type names must agree between the declaration and every use site).
@@ -498,8 +510,18 @@ def _expr(node, env: _Env, expected=None) -> str:
             # multi-value expression (a service/host call), so bind it first.
             gt = (_go_type(expected) if expected
                   else _go_type(_comp_infer(node.get("right"), env)) or "any")
-            left = _expr(node["left"], env)
+            left_node = node["left"]
+            left = _expr(left_node, env)
             right = _expr(node["right"], env, _comp_infer(node.get("right"), env))
+            if left_node.get("kind") not in ("call", "host", "builtin", "fn"):
+                # issue #1356: an Opt that is READ rather than CALLED — a
+                # config field (`config.limit ?? 0`), a struct field, a local
+                # — holds the VALUE-position form `*T` (`_go_type`), not the
+                # `(T, bool)` a service or host call returns (`_go_return`).
+                # Destructuring one with `_v, _ok :=` is Go's "2 variables but
+                # 1 value"; the presence bit is the pointer being non-nil.
+                return ("func() %s { if _v := %s; _v != nil { return *_v }; "
+                        "return %s }()" % (gt, left, right))
             return ("func() %s { _v, _ok := %s; if _ok { return _v }; "
                     "return %s }()" % (gt, left, right))
         if op in ("<<", ">>"):
@@ -1281,6 +1303,13 @@ def _comp_builtin(method, recv_surface, target, args):
             # `strconv.FormatFloat(x, 'g', -1, 64)`) — so `x.to_str()` and `${x}`
             # agree on this tier. FormatInt would not compile on a float64.
             return "strconv.FormatFloat(%s, 'g', -1, 64)" % target
+        if recv_surface == "Int32":
+            # issue #1356: an `Int32` receiver is a Go `int32`, which
+            # FormatInt's int64 parameter does not accept. The pure v3
+            # renderer has widened it since item 434 (f); this one never did,
+            # and `_go_widen_int` cannot see it — that helper widens the
+            # ir_version 1/2 `int` and answers an already-int64 Int unchanged.
+            return "strconv.FormatInt(int64(%s), 10)" % target
         return "strconv.FormatInt(%s, 10)" % _go_widen_int(target)
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
@@ -1725,8 +1754,19 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             # beside a component (issue #1321), and it never got the fix.
             go_t = (_go_v3_type(surface, _V3_TYPES)
                     if surface and _V3_TYPED_COMPONENTS and _V3_TYPES else "")
+            # issue #1356, the same omission one type down: a bare integer or
+            # float literal binding defaults to Go `int`/`float64` through
+            # `:=`, and commit 5e83a9cfd converged the v3 component tier on
+            # int64. `var i = 0` then declared an `int` that no helper taking
+            # the tier's Int accepts (`revlStrCharAt(path, i)`). `_go_v3_stmt`
+            # has pinned the declared type on the pure tier since item 434;
+            # this renderer never did.
+            pinned = (_go_type(surface)
+                      if _V3_MODE and surface in ("Int", "Float") else "")
             if go_t and _go_v3_is_interface(surface, _V3_TYPES):
                 out.append("%svar %s %s = %s" % (pad, name, go_t, value))
+            elif pinned in ("int64", "float64"):
+                out.append("%svar %s %s = %s" % (pad, name, pinned, value))
             else:
                 out.append("%s%s := %s" % (pad, name, value))
             out.append("%s_ = %s" % (pad, name))
@@ -2382,17 +2422,98 @@ def _collect_host_calls(node, acc):
             _collect_host_calls(x, acc)
 
 
+def _stub_host_type(recv: str) -> str:
+    """The Go type name a generated host stub declares for family `recv`.
+
+    Agrees with `_host_type_of_acquire`, which is what types the `let`-bound
+    receiver: placement mode renames the type when a declared record collides
+    with it, and the bind's field type must be the same name the stub
+    declares."""
+    name = _camel(recv)
+    if _V3_TYPED_COMPONENTS and name in _V3_TYPES:
+        return "Revl" + name
+    return name
+
+
+def _collect_host_bind_methods(node, binds: dict, acc: set) -> None:
+    """Record (family, verb) for every method called on a host-BOUND receiver.
+
+    `let job = effect Job.run(..)` binds a host object, and `job.run("start")`
+    inside a provide method lowers to `revlSelf.job.Run("start")` — a METHOD
+    on the bind's type. The stub emitter only ever declared free functions, so
+    the type had no such method and the package did not build (issue #1356).
+    """
+    if isinstance(node, dict):
+        if node.get("kind") == "call" and "method" in node:
+            target = node.get("target") or {}
+            if target.get("kind") in ("name", "var"):
+                family = binds.get(target.get("id") or target.get("name"))
+                if family:
+                    acc.add((family, str(node.get("method"))))
+        for v in node.values():
+            _collect_host_bind_methods(v, binds, acc)
+    elif isinstance(node, list):
+        for x in node:
+            _collect_host_bind_methods(x, binds, acc)
+
+
+def _collect_host_binds(node, binds: dict) -> None:
+    """bind name -> host family, for every `let-effect` acquiring a host object
+    beyond the fixed Pool/Map/Stream runtime."""
+    if isinstance(node, dict):
+        if node.get("step") == "let-effect":
+            acquire = node.get("acquire") or {}
+            if isinstance(acquire, dict) and acquire.get("kind") == "host":
+                recv, _, _meth = str(acquire.get("fn", "")).partition(".")
+                if recv and recv not in ("Pool", "Map", "Stream"):
+                    binds[str(node.get("bind"))] = recv
+        for v in node.values():
+            _collect_host_binds(v, binds)
+    elif isinstance(node, list):
+        for x in node:
+            _collect_host_binds(x, binds)
+
+
 def _emit_host_stubs(ir) -> list[str]:
     """Deterministic stubs for host receivers this document references beyond
     Pool/Map (e.g. an awaited `Job.run`). Emitted only when referenced, so the
-    Pool/Map-only scenarios stay byte-identical."""
+    Pool/Map-only scenarios stay byte-identical.
+
+    Each referenced family gets a TYPE as well as its constructors, because
+    `_host_type_of_acquire` types a `let`-bound receiver as `*Job`. Before
+    issue #1356 only the free functions were emitted, so the bind's declared
+    type was undefined and every verb called on the receiver was missing."""
     acc: set = set()
     _collect_host_calls(ir, acc)
-    if not acc:
+    binds: dict = {}
+    _collect_host_binds(ir, binds)
+    methods: set = set()
+    _collect_host_bind_methods(ir, binds, methods)
+    if not acc and not methods:
         return []
     out = ["// ---- generated host stubs (hosts beyond the fixed runtime) ----------"]
+    families = sorted({recv for recv, _ in acc} | {recv for recv, _ in methods})
+    bound = {recv for recv in binds.values()}
+    for recv in families:
+        out.append("// %s is a deterministic stub for a host family with no"
+                   " runtime on this tier." % _stub_host_type(recv))
+        out.append("type %s struct{}" % _stub_host_type(recv))
+        out.append("")
     for recv, meth in sorted(acc):
-        out.append("func %s(_args ...any) any {" % (_camel(recv) + _camel(meth)))
+        # A constructor whose result a `let-effect` binds answers the family
+        # pointer the bind is declared as; one nothing binds keeps `any`, so
+        # the Pool/Map-free scenarios that only `await` a host verb move no
+        # bytes beyond the type declaration above.
+        ret = "*%s" % _stub_host_type(recv) if recv in bound else "any"
+        body = ("&%s{}" % _stub_host_type(recv)) if recv in bound else "nil"
+        out.append("func %s(_args ...any) %s {" % (_camel(recv) + _camel(meth), ret))
+        out.append("\thostRecord(%s)" % _go_string("%s.%s" % (recv, meth)))
+        out.append("\treturn %s" % body)
+        out.append("}")
+        out.append("")
+    for recv, meth in sorted(methods):
+        out.append("func (_h *%s) %s(_args ...any) any {"
+                   % (_stub_host_type(recv), _camel(meth)))
         out.append("\thostRecord(%s)" % _go_string("%s.%s" % (recv, meth)))
         out.append("\treturn nil")
         out.append("}")
@@ -3809,8 +3930,28 @@ def _host_runtime() -> str:
     src = src.replace("@SECRET_RESET@", _SECRET_RESET if _SECRET_MODE else "")
     if _V3_TYPED_COMPONENTS:
         for name in _HOST_RUNTIME_RENAMES:
-            if name in _V3_TYPES:
-                src = re.sub(r"\b%s\b" % name, "Revl" + name, src)
+            if name not in _V3_TYPES:
+                continue
+            if name == "Row":
+                # issue #1356. `Row` is not a type with behaviour, it is a
+                # bare ALIAS naming the shape a query answers, and the stub's
+                # `Query` reads nothing out of it and returns nil. Renaming it
+                # to `RevlRow` made the host answer `[]RevlRow` where the
+                # provide method that declares `-> List[Row]` over the same
+                # call returns `[]Row`, and the package did not build — for
+                # ten of the sixteen carried documents this issue counts.
+                #
+                # A document that declares `type Row = { .. }` is saying what
+                # its pool answers with, and the frontend leaves a host verb's
+                # RESULT opaque on purpose (src/revl/typecheck.py, the
+                # `_HOST_ARG_SIG` header), so nothing contradicts it. Drop the
+                # alias and let `Query` answer the declared record. The stub
+                # still answers no rows, so only the TYPE moves.
+                src = src.replace(
+                    "// Row is a query result row.\ntype Row = map[string]string\n",
+                    "")
+                continue
+            src = re.sub(r"\b%s\b" % name, "Revl" + name, src)
     return src
 
 
@@ -3822,6 +3963,15 @@ def _needs_sync(ir) -> bool:
 # record. Placement mode renames the HOST side to `Revl<Name>` so the declared
 # record struct keeps its name (see _host_runtime / _host_type_of_acquire).
 _HOST_RUNTIME_RENAMES = ("Row", "Map", "Pool")
+
+
+# The host families whose CONSTRUCTOR is spelled `<Root>.<verb>(..)` in source
+# (`src/revl/lower.py::_HOST_CALLABLES`). In a component position the frontend
+# lowers that to a `host` IR node, which `_expr` renders as the free function
+# `PoolOpen(..)`. In a plain top-level `fn` it stays an ordinary `call` on a
+# `field` of a `var`, so the pure renderer used to print the source spelling
+# `Pool.Open(..)` — a method Go's host runtime does not declare (issue #1356).
+_V3_HOST_ROOTS = frozenset({"Map", "Pool", "Job", "Stream"})
 
 
 # item 421 F6: the go tier's confidentiality funnel, the peer of
@@ -4529,6 +4679,41 @@ def _v3_split_fn_type(name: str):
     return None
 
 
+def _v3_host_constructor(callee: dict, ctx) -> str | None:
+    """`Pool.open(..)` in a plain top-level `fn` -> the Go name `PoolOpen`.
+
+    issue #1356. The frontend lowers a host verb to a `host` IR node only in a
+    component position; in a pure `fn` body it stays a `call` on a `field` of
+    a `var` named for the family root, and this renderer printed the source
+    spelling `Pool.Open(..)`. Go's host runtime declares the constructors as
+    FREE functions (`func PoolOpen(url string, size int64) *Pool`) and only
+    the per-instance verbs as methods, so the family root has no `Open`.
+
+    Answers None for anything that is not one of those roots, including a
+    local binding or a declared type that happens to share the name — a
+    receiver the document bound is an ordinary value with ordinary methods.
+    """
+    if callee.get("kind") != "field":
+        return None
+    target = callee.get("target") or {}
+    if target.get("kind") not in ("var", "name"):
+        return None
+    root = target.get("name") or target.get("id")
+    if root not in _V3_HOST_ROOTS:
+        return None
+    if root in ctx.var_types or root in (ctx.types or {}):
+        return None
+    verb = callee.get("name")
+    go = _camel(root) + _camel(verb)
+    if root == "Map" and verb == "new":
+        # item 113: the host Map is generic and Go cannot infer `V` from the
+        # argument-less constructor. A pure-fn `Map.new()` has no enclosing
+        # let-effect to learn the value type from, so it takes the historical
+        # surface, exactly as `_expr`'s fallback does.
+        return f"{go}[string]"
+    return go
+
+
 def _go_v3_type(t, types: dict) -> str:
     """Surface type -> Go type for the v3 tier."""
     if t is None or t == "" or t == "Unit":
@@ -4661,6 +4846,9 @@ class _V3GoCtx:
         self.needs_overflow = False     # trapping + - * on Int
         self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
         self.needs_parse_int = False    # Str.to_int (revlParseInt helper)
+        # `v[k]` on an `Any`-typed receiver (issue #1356): go's index operator
+        # is type-directed, so the read goes through `revlAnyIndex`.
+        self.needs_any_index = False
         # Int -> Str through strconv.FormatInt rather than fmt.Sprintf("%d"):
         # `%d` takes ...any and boxes the operand (item 434 (f)).
         self.needs_strconv = False
@@ -5207,6 +5395,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if is_ctor:
             return _go_v3_construct(ctx, cname, arg_renders, expected,
                                     arg_nodes=arg_nodes)
+        host = _v3_host_constructor(callee, ctx)
+        if host is not None:
+            return f"{host}({', '.join(arg_renders)})"
         callee_src = _go_v3_expr(callee, ctx)
         return f"{callee_src}({', '.join(arg_renders)})"
 
@@ -5228,6 +5419,15 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             # VALUE, silently, where every other tier faults (issue #957). Route
             # it through the helper so the miss is the same fault here.
             return f"revlMapIndex({target}, {_go_v3_expr(node.get('index'), ctx)})"
+        if _go_v3_type(_go_v3_infer_type(target_node, ctx), ctx.types) == "any":
+            # issue #1356: `v[k]` where `v` is statically `Any`. Go's index
+            # operator is type-directed and an interface value has none, so
+            # this emitted a bare `v[k]` that did not compile. Reflection is
+            # the faithful lowering — the same read python and typescript
+            # make on a value whose shape only the runtime knows.
+            ctx.needs_reflect = True
+            ctx.needs_any_index = True
+            return f"revlAnyIndex({target}, {_go_v3_expr(node.get('index'), ctx)})"
         return f"{target}[{_go_v3_expr(node.get('index'), ctx)}]"
 
     if kind == "len":
@@ -6434,9 +6634,20 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         out.append(f"{pad}_ = {_go_v3_expr(node['expr'], ctx)}")
     elif step == "assert":
         expr = _go_v3_expr(node["expr"], ctx)
-        tn = t_name or "t"
         out.append(f"{pad}if !({expr}) {{")
-        out.append(f'{pad}\t{tn}.Fatalf("assertion failed: %s", {_go_string(expr)})')
+        if t_name:
+            out.append(
+                f'{pad}\t{t_name}.Fatalf("assertion failed: %s", {_go_string(expr)})')
+        else:
+            # issue #1356: an `assert` in an ORDINARY `fn` body, which the
+            # emitted test receiver never reaches. This arm defaulted to the
+            # bare name `t` and emitted `t.Fatalf(...)` into a function with
+            # no `*testing.T` in scope, so the package did not compile. Every
+            # other tier answers a plain-fn assert with a runtime fault
+            # (python `assert`, typescript `throw`, java `AssertionError`);
+            # `panic` is go's.
+            out.append(
+                f'{pad}\tpanic("assertion failed: " + {_go_string(expr)})')
         out.append(f"{pad}}}")
     else:
         raise EmitError(f"unsupported v3 statement step {step!r}")
@@ -8677,6 +8888,37 @@ func revlMapIndex[K comparable, V any](m map[K]V, k K) V {
 }
 ''' % _MAP_MISS_MSG
 
+_V3_ANY_INDEX_HELPER = '''// revlAnyIndex is the subscript `v[k]` where `v` is statically `Any` (issue
+// #1356). Go's index operator is type-directed and an interface value has
+// none, so the read goes through reflection, exactly as python and typescript
+// read a value whose shape only the runtime knows. A miss, an out-of-range
+// position and a value that is not indexable all FAULT, which is the answer
+// the same subscript gives on every other tier.
+func revlAnyIndex(v any, k any) any {
+\trv := reflect.ValueOf(v)
+\tswitch rv.Kind() {
+\tcase reflect.Map:
+\t\tkv := reflect.ValueOf(k)
+\t\tif kv.IsValid() && kv.Type().ConvertibleTo(rv.Type().Key()) {
+\t\t\tif e := rv.MapIndex(kv.Convert(rv.Type().Key())); e.IsValid() {
+\t\t\t\treturn e.Interface()
+\t\t\t}
+\t\t}
+\t\tpanic("revl: map index: no entry for key")
+\tcase reflect.Slice, reflect.Array:
+\t\ti, ok := k.(int64)
+\t\tif !ok {
+\t\t\tpanic("revl: list index: position is not an Int")
+\t\t}
+\t\tif i < 0 || i >= int64(rv.Len()) {
+\t\t\tpanic("revl: list index: out of range")
+\t\t}
+\t\treturn rv.Index(int(i)).Interface()
+\t}
+\tpanic("revl: index: value is not indexable")
+}
+'''
+
 _V3_FTOA_HELPER = r'''// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical
 // cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,
 // "1e+21"/"NaN"/"Infinity", a whole-number float as "0", negative zero as "0".
@@ -9101,6 +9343,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("")
         out.append(_V3_LIST_INDEX_OF_EQ)
         out.append("")
+    if ctx.needs_any_index:
+        out.append(_V3_ANY_INDEX_HELPER)
     if ctx.needs_float_div:
         # A function, not an expression: Go rejects a *constant* `1.0 / 0.0`
         # at compile time, where IEEE defines +Inf. Through a call it is an
@@ -10457,6 +10701,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         out.append("")
         out.append(_V3_LIST_INDEX_OF_EQ)
         out.append("")
+    if ctx.needs_any_index:
+        out.append(_V3_ANY_INDEX_HELPER)
     if ctx.needs_float_div:
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
         out.append("")
