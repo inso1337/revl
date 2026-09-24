@@ -486,7 +486,36 @@ print(json.dumps({"verdict": record["verdict"], "files": sorted(files)}))
 BASELINE = "tools/gate_reference_census_baseline.json"
 
 
-def test_every_repo_path_the_scorer_names_is_classified():
+#: A corpus program the census has keyed a `false-admit` entry on before. Used
+#: to STAGE a recorded divergence rather than to wait for one: the committed
+#: baseline records `{}` since PR #1396 closed item 391, and the three guards
+#: below all used to read a live entry out of it to prove they were looking at
+#: anything. Each one now derives its own, so it holds on an empty baseline and
+#: on a populated one alike.
+STAGED_KEYED_PROGRAM = "examples/rejections/t13_unknown_match_case.rvl"
+
+
+def staged_baseline(root: Path, buckets: dict) -> Path:
+    """`root` with a census baseline recording `buckets`, returned.
+
+    A whole root rather than a loose file because `heldout.bypass_allowance`
+    and `heldout.run` take one, and reading the allowance out of a staged root
+    exercises the same code path a real run takes. `git init` because
+    `seed_is_in_tree` searches the tracked tree with `git grep` and refuses a
+    tree it cannot search: staging the baseline must not quietly disarm the
+    seed check on the way past.
+    """
+    (root / "tools").mkdir(parents=True, exist_ok=True)
+    (root / "tools" / "gate_reference_census_baseline.json").write_text(
+        json.dumps({"buckets": buckets, "corpus_dirs": ["examples"],
+                    "details": {}, "note": "staged by the test suite"}),
+        encoding="utf-8")
+    subprocess.run(["git", "init", "--quiet", str(root)],
+                   check=True, capture_output=True, timeout=120)
+    return root
+
+
+def test_every_repo_path_the_scorer_names_is_classified(tmp_path):
     """The static half of the closure check.
 
     `sys.modules` cannot see a file loaded through `spec_from_file_location`
@@ -524,17 +553,33 @@ def test_every_repo_path_the_scorer_names_is_classified():
         + ", ".join(unclassified))
 
     # Not vacuous on the data half: a `.json` reader that returned an empty
-    # set would satisfy every assertion above while holding none of the
-    # corpus paths the allowance is keyed on. Anchored on the file's own
-    # contents rather than a count, so recording a divergence does not edit
-    # this.
-    recorded = {path
-                for entries in json.loads(
-                    (ROOT / BASELINE).read_text(encoding="utf-8"))["buckets"]
-                .values()
-                for path in entries}
-    assert recorded, "the baseline records no divergence to hold"
-    assert recorded <= named, sorted(recorded - named)
+    # set would satisfy every assertion above while holding none of the paths
+    # the baseline names. Anchored on the file's own contents rather than on a
+    # count, so recording a divergence does not edit this.
+    #
+    # The corpus directories are the half that is there whether or not the
+    # allowance is empty, and they decide what the census walks, so they are
+    # the paths this reader must not drop.
+    from_baseline = _json_paths(ROOT / BASELINE)
+    assert from_baseline, "the .json fence reader reports no path at all"
+    assert from_baseline <= named, sorted(from_baseline - named)
+    blob = json.loads((ROOT / BASELINE).read_text(encoding="utf-8"))
+    walked = {d for d in blob["corpus_dirs"] if (ROOT / d).exists()}
+    assert walked and walked <= from_baseline, sorted(walked - from_baseline)
+
+    # The entry half, staged instead of waited for. Until 2026-09-24 this read
+    # the programs a recorded `false-admit` entry is keyed on straight out of
+    # the committed file, so PR #1396 emptying it left the assertion with
+    # nothing to hold and the test failed on its own non-vacuity check. The
+    # obligation is the same either way: a recorded divergence keys the
+    # allowance on a program, and that program has to be classified.
+    staged = tmp_path / "staged_baseline.json"
+    staged.write_text(
+        json.dumps({**blob, "buckets": {"false-admit/TYPE":
+                                        [STAGED_KEYED_PROGRAM]}}),
+        encoding="utf-8")
+    assert _json_paths(staged) == from_baseline | {STAGED_KEYED_PROGRAM}
+    assert heldout.classify(STAGED_KEYED_PROGRAM) is not None
 
 
 def test_a_fenced_data_file_naming_an_unclassified_path_is_caught(tmp_path):
@@ -690,12 +735,20 @@ def _fence_reader(path: str):
 # Slice 2: the bypass direction, capped by the baseline's families.
 # --------------------------------------------------------------------------
 
-def test_the_allowance_is_the_censuss_own_baseline_families():
+def test_the_allowance_is_the_censuss_own_baseline_families(tmp_path):
     """Read from the baseline file, never copied into the scorer.
 
     A second list would drift from the one the census publishes, and the claim
     this tool makes is exactly "no `false-admit` family beyond the ones the
     repository has already recorded and somebody has read".
+
+    Two roots, because an equality against an empty file cannot tell a file
+    reader from a hard-coded list. This used to close that hole by asserting
+    the committed allowance was non-empty, which made it a test that only ran
+    while the repository had an open gate bypass; PR #1396 closed the last one
+    and the assertion failed. The staged root asks the same question of a
+    populated baseline the scorer has never seen, which is the property all
+    along: a copied list would answer the same thing for both roots.
     """
     allowance = heldout.bypass_allowance(ROOT)
     blob = json.loads(
@@ -703,7 +756,14 @@ def test_the_allowance_is_the_censuss_own_baseline_families():
     expected = {name.split("/", 1)[1] for name in blob["buckets"]
                 if name.split("/", 1)[0] == "false-admit"}
     assert allowance == expected
-    assert allowance, "an empty allowance would make this test vacuous"
+
+    root = staged_baseline(tmp_path / "populated", {
+        "false-admit/T1": [STAGED_KEYED_PROGRAM],
+        "false-admit/STAGED": [STAGED_KEYED_PROGRAM],
+        "false-admission": ["never-baselined"],
+        "agree-refuse/G1": ["examples/ok/whatever.rvl"],
+    })
+    assert heldout.bypass_allowance(root) == {"T1", "STAGED"}
 
 
 def test_the_bypass_tag_split_does_not_catch_false_admission():
@@ -857,17 +917,29 @@ def test_the_bypass_direction_is_not_reachable_on_this_grammar(
 
 
 def test_a_family_already_in_the_baseline_is_reported_and_is_not_a_finding(
-        engine, census, reference):
+        engine, census, reference, tmp_path):
     """The other half, and the reason slice 1 left this direction out.
 
     A `false-admit` tag the baseline already carries is the known gap re-found
     on new programs. Reporting it as a divergence would red on the repository's
     own recorded allowance rather than on the candidate, so it is counted in
     `bypass.families` and kept out of `bypass.new_families`.
+
+    The allowance is STAGED. This used to take the first tag out of the
+    committed baseline, so the day PR #1396 emptied it the test raised
+    `IndexError` before asserting anything - a guard that can only run while
+    the repository has an open bypass is not guarding the repository, it is
+    reporting on it. `run()` takes the root it reads the allowance from, so the
+    staged root is the real code path with a baseline of this test's own
+    making, and the case above is the unchanged control on a tag no allowance
+    carries.
     """
-    allowed = sorted(heldout.bypass_allowance(ROOT))[0]
+    allowed = "STAGED"
+    root = staged_baseline(tmp_path / "allowed",
+                           {"false-admit/" + allowed: [STAGED_KEYED_PROGRAM]})
+    assert heldout.bypass_allowance(root) == {allowed}
     record, status = heldout.run(
-        argv_seed=TEST_SEED, env={}, count=DRAW,
+        argv_seed=TEST_SEED, env={}, count=DRAW, root=root,
         changed=["src/revl/lower.py"], census=census,
         engine=_NoRefusalGate(engine),
         reference=_in_slice(reference, allowed))
