@@ -20,14 +20,14 @@ them. That is the cost, stated first.
 | tier | residual | corpus | reproduced |
 |---|---:|---:|---:|
 | go | **0** | 23 | 23 |
-| java | **9** | 59 | 50 |
-| py | **13** | 56 | 43 |
-| rust | **3** | 40 | 37 |
-| ts | **16** | 60 | 44 |
+| java | **0** | 59 | 59 |
+| py | **5** | 57 | 52 |
+| rust | **2** | 40 | 38 |
+| ts | **4** | 61 | 57 |
 | wasm | **0** | 21 | 21 |
-| **total** | **41** | 259 | 218 |
+| **total** | **11** | 261 | 250 |
 
-Tiers with no residual: go, wasm.
+Tiers with no residual: go, java, wasm.
 
 ## Constructs the self-host port does not implement
 
@@ -77,9 +77,5 @@ be correcting.
 
 | bucket | programs |
 |---|---:|
-| `false-admit/T1` | 6 |
-| `false-admit/TYPE` | 3 |
-| **total** | **9** |
-
-Named programs: `examples/rejections/t13_unknown_match_case.rvl`, `examples/rejections/t14_optional_chain_on_nonoptional.rvl`, `examples/rejections/t17_arrow_body_unchecked.rvl`, `examples/rejections/t18_type_alias_cycle.rvl`, `examples/rejections/t32_arrow_value_result_flows.rvl`, `examples/rejections/t33_arrow_value_arity.rvl`, `examples/rejections/t35_arrow_annotation_not_quantified.rvl`, `examples/rejections/t5_destructure_nonrecord.rvl`, `examples/rejections/v2_match_nonexhaustive.rvl`.
+| **total** | **0** |
 
