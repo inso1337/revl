@@ -669,9 +669,85 @@ for the parser additions. Fixtures: `t17`, `t32`, `t33`, `t35`, `t34`. ~400
 lines. Hardest expression slice; ordered after T2b because it needs the
 signature table.
 
+**T2c LANDED, in `lower.rvl` rather than `checker.rvl`**, for T2b's reason and
+with T2b's shape: the four documents it owns are measured through `admit_src`,
+so it extends the refusing walk that answers that rather than starting a second
+engine. No parser change was needed either. `ArrowN` already carries its
+`params` with their written annotations and its `ret`, which is the whole of
+what §3.1 reads; `ArrowN.tok` and the `arrows` map exist in the design to
+re-read a CHECKING position's resolution off a node, and this slice does not
+port the checking position.
+
+What it adds. `tk_arrow` is `infer_ast`'s `ExprArrow` arm: each parameter is its
+written annotation or bottom, the result is the written return or, only where no
+bottom parameter occurs in the body (§3.2), what the body infers to, and the
+node ALWAYS types, as a function type with every bottom rendered `Any`.
+`tk_fnvalue`/`tk_fn_call` is `call_function_value` at both its positions, a bare
+name bound to a function type and any other callee expression that infers to
+one: arity first, then each argument against the parameter type. Rule G is
+`tk_arrow_ann`, a spelling transform over two new families of environment row.
+`tparam ` rows carry the enclosing `fn`'s quantified names, so a name the
+signature quantifies marks `?T` and is a wildcard; every other name is left as
+written, which is what makes `(x: Q): Q => x` a `(Q) -> Q` that `Int` does not
+flow into.
+
+`alias ` rows carry the fixed-point alias table, and they are the finding.
+An arrow's annotations are the one declared spelling this walk meets with no
+token span behind it: the reference rewrites them in `_subst_body_annotations`,
+inside the body, rather than in the declaration sweep every other site goes
+through. Without the same substitution `let f = (v: Count): Sku => "x"` holds
+its body to `Sku` where the reference holds it to `Str`, and that is a FALSE
+REJECTION, the one direction this gate may not err in. It showed on
+`tests/fixtures/emit_py_corpus/type_aliases.rvl` in the census and on no unit
+oracle, which is the same lesson T1's finding 1 records: run the census, not a
+unit suite.
+
+What it withholds, each silence in the under-refusing direction: an arrow in a
+CHECKING position is not read off the expectation (`_check_arrow`'s
+contravariant parameters), so `let g: (Int) -> Int = (x) => ...` still types `x`
+as bottom; `_check_arrow_args` does not give an arrow ARGUMENT its checking
+position; `tk_compatible` keeps the permissive function-type frontier it had, so
+no comparison AGAINST a function type newly refuses; an annotation naming a type
+the walk cannot resolve passes through `tk_solid` to the inference position and
+is not compared; and §3.2's independence rule over-approximates (an inner binder
+that shadows the name still counts as an occurrence), because naming one
+occurrence too many withholds a result while naming one too few claims a result
+the parameter could have shaped.
+
+An issue it does NOT close, named rather than absorbed. Rule C1's A1 refusal
+stays the arrow-colour phase's, which reads the WRITTEN annotation, so issue
+#1151 (an alias of `Async[T]` does not draw it) is still open. This walk
+declines an arrow whose return mentions `Async` on EITHER spelling, written or
+erased, which keeps it from turning that missing refusal into a different one;
+closing #1151 means moving the colour phase onto the alias table and verifying
+the refusal ordering, which is its own change with its own oracle rows.
+
+What it buys, measured. `t17_arrow_body_unchecked`,
+`t32_arrow_value_result_flows`, `t33_arrow_value_arity` and
+`t35_arrow_annotation_not_quantified` moved from `false-admit/T1` to
+`agree-refuse/T1` on tag AND message. `t34_arrow_self_declared_async` is the
+control: `agree-refuse/A1` on both trees, unchanged.
+
 **T2d. Match, record update, optional chaining.** Arm payload typing from
 the variant table and `Opt`/`Result` args; record-update rules; `?.` rules.
 Oracle: checker corpus. Small (~250 lines); can run in parallel with T2c.
+
+**T2d's `?.` half LANDED with T2c**, in the same walk and for the same reason.
+`?.` REQUIRES an optional on its left and always yields one on the right; on a
+value that is always present the short-circuit is dead syntax the strict tiers
+cannot render, which is the mirror of `??` on a non-optional, already refused.
+The member's own type is NOT ported, so the chain's result stays unknown and no
+`Opt[member]` is claimed. `t14_optional_chain_on_nonoptional` moved from
+`false-admit/T1` to `agree-refuse/T1`. The match and record-update halves of
+this slice are untouched: `t13_unknown_match_case` and `v2_match_nonexhaustive`
+still need the variant table and the arm algebra.
+
+Census across both: 846 programs, `false-admit/T1` 6 to 1, `agree-refuse/T1` 57
+to 62, `agree-admit` unchanged at 463, every other bucket byte-identical, and a
+per-program diff naming exactly the five documents above and nothing else. No
+new `false-reject`, no `gate-fault`. The recorded baseline is that run plus the
+five new `REJECTED_PROGRAMS` rows, which the census reads as `oracle-reject:`
+entries, at 851 programs.
 
 **T3a. The fn-body statement layer.** `lir_*` gains the refusal channel and
 `TEnv`; `let`/`var`/assign/compound/return/`if`/`while`/`for`/`assert`/expr
@@ -763,6 +839,77 @@ oracles agreed trivially — the absence, not a divergence. That erasure is
 §2.1 item 1 and belongs to T1's `types.rvl`; the alias case was dropped from
 `return_paths.rvl` rather than half-fixed here, and this paragraph is the record
 that it is known.
+
+**T3b (the rest). Match totality, the alias cycle, non-record destructuring.
+LANDED.** The three obligations left after T3b(returns), each decided at the
+reference's own position and none of them needing the T3a channel to be widened.
+
+`_check_match_exhaustiveness` needed one thing the gate did not hold: the ORDERED
+case list of each declared variant. `adt_case_row` records it beside the
+per-case rows the declaration scan already builds (`cases <Type>`, the names
+comma-joined), reading the declaration with `ir_type_decl`'s own decisions
+because that reader is already byte-exact against the reference's emitted
+`types` section — a transparent alias contributes nothing, a record body is a
+record, a bare single-case right-hand side is the one-case nominal. The check
+then runs inside the expression walk's `Match` arm, where `_lower_pure_expr`
+runs it: after `_expr_static_type` (the NON-raising engine, so a scrutinee the
+refusing walk would reject does not reorder the two) and before the scrutinee or
+any arm is walked, unknown arm first and missing cases second, the second
+skipped outright when a `_` arm is present.
+
+The alias CYCLE is `_resolve_type_aliases`' `expand` recursion, ported at the
+head of `collect_nonlink` — ahead of `declared_types_refusal`, because the
+reference runs `_resolve_type_aliases` before `_validate_declared_types` and it
+RAISES, so a program that trips it reaches nothing else. `alias_map` above
+computes the same fixed point for the PRODUCER side and bounds its rounds so a
+cycle terminates with a harmless answer, which is right there because it runs
+behind this gate; here the cycle is the answer. The chain is the reference's
+string, the anchor the repeated alias's own declaration line.
+
+Non-record destructuring is the one place this slice widened the fn-body reader.
+`fb_one` used to bail outright on a `let { … } =`, so the statement and the whole
+rest of its block went unjudged. It now reads the pattern — `{ a, b }`, names
+only, the grammar has no renaming form — and emits a `letpat` step that STILL
+ends the block (`i: hi`), so every consumer that treated the old bail as
+undecidable still does (`rp_has_bail`, `csh_binders` name it explicitly). Only
+the two arms that spell "requires a record" are ported: a declared type whose
+`types` entry is a variant, and a `_BUILTIN_NONRECORD` head. The unknown-field
+and element-type arms, the empty pattern and the repeated name are silence, and a
+list pattern keeps the plain bail.
+
+What it buys, measured. All four documents moved from `false-admit` to
+`agree-refuse` on tag AND message: `t13_unknown_match_case` and
+`t5_destructure_nonrecord` and `t18_type_alias_cycle` (`TYPE`), and
+`v2_match_nonexhaustive` (`T1`). `false-admit/TYPE` 3 -> 0, the bucket is now
+EMPTY; `false-admit/T1` 6 -> 5. `agree-refuse/TYPE` 6 -> 9 and
+`agree-refuse/T1` 57 -> 58; every other bucket over the 846-program census is
+byte-identical, with no `false-reject` and no `gate-fault`. Over the `--all`
+sweep (1356 programs) and the 400-draw fuzz at seed 7, run on the SAME corpus
+on both trees, fifteen and seventeen programs respectively left a false-admit
+bucket and none entered one, and `agree-admit` is unchanged on both (845 and
+509) — which is the number that would move first if any of these rules
+over-refused.
+
+Where each rule stays SILENT, and why the direction is the sound one. A
+scrutinee whose type the annotation engine cannot answer, or whose type is not a
+declared variant this text spells out — a record, a builtin, `Opt[T]` and
+`Result[T, E]`, a parameterized ADT's applied form — draws no exhaustiveness
+verdict, which is what `types.get(type_name)` does on the reference side too. A
+variant with an empty case list records no row, because `tenv_get` cannot tell an
+empty value from an absent key. A duplicate type name keeps its FIRST row rather
+than letting the second win, so nothing here claims a surface the reference
+never built (it refuses `duplicate type` instead, which this slice does not
+port). Each of those admits a program the reference may refuse; none refuses one
+the reference admits.
+
+What it does NOT carry, out of T3b's own list: `duplicate function` /
+`duplicate parameter`, `_lower_type_decls`' three duplicate refusals,
+wellformed declared types at the SERVICE-method and TYPE-declaration sites (T1
+named those already), `_refuse_callable_shadowing` and verified totality (both
+landed earlier), and the parser strictness that refuses `fn f() -> { }` — which
+is the last row of the crate oracle's `TYPE_LAYER_GAP` and a parser change, not
+a lowering one. No census document turns on any of them, so each is fail-open
+surface rather than a measured divergence.
 
 **T3c. One engine.** Delete lower.rvl's private `infer`/`binop_ty`/
 `builtin_ret`/`join_ty`/`infer_field`/`infer_callee`/`operands_of` and the
