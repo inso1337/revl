@@ -2762,6 +2762,42 @@ fn zip_env(names: List[ParamN], decls: List[ParamN], i: Int,
                  acc.push({ name: names[i].name, ty: decls[i].ty }))
 }
 
+// ---- the `a host emission` reach label (issue #1254) -----------------------
+//
+// `_method_emissions` (emission_analysis.py) notes `a host emission` for every
+// `emit` STEP whose head is not a required-key crossing, ahead of the emitting
+// NAMES the same statement reaches. It is what says the crossing left the
+// composition: `emit db.execute(q)` names the wiring key it went through,
+// `emit pg_write(row)` has no key to name. Without it this slice refused the
+// same program as the reference with a shorter reach list — same tag, same
+// offending token, different text, which item 391's agreement (tag AND message)
+// counts as a divergence.
+//
+// The unit is the STEP: a `let r = emit pg_write(row)` binds an emit-marked
+// VALUE, which the reference lowers through its expression path rather than
+// into an `emit` step, so it carries no label. That is why this sits on the
+// non-binding arm of `check_stmts` alone.
+fn host_emit_head(e: Expr, ck: Ck) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Var(n) => ck.ctx.caps.has(n),
+      _      => false,
+    },
+    _ => false,
+  }
+}
+
+fn note_host_emission(s: Stmt, ck: Ck) -> Ck {
+  if (s.kind != "emit" || s.bind != "") { return ck }
+  if (!host_emit_head(s.e, ck)) { return ck }
+  // deduped, as `note`'s `seen` set dedups: two host emissions in one body
+  // carry the label once
+  return { ctx: ck.ctx, env: ck.env,
+           ev: mk_ev2(union_into(ck.ev.labels, ["a host emission"]),
+                      ck.ev.caps),
+           msg: ck.msg }
+}
+
 fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
   if (i >= ss.length() || ck.msg != "") { return ck }
   let s = ss[i]
@@ -2777,7 +2813,7 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
               ev: next.ev, msg: "" }
     return check_stmts(ss, i + 1, next)
   }
-  next = walk_expr(s.e, s.kind == "emit", ck)
+  next = walk_expr(s.e, s.kind == "emit", note_host_emission(s, ck))
   if (next.msg != "") { return next }
   return check_stmts(ss, i + 1, next)
 }
