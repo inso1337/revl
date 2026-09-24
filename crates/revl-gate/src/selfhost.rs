@@ -46,6 +46,7 @@ pub struct FnD {
     body: Vec<Stmt>,
     cachePure: bool,
     line: i64,
+    caps: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -7384,8 +7385,8 @@ fn mk_step(p: Prog, i: i64) -> PStep {
     return PStep { pg: p.clone(), i: i };
 }
 
-fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, bd: Vec<Stmt>, ln: i64) -> FnD {
-    return FnD { name: nm.clone(), isEmExtern: em, isAsyncExtern: asy, callees: cs.clone(), asyncSlots: slots.clone(), asyncParams: aps.clone(), body: bd.clone(), cachePure: false, line: ln };
+fn mk_fnd(nm: String, em: bool, asy: bool, cs: Vec<String>, slots: Vec<i64>, aps: Vec<String>, bd: Vec<Stmt>, ln: i64, cps: Vec<String>) -> FnD {
+    return FnD { name: nm.clone(), isEmExtern: em, isAsyncExtern: asy, callees: cs.clone(), asyncSlots: slots.clone(), asyncParams: aps.clone(), body: bd.clone(), cachePure: false, line: ln, caps: cps.clone() };
 }
 
 fn mk_msig(nm: String, em: bool, cs: Vec<String>, asy: bool, ps: Vec<ParamN>, ret: String) -> MSig {
@@ -8015,6 +8016,8 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let mut isEm = false;
     let mut isAsync = false;
     let mut isWit = false;
+    let mut caps: Vec<String> = vec![];
+    let mut sawCaps = false;
     while (((((((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) || ati(&ts, j.clone(), "witnessed")) || ati(&ts, j.clone(), "deferred")) || atk(&ts, j.clone(), "[")) || atk(&ts, j.clone(), "(")) {
         if atw(&ts, j.clone(), "emission") {
             isEm = true;
@@ -8026,13 +8029,20 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
             isAsync = true;
         }
         if atk(&ts, j.clone(), "[") {
-            let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
-            while ((k < ts.revl_length()) && (!atk(&ts, k.clone(), "]"))) {
-                k = (k).checked_add(1i64).expect("revl: Int overflow");
+            if sawCaps {
+                let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
+                while ((k < ts.revl_length()) && (!atk(&ts, k.clone(), "]"))) {
+                    k = (k).checked_add(1i64).expect("revl: Int overflow");
+                }
+                j = (k).checked_add(1i64).expect("revl: Int overflow");
+            } else {
+                let cl = cap_list_at(&ts, j.clone(), ts.revl_length());
+                caps = cl.xs;
+                sawCaps = true;
+                j = cl.i;
             }
-            j = (k).checked_add(1i64).expect("revl: Int overflow");
         } else {
-            if atk(&ts, j.clone(), "(") {
+            if atk(&ts, j, "(") {
                 let mut k = (j).checked_add(1i64).expect("revl: Int overflow");
                 while ((k < ts.revl_length()) && (!atk(&ts, k.clone(), ")"))) {
                     k = (k).checked_add(1i64).expect("revl: Int overflow");
@@ -8043,8 +8053,8 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
             }
         }
     }
-    if (!atw(&ts, j.clone(), "fn")) {
-        return PStep { pg: bad_prog(pg.clone(), String::from("expected fn after extern")), i: skip_line(&ts, j.clone()) };
+    if (!atw(&ts, j, "fn")) {
+        return PStep { pg: bad_prog(pg.clone(), String::from("expected fn after extern")), i: skip_line(&ts, j) };
     }
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
     let ps = params_at(ts.clone(), (j).checked_add(3i64).expect("revl: Int overflow"));
@@ -8061,7 +8071,7 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
             k = (k).checked_add(1i64).expect("revl: Int overflow");
         }
     }
-    return mk_step(push_fn(pg.clone(), mk_fnd(nm.clone(), (isEm || isWit), isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![], tkc(&ts, i).line)), k);
+    return mk_step(push_fn(pg.clone(), mk_fnd(nm.clone(), (isEm || isWit), isAsync, vec![], async_slots_of(&ps.ps), async_params_of(&ps.ps), vec![], tkc(&ts, i).line, if (isEm || isWit) { caps } else { vec![] })), k);
 }
 
 fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
@@ -8080,7 +8090,7 @@ fn p_fn(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
         return PStep { pg: bad_prog(pg.clone(), String::from("unbalanced braces in fn body")), i: ts.revl_length() };
     }
     let body = p_stmts(ts.clone(), (rti).checked_add(1i64).expect("revl: Int overflow"), (bend).checked_sub(1i64).expect("revl: Int overflow"), vec![]);
-    return mk_step(push_fn(pg.clone(), FnD { name: nm.clone(), isEmExtern: false, isAsyncExtern: false, callees: body_callees(body.clone(), 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line }), bend);
+    return mk_step(push_fn(pg.clone(), FnD { name: nm.clone(), isEmExtern: false, isAsyncExtern: false, callees: body_callees(body.clone(), 0i64, vec![]), asyncSlots: async_slots_of(&ps.ps), asyncParams: async_params_of(&ps.ps), body: body.clone(), cachePure: cachePure.clone(), line: tkc(&ts, i).line, caps: vec![] }), bend);
 }
 
 fn mk_meths(xs: Vec<MSig>, i: i64, ok: bool) -> MethsR {
@@ -8725,7 +8735,7 @@ fn emit_caps_reach(fs: &[FnD], include_values: bool) -> std::collections::HashMa
     let mut i = 0i64;
     while (i < fs.revl_length()) {
         if (fs)[(i) as usize].isEmExtern.clone() {
-            caps.insert((fs)[(i) as usize].name.clone(), vec![(fs)[(i) as usize].name.clone()]);
+            caps.insert((fs)[(i) as usize].name.clone(), if ((fs)[(i) as usize].caps.revl_length() > 0i64) { (fs)[(i) as usize].caps.clone() } else { vec![(fs)[(i) as usize].name.clone()] });
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }

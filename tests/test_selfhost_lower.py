@@ -1612,6 +1612,59 @@ fn f() -> Int {
   return x
 }
 """),
+    # ---- a scoped extern crossing a provide-method boundary (issue #1240) --
+    # The documents this corpus did NOT have. `emit_caps_reach` seeded a
+    # boundary-crossing extern with its own NAME, so `emission[db]` implemented
+    # through `extern emission[db] fn pg_write` measured a crossing called
+    # `pg_write` against a bound spelled `db` and refused a provider that was
+    # exactly in bounds. Nothing here reached the path: every scoped extern in
+    # the tree was either never provided through, or provided through a bound
+    # that happened to name it, so both trees agreed vacuously while the seed
+    # rules disagreed. These are the four shapes that make the agreement a
+    # measurement — a scope REPLACES the name (docs/capabilities.md §2), so all
+    # four admit on the reference and must admit here.
+    ("a provider inside a scoped emission extern's own bound", """
+extern emission[db] fn pg_write(t: Str) = @py { return }
+service Worker { emission[db] fn go(t: Str) }
+component W provides worker: Worker {
+  provide worker { fn go(t) { emit pg_write(t) } }
+}
+"""),
+    # the same crossing one `fn` hop away: the scope is what propagates through
+    # the fixed point, so refactoring a body into a helper cannot move the
+    # verdict.
+    ("a scoped emission extern reached through a helper fn", """
+extern emission[db] fn pg_write(t: Str) = @py { return }
+fn wrapped(t: Str) { pg_write(t) }
+service Worker { emission[db] fn go(t: Str) }
+component W provides worker: Worker {
+  provide worker { fn go(t) { emit wrapped(t) } }
+}
+"""),
+    # a realm-style DOTTED token (item 343) is ONE capability, so the bound and
+    # the crossing compare whole. Scraping idents out of the bracket would have
+    # made this `net` and `edge` and left the bound unmet.
+    ("a dotted capability token on an emission extern", """
+extern emission[net.edge] fn ship(t: Str) -> Int = @py { return 1 }
+service Sink { emission[net.edge] fn send(m: Str) }
+component S provides sink: Sink {
+  provide sink { fn send(m) { emit ship(m) } }
+}
+"""),
+    # the `witnessed` half, which predates the emission one: a witnessed extern
+    # crosses the same boundary (item 243) and seeds the same way, so
+    # `witnessed[fs]` is the capability `fs` and not the capability `stash`,
+    # which no service bound can name.
+    ("a witnessed extern's declared scope meets a provide-method bound", """
+type Stash = { id: Str }
+extern witnessed[fs] fn stash(p: Str) -> Result[Stash, Str]
+  undo unstash(result) = @py { return Ok({}) }
+extern pure fn unstash(w: Stash) -> Bool = @py { return True }
+service Worker { emission[fs] fn go(t: Str) }
+component W provides worker: Worker {
+  provide worker { fn go(t) { emit stash(t) } }
+}
+"""),
 ]
 
 
