@@ -1754,8 +1754,17 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
 // subscription whose backlog nothing holds. This port has no refusal channel,
 // so it REPORTS — the document diverges loudly instead of quietly claiming a
 // durability the emitted crate does not deliver.
+//
+// The predicate is `!value_is_null`, not `value_bool`. A §4.5 declaration is a
+// RECORD in the interchange IR — `{"count": 4}` for `replay(4)`, `{"cursor":
+// "orders"}` for `replay(from: "orders")` — and never a bool, so `value_bool`
+// answers `false` for every replay a document can carry and the marker below
+// was unreachable. Measured on `957e9b1b`: the reference refuses
+// `effect Stream.source() replay(4) undo src.close()` by name and this port
+// answered the same document with a 29,022-byte crate carrying no marker at
+// all, which is the exact silence issue #81's exit forbids.
 fn render_host(node: Any, ctx: Ctx) -> Str {
-  if (value_bool(value_field(node, "replay"))) { return "<<DEFER-host-replay>>" }
+  if (!value_is_null(value_field(node, "replay"))) { return "<<DEFER-host-replay>>" }
   let fname = value_str(value_field(node, "fn"))
   // `partition(".")`: the root is everything before the FIRST dot, the method
   // everything after it.
@@ -1939,8 +1948,13 @@ fn stream_chain(head: Any, stages: List[Any], ctx: Ctx) -> Str {
 // which resumes on a clock this tier keeps THREAD-LOCAL so the window would
 // never fire. The reference RAISES on each; this port has no refusal channel,
 // so it REPORTS.
+//
+// Both predicates read `!value_is_null`, for the reason `render_host` above
+// records: a `replay` declaration is a RECORD in the IR, never a bool, so the
+// `value_bool` this line used to carry was false for every document and the
+// marker never fired.
 fn render_subscribe(node: Any, ctx: Ctx) -> Str {
-  if (value_bool(value_field(node, "replay"))) { return "<<DEFER-stream-replay>>" }
+  if (!value_is_null(value_field(node, "replay"))) { return "<<DEFER-stream-replay>>" }
   if (!value_is_null(value_field(node, "drain"))) { return "<<DEFER-stream-drain>>" }
   var policy = value_str(value_field(node, "policy"))
   if (policy == "") { policy = "error" }
@@ -4311,13 +4325,31 @@ fn rust_inject(reqs: List[Str]) -> Str {
   for (r of reqs) { parts = parts.push(string_lit(r)) }
   return `Inject::new([${parts.join(", ")}])`
 }
+// A required `Stream[T]` COEFFECT (item 130 §6b, issue #81) in the TYPE
+// position of a requirement. The reference refuses the whole document by name
+// on this tier — a requirement here resolves against a SERVICE, and a
+// `Stream[T]` is not one — and this port used to splice the declared type in
+// verbatim, so the emitted crate carried `Box<dyn Stream[OrderCreated]>`: not a
+// Rust type, not anything, and emitted with no diagnostic. Measured on
+// `957e9b1b`, that was a 42,857-byte crate for a document the reference answers
+// with an `EmitError`. A stated refusal made silent by the port is the one
+// direction the byte-agreement oracle exists to rule out, so the requirement's
+// type position carries a named marker instead. Every site that renders a
+// requirement AS A RUST TYPE goes through here; the sites that render it as a
+// KEY (the `Inject` gate, the `_undo`/`_t<n>` clones) are unaffected, because
+// the key is a string either way and naming it twice would say nothing extra.
+fn require_ty(svc: Str) -> Str {
+  if (svc.startsWith("Stream[")) { return `<<DEFER-required-stream:${svc}>>` }
+  return svc
+}
+
 // `_emit_req_bindings`: bind each required service through the Inject gate
 // (`ctx.require::<Box<dyn S>>("key")?`). Routed keys are DEFERRED.
 fn emit_req_bindings(reqs: Any, indent: Int) -> List[Str] {
   let pad = ind(indent)
   var out = []
   for (local of value_keys(reqs)) {
-    let svc = value_str(value_field(reqs, local))
+    let svc = require_ty(value_str(value_field(reqs, local)))
     out = out.push(`${pad}let ${local} = ctx.require::<Box<dyn ${svc}>>(${string_lit(local)})?;`)
   }
   return out
@@ -4994,7 +5026,7 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
-    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     out = out.push("}")
     out = out.push(`impl ${srv} for ${struct} {`)
@@ -5070,7 +5102,7 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
     let struct = `${cname}${camel(key)}`
     out = out.push(`struct ${struct} {`)
     for (b of binds(comp)) { out = out.push(`    ${mangle(b)}: Arc<${host_of(comp, b, map_values)}>,`) }
-    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${value_str(value_field(reqs, local))}>>,`) }
+    for (local of value_keys(reqs)) { out = out.push(`    ${local}: Arc<Box<dyn ${require_ty(value_str(value_field(reqs, local)))}>>,`) }
     out = out.concat(config_struct_field(comp, key))
     if (has_eff) { out = out.push("    ctx: Arc<cordis::Context>,") }
     out = out.push("}")

@@ -980,6 +980,126 @@ def test_the_stream_surface_is_carried_byte_for_byte(emitted, reference):
         assert marker not in got, f"{marker} is back: the boundary reopened"
 
 
+# item 130 §4.5 / §6b (issue #81): the two stream surfaces the REFERENCE refuses
+# on this tier, and which this port answered in silence.
+# ---------------------------------------------------------------------------
+#
+# The section above pins the surface the port CARRIES. These two pin the
+# surfaces it does not, and they are the sharper half: what the port dropped
+# here was ITSELF A REFUSAL. A tier limit the reference states in an `EmitError`
+# came back from its port as a crate that looks complete, which is the same
+# shape as #1130 and #1183 and the one direction the byte-agreement oracle
+# exists to rule out. There is no byte agreement to protect in either case --
+# the reference emits nothing at all -- so the marker is free.
+
+_REPLAY_DOC = """
+component C {
+  let src = effect Stream.source() replay(4) undo src.close()
+  let sub = subscribe src replay(2) undo sub.close()
+  await sub.next()
+}
+"""
+
+_COEFFECT_DOC = """
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+  on OrderCreated as e { emit ship.dispatch(e.order_id) }
+}
+"""
+
+
+def _refused_doc(tmp_path, source: str, reference):
+    path = tmp_path / "doc.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError) as excinfo:
+        reference.emit(ir)
+    return ir, str(excinfo.value)
+
+
+def test_a_replay_declaration_the_reference_refuses_is_named_here_too(
+        emitted, reference, tmp_path):
+    """§4.5: a provider-declared backlog, refused on this tier because the
+    recovery surface that makes the claim worth anything is the WAL's.
+
+    The port carried markers for both ends of it already -- `<<DEFER-host-
+    replay>>` at the declaration and `<<DEFER-stream-replay>>` at the request --
+    and neither could ever fire: both were spelled `value_bool(value_field(node,
+    "replay"))`, and a replay declaration is a RECORD in the interchange IR
+    (`{"count": 4}`, `{"cursor": "orders"}`), never a bool. So the port answered
+    a document the reference refuses by name with a 29,022-byte crate that
+    emitted a subscription and silently dropped the backlog -- delivering only
+    live items and calling it replay, which is the exact divergence the
+    reference's refusal text names.
+    """
+    ir, message = _refused_doc(tmp_path, _REPLAY_DOC, reference)
+    assert "a stream `replay(…)` is not lowered" in message, (
+        "the reference no longer refuses replay by name: this case has moved"
+    )
+    got = emitted["emit_rust_src"](ir)
+    assert "<<DEFER-host-replay>>" in got, "the provider's declaration"
+    assert "Stream::subscribe(" not in got, (
+        "the port emitted a subscription for a document the reference refuses"
+    )
+
+
+def test_the_consumer_side_replay_request_is_named_on_its_own(
+        emitted, reference, tmp_path):
+    """The request half, reached on its own so the declaration's marker cannot
+    stand in for it. A provider with no declared backlog is a frontend error, so
+    the request is reached here through a REQUIRED stream, whose declaration
+    lives on the requirement (§6c) rather than on a local acquisition."""
+    source = """
+    event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+    service Ship { emission fn dispatch(id: Str) }
+    component C requires feed: Stream[OrderCreated] replay(4), ship: Ship {
+      let sub = subscribe feed replay(2) undo sub.close()
+      on OrderCreated as e in sub { emit ship.dispatch(e.order_id) }
+    }
+    """
+    ir, message = _refused_doc(tmp_path, source, reference)
+    assert "not lowered" in message
+    got = emitted["emit_rust_src"](ir)
+    assert "<<DEFER-stream-replay>>" in got, (
+        "the `subscribe` request's own marker: `render_subscribe` read the "
+        "declaration with `value_bool` and could never report it"
+    )
+
+
+def test_a_required_stream_coeffect_the_reference_refuses_is_named_here_too(
+        emitted, reference, tmp_path):
+    """§6b: a requirement resolves against a SERVICE on this tier, and a
+    `Stream[T]` is not one.
+
+    The port used to splice the declared type into the requirement's type
+    position verbatim, so a 42,857-byte crate came out carrying `Box<dyn
+    Stream[OrderCreated]>` -- not a Rust type, not anything, and emitted with no
+    diagnostic, so the failure landed in cargo rather than here.
+    """
+    ir, message = _refused_doc(tmp_path, _COEFFECT_DOC, reference)
+    assert "a required `Stream[T]` coeffect is not lowered" in message, (
+        "the reference no longer refuses the coeffect by name"
+    )
+    got = emitted["emit_rust_src"](ir)
+    assert "<<DEFER-required-stream:Stream[OrderCreated]>>" in got
+    assert "Box<dyn Stream[OrderCreated]>" not in got, (
+        "the literal declared type is back in the requirement's type position"
+    )
+
+
+def test_the_required_stream_marker_is_scoped_to_the_stream_requirement(
+        emitted, reference, tmp_path):
+    """The non-vacuity control: an ordinary service requirement on the same
+    program keeps its own type in the same positions, so the marker above is the
+    stream's and not every requirement's. Passes before the change too."""
+    ir, _ = _refused_doc(tmp_path, _COEFFECT_DOC, reference)
+    got = emitted["emit_rust_src"](ir)
+    assert "Box<dyn Ship>" in got, "the service requirement is untouched"
+    assert "<<DEFER-required-stream:Ship>>" not in got
+
+
 # --------------------------------------------------------------------------
 # item 146 / issue #98 Stage 4 — the rust EMITTER RUNS as rust, and its output
 # is the reference's, byte for byte.

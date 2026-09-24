@@ -120,6 +120,11 @@ REJECTIONS = {
     # service op, but whose declared function type carries no async color, is a
     # compile error — the sound replacement for the silent coroutine leak.
     "a1_async_arrow_sync_type.rvl": "carries no async color — the caller would receive an unawaited suspension (A1)",
+    # issue #1151: `Async[T]` is position-restricted and a transparent type
+    # alias's right-hand side is not one of its positions, so an alias of
+    # `Async[T]` is refused at the DECLARATION — before the arrow that uses it
+    # is ever asked whether it declares its own colour.
+    "a1_alias_of_async.rvl": "`Async[T]` is not a value type (`Async[Str]`)",
     # roadmap item 117 (harness finding #40): a SYNC provide method reaching an
     # async *service operation* through a required key in EXPRESSION position (a
     # ternary arm) — the blind spot the name-based reach left open — is refused

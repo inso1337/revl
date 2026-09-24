@@ -867,10 +867,11 @@ def test_the_service_block_is_on_the_wire_the_reference_renders():
     """The block is the projection's, not the test's: `manifest_wire` renders the
     `!services` header and one `:S,op,op` row per service the compiled
     composition declares, in declaration order, carrying each service's own
-    operations. A hand-spelled wire here would let the two sides agree on a shape
+    operations and each operation's own declared parameter list (issue #346).
+    A hand-spelled wire here would let the two sides agree on a shape
     neither produces."""
-    assert ENUMERATED_MANIFEST.endswith(";!services;:Store,get;:AppSvc,snapshot"), \
-        ENUMERATED_MANIFEST
+    assert ENUMERATED_MANIFEST.endswith(
+        ";!services;:Store,get(key:Str);:AppSvc,snapshot()"), ENUMERATED_MANIFEST
     assert ENUMERATED_MANIFEST.startswith(
         "Kv/store/;App/app/;App<store"), ENUMERATED_MANIFEST
 

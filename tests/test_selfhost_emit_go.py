@@ -511,6 +511,99 @@ def test_the_stream_diversion_with_top_level_declarations_is_named_now(emitted,
                             f"<<UNSUPPORTED-COMPONENT:{names[0]}>>")
 
 
+def test_a_required_stream_coeffect_is_named_by_the_port(emitted, reference,
+                                                         tmp_path):
+    """item 130 6b (issue #81): the reference refuses this document by name, and
+    the port must not answer it with silence.
+
+    A requirement resolves against a SERVICE on this tier and a `Stream[T]` is
+    not one, so `backends/go/emit.py` raises rather than emitting. Before issue
+    #1321 the port answered the same document with its banner plus the event's
+    record type and nothing else, 242 bytes against an `EmitError`, with no
+    marker anywhere: a stated refusal made silent by the port, which is the one
+    direction the byte-agreement oracle exists to rule out.
+
+    `component_is_observable` closes it without reading a stream spelling. The
+    component has an `on ... as` body step, so it is observable, so the
+    suppression does not fire and the component is named. The go tier's
+    `unported` baseline in tests/fixtures/selfhost_blind_spots.json is untouched
+    and no port of the stream lowering is claimed.
+    """
+    path = tmp_path / "coeffect.rvl"
+    path.write_text("""
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+  on OrderCreated as e { emit ship.dispatch(e.order_id) }
+}
+""")
+    ir = compile_files([str(path)])
+    assert ir["types"], (
+        "the case is only interesting while the document ALSO carries a "
+        "top-level declaration, which is what arms the suppression"
+    )
+    with pytest.raises(reference.EmitError) as excinfo:
+        reference.emit(ir)
+    assert "a required `Stream[T]` coeffect is not lowered" in str(excinfo.value), (
+        "the reference no longer refuses the coeffect by name"
+    )
+    got = emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-COMPONENT:Fulfiller>>" in got
+
+
+def test_a_stream_coeffect_on_an_empty_component_stays_suppressed(emitted,
+                                                                  reference,
+                                                                  tmp_path):
+    """The boundary on the test above, and the reason the port reads `body`
+    rather than the requirement's declared type text.
+
+    A `Stream[T]` requirement is not by itself a reason to name a component.
+    With no body there is nothing for the reference to lose by routing past it,
+    so the reference takes the pure typed-core path and EMITS, refusing nothing.
+    A port that keyed the marker on the requirement type would answer that
+    document with a marker the reference has no counterpart for, and would pay
+    for it out of the byte agreements the suppression exists to buy.
+    """
+    path = tmp_path / "empty_coeffect.rvl"
+    path.write_text("""
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship { }
+""")
+    ir = compile_files([str(path)])
+    assert ir["types"] and not ir["components"][0]["body"], (
+        "the case is a top-level declaration beside a component with nothing "
+        "in it, which is what arms the suppression"
+    )
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-COMPONENT" not in got
+    assert got == want
+
+
+def test_the_suppression_still_holds_for_a_service_only_requirement(
+        emitted, reference, tmp_path):
+    """The non-vacuity control: the same document shape with an ordinary service
+    requirement and an empty body still routes to the reference's pure
+    typed-core path, still drops its component on both sides, and is still
+    byte-identical."""
+    path = tmp_path / "service_req.rvl"
+    path.write_text("""
+type Order = { id: Str }
+service Ship { fn dispatch(id: Str) }
+
+component Fulfiller requires ship: Ship { }
+""")
+    ir = compile_files([str(path)])
+    got = emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-COMPONENT" not in got, (
+        "the suppression has narrowed past an unobservable component and is "
+        "now costing the byte agreements it exists to buy"
+    )
+    assert got == reference.emit(ir)
+
+
 def test_record_update_is_a_reference_refusal(reference, tmp_path):
     path = tmp_path / "record_update.rvl"
     path.write_text("type R = { x: Int }\nfn f(r: R) -> R { return {r | x = 2} }")
