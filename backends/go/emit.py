@@ -514,9 +514,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             left = _expr(left_node, env)
             right = _expr(node["right"], env, _comp_infer(node.get("right"), env))
             if left_node.get("kind") not in ("call", "host", "builtin", "fn"):
-                # issue #1356: an Opt that is READ rather than CALLED — a
-                # config field (`config.limit ?? 0`), a struct field, a local
-                # — holds the VALUE-position form `*T` (`_go_type`), not the
+                # issue #1356: an Opt that is READ rather than CALLED (a
+                # config field like `config.limit ?? 0`, a struct field, a
+                # local) holds the VALUE-position form `*T` (`_go_type`), not
                 # `(T, bool)` a service or host call returns (`_go_return`).
                 # Destructuring one with `_v, _ok :=` is Go's "2 variables but
                 # 1 value"; the presence bit is the pointer being non-nil.
@@ -1307,7 +1307,7 @@ def _comp_builtin(method, recv_surface, target, args):
             # issue #1356: an `Int32` receiver is a Go `int32`, which
             # FormatInt's int64 parameter does not accept. The pure v3
             # renderer has widened it since item 434 (f); this one never did,
-            # and `_go_widen_int` cannot see it — that helper widens the
+            # and `_go_widen_int` cannot see it: that helper widens the
             # ir_version 1/2 `int` and answers an already-int64 Int unchanged.
             return "strconv.FormatInt(int64(%s), 10)" % target
         return "strconv.FormatInt(%s, 10)" % _go_widen_int(target)
@@ -2439,7 +2439,7 @@ def _collect_host_bind_methods(node, binds: dict, acc: set) -> None:
     """Record (family, verb) for every method called on a host-BOUND receiver.
 
     `let job = effect Job.run(..)` binds a host object, and `job.run("start")`
-    inside a provide method lowers to `revlSelf.job.Run("start")` — a METHOD
+    inside a provide method lowers to `revlSelf.job.Run("start")`, a METHOD
     on the bind's type. The stub emitter only ever declared free functions, so
     the type had no such method and the package did not build (issue #1356).
     """
@@ -3938,7 +3938,7 @@ def _host_runtime() -> str:
                 # `Query` reads nothing out of it and returns nil. Renaming it
                 # to `RevlRow` made the host answer `[]RevlRow` where the
                 # provide method that declares `-> List[Row]` over the same
-                # call returns `[]Row`, and the package did not build — for
+                # call returns `[]Row`, and the package did not build, for
                 # ten of the sixteen carried documents this issue counts.
                 #
                 # A document that declares `type Row = { .. }` is saying what
@@ -3970,7 +3970,7 @@ _HOST_RUNTIME_RENAMES = ("Row", "Map", "Pool")
 # lowers that to a `host` IR node, which `_expr` renders as the free function
 # `PoolOpen(..)`. In a plain top-level `fn` it stays an ordinary `call` on a
 # `field` of a `var`, so the pure renderer used to print the source spelling
-# `Pool.Open(..)` — a method Go's host runtime does not declare (issue #1356).
+# `Pool.Open(..)`, a method Go's host runtime does not declare (issue #1356).
 _V3_HOST_ROOTS = frozenset({"Map", "Pool", "Job", "Stream"})
 
 
@@ -4690,7 +4690,7 @@ def _v3_host_constructor(callee: dict, ctx) -> str | None:
     the per-instance verbs as methods, so the family root has no `Open`.
 
     Answers None for anything that is not one of those roots, including a
-    local binding or a declared type that happens to share the name — a
+    local binding or a declared type that happens to share the name: a
     receiver the document bound is an ordinary value with ordinary methods.
     """
     if callee.get("kind") != "field":
@@ -5426,7 +5426,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             # issue #1356: `v[k]` where `v` is statically `Any`. Go's index
             # operator is type-directed and an interface value has none, so
             # this emitted a bare `v[k]` that did not compile. Reflection is
-            # the faithful lowering — the same read python and typescript
+            # the faithful lowering: the same read python and typescript
             # make on a value whose shape only the runtime knows.
             ctx.needs_reflect = True
             ctx.needs_any_index = True
