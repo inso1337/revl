@@ -273,6 +273,74 @@ kind, which already ships with its own message, why-trace and navigation
 record. The residue split is a REPORT and refuses nothing. Slice 1's two
 refusals (G4, `reversibility`) are untouched.
 
+## 6a. Where the plan reads a crossing from (issue #1327)
+
+The five verdicts of section 5 are only as good as the set of steps they are
+computed over, and for a while that set was wrong in the fail-open direction.
+
+`ui_transaction._calls` read three statement kinds (`emit e`, `let x = e`, a
+bare expression statement) and only the TOP node of each one's expression, so a
+crossing written anywhere else reached no plan at all. Six spellings that
+compile today were affected: `return emit click(t)`, the `then` arm of an `if`,
+the `else` arm of an `if`, a `return` inside an `if` arm, `n = emit click(t)`,
+and a call nested in a larger expression. Each produced a plan with no step for
+the crossing, so it got no residue verdict, no confirmation state, no
+postcondition verdict, no `[4]` row and no entry in
+`unconfirmedIrreversibleSteps`.
+
+That is the fail-open direction because `aggregate` is the weakest state
+PRESENT. A step absent from the fold is therefore not a gap in the answer, it is
+a step that cannot drag the answer down: a set holding one compensated `ui.text`
+plus a tail-position `ui.click` aggregated to `restored`, and its claim carried
+no "may not be reported as cleanly reverted". Tail position is also where an
+actuation most naturally lands, since a provide method that returns what it
+clicked has nothing left to bind.
+
+The repair is a generic walk in evaluation order rather than a longer list of
+statement kinds, because a longer list would only defer the next instance:
+every step kind the language grows is another way to hide a crossing until
+someone remembers the table. Three things the walk decides explicitly:
+
+- **Both arms of an `if` are reported.** This is a reading, not an execution,
+  and the plan cannot know which arm runs. Reporting an arm a given run skips
+  over-states the plan by one crossing; reporting neither under-states it by all
+  of them, and only one of those two directions can leave an irreversible
+  actuation unnamed.
+- **A registered inverse is not walked.** `compensate f()` and an effect's
+  `undo` are entries on the teardown accumulator: they run on unwind, not in the
+  forward order the plan reports, and whether a crossing has an inverse is
+  already carried per step by `_extern_index`. Walking them would report a
+  second actuation the program never makes in that order. The two keys are named
+  with that reason in `_REGISTERED_INVERSE`.
+- **Callees are still not followed.** `method_plan` reads one body, exactly as
+  before. `emission_analysis` owns the transitive question and the G4/G8 gates
+  read it there.
+
+A loop body is not in the list because it cannot hold a crossing: an `emit` step
+inside a provide-method `while`/`for` body is refused by the frontend.
+`test_a_loop_body_cannot_hide_a_crossing_because_it_cannot_hold_one` pins that,
+so a later item that admits one has to come back here.
+
+**The neighbouring folds, including the negative.** Only one of the report's two
+computer-use folds was blind. `boundaryCrossings.uiResidue`, the per-crossing
+`uiResidue` tag, `residueSteps` and that section's `compensateOrder` read
+`query.Composition`'s reachability facts, which do not know where in a body a
+crossing was written, so they reported `uncompensated` on a tail-position click
+before this change and are unchanged by it. The `[4]` plan's residue verdict,
+confirmation state, postcondition verdict, `compensateOrder` and
+`unconfirmedIrreversibleSteps` were blind together, because all five are
+computed from the one walk. So the same report answered the same question about
+the same click two ways, and the weaker answer was the one a reader would take
+as the transaction's own verdict.
+`test_the_two_computer_use_folds_agree_about_a_tail_crossing` pins the agreement
+as an equality rather than as two separate assertions.
+
+**What moved.** Measured over every `.rvl` and `.revl` source in the tree and
+every fenced revl block under `docs/`: 872 compile, 2 get a plan, and both move.
+Both move in the same direction, from `untouched` to `uncompensated`, gaining
+the `[4]` row and the `unconfirmedIrreversibleSteps` entry for a `ui.click` that
+was invisible. The item-525 flagship demo does not move.
+
 ## 7. Self-host
 
 Does this need a self-host port? No, and for 538 section 9's reason unchanged:
