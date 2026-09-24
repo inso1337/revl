@@ -317,12 +317,23 @@ does not fire on it and steps 1-8 and 10 are unaffected.
 
 ## 9. What is not verified
 
-- **No phase executes.** There is no runtime transaction, no LIFO run, no
-  scheduler. `compensateOrder` is an ORDER, not a result, and the report says
-  so. 538 slice 3 is still open and still needs item 521's slice 4.
-- **The postcondition check is POSITIONAL.** It reports that a read follows an
-  actuation in the same method, not that the read checks that actuation.
-  Section 4.
+- **No phase executes.** There is no runtime transaction and no scheduler. Two
+  parts of this bullet stopped being true after it was written, with 538 slice
+  3 (issue #1369, PR #1386): `compensation_run` computes a LIFO run keyed on
+  the step the transaction failed at, and `revl erase-report` prints it.
+  `compensateOrder` is still an ORDER and is still not keyed on the failure; it
+  is kept as the control the run is measured against. What remains true is that
+  revl performs nothing: the compensating crossings are the substrate's (item
+  539), exactly as the actuations are, and the run artifact says so in
+  `performedBy`.
+- **The postcondition check WAS POSITIONAL.** It reported that a read follows
+  an actuation in the same method, not that the read checks that actuation.
+  538 slice 5 (issue #1370, PR #1386) bound it: a read carries a step's
+  postcondition only when it resolves the same target by provenance and derives
+  from crossings later than the actuation, and a read that follows and checks
+  something else gets its own word, `read-not-bound-to-this-step`. Section 4's
+  limit is unchanged: the read is still `Untrusted` and the strongest word is
+  still `verified-against-untrusted-read`.
 - **The check-to-use race is open**, unchanged from 538 section 4. Nothing in
   the tree resolves a UI target into a handle, so every phase boundary
   re-resolves by name.
