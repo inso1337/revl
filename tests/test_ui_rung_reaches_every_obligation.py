@@ -39,12 +39,14 @@ approval` did not raise `ui.click.pixel`, so the rung reported `unconfirmed`
 under a policy that named its verb. `test_an_operator_raise_reaches_the_rung`
 is that measurement and it fails on the exact-match version.
 
-A SEPARATE DEFECT was found while writing this file and is NOT fixed here:
-`ui_transaction.method_plan` drops an emission in RETURN position. It is
-pre-existing on #1287's own branch, has nothing to do with rungs or with this
-merge, and is pinned by the strict `xfail` at the bottom rather than repaired
-inside a five-PR reconciliation. Every plan-reading fixture above therefore
-binds its emissions rather than returning them.
+A SEPARATE DEFECT was found while writing this file, pinned here by a strict
+`xfail` rather than repaired inside a five-PR reconciliation, and fixed by
+issue #1327: `ui_transaction.method_plan` dropped an emission in RETURN
+position. The xfail is now the plain assertion
+`test_a_return_position_actuation_is_reported`, and the section at the bottom
+of this file covers the rest of what the same cause hid. Every plan-reading
+fixture above still binds its emissions rather than returning them, which is
+now a choice rather than a workaround.
 
 NOT MEASURED HERE: no step executes, and nothing in this file drives a
 desktop. These are compile-time and report-time classifications.
@@ -60,7 +62,7 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from revl import ui_family  # noqa: E402
+from revl import erase_report, ui_family  # noqa: E402
 from revl import ui_transaction as uitx  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
@@ -281,27 +283,187 @@ def test_the_erase_report_gives_a_rung_a_residue_word() -> None:
         assert state in uitx.WEAKEST_FIRST, (rung, state)
 
 
-# -------------------------------- a defect found here and deliberately not
-# -------------------------------- fixed here
+# ------------------------------- the defect found here, and now repaired
+#
+# Issue #1327. `ui_transaction._calls` read three statement kinds and only the
+# TOP node of each one's expression, so a crossing written anywhere else
+# reached no plan at all. The strict `xfail` below is now a plain assertion,
+# and the tests around it cover the rest of what the same cause hid.
 
 
-@pytest.mark.xfail(strict=True, reason=(
-    "PRE-EXISTING, NOT THIS BRANCH'S. `ui_transaction.method_plan` collects a "
-    "step for every BOUND emission (`let x = emit f(...)`) and drops an "
-    "emission in RETURN position, so `return emit actuate(t)` gets no residue "
-    "verdict, no confirmation state, and no row in the `[4]` section or in "
-    "`unconfirmedIrreversibleSteps`. It is the fail-open direction - an "
-    "irreversible actuation in tail position is invisible to exactly the "
-    "report that exists to name it - and it reproduces on PR #1287's own "
-    "branch with no rung involved, so it is not a consequence of merging "
-    "these five. It is left alone here on purpose: fixing it moves what every "
-    "plan reports for every program with a tail-position crossing, which "
-    "would put a semantic change with its own failure direction and its own "
-    "non-vacuity argument inside a five-PR reconciliation. Reported to the "
-    "orchestrator instead. Flip this to a plain assertion when it is fixed."))
+#: Every position a `ui.click` can be written in a provide method that
+#: compiles today, as `(label, body, reaches_the_plan_before_the_fix)`. The
+#: last two are CONTROLS: they reached the plan before the fix and must still
+#: reach it, so a walk that reported nothing would fail this file rather than
+#: satisfy it.
+CROSSING_POSITIONS = [
+    ("return", "      return emit click(t)\n", False),
+    ("if-then", "      if (1 == 1) { emit click(t) }\n      return 0\n", False),
+    ("if-else",
+     "      if (1 == 2) { return 0 } else { emit click(t) }\n      return 0\n",
+     False),
+    ("return-inside-if",
+     "      if (1 == 1) { return emit click(t) }\n      return 0\n", False),
+    ("assignment",
+     "      var n = 0\n      n = emit click(t)\n      return n\n", False),
+    ("nested-in-expression",
+     "      let a = emit click(t) + 0\n      return a\n", False),
+    ("bound", "      let a = emit click(t)\n      return a\n", True),
+    ("bare-statement", "      emit click(t)\n      return 0\n", True),
+]
+
+
+@pytest.mark.parametrize(("label", "body", "reached_before"),
+                         [(lbl, body, before)
+                          for lbl, body, before in CROSSING_POSITIONS],
+                         ids=[lbl for lbl, _b, _r in CROSSING_POSITIONS])
+def test_every_crossing_position_reaches_the_plan(label, body,
+                                                  reached_before) -> None:
+    """The generalisation of the defect. Six of these eight positions produced
+    a plan with no step for the click, so the crossing got no residue verdict,
+    no confirmation state, no postcondition verdict, no `[4]` row and no entry
+    in `unconfirmedIrreversibleSteps`. Two are controls that always worked."""
+    ir = compile_source(_program(SEMANTIC, body), f"position_{label}.rvl")
+    tokens = [step["token"] for step in uitx.plans(ir)[0]["steps"]]
+    assert "ui.click" in tokens, (label, tokens)
+
+
+def test_a_loop_body_cannot_hide_a_crossing_because_it_cannot_hold_one() -> None:
+    """The two positions this file does NOT parametrize, and why. An `emit`
+    step inside a provide-method `while`/`for` body is refused by the frontend,
+    so a loop is not a place a crossing can hide from the plan. Pinned so that
+    a later item admitting one is forced to come back here."""
+    for loop in ("while (1 == 2) { emit click(t) }",
+                 "for (i of [1]) { emit click(t) }"):
+        with pytest.raises(RevlError) as refused:
+            compile_source(
+                _program(SEMANTIC, f"      {loop}\n      return 0\n"),
+                "loop_body.rvl")
+        assert "`emit`" in refused.value.message
+
+
 def test_a_return_position_actuation_is_reported() -> None:
+    """The original strict `xfail`, flipped. Left as its own named test rather
+    than folded into the parametrization above, because this exact spelling is
+    what the five-PR reconcile measured and reported."""
     ir = compile_source(
         _program(SEMANTIC, "      return emit click(t)\n"),
         "return_position.rvl")
     tokens = [step["token"] for step in uitx.plans(ir)[0]["steps"]]
     assert "ui.click" in tokens, tokens
+
+
+def test_the_tail_crossing_gets_the_four_verdicts_it_was_missing() -> None:
+    """A step absent from the plan is not a step with weak verdicts, it is a
+    step with none. All four are computed from the one walk, so all four were
+    missing together: the residue verdict, the confirmation state, the
+    postcondition verdict and the `unconfirmedIrreversibleSteps` entry."""
+    ir = compile_source(
+        _program(SEMANTIC, "      return emit click(t)\n"),
+        "tail_verdicts.rvl")
+    plan = uitx.plans(ir)[0]
+    step = next(s for s in plan["steps"] if s["token"] == "ui.click")
+    assert step["residue"] == uitx.UNCOMPENSATED
+    assert step["confirmation"] == uitx.UNCONFIRMED
+    assert step["postcondition"] is not None
+    assert "click" in plan["unconfirmedIrreversibleSteps"]
+
+
+def test_the_tail_and_bound_spellings_of_one_click_agree() -> None:
+    """Two programs that differ only in where the click is written must not get
+    two readings. The plan is a statement about the crossings a method makes,
+    and where an author binds the result is not one of them."""
+    tail = uitx.plans(compile_source(
+        _program(SEMANTIC, "      return emit click(t)\n"), "t.rvl"))[0]
+    bound = uitx.plans(compile_source(
+        _program(SEMANTIC,
+                 "      let a = emit click(t)\n      return a\n"), "b.rvl"))[0]
+    assert [s["token"] for s in tail["steps"]] \
+        == [s["token"] for s in bound["steps"]]
+    assert tail["revert"]["aggregate"] == bound["revert"]["aggregate"]
+    assert tail["unconfirmedIrreversibleSteps"] \
+        == bound["unconfirmedIrreversibleSteps"]
+
+
+# ------------------------------------------- the neighbouring folds, measured
+
+
+#: The erase report's OTHER computer-use fold, on a realm. The click is in tail
+#: position; `type_amount` carries a declared inverse, so the set would
+#: aggregate to `restored` if the click were missing from it. That is the
+#: non-vacuity: the tail crossing is the weakest part of an otherwise
+#: recoverable step set.
+TAIL_REALM = UI_TARGET + """
+extern emission[screen.observe] fn read_pane(region: Str) -> Str = @py { return "" }
+extern emission[ui.find] fn locate(hint: Str) -> UiTarget = @py { return None }
+extern pure fn clear_field() = @py { return None }
+extern emission[ui.text] fn type_amount(target: UiTarget, amount: Str)
+  compensate clear_field()
+  = @py { return None }
+extern emission[ui.click] fn actuate(target: UiTarget) -> Int = @py { return 0 }
+
+service Refund { emission fn settle(invoice: Str) -> Int }
+
+component UiAgent provides refund: Refund {
+  isolate refund in realm("billing")
+  provide refund {
+    fn settle(invoice) {
+      let pane = emit read_pane("detail")
+      let field = emit locate("amount")
+      emit type_amount(field, invoice)
+      return emit actuate(field)
+    }
+  }
+}
+"""
+
+
+def test_the_two_computer_use_folds_agree_about_a_tail_crossing() -> None:
+    """The report answered the same question about the same click two ways.
+
+    `boundaryCrossings.uiResidue` reads `query.Composition`'s reachability
+    facts, which do not know WHERE in a body a crossing was written, so it was
+    never blind. The `[4]` plan's five verdicts are all computed from the one
+    walk, so they were blind together, and the weaker answer was the one a
+    reader would take as the transaction's own verdict. Pinned as an equality
+    rather than as two separate assertions, so neither side can drift."""
+    ir = compile_source(TAIL_REALM, "tail_realm.rvl")
+    report = erase_report.build_report(ir, "billing", prove_residue=False)
+    realm_fold = report["boundaryCrossings"]["uiResidue"]["aggregate"]
+    plan_fold = uitx.plans(ir)[0]["revert"]["aggregate"]
+    assert plan_fold == realm_fold == uitx.UNCOMPENSATED
+
+
+def test_the_tail_crossing_is_the_weakest_part_of_a_restored_set() -> None:
+    """NON-VACUITY: the aggregate actually changing, not just a step appearing.
+
+    Drop the tail click from the same program and the remaining set is a
+    compensated `ui.text` plus two reads, which aggregates to `restored`: an
+    inverse ran and put the state back. With the click counted, the set is
+    `uncompensated`, the compensation order holds only `type_amount`, and the
+    claim carries the caveat. A step absent from the fold cannot drag the
+    aggregate down, which is why the missing step was the fail-open
+    direction."""
+    with_click = uitx.plans(compile_source(TAIL_REALM, "w.rvl"))[0]
+    assert with_click["revert"]["aggregate"] == uitx.UNCOMPENSATED
+    assert with_click["revert"]["compensateOrder"] == ["type_amount"]
+    assert "may not be reported as cleanly reverted" \
+        in with_click["revert"]["claim"]
+
+    without_click = uitx.plans(compile_source(
+        TAIL_REALM.replace("      return emit actuate(field)\n",
+                           "      return 1\n"), "n.rvl"))[0]
+    assert without_click["revert"]["aggregate"] == uitx.RESTORED
+    assert "may not be reported as cleanly reverted" \
+        not in without_click["revert"]["claim"]
+
+
+def test_a_registered_inverse_is_not_reported_as_a_second_crossing() -> None:
+    """The one thing the generic walk must NOT descend. `compensate f()` and an
+    effect's `undo` are entries on the teardown accumulator: they run on
+    unwind, not in the forward order the plan reports, and whether a crossing
+    has an inverse is already carried per step. Walking them would report a
+    second actuation the program never makes in that order."""
+    ir = compile_source(TAIL_REALM, "inverse.rvl")
+    tokens = [step["token"] for step in uitx.plans(ir)[0]["steps"]]
+    assert tokens == ["screen.observe", "ui.find", "ui.text", "ui.click"]
