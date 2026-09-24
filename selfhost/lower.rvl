@@ -3189,15 +3189,31 @@ fn any_in(xs: List[Str], set: List[Str]) -> Bool {
 // head's arguments then admit bare emissions, as the slot does), "args" inside
 // a marked head's argument list, "" elsewhere. The reference keeps this as
 // `env._emit_arg_mode` / `env._in_emit_args` around `_emit_head_args`.
-// `ambOps` is the RUNNING composition's declared operations, service name ->
-// operation names, off the item-346 `!services` block (`:S,op,op`). It is the
+// One RUNNING service's declared surface, off the item-346 `!services` block.
+// `ops` are the operation NAMES its `:S,op,op` row spells — the A6 member
+// claim. `sigs` are the DECLARED PARAMETER LISTS of the subset of those
+// operations whose row carried one (`:S,op(k:Str)`), which is what lets a
+// candidate's call through a requirement be typed against the running
+// declaration rather than only resolved against its name.
+//
+// `sigs` is a SUBSET and says so by being one: an operation named in `ops`
+// with no entry here is one whose parameters the wire did not spell, and the
+// argument rule decides nothing about it. Each signature carries `isEm`,
+// `isAsync` and `caps` at their inert values because the wire does not spell
+// them; the ONLY reader is `ct_req_msig`, whose rule reads `ps` alone. That is
+// also why this stays out of `cx.svcs`: an entry there is read by the G4 and A1
+// arms, which would then answer from flags no wire carried.
+type AmbSvc = { ops: List[Str], sigs: List[MSig] }
+
+// `ambOps` is the RUNNING composition's declared surface, service name ->
+// `AmbSvc`, off the item-346 `!services` block (`:S,op,op`). It is the
 // second exhaustive service declaration this gate can hold (see
 // `svc_decl_known`) and is EMPTY on the single-source path, where the text is
 // the whole world. Deliberately NOT merged into `svcs`: an entry there carries
 // the emission / async / capability flags the G4 and A1 arms judge, and the
-// wire carries operation NAMES only, so a merged entry would answer those arms
+// wire carries no such flag, so a merged entry would answer those arms
 // from a declaration it does not have.
-type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, List[Str]],
+type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              reqMap: Map[Str, Str], caps: CapsT,
              colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
@@ -3273,8 +3289,8 @@ fn svc_has_method(cx: Ctx, svcName: Str, m: Str) -> Bool {
     return find_msig(svc_of(cx, svcName), m, 0).name != ""
   }
   return match cx.ambOps.lookup(svcName) {
-    Some(ops) => contains(ops, m),
-    None      => false,
+    Some(a) => contains(a.ops, m),
+    None    => false,
   }
 }
 
@@ -4195,17 +4211,18 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
 }
 
-// The RUNNING composition's operation table, off the item-346 service block's
+// The RUNNING composition's service table, off the item-346 service block's
 // `:S,op,op` rows. Only a service whose row made the operation claim gets an
 // entry, so the map's KEYS are exactly the running services this gate holds a
 // surface for (`svc_decl_known`) and there is no entry that means "unknown".
 fn amb_ops_map(xs: List[SvcOps], i: Int,
-               acc: Map[Str, List[Str]]) -> Map[Str, List[Str]] {
+               acc: Map[Str, AmbSvc]) -> Map[Str, AmbSvc] {
   if (i >= xs.length()) { return acc }
-  return amb_ops_map(xs, i + 1, acc.set(xs[i].name, xs[i].ops))
+  return amb_ops_map(xs, i + 1,
+                     acc.set(xs[i].name, { ops: xs[i].ops, sigs: xs[i].sigs }))
 }
 
-fn ctx_amb_ops(cx: Ctx, ops: Map[Str, List[Str]]) -> Ctx {
+fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
   return { svcs: cx.svcs, ambOps: ops, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
            emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
@@ -4511,6 +4528,33 @@ fn ct_no_msig() -> MSig {
   return { name: "", isEm: false, caps: [], isAsync: false, ps: [], ret: "" }
 }
 
+// The DECLARATION a required-service call is held to: the TEXT's own
+// `service S { … }` when the candidate carries one, and otherwise the RUNNING
+// composition's, off the item-346 service block's parameter lists (issue #346,
+// docs/design/457 section 4.5 — "a candidate's `requires store: Store` resolves
+// and its call sites are typed against the RUNNING signature").
+//
+// The text wins where both are present, which is the precedence `svc_has_method`
+// already gives the A6 member rule: a text that redeclares a running service is
+// checked against what it wrote, and the redeclaration itself is the
+// compatibility gate's business, not this one's.
+//
+// The wire is a PARTIAL source and the empty signature is what says so. An
+// operation the running composition declares but whose parameters the wire did
+// not spell resolves to `ct_no_msig()` here, exactly as an unknown service does,
+// and `ct_call`'s `decl.name != ""` guard then decides nothing about its
+// arguments. So a wire rendered before signatures were on it — or one whose
+// producer withheld a spelling it could not put on the wire — leaves this rule
+// silent rather than guessing a parameter list, which is the direction this gate
+// is allowed to err in.
+fn ct_req_msig(cx: Ctx, svcName: Str, op: Str) -> MSig {
+  if (cx.svcs.has(svcName)) { return find_msig(svc_of(cx, svcName), op, 0) }
+  return match cx.ambOps.lookup(svcName) {
+    Some(a) => find_msig({ name: svcName, methods: a.sigs }, op, 0),
+    None    => ct_no_msig(),
+  }
+}
+
 // The service operation `<root>.<op>(…)` resolves to through the component's
 // requirement map, or the empty signature. A spawn-handle provision alias takes
 // the instance path instead and is not a requirement read, exactly as
@@ -4519,8 +4563,8 @@ fn ct_req_decl(tg: Expr, cx: Ctx) -> MSig {
   return match tg {
     Field(fl) => match fl.target {
       Var(v)   => cx.reqMap.has(v) && !cx.provAlias.has(v)
-        ? find_msig(svc_of(cx, match cx.reqMap.lookup(v) {
-            Some(sv) => sv, None => "" }), fl.name, 0)
+        ? ct_req_msig(cx, match cx.reqMap.lookup(v) {
+            Some(sv) => sv, None => "" }, fl.name)
         : ct_no_msig(),
       _        => ct_no_msig(),
     },
@@ -14388,12 +14432,16 @@ fn cut(s: Str, sep: Str) -> Cut {
 // row IS the predecessor half of item 53's compatibility relation, so each gets
 // a field (`routes`, `hands`) and is folded in full.
 
-// One running service's OPERATION claim: the names its `:S,op,op` row spells.
-// Only a row that carries the separator makes the claim, so a bare `:S` (every
-// wire rendered before the operation names were on it) contributes no entry and
-// the A6 member rule decides nothing about that service — the same
-// silence-is-not-emptiness discipline the `!services` header itself carries.
-type SvcOps = { name: Str, ops: List[Str] }
+// One running service's OPERATION claim: the names its `:S,op,op` row spells,
+// and the DECLARED PARAMETER LISTS of whichever of them the row spelled in full
+// (`:S,op(k:Str)`). Only a row that carries the separator makes the claim, so a
+// bare `:S` (every wire rendered before the operation names were on it)
+// contributes no entry and the A6 member rule decides nothing about that
+// service — the same silence-is-not-emptiness discipline the `!services` header
+// itself carries. `sigs` carries the same discipline one level down: an
+// operation named without a parameter list contributes no signature, and the
+// argument rule decides nothing about it.
+type SvcOps = { name: Str, ops: List[Str], sigs: List[MSig] }
 
 type Manifest = { provs: List[Prov3], reqs: List[MReq], routes: List[MRoute],
                   hands: List[MHand], mnames: List[Str], repl: List[Str],
@@ -14492,10 +14540,57 @@ fn man_bad(man: Manifest, msg: Str) -> Manifest {
 
 // The operation half of a `:S,…` row, read once so the row branch reads as one
 // decision. `claimed` is false only for a row that carries no separator at all.
-type OpsR = { xs: List[Str], claimed: Bool, ok: Bool }
+// `sigs` holds one entry per operation token that carried a parameter list.
+type OpsR = { xs: List[Str], sigs: List[MSig], claimed: Bool, ok: Bool }
 
 fn mk_ops_none() -> OpsR {
-  return { xs: [], claimed: false, ok: true }
+  return { xs: [], sigs: [], claimed: false, ok: true }
+}
+
+// ONE operation token of a `:S,…` row. `op` is the NAME claim alone; `op(…)`
+// is the name AND its declared parameter list, parameters separated by `|` and
+// each spelled `name:Type` (src/revl/manifest.py's `_signature`). `sig` is
+// whether the token carried a list at all — `op()` is the empty list, which is
+// a claim, while `op` is silence about the arguments.
+//
+// The type field is taken VERBATIM: it is a type spelling, not a name, and the
+// only thing entitled to judge it is the relation that compares it
+// (`tk_compatible`). The renderer withholds any signature whose text would need
+// one of the wire's own structural characters, so a spelling that arrives here
+// never has to be un-escaped.
+type OpTok = { name: Str, ps: List[ParamN], sig: Bool, ok: Bool }
+
+fn parse_optok(one: Str) -> OpTok {
+  let lp = one.indexOf("(")
+  if (lp == 0 - 1) {
+    return { name: one, ps: [], sig: false, ok: bare_ident(one, 0) }
+  }
+  let nm = one.slice(0, lp)
+  if (!bare_ident(nm, 0) || one.slice(one.length() - 1, one.length()) != ")") {
+    return { name: "", ps: [], sig: false, ok: false }
+  }
+  let inner = one.slice(lp + 1, one.length() - 1)
+  if (inner == "") { return { name: nm, ps: [], sig: true, ok: true } }
+  var ps: List[ParamN] = []
+  var s = inner
+  var ok = true
+  var done = false
+  while (!done) {
+    let bar = s.indexOf("|")
+    let piece = bar == 0 - 1 ? s : s.slice(0, bar)
+    let colon = piece.indexOf(":")
+    let pn = colon == 0 - 1 ? "" : piece.slice(0, colon)
+    let pt = colon == 0 - 1 ? "" : piece.slice(colon + 1, piece.length())
+    if (colon == 0 - 1 || !bare_ident(pn, 0) || pt == "") {
+      ok = false
+      done = true
+    } else {
+      ps = ps.push({ name: pn, ty: pt })
+      if (bar == 0 - 1) { done = true }
+      else { s = s.slice(bar + 1, s.length()) }
+    }
+  }
+  return { name: ok ? nm : "", ps: ok ? ps : [], sig: ok, ok: ok }
 }
 
 // `rest` is everything after the first comma: "" is the EMPTY claim (a running
@@ -14505,24 +14600,31 @@ fn mk_ops_none() -> OpsR {
 // has — a short list here would refuse calls the reference admits, which is the
 // direction this gate may not err in.
 fn mk_ops(rest: Str) -> OpsR {
-  if (rest == "") { return { xs: [], claimed: true, ok: true } }
+  if (rest == "") { return { xs: [], sigs: [], claimed: true, ok: true } }
   var xs: List[Str] = []
+  var sigs: List[MSig] = []
   var s = rest
   var ok = true
   var done = false
   while (!done) {
     let comma = s.indexOf(",")
     let one = comma == 0 - 1 ? s : s.slice(0, comma)
-    if (!bare_ident(one, 0)) {
+    let t = parse_optok(one)
+    if (!t.ok) {
       ok = false
       done = true
     } else {
-      xs = contains(xs, one) ? xs : xs.push(one)
+      xs = contains(xs, t.name) ? xs : xs.push(t.name)
+      // the flags a signature off the wire does NOT carry, at their inert
+      // values: `ct_req_msig` is the only reader and it reads `ps` alone.
+      sigs = t.sig ? sigs.push({ name: t.name, isEm: false, caps: [],
+                                 isAsync: false, ps: t.ps, ret: "" })
+                   : sigs
       if (comma == 0 - 1) { done = true }
       else { s = s.slice(comma + 1, s.length()) }
     }
   }
-  return { xs: ok ? xs : [], claimed: true, ok: ok }
+  return { xs: ok ? xs : [], sigs: ok ? sigs : [], claimed: true, ok: ok }
 }
 
 fn parse_row(row: Str, man: Manifest) -> Manifest {
@@ -14581,8 +14683,9 @@ fn parse_row(row: Str, man: Manifest) -> Manifest {
              mnames: man.mnames, repl: man.repl, halted: man.halted,
              svcs: contains(man.svcs, sname) ? man.svcs : man.svcs.push(sname),
              svcsKnown: man.svcsKnown,
-             svcOps: ops.claimed ? man.svcOps.push({ name: sname, ops: ops.xs })
-                                 : man.svcOps,
+             svcOps: ops.claimed
+               ? man.svcOps.push({ name: sname, ops: ops.xs, sigs: ops.sigs })
+               : man.svcOps,
              bad: "" }
   }
   if (row.slice(0, 1) == "-") {
@@ -21569,6 +21672,70 @@ test "an exhaustive service block that omits the name still refuses" {
 test "the empty wire keeps the standalone verdict" {
   let cand = "service Cache { fn lookup(key: Str) -> Str } component CacheLayer requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
   assert admit_ambient(cand, "") == admit_src(cand)
+}
+
+// ---- the running signature: a call through a requirement, typed (issue #346)
+//
+// The `:S,op(k:T)` half of the service block. The row's operation NAMES already
+// decide MEMBERSHIP (`store.nonexistent` is refused A6); the parameter list
+// decides the ARGUMENTS, which is the clause docs/design/457 section 4.5 spells
+// as "a candidate's `requires store: Store` resolves and its call sites are
+// typed against the RUNNING signature".
+//
+// The pair below is the whole claim. Both candidates call an operation the
+// running `Store` declares; one hands it the declared type and one does not.
+// A gate reading only the operation NAMES answers the same thing about both.
+test "a required-service call is typed against the running signature" {
+  let bad = "service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }"
+  assert admit_ambient(bad, "Kv/store/;!services;:Store,get(key:Str),bump(n:Int)")
+    == "T1|`store.bump` argument `n` expects `Int`, got `Str`"
+  // NON-VACUITY: the same shape, handed what the running declaration asks for.
+  let ok = "service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
+  assert admit_ambient(ok, "Kv/store/;!services;:Store,get(key:Str),bump(n:Int)") == ""
+}
+
+// The parameter list is the claim and its absence is SILENCE, one level below
+// the `!services` header's own silence-is-not-emptiness rule. A wire that names
+// the operation without spelling its parameters — every wire rendered before
+// signatures were on it, and every one whose producer withheld a spelling it
+// could not put on the wire — leaves the argument question undecided rather
+// than guessing an empty parameter list and refusing the call outright.
+test "an operation named without a parameter list decides nothing about arguments" {
+  let bad = "service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }"
+  assert admit_ambient(bad, "Kv/store/;!services;:Store,get,bump") == ""
+  // ... and membership still decides, off the same row.
+  let miss = "service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.nope(key) } }"
+  assert admit_ambient(miss, "Kv/store/;!services;:Store,get,bump")
+    == "A6|`store.nope` is not a method of service Store"
+}
+
+// The TEXT's own declaration wins over the wire's, the same precedence
+// `svc_has_method` gives the member rule: a candidate that redeclares the
+// service is checked against what it wrote.
+test "the text's service declaration outranks the running one" {
+  let src = "service Store { fn bump(n: Str) -> Str } service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.bump(key) } }"
+  assert admit_ambient(src, "Kv/other/;!services;:Store,bump(n:Int)") == ""
+}
+
+// `op()` is the EMPTY parameter list, which IS a claim — and an arity that does
+// not match the declaration is left to the arity rule, not answered here.
+test "an empty parameter list is a claim, not silence" {
+  let src = "service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.ping() } }"
+  assert admit_ambient(src, "Kv/store/;!services;:Store,ping()") == ""
+}
+
+// A garbled signature REFUSES the wire by name rather than being read as a
+// smaller surface: a parameter list this fold cannot parse is one whose types
+// it would otherwise have to guess at, and a guess here refuses calls the
+// reference admits.
+test "a garbled parameter list refuses the wire by name" {
+  let src = "service Cache { fn lookup(key: Str) -> Str } component CL requires store: Store provides cache: Cache { provide cache { fn lookup(key) = store.get(key) } }"
+  assert admit_ambient(src, "Kv/store/;!services;:Store,get(key")
+    == "MANIFEST|manifest service row `:Store,get(key` does not name an operation"
+  assert admit_ambient(src, "Kv/store/;!services;:Store,get(:Str)")
+    == "MANIFEST|manifest service row `:Store,get(:Str)` does not name an operation"
+  assert admit_ambient(src, "Kv/store/;!services;:Store,get(key:)")
+    == "MANIFEST|manifest service row `:Store,get(key:)` does not name an operation"
 }
 
 // ---- the replacement wave, part 2: `handoff` STATE compatibility (item 53).
