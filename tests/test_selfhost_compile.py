@@ -475,96 +475,111 @@ def test_native_compile_on_the_tiers_wired_by_item_146(
 # covers all six, and the test recomputes the set rather than sampling it.
 LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
     "py": (
-        # service dispatch and interpolation inside a component method
-        "services_match.rvl",
+        # (component-method service dispatch and `${…}` interpolation, the
+        # witnessed activation/method acquisitions and their `Secret[T]`
+        # marking, and the effect block's pure setup all left this list when
+        # lower.rvl grew the `match`/`format`/`fn`/witnessed-`effect` surface.)
+        #
         # issue #721: provide-method control flow (`if`/`while`/`for`/`break`/
-        # `continue`). The EMITTER half is byte-exact — selfhost/emit_py.rvl
-        # carries `method_control` — so this is a `selfhost/lower.rvl` gap: the
+        # `continue`). The EMITTER half is byte-exact, selfhost/emit_py.rvl
+        # carries `method_control`, so this is a `selfhost/lower.rvl` gap: the
         # native IR producer does not lower a method-body control-flow step.
         "services_control_flow.rvl",
-        "services_interp.rvl",
-        # witnessed effects / secret marking on the activation path
-        "witnessed.rvl",
-        "witnessed_secret.rvl",
-        # component branch shapes
+        # component branch shapes. What is left here is ONE form: a
+        # statement-block match arm (`Some(n) => { let doubled = n * 2
+        # doubled + 1 }`), which the shared self-host PARSER has no node for at
+        # all — `selfhost/parser.rvl` reads an arm body as an expression. It is
+        # a parser gap reached through lower.rvl, and it withholds the whole
+        # component because one provide method of fourteen spells it.
         "branches.rvl",
-        # whole-program documents combining several of the above
+        # whole-program documents combining several of the above.
+        # (`../../../examples/v3_step_scheduler.rvl` left this list with the
+        # spawn/instance surface: it is the one py document whose components
+        # both spawn a child and read a provision back off the handle, and the
+        # component dialect's record literal and bare-name `fn` call closed the
+        # rest of it.)
         "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
-        "../../../examples/v3_step_scheduler.rvl",
-        "../../../backends/typescript/tests/fixtures/conformance.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
-        "../policy_agents.rvl",
-        "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
-        "../../../examples/java_match.rvl",
         "../../../src/revl/truc/components/cli.rvl",
     ),
     "ts": (
-        # composite service dispatch and component expressions
-        "services_composite.rvl",
-        "component_exprs.rvl",
-        # async coloring (async methods / await / async arrows)
-        "services_async.rvl",
-        "components_await.rvl",
-        "async_effects.rvl",
-        "async_arrow_emission.rvl",
-        # spawn / instance-get
-        "spawn.rvl",
-        "instance_get.rvl",
+        # (`services_composite.rvl` left this list when lower.rvl grew the
+        # component dialect's list literal, and `component_exprs.rvl` with its
+        # `format` template, bare-name `fn` call and tagged `adt` construction,
+        # which closed documents on the py and java tiers as well.)
+        # (async coloring left this list entirely. `components_await.rvl` went
+        # with the `await` activation STEP — the colouring itself is a
+        # whole-program property the producer already stamped, and what was
+        # missing was the step, so the body walk refused at the first `await`
+        # and the component lost its body with it. `services_async.rvl`,
+        # `async_effects.rvl`, `async_arrow_emission.rvl` and the two
+        # backends/typescript async fixtures went with the three remaining
+        # pieces: the `async fn` provide method, the `"async": true` stamp an
+        # `effect await`/`await emit` step carries, and the item-92 coercion
+        # that colours an arrow passed into an `(…) -> Async[T]` parameter.)
+        # (spawn / instance-get left this list when `selfhost/lower.rvl` grew
+        # the instance surface: the `spawn <C> with { … }` acquire node, the
+        # handle's own verb tail, and the `<handle>.<key>` provision read that
+        # lowers to `instance-get`. `spawn.rvl` and `instance_get.rvl` now
+        # compile byte-exact through the fully-native chain.)
         # (realm placement metadata — isolate / intercept / routes — left this
         # list when lower.rvl grew the component-header prelude; the four ts
         # realm documents now compile byte-exact through the native chain.)
         # whole-program documents combining several of the above
-        "../../../bench/results/gpt-oss-20b-oneshot/03-user-cache/v1/attempt-1.rvl",
         "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
         "../../../examples/java_match.rvl",
-        "../../../backends/typescript/tests/fixtures/async_http.rvl",
-        "../../../backends/typescript/tests/fixtures/async_fn_values.rvl",
-        # property/component edge shapes and the CAS runtime surface
-        "property_edges.rvl",
+        # component edge shapes. Everything this document spells is byte-exact
+        # through the native chain except its ONE async provide method: the
+        # guard `if`/`fail` pair, the bare `fn` effect bracket, the `emit …
+        # compensate …` step with its `compensate_captures`, the host-map
+        # bracket and the per-invocation method bracket all reproduce.
         "component_edges.rvl",
-        "cas_runtime.rvl",
+        # (`property_edges.rvl` left this list when the `.length` PROPERTY form
+        # on a sized receiver started carrying `sized_length`, and
+        # `cas_runtime.rvl` when the per-invocation `let … = effect … undo …`
+        # bracket, the `assign` step and `undo_captures` landed in a provide
+        # method body.)
         # issue #721: provide-method control flow, the same lower.rvl gap the
-        # py list records — selfhost/emit_ts.rvl reproduces the reference bytes
+        # py list records: selfhost/emit_ts.rvl reproduces the reference bytes
         # from the reference IR, and the fully-native chain does not.
         "../emit_py_corpus/services_control_flow.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole go corpus.
     "go": (),
     "java": (
-        # async coloring
-        "comp_await.rvl",
-        # whole-program documents combining several of the shapes below
-        "../../../bench/results/baseline-deepseek-v4-pro/09-warmup-cache/v2/attempt-1.rvl",
-        "../emit_ts_corpus/services_async.rvl",
-        "../../../bench/results/baseline-deepseek-v4-pro/26-log-rotator/v2/attempt-2.rvl",
-        # component string interpolation / branch shapes / map inference
-        "component_format.rvl",
-        "component_branches.rvl",
-        "map_inference.rvl",
-        # the stdlib builtin surface
-        "stdlib_builtins.rvl",
-        "../emit_ts_corpus/property_edges.rvl",
+        # (async coloring left this list entirely. `comp_await.rvl` and the two
+        # bench documents went with the `await` activation step;
+        # `component_format.rvl` and `component_branches.rvl` with the
+        # component `format` node, the bare-name `fn` call and the `index`
+        # node; `../emit_ts_corpus/services_async.rvl` with the `async fn`
+        # provide method.)
+        # (`map_inference.rvl` left this list when lower.rvl grew the component
+        # dialect's record literal, which was the last shape its activation body
+        # spelled that the walk could not read; the stdlib builtin surface —
+        # `stdlib_builtins.rvl` and the borrowed
+        # `../emit_ts_corpus/property_edges.rvl` — left it with the
+        # `sized_length` property form.)
+        # no residual: the fully-native chain reproduces the whole java corpus.
     ),
     "rust": (
         # component edge shapes; the host-root and realm-placement documents
         # left this list when lower.rvl grew those two surfaces.
         "component_edges.rvl",
-        # issue 1153's two component documents. Neither is an EMITTER residual:
+        # issue 1153's two component documents. Neither was an EMITTER residual:
         # the rust byte oracle in tests/test_selfhost_emit_rust.py holds both
         # byte-exact when it is handed the REFERENCE IR (host runtime and all),
-        # so what is left is the native IR producer. `comp_await_job.rvl`'s
-        # activation body awaits a host `Job`: the reference IR carries that
-        # host declaration's runtime block and `selfhost/lower.rvl` does not, so
-        # the native chain emits 7,067 bytes against the reference's 11,094 —
-        # the module with no `Job`/`JobHandle` runtime in it. `comp_stream.rvl`
-        # is no longer refused before any rust is built: the item-130 stream
-        # statement forms landed in `selfhost/lower.rvl` (#1139) and the native
-        # gate now ADMITS it, so its residual is measured in bytes by the same
-        # comparison as every document above. Both are `selfhost/lower.rvl`'s,
-        # and both are NAMED rather than skipped, so the day lower.rvl grows
-        # either surface this list shrinks instead of quietly keeping a waiver
-        # nobody rereads.
-        "comp_await_job.rvl",
+        # so what was left in each was the native IR producer.
+        # `comp_await_job.rvl` is now CLOSED: its activation body awaits a host
+        # `Job`, the body walk had no `await` step to carry that, and a refused
+        # step drops the WHOLE component `body` — so the native chain emitted
+        # 7,067 bytes against the reference's 11,094, the module with no
+        # `Job`/`JobHandle` runtime in it. `comp_stream.rvl` is no longer
+        # refused before any rust is built either: the item-130 stream statement
+        # forms landed in `selfhost/lower.rvl` (#1139) and the native gate now
+        # ADMITS it, so its residual is measured in bytes by the same comparison
+        # as every document above. It is `selfhost/lower.rvl`'s, and it is NAMED
+        # rather than skipped, so the day lower.rvl grows that surface this list
+        # shrinks instead of quietly keeping a waiver nobody rereads.
         "comp_stream.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
