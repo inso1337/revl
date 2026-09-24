@@ -35,7 +35,8 @@
 //   * `_go_v3_stmt` for the base statement surface — let (with the int64/float64
 //     `var name T = …` pin and the `_ = name` keep-alive), assign, return,
 //     if/else, while, for (the `for _, x := range …` form with its `_ = x`),
-//     the bare-expr `_ = …`, and assert (`if !(…) { t.Fatalf(…) }`).
+//     the bare-expr `_ = …`, and assert (`if !(…) { panic(…) }`: a `test`
+//     block is deferred here, so an assert is always in an ordinary fn).
 //   * the v3 TYPED-CORE (item 209) — user `type` decls (`_emit_v3_go_types`): a
 //     record as a Go `struct` with EXPORTED, `json:"<source>"`-tagged fields
 //     (item 390 — so a record marshals through `encoding/json`), a variant as a
@@ -1304,7 +1305,12 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
   if (step == "assert") {
     let expr = render_expr(value_field(node, "expr"), ctx, "")
     var out = [line(indent, `if !(${expr}) {`)]
-    out = out.push(line(indent + 1, `t.Fatalf("assertion failed: %s", ${go_string(expr)})`))
+    // issue #1356: a `panic`, not `t.Fatalf`. A `test` block is DEFERRED on
+    // this tier (`deferred_test_markers`), so every assert this renders sits
+    // in an ordinary module `fn`, where no `*testing.T` is in scope. The
+    // reference arm reads the same way: it spells `t.Fatalf` only when the
+    // test receiver was passed down to it.
+    out = out.push(line(indent + 1, `panic("assertion failed: " + ${go_string(expr)})`))
     out = out.push(line(indent, "}"))
     return { lines: out, ctx: ctx }
   }
