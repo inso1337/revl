@@ -69,9 +69,9 @@ the table, not a result.**
 
 The first draft of this work was going to quote the residual figures out of the
 roadmap. That would have been wrong in a way worth recording, because the
-roadmap, `docs/selfhost-compile.md` and `docs/selfhost-findings.md` currently
-hold **three different totals for the same quantity**, none of which matches
-what the tests gate:
+roadmap, `docs/selfhost-compile.md` and `docs/selfhost-findings.md` held
+**three different totals for the same quantity**, none of which matched what
+the tests gate. Read as of 2026-09-20:
 
 | source | total residual | kind |
 |---|---:|---|
@@ -79,6 +79,11 @@ what the tests gate:
 | `docs/selfhost-compile.md` | 63 | prose, with a 239-document table |
 | `docs/selfhost-findings.md` | 63 | prose |
 | `tests/test_selfhost_compile.py` `LOWER_GAP_DOCS` | **41** | gated by a test that recomputes it |
+
+That table is a snapshot and is left at the date it was taken, because the
+point it makes is the divergence and not any one of the four numbers. The
+gated figure has moved since: the report emitted from this branch recomputes
+it, and no number in this note is the source of a published cell.
 
 So `bench/refusal_inventory.py` reads the ledgers the tests gate and recomputes
 every count at report time. A number recomputed from the ledger cannot disagree

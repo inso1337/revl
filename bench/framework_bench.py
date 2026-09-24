@@ -90,6 +90,23 @@ def git_sha() -> str:
         return "unknown"
 
 
+def _compiler_path(parent: Path) -> str:
+    """Which checkout graded the report, named without publishing a layout.
+
+    Recorded because an editable install registers a meta-path finder that is
+    consulted before `sys.path`, so a report can be graded by a different
+    checkout than the one it was pointed at. `report.json` is committed and
+    this repository is public, so the path is relative when the compiler is
+    inside the checkout. A compiler from outside it is the case a reader needs
+    to see, and it is named without its directory, the same rule
+    `bench/run.py`'s `scoring_compiler` applies to a run summary.
+    """
+    try:
+        return str(parent.relative_to(ROOT))
+    except ValueError:
+        return f"{parent.name} (outside this checkout)"
+
+
 def checker_version() -> dict:
     """The version triple a later run is compared against.
 
@@ -110,7 +127,7 @@ def checker_version() -> dict:
         "gate_api": version.get("api"),
         "language": version.get("language"),
         "frontier": version.get("frontier"),
-        "compiler_path": str(Path(revl.__file__).parent),
+        "compiler_path": _compiler_path(Path(revl.__file__).parent),
         "compiler_commit": git_sha(),
         "report_schema": REPORT_SCHEMA,
     }
@@ -1344,7 +1361,14 @@ def render(report: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def main(argv: list[str] | None = None) -> int:
+def build_parser() -> argparse.ArgumentParser:
+    """Built apart from `main` so the defaults are a testable surface.
+
+    They carry weight beyond convenience: `bench/README.md` documents
+    `--write` with no flags, so a column whose corpus is only reachable
+    through a flag is a column the documented command drops. Every default
+    here names a corpus committed under `bench/results/`.
+    """
     ap = argparse.ArgumentParser(
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -1355,9 +1379,9 @@ def main(argv: list[str] | None = None) -> int:
                     help="committed raw-ts corpus for the residue column")
     ap.add_argument("--tokens-from", default=None,
                     help="committed corpus for the tokens-to-green column")
-    ap.add_argument("--injection-from", default=None,
+    ap.add_argument("--injection-from", default="injection-ornith",
                     help="committed bench/injection_escape.py run label "
-                         "for the injection-escape column")
+                         "for the injection-escape column ('none' to skip)")
     ap.add_argument("--attempt", type=int, default=1)
     ap.add_argument("--compiler-root", default=None,
                     help="score against a different checkout's compiler")
@@ -1371,10 +1395,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--check", action="store_true",
                     help="validate the report against the honesty protocol")
     ap.add_argument("--json", action="store_true", help="print the report as JSON")
-    args = ap.parse_args(argv)
+    return ap
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
 
     if args.admits_from == "none":
         args.admits_from = None
+    if args.injection_from == "none":
+        args.injection_from = None
 
     report = build_report(args)
 

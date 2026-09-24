@@ -87,6 +87,11 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_affected_tests.py",
     "tests/test_admission_latency.py",
     "tests/test_demand_ranking.py",
+    # FRAMEWORK-BENCH-1. It reads `bench/hosts.json` and the committed report,
+    # survey and injection artifacts, and it is the gate that catches a
+    # committed artifact drifting from the ledgers it was recomputed from, so a
+    # bench change has to re-run it.
+    "tests/test_framework_bench.py",
     "tests/test_inprocess_gate.py",
     "tests/test_inprocess_gate_rust.py",
     "tests/test_mcp_edit.py",

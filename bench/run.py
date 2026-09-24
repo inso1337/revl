@@ -537,11 +537,13 @@ def scoring_compiler() -> str:
     # Reported relative to the repository when it is inside it. Summaries are
     # committed and this repository is public, so an absolute path here would
     # publish the operator's directory layout. A compiler from outside the tree
-    # is the case a reader needs to see, and that one is still printed in full.
+    # is the case a reader needs to see, so it is named as such, but by its
+    # directory name only: the fact a reader needs is that it was not this
+    # checkout, and the rest of the path is the operator's layout again.
     try:
         return str(parent.relative_to(ROOT))
     except ValueError:
-        return f"{parent} (outside this checkout)"
+        return f"{parent.name} (outside this checkout)"
 
 
 def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
