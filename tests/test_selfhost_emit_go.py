@@ -511,6 +511,139 @@ def test_the_stream_diversion_with_top_level_declarations_is_named_now(emitted,
                             f"<<UNSUPPORTED-COMPONENT:{names[0]}>>")
 
 
+def test_a_source_only_stream_acquisition_is_named(emitted, reference,
+                                                   tmp_path):
+    """The stream shape that carries no `subscribe` flag and no loop step.
+
+    `backends/go/testdata/stream_event_130.rvl` above holds all three of the
+    reference `_document_holds_stream` discriminants at once, so it says
+    nothing about the shapes that hold only one. A source-only program
+    (`let src = effect Stream.source() undo src.close()` with nothing reading
+    it) is the one easiest to leave silent: no flag, no `stream-iter` step,
+    yet a live host listener with a `Close` inverse on the teardown stack. The
+    reference diverts it off the pure typed-core path the moment anything
+    top-level appears beside it, which the `type` below does.
+
+    The port reaches the same answer from the other side. It reads no stream
+    spelling at all: the acquisition is a body step, so the component is
+    OBSERVABLE, so `uncarried_components` does not suppress and the marker is
+    emitted. This case pins that the two routes agree here, which is not
+    implied by the three-discriminant fixture above.
+    """
+    path = tmp_path / "source_only.rvl"
+    path.write_text("type Reading = { value: Int }\n"
+                    "component Source {\n"
+                    "  let src = effect Stream.source() undo src.close()\n"
+                    "}\n")
+    ir = compile_files([str(path)])
+    assert ir["types"], "the top-level declaration is what arms the suppression"
+    steps = ir["components"][0]["body"]
+    assert not any(step.get("subscribe") or step.get("step") == "stream-iter"
+                   for step in steps), (
+        "the case is only about the acquisition shape while the document "
+        "carries neither of the other two discriminants"
+    )
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert_boundary_witness(want, got, "stc-go",
+                            "<<UNSUPPORTED-COMPONENT:Source>>")
+
+
+def test_a_bracket_subscription_alone_is_named(emitted, reference, tmp_path):
+    """The `subscribe` shape on its own, for the same reason as the case
+    above: a subscription with no loop reading it is still a bracket with an
+    inverse, the reference still diverts it off the pure path, and the port
+    still names the component it did not carry."""
+    path = tmp_path / "subscribe_only.rvl"
+    path.write_text("type Reading = { value: Int }\n"
+                    "component Parked {\n"
+                    "  let src = effect Stream.source() undo src.close()\n"
+                    "  let sub = subscribe src undo sub.close()\n"
+                    "}\n")
+    ir = compile_files([str(path)])
+    steps = ir["components"][0]["body"]
+    assert any(step.get("subscribe") for step in steps)
+    assert not any(step.get("step") == "stream-iter" for step in steps)
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert_boundary_witness(want, got, "stc-go",
+                            "<<UNSUPPORTED-COMPONENT:Parked>>")
+
+
+def test_a_required_stream_coeffect_is_named_and_not_suppressed(
+        emitted, reference, tmp_path):
+    """The document the reference REFUSES rather than emits (item 130 6b).
+
+    A requirement resolves against a SERVICE on this tier and a `Stream[T]` is
+    not one, so the reference raises instead of producing bytes. The
+    suppression exists to protect byte agreements, and there is no agreement
+    to protect where there are no bytes; answering with the banner plus the
+    event's record type and no marker would be the silent-refusal shape the
+    marker convention exists to rule out.
+
+    The port names the component here without a carve-out of its own: the
+    `on OrderCreated as e` step gives the component a body, so it is
+    observable. The assertion is on the port's output and on the reference
+    RAISING, so a change to either side that reintroduced silence fails here.
+    """
+    path = tmp_path / "coeffect.rvl"
+    path.write_text("""
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+  on OrderCreated as e { emit ship.dispatch(e.order_id) }
+}
+""")
+    ir = compile_files([str(path)])
+    assert ir["types"], (
+        "the case is only interesting while the document ALSO carries a "
+        "top-level declaration, which is what arms the suppression"
+    )
+    with pytest.raises(reference.EmitError) as excinfo:
+        reference.emit(ir)
+    assert "a required `Stream[T]` coeffect is not lowered" in str(excinfo.value), (
+        "the reference no longer refuses the coeffect by name"
+    )
+    got = emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-COMPONENT:Fulfiller>>" in got
+
+
+def test_an_empty_component_with_a_requires_clause_is_still_suppressed(
+        emitted, reference, tmp_path):
+    """The non-vacuity control for the three cases above, and the boundary a
+    stream-shaped carve-out would have crossed.
+
+    A `requires` clause is not by itself a reason to name. An empty component
+    is incidental whatever it requires: the reference routes past it on the
+    pure typed-core path and emits the declarations alone, and both sides drop
+    the same thing. Measured on this tree, the two rows below are 242 bytes
+    each and byte-identical on both sides. A carve-out keyed on the
+    requirement's TYPE TEXT rather than on the component's body would name the
+    `Stream[T]` row and lose that agreement.
+    """
+    stream_req = tmp_path / "stream_req.rvl"
+    stream_req.write_text("""
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+
+component Fulfiller requires feed: Stream[OrderCreated] { }
+""")
+    service_req = tmp_path / "service_req.rvl"
+    service_req.write_text("""
+type Order = { id: Str }
+service Ship { fn dispatch(id: Str) }
+
+component Fulfiller requires ship: Ship { }
+""")
+    for path in (stream_req, service_req):
+        ir = compile_files([str(path)])
+        assert ir["types"] and not ir["components"][0]["body"]
+        want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+        assert "<<UNSUPPORTED-COMPONENT" not in got, (
+            f"{path.name}: the suppression widened past an observable "
+            f"component and is costing the byte agreements it exists to buy"
+        )
+        assert got == want
+
+
 def test_record_update_is_a_reference_refusal(reference, tmp_path):
     path = tmp_path / "record_update.rvl"
     path.write_text("type R = { x: Int }\nfn f(r: R) -> R { return {r | x = 2} }")
