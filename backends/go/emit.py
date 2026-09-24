@@ -4705,7 +4705,10 @@ def _v3_host_constructor(callee: dict, ctx) -> str | None:
         return None
     verb = callee.get("name")
     go = _camel(root) + _camel(verb)
-    if root == "Map" and verb == "new":
+    # Keyed on the DOTTED host verb, the spelling `_expr`'s own host arm uses,
+    # rather than on the bare method name: the two paths lower the same verb
+    # and a second spelling of the same test would read as a second construct.
+    if f"{root}.{verb}" == "Map.new":
         # item 113: the host Map is generic and Go cannot infer `V` from the
         # argument-less constructor. A pure-fn `Map.new()` has no enclosing
         # let-effect to learn the value type from, so it takes the historical
