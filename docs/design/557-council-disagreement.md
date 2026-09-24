@@ -360,8 +360,13 @@ existing thirteen refusals across two codes. It adds no rule, no syntax and no
 IR, so an admitted program is still byte-identical to the same program with the
 council declaration deleted (`test_the_refusals_cost_the_ir_nothing`).
 
-Item 516's slices 3 and 4 are untouched and still open: the `Aggregate[T]`
-answer type and its exhaustiveness rule, and per-member inputs. Slice 2,
+Item 516's slice 4, per-member inputs, is the only one still open, and it is
+issue #1368. Slice 3, the `Aggregate[T]` answer type and its exhaustiveness
+rule, was open when this was written and landed with issue #1367: a match on an
+`Aggregate[T]` that omits `Split` or `Inquorate` is refused under this note's
+code, and `Split` carries `List[DissentEntry]` rather than `T`, so the total
+projection does not typecheck. That is where the roadmap's first exit clause
+became true of a call. Slice 2,
 binding a council to an action, was open when this was written and landed with
 issue #1366; a `route model` arm now names a council, and a confidentiality
 origin routed to one whose member is `off_device` is refused naming that
