@@ -590,10 +590,17 @@ pub struct MSpan {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CIn {
+    cio: String,
+    ciline: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CMem {
     cfun: String,
     crole: String,
     cmline: i64,
+    cins: Vec<CIn>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -16964,7 +16971,7 @@ fn model_residences() -> Vec<String> {
 }
 
 fn model_origin_classes() -> Vec<String> {
-    return vec![String::from("confidential"), String::from("fs"), String::from("input"), String::from("model"), String::from("net"), String::from("secret"), String::from("web")];
+    return vec![String::from("confidential"), String::from("fs"), String::from("input"), String::from("model"), String::from("net"), String::from("screen"), String::from("secret"), String::from("web")];
 }
 
 fn model_confidentiality_origins() -> Vec<String> {
@@ -17221,11 +17228,11 @@ fn marm_origin_at(as__: &[MArm], o: &str, i: i64) -> i64 {
     return marm_origin_at(as__, o, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
-fn ccl_off_member(c: CDecl, rs: &[MRole]) -> i64 {
+fn ccl_off_member(c: CDecl, rs: &[MRole], orig: &str) -> i64 {
     let mut i = 0i64;
     while (i < c.cmems.revl_length()) {
         let ri = mrole_at(rs, &(c.cmems)[(i) as usize].crole, 0i64);
-        if ((ri != (0i64).checked_sub(1i64).expect("revl: Int overflow")) && ((rs)[(ri) as usize].rres == "off_device")) {
+        if (((ri != (0i64).checked_sub(1i64).expect("revl: Int overflow")) && ((rs)[(ri) as usize].rres == "off_device")) && ccl_member_reads(c.clone(), (c.cmems)[(i) as usize].clone(), orig)) {
             return i;
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
@@ -17256,7 +17263,7 @@ fn model_arms_refusal(b: MBlock, cname: &str, rs: &[MRole], cs: &[CDecl]) -> Ver
         }
         if (ci != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
             if contains__m2(&model_confidentiality_origins(), &a.aorig) {
-                let mi = ccl_off_member((cs)[(ci) as usize].clone(), rs);
+                let mi = ccl_off_member((cs)[(ci) as usize].clone(), rs, &a.aorig);
                 if (mi != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     let m = ((cs)[(ci) as usize].cmems.clone())[(mi) as usize].clone();
                     let mr = (rs)[(mrole_at(rs, &m.crole, 0i64)) as usize].clone();
@@ -17360,6 +17367,14 @@ fn council_admitting_ties() -> Vec<String> {
     return vec![String::from("allow"), String::from("admit"), String::from("proceed"), String::from("accept"), String::from("first"), String::from("any")];
 }
 
+fn council_member_inputs() -> Vec<String> {
+    return vec![String::from("confidential")];
+}
+
+fn council_refused_inputs() -> Vec<String> {
+    return vec![String::from("secret")];
+}
+
 fn ccl_twice_msg(name: &str, fline: i64) -> String {
     return (((String::from("model council `").revl_concat(&name)).revl_concat("` is declared twice (first on line ")).revl_concat(&(fline).to_string())).revl_concat(")");
 }
@@ -17428,6 +17443,26 @@ fn ccl_unknown_tie_msg(o: &str, name: &str) -> String {
     return (((String::from("unknown tie outcome `").revl_concat(&o)).revl_concat("` in model council `")).revl_concat(&name)).revl_concat("`");
 }
 
+fn ccl_reads_secret_msg(fun: &str, name: &str, o: &str) -> String {
+    return (((((String::from("member `").revl_concat(&fun)).revl_concat("` of model council `")).revl_concat(&name)).revl_concat("` is declared `reads ")).revl_concat(&o)).revl_concat("`");
+}
+
+fn ccl_reads_unknown_msg(o: &str, fun: &str, name: &str) -> String {
+    return (((((String::from("unknown origin class `").revl_concat(&o)).revl_concat("` in member `")).revl_concat(&fun)).revl_concat("` of model council `")).revl_concat(&name)).revl_concat("`");
+}
+
+fn ccl_reads_not_conf_msg(fun: &str, name: &str, o: &str) -> String {
+    return (((((String::from("member `").revl_concat(&fun)).revl_concat("` of model council `")).revl_concat(&name)).revl_concat("` is declared `reads ")).revl_concat(&o)).revl_concat("`, which is not a confidentiality origin");
+}
+
+fn ccl_reads_twice_msg(fun: &str, name: &str, o: &str) -> String {
+    return (((((String::from("member `").revl_concat(&fun)).revl_concat("` of model council `")).revl_concat(&name)).revl_concat("` reads `")).revl_concat(&o)).revl_concat("` twice");
+}
+
+fn ccl_reads_off_device_msg(fun: &str, name: &str, o: &str, role: &str, res: &str, rline: i64) -> String {
+    return (((((((((((((String::from("member `").revl_concat(&fun)).revl_concat("` of model council `")).revl_concat(&name)).revl_concat("` is declared `reads ")).revl_concat(&o)).revl_concat("` and runs on model role `")).revl_concat(&role)).revl_concat("`, declared `")).revl_concat(&res)).revl_concat("` on line ")).revl_concat(&(rline).to_string())).revl_concat(": a ")).revl_concat(&o)).revl_concat(" input may not leave the device");
+}
+
 fn ccl_undecided_msg(name: &str) -> String {
     return (String::from("model council `").revl_concat(&name)).revl_concat("` is written in a form this gate does not decide");
 }
@@ -17479,8 +17514,17 @@ fn council_body(ts: &[Token], lo: i64, hi: i64) -> CBody {
                 if (!atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "ident")) {
                     return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
                 }
-                mems.push(CMem { cfun: tkc(ts, i).text, crole: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, cmline: tkc(ts, i).line });
-                i = (i).checked_add(3i64).expect("revl: Int overflow");
+                let mut k = (i).checked_add(3i64).expect("revl: Int overflow");
+                let mut ins: Vec<CIn> = vec![];
+                while ati(ts, k.clone(), "reads") {
+                    if (!atk(ts, (k).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+                        return CBody { ymems: mems.clone(), yaggs: aggs.clone(), yok: false };
+                    }
+                    ins.push(CIn { cio: tkc(ts, (k).checked_add(1i64).expect("revl: Int overflow")).text, ciline: tkc(ts, k.clone()).line });
+                    k = (k).checked_add(2i64).expect("revl: Int overflow");
+                }
+                mems.push(CMem { cfun: tkc(ts, i).text, crole: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, cmline: tkc(ts, i).line, cins: ins.clone() });
+                i = k.clone();
             }
         }
     }
@@ -17544,6 +17588,34 @@ fn cmem_role_at(ms: &[CMem], r: &str, i: i64) -> i64 {
     return cmem_role_at(ms, r, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
+fn cin_at(ins: &[CIn], o: &str, i: i64) -> i64 {
+    if (i >= ins.revl_length()) {
+        return (0i64).checked_sub(1i64).expect("revl: Int overflow");
+    }
+    if ((ins)[(i) as usize].cio == o) {
+        return i;
+    }
+    return cin_at(ins, o, (i).checked_add(1i64).expect("revl: Int overflow"));
+}
+
+fn ccl_scoped(c: CDecl) -> bool {
+    let mut i = 0i64;
+    while (i < c.cmems.revl_length()) {
+        if ((c.cmems)[(i) as usize].cins.revl_length() > 0i64) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn ccl_member_reads(c: CDecl, m: CMem, o: &str) -> bool {
+    if (!ccl_scoped(c.clone())) {
+        return true;
+    }
+    return (cin_at(&m.cins, o, 0i64) != (0i64).checked_sub(1i64).expect("revl: Int overflow"));
+}
+
 fn council_members_refusal(c: CDecl, rs: &[MRole]) -> Verd {
     let mut i = 0i64;
     while (i < c.cmems.revl_length()) {
@@ -17562,7 +17634,36 @@ fn council_members_refusal(c: CDecl, rs: &[MRole]) -> Verd {
         if (pr != i) {
             return cverd(&ccl_same_role_msg(&(c.cmems)[(pr) as usize].cfun, &m.cfun, &c.ccname, &m.crole), m.cmline);
         }
+        let iv = council_inputs_refusal(c.clone(), m.clone(), rs);
+        if (iv.v != "") {
+            return iv;
+        }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn council_inputs_refusal(c: CDecl, m: CMem, rs: &[MRole]) -> Verd {
+    let mut k = 0i64;
+    while (k < m.cins.revl_length()) {
+        let cl = (m.cins)[(k) as usize].clone();
+        if contains__m2(&council_refused_inputs(), &cl.cio) {
+            return cverd(&ccl_reads_secret_msg(&m.cfun, &c.ccname, &cl.cio), cl.ciline);
+        }
+        if (!contains__m2(&model_origin_classes(), &cl.cio)) {
+            return cverd(&ccl_reads_unknown_msg(&cl.cio, &m.cfun, &c.ccname), cl.ciline);
+        }
+        if (!contains__m2(&council_member_inputs(), &cl.cio)) {
+            return cverd(&ccl_reads_not_conf_msg(&m.cfun, &c.ccname, &cl.cio), cl.ciline);
+        }
+        if (cin_at(&m.cins, &cl.cio, 0i64) != k) {
+            return cverd(&ccl_reads_twice_msg(&m.cfun, &c.ccname, &cl.cio), cl.ciline);
+        }
+        let ri = mrole_at(rs, &m.crole, 0i64);
+        if ((contains__m2(&model_confidentiality_origins(), &cl.cio) && (ri != (0i64).checked_sub(1i64).expect("revl: Int overflow"))) && ((rs)[(ri) as usize].rres == "off_device")) {
+            return cverd(&ccl_reads_off_device_msg(&m.cfun, &c.ccname, &cl.cio, &m.crole, &(rs)[(ri) as usize].rres, (rs)[(ri) as usize].rline.clone()), cl.ciline);
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
     }
     return no_verd();
 }
@@ -28321,6 +28422,25 @@ fn a_council_is_several_models__each_with_its_own_placement() {
     assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast, proposer -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|council function `proposer` is declared twice in model council `Release` (first on line 3, as `vast`)"));
     assert!((admit_src(String::from("model role edge on_device\nmodel council Release { proposer -> vast, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` names model role `vast`, which is not declared"));
     assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge, adversary -> edge, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|members `proposer` and `adversary` of model council `Release` are both placed on model role `edge`"));
+}
+
+#[test]
+fn a_member_may_be_given_an_origin_its_sibling_is_not__item_516_slice_4_() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge reads confidential,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}")) == ""));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release {\n  proposer -> vast,\n  adversary -> edge,\n  aggregate unanimous\n}\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> Release }\n  provide out { fn classify(text) = text }\n}")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model council `Release`, whose member `proposer` runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn a_member_given_a_confidential_input_is_not_placed_off_the_device() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> vast reads confidential, adversary -> edge,\n  aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` is declared `reads confidential` and runs on model role `vast`, declared `off_device` on line 2: a confidential input may not leave the device"));
+}
+
+#[test]
+fn what_a_member_may_be_declared_to_read_is_a_closed_vocabulary() {
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge reads secret, adversary -> vast,\n  aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` is declared `reads secret`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge reads web, adversary -> vast,\n  aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` is declared `reads web`, which is not a confidentiality origin"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge reads confidentail, adversary -> vast,\n  aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|unknown origin class `confidentail` in member `proposer` of model council `Release`"));
+    assert!((admit_src(String::from("model role edge on_device\nmodel role vast off_device\nmodel council Release { proposer -> edge reads confidential reads confidential,\n  adversary -> vast, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|member `proposer` of model council `Release` reads `confidential` twice"));
 }
 
 #[test]

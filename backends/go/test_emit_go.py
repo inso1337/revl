@@ -787,13 +787,21 @@ def test_v3_typed_core_placement_emits_types_and_live_components():
     _has(bridge, "_r := _revlDecodeStep(_v)")
 
 
-def test_v3_typed_core_placement_host_collision_is_renamed():
-    """A declared record named like a legacy host-runtime type (Row) renames
-    the HOST side to RevlRow, so the two never collide in one package."""
+def test_v3_typed_core_placement_host_collision_is_resolved():
+    """A declared record named like a legacy host-runtime type never collides
+    with it in one package. `Pool` and `Map` are types WITH behaviour, so the
+    HOST side is renamed to `RevlPool` / `RevlMap`. `Row` is a bare alias
+    naming the shape a query answers, and the stub's `Query` reads nothing out
+    of it, so the declared record simply BECOMES the row type and the alias is
+    dropped (issue #1356): renaming it made the host answer `[]RevlRow` where
+    a provide method declaring `-> List[Row]` over the same call returns
+    `[]Row`, and the package did not build."""
     ir = _compile_ir(V3_STEP_IR)
     gen, _ = _placement_split(ir)
-    assert "type RevlRow = map[string]string" in gen
+    assert "RevlRow" not in gen
+    assert "type Row = map[string]string" not in gen
     assert "type Row struct {" in gen
+    _has(gen, "func (p *Pool) Query(sql string) []Row {")
 
 
 def test_v3_typed_core_placement_records_round_trip_through_the_bridge():
@@ -1456,3 +1464,210 @@ def test_nullish_in_a_method_let_binds_the_payload_not_the_opt():
     body = _body(src, "(revlSelf *C_s) F")
     assert "RevlOpt" not in body, body
     _has(body, "a := func() int")
+
+
+# ---------------------------------------------------------------------------
+# issue #1356: the seven causes behind the sixteen carried documents that
+# emitted Go which did not build.
+#
+# PR #1378 established that these are NOT the combined renderer failing to
+# mirror `_emit`'s per-emit state (that enumeration found five instances and
+# explained none of the sixteen). They are gaps in the SHARED component
+# renderer and in the pure typed-core renderer that carrying made reachable,
+# so each one is pinned here on the smallest document that shows it, through
+# `emit` rather than through a corpus path.
+#
+# The whole-set control is tests/test_go_carried_set_builds.py, whose ratchet
+# fixture is now empty.
+
+def test_a_function_typed_service_parameter_renders_as_a_go_func_type():
+    """`_go_type` had no arm for a function type and fell through to `_camel`,
+    which printed the surface spelling into the interface (`f (Int, Str) >
+    Bool`). The v3 renderer has had the arm since it gained function types;
+    this one never got it, because before issue #1321 no document put a
+    function-typed service method beside the typed core."""
+    src = emit.emit(_compile(
+        "type Msg = { body: Str }\n"
+        "service S { fn e(f: (Int, Str) -> Bool) -> Bool }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn e(f) = true }\n"
+        "}"), package="emitted")
+    _has(src, "E(f func(int64, string) bool) bool")
+    assert "(Int, Str)" not in src, src
+
+
+def test_an_assert_in_an_ordinary_fn_panics_instead_of_failing_a_missing_t():
+    """The assert arm defaulted its receiver to the bare name `t`, which only
+    exists inside an emitted test, so an `assert` in a plain top-level `fn`
+    emitted `t.Fatalf(..)` into a function with no `*testing.T` in scope.
+    Every other tier answers a plain-fn assert with a runtime fault."""
+    src = emit.emit(_compile(
+        "fn ok() -> Bool { assert 1 == 1\n  return true }\n"
+        "service S { fn done() }\n"
+        "component C provides s: S { provide s { fn done() { return } } }"),
+        package="emitted")
+    body = _body(src, "ok")
+    _has(body, 'panic("assertion failed: ')
+    assert "t.Fatalf" not in body, body
+
+
+def test_an_assert_inside_a_test_still_fails_through_the_test_receiver():
+    """The control for the arm above: a `test` block keeps `revlT.Fatalf`."""
+    src = emit.emit(_compile(
+        "fn one() -> Int { return 1 }\n"
+        "test \"one\" { assert one() == 1 }\n"), package="emitted")
+    _has(src, "revlT.Fatalf")
+    assert "panic(\"assertion failed" not in src, src
+
+
+def test_an_any_typed_receiver_is_subscripted_through_reflection():
+    """Go's index operator is type-directed and an interface value has none,
+    so `value["k"]` on an `Any` parameter emitted a bare index that did not
+    compile. Reflection is the faithful lowering: the same read python and
+    typescript make on a value whose shape only the runtime knows."""
+    src = emit.emit(_compile(
+        "fn indexed(value: Any) -> Any { return value[\"k\"] }\n"
+        "service S { fn done() }\n"
+        "component C provides s: S { provide s { fn done() { return } } }"),
+        package="emitted")
+    body = _body(src, "indexed")
+    _has(body, 'return revlAnyIndex(value, "k")')
+    _has(src, "func revlAnyIndex(v any, k any) any {")
+
+
+def test_an_int32_receiver_widens_before_formatint_in_a_method_body():
+    """`Int32.to_str()` in a provide method reached `strconv.FormatInt` as a
+    Go `int32`. The pure renderer has widened it since item 434 (f);
+    `_go_widen_int` cannot see the case, because it widens the ir_version 1/2
+    `int` and answers an already-int64 Int unchanged."""
+    src = emit.emit(_compile(
+        "type T = { v: Int }\n"
+        "service S { emission fn show(w: Int32) }\n"
+        "component C provides s: S {\n"
+        "  let seen = effect Map.new() undo seen.drop()\n"
+        "  provide s {\n"
+        "    fn show(w) { effect seen.insert(\"k\", w.to_str())"
+        " undo seen.remove(\"k\") }\n"
+        "  }\n"
+        "}"), package="emitted")
+    body = _body(src, "(revlSelf *C_s) Show")
+    _has(body, "strconv.FormatInt(int64(w), 10)")
+
+
+def test_an_int_local_in_a_method_body_declares_the_tiers_int64():
+    """A bare integer literal binding took `:=` and declared a Go `int`, where
+    commit 5e83a9cfd converged the v3 component tier on int64, so no helper
+    taking the tier's Int accepted it (`revlStrCharAt(path, i)`)."""
+    src = emit.emit(_compile(
+        "type T = { v: Int }\n"
+        "service S { fn head(p: Str) -> Str }\n"
+        "component C provides s: S {\n"
+        "  provide s { fn head(p) { var i = 0\n"
+        "    return p.charAt(i) } }\n"
+        "}"), package="emitted")
+    body = _body(src, "(revlSelf *C_s) Head")
+    _has(body, "var i int64 = 0")
+
+
+def test_a_host_constructor_in_a_pure_fn_takes_the_free_function_form():
+    """The frontend lowers a host verb to a `host` IR node only in a component
+    position; in a plain top-level `fn` it stays a `call` on a `field` of a
+    `var`, so the pure renderer printed the source spelling `Pool.Open(..)`.
+    Go's host runtime declares the constructors as FREE functions and only the
+    per-instance verbs as methods, so the family root has no `Open`."""
+    src = emit.emit(_compile(
+        "type T = { v: Int }\n"
+        "pub fn poolExec(url: Str) -> Int {\n"
+        "  let p = Pool.open(url, 3)\n"
+        "  return p.execute(\"INSERT INTO t VALUES (1)\")\n"
+        "}\n"
+        "service S { fn done() }\n"
+        "component C provides s: S { provide s { fn done() { return } } }"),
+        package="emitted")
+    body = _body(src, "poolExec")
+    _has(body, "p := PoolOpen(url, 3)")
+    assert "Pool.Open" not in src, src
+
+
+def test_a_host_stub_beyond_the_fixed_runtime_declares_its_type_and_methods():
+    """`_emit_host_stubs` answered a host beyond Pool/Map with a FUNCTION stub
+    only, while `_host_type_of_acquire` types the `let`-bound receiver as a
+    `*Job` value with methods. The two disagreed: the bind's declared type was
+    undefined and every verb called on the receiver was missing."""
+    src = emit.emit(_compile(
+        "type T = { v: Int }\n"
+        "service S { emission fn run() }\n"
+        "component C provides s: S {\n"
+        "  let job = effect Job.run(\"background\") undo Job.run(\"stop\")\n"
+        "  provide s {\n"
+        "    fn run() { effect job.run(\"start\") undo job.run(\"stop\") }\n"
+        "  }\n"
+        "}"), package="emitted")
+    _has(src, "type Job struct{}")
+    _has(src, "func JobRun(_args ...any) *Job {")
+    _has(src, "func (_h *Job) Run(_args ...any) any {")
+
+
+def test_a_read_opt_takes_the_pointer_form_of_nullish_not_the_tuple():
+    """An Opt that is READ rather than CALLED, such as a config field, holds
+    the value-position form `*T`, not the `(T, bool)` a service or host call
+    returns, so destructuring it was Go's "2 variables but 1 value"."""
+    src = emit.emit(_compile(
+        "type T = { v: Int }\n"
+        "service S { fn limit() -> Int }\n"
+        "component C provides s: S {\n"
+        "  config { limit: Opt[Int] }\n"
+        "  provide s { fn limit() = config.limit ?? 0 }\n"
+        "}"), package="emitted")
+    body = _body(src, "(revlSelf *C_s) Limit")
+    _has(body, "if _v := revlSelf.cfg.Limit; _v != nil { return *_v }")
+
+
+def test_a_called_opt_still_takes_the_two_value_form_of_nullish():
+    """The control for the arm above: a service call answers the tuple, and
+    that spelling must not move."""
+    src = emit.emit(_compile(
+        "type T = { v: Int }\n"
+        "service Bus { fn maybe(n: Int) -> Opt[Int] }\n"
+        "service S { fn f(x: Int) -> Int }\n"
+        "component C requires bus: Bus provides s: S {\n"
+        "  provide s { fn f(x) = bus.maybe(x) ?? 0 }\n"
+        "}"), package="emitted")
+    body = _body(src, "(revlSelf *C_s) F")
+    _has(body, "_v, _ok := revlSelf.bus.Maybe(x)")
+
+
+def test_a_declared_row_record_is_the_row_type_the_host_pool_answers():
+    """Ten of the sixteen. `Row` is not a type with behaviour, it is a bare
+    ALIAS naming the shape a query answers, and the stub's `Query` reads
+    nothing out of it and returns nil. Renaming it to `RevlRow` on a
+    collision made the host answer `[]RevlRow` where a provide method
+    declaring `-> List[Row]` over the same call returns `[]Row`."""
+    src = emit.emit(_compile(
+        "type Row = { id: Int, name: Str }\n"
+        "service Database { fn query(sql: Str) -> List[Row] }\n"
+        "component PgDatabase provides db: Database {\n"
+        "  config { url: Str, pool_size: Int = 10 }\n"
+        "  let pool = effect Pool.open(config.url, config.pool_size)"
+        " undo pool.close()\n"
+        "  provide db { fn query(sql) = pool.query(sql) }\n"
+        "}"), package="emitted")
+    assert "RevlRow" not in src, src
+    assert "type Row = map[string]string" not in src, src
+    _has(src, "func (p *Pool) Query(sql string) []Row {")
+    _has(src, "type Row struct {")
+
+
+def test_a_pool_collision_still_renames_the_host_side():
+    """The control for the arm above: `Pool` and `Map` are types WITH
+    behaviour, so a declared record of that name still renames the host side
+    rather than standing in for it."""
+    src = emit.emit(_compile(
+        "type Pool = { size: Int }\n"
+        "service S { fn size() -> Int }\n"
+        "component C provides s: S {\n"
+        "  config { url: Str }\n"
+        "  let p = effect Pool.open(config.url, 3) undo p.close()\n"
+        "  provide s { fn size() = 1 }\n"
+        "}"), package="emitted")
+    _has(src, "type RevlPool struct {")

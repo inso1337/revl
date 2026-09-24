@@ -139,7 +139,7 @@
           "_v3_str_concat_pieces": 6
         },
         "Remaining assembly paths are the empty-document refusal, in-file tests, reflect structural equality, Float interpolation's ftoa helper, extern imports, and demanded Opt/Result/Map/stdlib plus integer-division helpers. Those helper-demand families are explicit Go scaffold deferrals; ordinary Float arithmetic and Int widening are covered, not excluded here. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py.": {
-          "_emit_v3_go": 69
+          "_emit_v3_go": 70
         },
         "Remaining branches are malformed/unresolved inference fallbacks, deferred len/builtin/Map and builtin constructors, ambiguous-record recovery, and the late Float % fallback (the frontend rejects Float remainder). Int32 complement inference and ordinary Float arithmetic/widening are now covered. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_go_v3_infer_type": 16
@@ -162,7 +162,7 @@
           "_emit": 115
         },
         "Remaining expression arms cover deferred None/builtin constructors (including call-shaped compatibility IR), len/stdlib/Map, optional chaining and structural equality, plus malformed expression/operator and record-update refusals. The frontend lowers declared variant applications as adt, not legacy constructor calls; pure user variants and Float/Int arithmetic are exercised. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
-          "_go_v3_expr": 48
+          "_go_v3_expr": 52
         },
         "Remaining extern paths generate config access scaffolding/bindings or reject a missing @go body. The oracle explicitly defers config-bearing externs and absent target bodies; simple synchronous body emission is already covered.": {
           "_emit_v3_go_externs": 3,
@@ -200,7 +200,7 @@
           "_go_v3_match": 7
         },
         "Remaining statements emit destructive stdlib self-rebinds, optimized code-point scans, or reject an unknown step. Their prerequisite builtin families are deferred; ordinary assignments, loops and accumulator builders are not excluded.": {
-          "_go_v3_stmt": 12
+          "_go_v3_stmt": 13
         },
         "Remaining type paths lower deferred Opt/Result generics or preserve an otherwise-unresolved type spelling; ordinary declared records/variants and List types are covered.": {
           "_go_v3_type": 4
@@ -243,7 +243,7 @@
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_v3_bridge_helpers": 52,
-          "_emit_v3_combined": 256,
+          "_emit_v3_combined": 258,
           "_emit_v3_placement": 1,
           "_go_bridge_arg_expr": 4,
           "_go_opt_inner": 4,
@@ -254,19 +254,19 @@
           "emit_placement": 3
         },
         "Component/method expression renderer and tuple-return convention, reached from _emit_component_step/_emit_method_body, not the pure _go_v3_expr renderer. This includes legacy name/fn/format literals and component Opt/Result spreading; the selfhost module port excludes that live ABI, not the corresponding pure literals or user ADTs. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1321 adds two statements to `_comp_infer`: the `fn` arm that reads a top-level fn/extern's declared return type off `_FN_RET`, so a receiver-typed builtin (`firsts(xs).length()`) can tell a Str receiver from a List one instead of guessing. It sits on the same deferred component/method path. Three later changes land on this same deferred component/method path. Issue #1347 adds three statements to `_comp_builtin`: the `to_int32` arm that flags the checked narrow `revlToI32`, which the pure typed-core path already carried, so a method body calling it no longer falls through to the unknown-method arm and the conformance matrix stops reading that as a go tier limit. Issue #1356 adds nine to `_comp_infer`: a `call` arm that reads a required service method's declared return type off the document's service table, and a `config` arm that reads a config field's declared surface type, both registries being populated only by `_emit_component`. Issue #1376 adds five more to `_comp_infer` and six to `_emit_return`: the `??` arm answers `T` rather than the left operand's `Opt[T]`, and a ternary in RETURN position over the tuple convention has no single-expression Go form, so it spreads into an `if` statement and each branch takes the ordinary return lowering.": {
-          "_comp_builtin": 62,
+          "_comp_builtin": 64,
           "_comp_checked_div_expr": 9,
           "_comp_infer": 76,
           "_construction_case": 15,
           "_emit_return": 32,
-          "_expr": 165,
+          "_expr": 168,
           "_format": 50,
           "_format.flush_text": 4,
           "_go_comp_match": 52,
           "_go_comp_match_tuple": 72,
           "_go_literal": 13,
           "_go_return": 9,
-          "_go_type": 19,
+          "_go_type": 24,
           "_go_widen_int": 1,
           "_go_zero": 10,
           "_v3_case_layout": 9,
@@ -279,15 +279,21 @@
           "_collect_host_calls": 10,
           "_emit_component": 88,
           "_emit_component_step": 173,
-          "_emit_host_stubs": 12,
-          "_emit_method_body": 85,
+          "_emit_host_stubs": 30,
+          "_emit_method_body": 88,
           "_emit_provide_impl": 37,
           "_emit_services": 16,
-          "_host_runtime": 10,
+          "_host_runtime": 14,
           "_host_type_of_acquire": 9,
           "_method_ret": 1,
           "_method_returns_value": 1,
           "_needs_sync": 1
+        },
+        "issue #1356: the seven causes behind the sixteen carried documents that emitted Go which did not build. Each is a shape the byte-agreement corpus does not hold - a function-typed service parameter, an `assert` in an ordinary `fn`, an `Any` subscript, an `Int32` receiver rendered in a method body, a bare integer local in one, a host constructor in a plain top-level `fn`, a host family beyond Pool/Map whose bound receiver takes methods, `??` over an Opt that is read rather than called, and a declared record named `Row`. What DOES reach them is tests/test_go_carried_set_builds.py, which emits all 123 carried documents and `go build`s them, and the twelve named tests in backends/go/test_emit_go.py. `selfhost/emit_go.rvl` mirrors none of it, so the byte-agreement oracle is silent here either way.": {
+          "_collect_host_bind_methods": 12,
+          "_collect_host_binds": 12,
+          "_stub_host_type": 4,
+          "_v3_host_constructor": 13
         }
       },
       "uncovered_statements": 3194

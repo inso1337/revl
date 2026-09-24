@@ -101,15 +101,40 @@ there.
 
 ## 1.2 What the port decides
 
-All seventeen refusals `model_council._check_one` raises, in the reference's
+All twenty-two refusals `model_council._check_one` raises, in the reference's
 own order: the name (declared once, and not a `model role`'s), then each member
 in declaration order (the function vocabulary, one member per function, the
-role's existence, one member per role), then the two counting rules over the
-member set (at least two members, and a `proposer` among them), then the
-aggregation clause (exactly one, written down; the rule itself, with the
-pick-one spellings refused ahead of the vocabulary check so an author who
-reaches for one gets the REASON; `veto` needing the adversary it is the veto
-of; the quorum basis; the tie outcome).
+role's existence, one member per role, and its `reads` clauses), then the two
+counting rules over the member set (at least two members, and a `proposer`
+among them), then the aggregation clause (exactly one, written down; the rule
+itself, with the pick-one spellings refused ahead of the vocabulary check so an
+author who reaches for one gets the REASON; `veto` needing the adversary it is
+the veto of; the quorum basis; the tie outcome).
+
+Seventeen of the twenty-two are slice 1's. The five that judge a member's
+`reads <origin>` clause are slice 4's (issue #1368), and section 1.4 below
+predicted them exactly: a clause a later item adds inside the council braces is
+stepped over whole by the top-level walk, and `council_body` refuses what it
+cannot read, so the port was the only thing standing between the new form and a
+`false-reject/COUNCIL` entry. They are, in the order the reference raises them
+per clause: `reads secret`, refused by name at every residence; an origin the
+lattice does not declare; an origin that is not a confidentiality origin; the
+clause written twice; and the member GIVEN a confidentiality origin while
+placed on an `off_device` role.
+
+That last one is the one the item is for, and it is what lets the model-
+PLACEMENT section keep one rule rather than two: `ccl_off_member` now takes the
+origin it is judging, so a council that withholds by declaration is judged only
+on the members it hands the origin to, and those members are already on the
+device because this phase refuses one that is not.
+
+`model_origin_classes` gained `screen` with the slice. The list mirrors
+`taint.ORIGIN_CLASSES` and item 521 Slice 2 added the class after this port was
+written, so the gate was refusing `route model on a { screen -> r }`, which the
+reference admits. It was a `false-reject` rather than a bypass, and it is
+corrected here because the new `reads` rules read the same list and would
+otherwise have answered "unknown origin class" where the reference answers
+"not a confidentiality origin".
 
 The phase runs where `check_and_lower` runs `model_council.check`: after
 `model_route.check` and before any component is lowered. That ordering is
