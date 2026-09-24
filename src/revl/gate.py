@@ -234,6 +234,14 @@ def _verdict_from_error(error: Exception) -> "Verdict":
 FAULT = "COMPILER_FAULT"
 
 
+# The control code for a TIER LIMIT — `compile_to` answering "this tier cannot
+# lower this document", with the emitting tier's own sentence. Distinct from
+# both a refusal code (which carries a FRONTEND diagnostic: the document is not
+# admissible anywhere) and from `FAULT` (a bug report). Only `compile_to` can
+# produce it; `admit` and `admit_into` never emit, so they never can.
+TIER_REFUSED = "TIER_REFUSED"
+
+
 def _verdict_from_fault(error: BaseException) -> "Verdict":
     """A fail-closed refusal for an exception that is NOT a `RevlError`.
 
@@ -335,6 +343,11 @@ def compile_to(source: str, tier: str) -> "Emit":
         output = _emit_for_tier(ir, tier)
     except RevlError as error:
         return Emit(_verdict_from_error(error))
+    except TierRefusal as refusal:
+        # issue #1406: the tier said, by name, that it cannot lower this
+        # document. Fail closed exactly as before -- `output` stays None -- but
+        # under a code that says which of the two it is.
+        return Emit(Verdict(False, code=TIER_REFUSED, message=str(refusal)))
     except Exception as error:  # noqa: BLE001 — see `_verdict_from_fault`
         return Emit(_verdict_from_fault(error))
     return Emit(Verdict(True), output=output)
@@ -356,20 +369,41 @@ def _tier_dir(tier: str) -> str | None:
     return _TIER_DIRS.get(tier)
 
 
+class TierRefusal(Exception):
+    """A reference emitter REFUSED this document for a tier: a tier limit the
+    author can act on, not a compiler bug.
+
+    Carried out of `_emit_for_tier` so `compile_to` can tell the two apart.
+    Before issue #1406 both arrived as `Exception` and both became
+    `COMPILER_FAULT`, whose own contract says it "carries an exception the
+    reference compiler should never have raised, which is a bug report and not a
+    repair signal for the author". A named tier limit is the opposite: it IS a
+    repair signal, and an embedder branching on `code` was told to file a bug
+    against revl instead of dropping `validated` or moving the component.
+    """
+
+
 def _emit_for_tier(ir: dict, tier: str) -> str:
     """Load the reference emitter for `tier` and emit `ir` to target source.
     The emitter modules live under `backends/<dir>/emit.py` and expose a
     module-level `emit(ir) -> str`; loaded the same way `tools/conformance.py`
-    loads them, so what the gate emits is real reference emitter output."""
+    loads them, so what the gate emits is real reference emitter output.
+
+    A tier limit raised by the emitter leaves as `TierRefusal`; anything else it
+    raises is a fault and propagates unchanged (issue #1406)."""
     import importlib.util  # noqa: PLC0415
 
     from ._paths import backends_root  # noqa: PLC0415
+    from .refusal import refusals  # noqa: PLC0415
     tier_dir = _tier_dir(tier)
     path = backends_root() / tier_dir / "emit.py"
     spec = importlib.util.spec_from_file_location(f"revl_gate_{tier_dir}_emit", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    return module.emit(ir)
+    try:
+        return module.emit(ir)
+    except refusals(module) as refusal:
+        raise TierRefusal(str(refusal)) from refusal
 
 
 def gate_version() -> dict:
