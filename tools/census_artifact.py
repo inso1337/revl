@@ -276,13 +276,22 @@ def provenance_rows(provenance) -> list[dict]:
         model, _, undeclared = prov.split(ids, since=provenance.FLOOR_SINCE)
         floor = prov.floors.get(name, 0)
         permille = provenance.independent_permille(len(model), len(ids))
+        # The second axis (issue #1397). `loop_authored` is what the floor
+        # gates; `human_authored` is the question a reader will think the
+        # first column answered, and it is published beside it so the two
+        # cannot be read as one.
+        _, human = prov.human_split(ids)
+        human_permille = provenance.independent_permille(
+            len(ids) - len(human), len(ids))
         rows.append({
             "corpus": name,
-            "model_authored": len(model),
+            "loop_authored": len(model),
+            "human_authored": len(human),
             "total": len(ids),
             "undeclared": len(undeclared),
             "independent_permille": permille,
             "independent_percent": f"{permille / 10:.1f}",
+            "human_authored_percent": f"{human_permille / 10:.1f}",
             "floor_percent": floor,
             "crosses_floor": provenance.crosses_floor(
                 len(model), len(ids), floor),
@@ -414,18 +423,38 @@ def build_report(census, provenance, measured: dict,
         },
         {
             "text": (
-                f"{census_row['model_authored']} of {census_row['total']} "
-                f"census programs are model-authored at or after generation "
+                f"{census_row['loop_authored']} of {census_row['total']} "
+                f"census programs were produced by a generation of the "
+                f"self-improvement loop at or after generation "
                 f"{provenance.FLOOR_SINCE} "
-                f"({census_row['independent_percent']}% independent, "
-                f"{census_row['undeclared']} undeclared), measured by "
+                f"({census_row['independent_percent']}% independent of the "
+                f"loop, {census_row['undeclared']} undeclared), measured by "
                 f"tools/corpus_provenance.py over "
-                f"tests/fixtures/corpus_provenance.json."),
+                f"tests/fixtures/corpus_provenance.json. The loop has never "
+                f"run, which is why this figure is what it is."),
             "rung": "measured",
             "public": True,
             # The provenance number is produced by a different tool over a
             # different input, and the crate engine says nothing about it, so
             # it carries no reproduction and stands at `measured`.
+            "evidence": {"compiler_commit": compiler, "run": run_id,
+                         "protocol": EVAL_PROTOCOL},
+        },
+        {
+            # Issue #1397. The claim above used to be worded as a claim about
+            # MODEL authorship, which is a different and much stronger thing
+            # than what the manifest holds. This one is published beside it so
+            # a reader cannot take the first for the second.
+            "text": (
+                f"{census_row['human_authored']} of {census_row['total']} "
+                f"census programs are declared in "
+                f"tests/fixtures/corpus_provenance.json as typed by a person "
+                f"({census_row['human_authored_percent']}%). This report makes "
+                f"no claim that its corpus is human-written, and the figure "
+                f"above is not that claim: it is the share no generation of "
+                f"the self-improvement loop produced."),
+            "rung": "measured",
+            "public": True,
             "evidence": {"compiler_commit": compiler, "run": run_id,
                          "protocol": EVAL_PROTOCOL},
         },
@@ -519,7 +548,16 @@ def build_report(census, provenance, measured: dict,
                 "about the tree as it stood, not a measurement. What holds from "
                 "there on is that an arriving document must name its "
                 "generation, and that an undeclared one counts as "
-                "model-authored.",
+                "loop-authored.",
+                "Generation zero does not mean a person typed it. Issue #1397 "
+                "measured the generation-zero set against the commits that "
+                "introduced it: 153 of 850 entries arrived on a branch named "
+                "agent/*, 132 more on a commit carrying an AI co-author "
+                "trailer, 415 on commits pushed to the trunk with no branch to "
+                "read, and the repository's root commit carries such a trailer "
+                "itself. Both signals are lower bounds. The honest reading is "
+                "that this corpus is model-written and pre-loop, and the floors "
+                "gate the second word, not the first.",
                 "A mislabelled provenance entry defeats the provenance "
                 "measurement exactly as re-recording the baseline would defeat "
                 "the census. Neither is detected by a tool; both are edits in a "
@@ -652,17 +690,33 @@ def render_markdown(report: dict) -> str:
     w("nothing. `tools/corpus_provenance.py` names the generation that authored")
     w("every scoring document, from `tests/fixtures/corpus_provenance.json`. A")
     w("document with no entry resolves to UNDECLARED and counts as")
-    w("model-authored at every threshold, because the other default would make")
+    w("loop-authored at every threshold, because the other default would make")
     w("dropping an unknown file into a globbed corpus RAISE the measured")
     w("independence.")
     w("")
-    w(f"Model-authored means: at or after generation {c['provenance']['since_generation']}.")
+    w("Read the two columns below as two different questions, because they "
+      "are:")
     w("")
-    w("| corpus | model-authored | total | independent | floor | undeclared | verdict |")
-    w("|---|---|---|---|---|---|---|")
+    w("- **loop-authored** is: produced by a generation of the "
+      "self-improvement")
+    w(f"  loop at or after generation "
+      f"{c['provenance']['since_generation']}. That loop has never run in this")
+    w("  repository, which is the whole of why the column reads as it does,")
+    w("  and it is the column the floors gate.")
+    w("- **human-authored** is: declared in the manifest as typed by a person.")
+    w("  Nothing here claims this corpus was written by people, and issue")
+    w("  #1397 records the measurement that says it was not: of the 850")
+    w("  generation-zero entries, 153 arrived on a branch named `agent/*` and")
+    w("  132 more on a commit carrying an AI co-author trailer, both of which")
+    w("  are lower bounds, and the repository's root commit carries one too.")
+    w("")
+    w("| corpus | loop-authored | human-authored | total | independent of the "
+      "loop | floor | undeclared | verdict |")
+    w("|---|---|---|---|---|---|---|---|")
     for row in c["provenance"]["corpora"]:
         verdict = "BELOW FLOOR" if row["crosses_floor"] else "ok"
-        w(f"| `{row['corpus']}` | {row['model_authored']} | {row['total']} | "
+        w(f"| `{row['corpus']}` | {row['loop_authored']} | "
+          f"{row['human_authored']} | {row['total']} | "
           f"{_pct(row)} | {row['floor_percent']}% | {row['undeclared']} | "
           f"{verdict} |")
     w("")
