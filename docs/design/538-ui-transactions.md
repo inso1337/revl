@@ -361,7 +361,10 @@ regenerated.
 ## 10. Slice plan
 
 Each slice is closable on its own and carries the oracle that makes it a
-measurement. Slice 1 is landed; the rest are proposals.
+measurement. All five have now landed; each entry carries its own evidence.
+What the five do NOT include is execution: revl computes a compensation run and
+performs no crossing, which is issue #1369's remainder, and the check-to-use
+race is issue #1371.
 
 **Slice 1: the classification and the two teardown refusals. LANDED.**
 `src/revl/ui_family.py` gains the five classes, the per-verb table, the
@@ -372,12 +375,24 @@ tests. Non-vacuity measured against `agent/1195-typed-computer-use` at
 `b8fea480`: the five refused programs are all ADMITTED there and refused here,
 and the six controls are admitted on both trees.
 
-**Slice 2: the confirmation gate.** Decide between the three options in
-section 6 and land the raise to `confirm-required`, so an `unknown` or
-`irreversible` crossing without a confirmation is refused by name. Oracle: the
-same program admitted with a confirmation and refused without it, plus a
-control on an ordinary capability. This is the slice that turns section 6's
-honest gap into a check, and it is the largest remaining piece of the item.
+**Slice 2: the confirmation gate. LANDED** (PR #1287). Section 6's third
+option was the one taken: the raise to `confirm-required` is operator-side,
+`capability ui.click requires approval`, and the half that landed is that
+`revl audit --policy` now evaluates it. `policy.approval_admission` had always
+enforced the rule and was called only from `revl.mcp.session`, so the static
+surface an operator reads before shipping reported an unconfirmed composition
+clean and exited 0 while a session refused it. Oracle, as written here:
+`tests/test_ui_transaction_phases_522.py::test_audit_policy_refuses_an_unconfirmed_ui_crossing`
+and `::test_an_activation_body_crossing_with_an_edge_admits`, the same program
+refused without a confirmation and admitted with one, plus
+`::test_a_policy_that_raises_nothing_is_still_clean` as the control. The gate
+reaches a `provide` method loop, which is the shape the item is about.
+
+Section 6's cost of that option is unchanged and is not a remainder of this
+slice: a policy rule is optional, so absence of a rule is silence rather than
+the gate admitting. The other two options are still open questions for
+whoever wants an unconditional raise, and the first of them is a change to
+item 246's non-persistence rule and belongs there.
 
 **Slice 3: the transaction unit and LIFO compensation. LANDED** (issue
 #1369). `ui_transaction.compensation_run(steps, failed_at)` computes the run
@@ -400,13 +415,30 @@ compensating crossings are the substrate's (item 539), exactly as the
 actuations are. A compensation that is performed and FAILS has no word in
 section 2's five states, and none was invented for it.
 
-**Slice 4: `uncompensated` on the residue report.** Extend the residue and
-erase surfaces so a UI transaction's outcome is a third value beside
-`no_residue` and a bare crossing, and so a transaction that ran every
-registered compensation over a step set containing an `irreversible` verb
-still reports `uncompensated`. Oracle: the report for the transaction in slice
-3 names both the compensated steps and the uncompensated one, and does not
-print `no_residue`.
+**Slice 4: `uncompensated` on the residue report. LANDED** (PR #1287 and
+#1296 for the states and the DOES NOT PROVE clauses, PR #1386 for the run the
+report prints). The oracle as written here was measured on `07a7058b`, by
+running `revl erase-report --realm billing` over the five-step program
+`tests/test_ui_transaction_run_1369.py` compiles. The report names the
+compensated steps and the uncompensated ones separately, prints the aggregate
+as the WEAKEST part, prints the LIFO run keyed on the failure, and refuses the
+clean word:
+
+    computer-use revert split (item 522) - aggregate: UNCOMPENSATED
+      uncompensated  actuate, fetch_receipt
+      restored       type_amount, type_memo, type_note
+      untouched      locate, read_pane
+      claim: residue remains: 3 restored, 2 uncompensated (no inverse
+             exists), 2 untouched (a read; not residue). This set may not be
+             reported as cleanly reverted
+    LIFO COMPENSATION RUN, per detectable failure (item 522 slice 3)
+      if actuate() fails: type_memo(), type_amount()
+        residue after the run: actuate() uncompensated
+        never executed, so nothing to undo: type_note(), fetch_receipt()
+
+`no_residue` appears once in that whole report, in the header's R4 clause about
+in-process state, which is a different claim about a different thing and is the
+one the header exists to keep apart.
 
 **Slice 5: the postcondition. LANDED** (issue #1370). The verdict was
 POSITIONAL: any later reversible crossing in the same method made every earlier
@@ -434,10 +466,13 @@ substrate is upstream.
 
 Written down so a reader does not infer more than was measured.
 
-- **Slice 1 does not stop a click.** It stops a program from claiming a click
-  is clean. An `unknown` or `irreversible` UI crossing is still admitted with
-  no confirmation, for the reason in section 6. That is the largest gap in
-  this item today and it is deliberate, not an oversight.
+- **Nothing stops a click that no operator rule covers.** Slice 1 stops a
+  program from claiming a click is clean. Slice 2 landed section 6's third
+  option, so `capability ui.click requires approval` is now refused by
+  `revl audit --policy` as well as by a session. Without such a rule an
+  `unknown` or `irreversible` UI crossing is still admitted with no
+  confirmation, because absence of a rule is silence. Section 6 says that is
+  the cost of the option, and the unconditional raise is still not built.
 - **The check-to-use race is open** (issue #1371). Section 4 names it. Item
   521's slice 4 landed a `UiTarget` carried BY VALUE, which is not a resolved
   handle: `docs/design/565-ui-target-binding.md` §7 says revl checks the
