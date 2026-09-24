@@ -1,0 +1,30 @@
+// REJECTED — a transparent type alias whose right-hand side names `Async[T]`
+// (issue #1151). `Async[T]` is POSITION-RESTRICTED: it is legal only as the
+// return of a function type, and an alias right-hand side is not that position,
+// so the alias below has no legal reading at all.
+//
+// The refusal is anchored at the ALIAS DECLARATION, not at the arrow that uses
+// it, and that is the whole point of this fixture. The reference erases aliases
+// before it asks anything else about a type (`_resolve_type_aliases` runs one
+// line ahead of `_validate_declared_types` in `check_and_lower`) and checks each
+// right-hand side as it collects it. So `-> Later` never reaches the rule C1
+// question that `t34_arrow_self_declared_async.rvl` pins: an alias of `Async[T]`
+// cannot be declared in the first place, and the declaration is what is
+// reported. The gate used to build its alias map from the same scan without
+// asking, which left this program deciding on whatever the arrow below did.
+//
+// Legal spellings — both give the arrow a consumer obliged to await it:
+//   * annotate the binding:  `let g: (Str) -> Async[Str] = v => suspending_op(v)`
+//   * declare the parameter: `fn run(g: (Str) -> Async[Str]) -> Str { … }`
+//
+// expected error:
+//   `Async[T]` is not a value type (`Async[Str]`)
+
+type Later = Async[Str]
+
+extern emission async fn suspending_op(v: Str) -> Str = @py { return v }
+
+fn leak(x: Str) -> Str {
+  let g = (v: Str): Later => suspending_op(v)
+  return g(x)
+}

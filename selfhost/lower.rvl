@@ -8415,7 +8415,7 @@ fn is_alias_target(target: Str, declared: List[Str]) -> Bool {
 }
 
 type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str],
-                   lines: List[Int] }
+                   lines: List[Int], tps: List[Bool] }
 
 // Every type DECLARATION in the file: the names it declares (the reference's
 // `declared` set, which an `event` contributes to as well — the parser appends an
@@ -8423,13 +8423,15 @@ type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str],
 // right-hand side is one bare type spelling, that spelling. A record body and a
 // variant right-hand side (a `|` alternation or a `(payload)`) are real
 // declarations and contribute no target. A declaration that carries type
-// PARAMETERS is refused outright by the reference when it is an alias, so such a
-// program never reaches this producer and none is offered here.
+// PARAMETERS is refused outright by the reference when it is an alias; it is
+// recorded here (marked in `tps`) so `alias_decl_refusal` knows where the
+// reference's own alias loop stops, and `alias_map` drops it again.
 fn alias_scan(ts: List[Token]) -> AliasScan {
   var declared: List[Str] = []
   var names: List[Str] = []
   var targets: List[Str] = []
   var lines: List[Int] = []
+  var tps: List[Bool] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (at_event(ts, i)) {
@@ -8445,20 +8447,21 @@ fn alias_scan(ts: List[Token]) -> AliasScan {
       var end = cfg_decl_end(ts, j)
       if (atk(ts, j, "=")) {
         end = cfg_decl_end(ts, j + 1)
-        if (!tparams && !atk(ts, j + 1, "{")
-            && !cfg_is_variant_rhs(ts, j + 1, end)) {
+        if (!atk(ts, j + 1, "{") && !cfg_is_variant_rhs(ts, j + 1, end)) {
           names = names.push(nm)
           targets = targets.push(type_at(ts, j + 1).ty)
           // the DECLARATION's own line: `_resolve_type_aliases` anchors the
           // cycle refusal at `aliases[head].line`, the line of the alias the
           // expansion came back round to, not at the use site.
           lines = lines.push(tkc(ts, i).line)
+          tps = tps.push(tparams)
         }
       }
       i = end > i ? end : skip_line(ts, i)
     } else { i += 1 }
   }
-  return { declared: declared, names: names, targets: targets, lines: lines }
+  return { declared: declared, names: names, targets: targets,
+           lines: lines, tps: tps }
 }
 
 fn alias_at(al: Map[Str, Str], name: Str) -> Str {
@@ -8505,7 +8508,10 @@ fn alias_map(ts: List[Token]) -> Map[Str, Str] {
   var raw: Map[Str, Str] = Map.empty()
   var i = 0
   while (i < sc.names.length()) {
-    if (is_alias_target(sc.targets[i], sc.declared)) {
+    // a PARAMETERIZED alias never reaches this producer (the reference refuses
+    // one outright), so it contributes no substitution — the scan carries it
+    // only so `alias_decl_refusal` can see where the reference stops.
+    if (!sc.tps[i] && is_alias_target(sc.targets[i], sc.declared)) {
       raw = raw.set(sc.names[i], sc.targets[i])
     }
     i += 1
@@ -8968,6 +8974,55 @@ fn wf_sites_concat(xs: List[WfSite], ys: List[WfSite]) -> List[WfSite] {
   var i = 0
   while (i < ys.length()) { out = out.push(ys[i])  i += 1 }
   return out
+}
+
+// ===================================== alias declarations (_resolve_type_aliases)
+//
+// The reference erases transparent aliases BEFORE it asks anything else about a
+// type: `check_and_lower` calls `_resolve_type_aliases` one line ahead of
+// `_validate_declared_types`, and that function checks each alias RIGHT-HAND
+// SIDE with the same `check_type_wellformed` the signature sites below use,
+// anchored at the alias DECLARATION's line ("an alias is a declaration, so its
+// right-hand side is checked here rather than only where the alias happens to
+// be used"). The gate built its `alias_map` from the same scan but never asked
+// that question, so `type Later = Async[Str]` — which the reference refuses at
+// the declaration — was waved through and whatever the arrow below it did
+// decided the verdict instead (issue #1151).
+//
+// ORDERING. This is a PHASE ahead of every other declared-type site, not a
+// line-ordered peer: the reference raises inside the alias loop, so a bad alias
+// at line 40 still beats a bad `fn` return at line 2. That also settles the
+// question the issue framed as "erase, then ask" for rule C1: `Async` is
+// position-restricted and an alias right-hand side is not one of its positions,
+// so NO alias that mentions `Async` survives this phase. An arrow annotated
+// `-> Later` therefore never reaches the C1 question on either side — the
+// reference refuses the declaration, and now so does the gate, with the same
+// tag, message and line.
+//
+// Two shapes are WITHHELD rather than refused, and both stop the walk, because
+// the reference raises at that alias and never looks at a later one:
+//   * a PARAMETERIZED alias (`type X[T] = …`), whose "cannot declare type
+//     parameters" refusal is code-less and has no tag in this vocabulary;
+//   * a right-hand side whose wellformed message `wf_tag` cannot route (the
+//     `Async` ARITY shape, for the reason the note above this section gives).
+// Reporting a LATER alias's verdict in place of either would turn a
+// no-objection into a wrong verdict, which is the direction that matters here.
+fn alias_decl_refusal(ts: List[Token]) -> Verd {
+  let sc = alias_scan(ts)
+  var i = 0
+  while (i < sc.names.length()) {
+    if (is_alias_target(sc.targets[i], sc.declared)) {
+      if (sc.tps[i]) { return no_verd() }
+      let r = check_type_wellformed(sc.targets[i], false)
+      if (!r.ok) {
+        let tg = wf_tag(r.msg)
+        if (tg == "") { return no_verd() }
+        return mk_verd(tagged(tg, r.msg), sc.lines[i])
+      }
+    }
+    i += 1
+  }
+  return no_verd()
 }
 
 // The top-level declaration walk, in the shape `cfg_owners_walk` established:
@@ -13971,6 +14026,14 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // reference's flow walk.
   let mdlv = model_place_refusal(ts)
   if (mdlv.v != "") { return { done: true, refs: [mdlv] } }
+  // the transparent-alias DECLARATIONS are decided ahead of every signature
+  // site: `check_and_lower` runs `_resolve_type_aliases` one line ahead of
+  // `_validate_declared_types`, after the two model phases above, and checks
+  // each alias right-hand side as it collects it, so an alias whose
+  // spelling is not wellformed beats every signature site regardless of line
+  // (issue #1151, `alias_decl_refusal`).
+  let adv = alias_decl_refusal(ts)
+  if (adv.v != "") { return { done: true, refs: [adv] } }
   let wfv = declared_types_refusal(ts)
   if (wfv.v != "") { return { done: true, refs: [wfv] } }
   // the program-wide declared-type table (the `field <Type>.<name>` rows, the
