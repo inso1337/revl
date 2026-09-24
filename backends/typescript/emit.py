@@ -5269,7 +5269,19 @@ def _main(argv: list[str]) -> int:
     else:
         with open(args[0], "r", encoding="utf-8") as handle:
             ir = json.load(handle)
-    sys.stdout.write(emit(ir, runtime_import=runtime_import))
+    # issue #1393: this CLI is how `revl run --backend ts` and `revl run
+    # --placement` reach the emitter (src/revl/placement.py runs it as a
+    # subprocess and relays its stderr verbatim), so an uncaught `EmitError`
+    # here is a Python traceback in the operator's terminal. A refusal is an
+    # answer: render it the way every other revl refusal renders, `error: <the
+    # diagnostic>` on stderr with a nonzero exit. `EmitError` and nothing wider
+    # — an internal emitter fault keeps its traceback, which is what it is.
+    try:
+        rendered = emit(ir, runtime_import=runtime_import)
+    except EmitError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    sys.stdout.write(rendered)
     return 0
 
 

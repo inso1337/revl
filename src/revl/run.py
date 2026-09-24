@@ -2545,6 +2545,22 @@ def run_command(args, hold_once: bool = False) -> int:
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
         return asyncio.run(driver.hold_repl(once=hold_once))
+    except emit.EmitError as exc:
+        # issue #1393: an emit-time refusal is an ANSWER, not a crash. The py
+        # emitter refuses a document it cannot lower without silently dropping
+        # part of it (items 257/513 and the tier refusals of #1381/#1384), and
+        # without this the author read that named refusal as a raw traceback —
+        # the one shape `revl.diagnostics` exists to avoid, since reacting to it
+        # means parsing prose. Rendered exactly as every other `revl run`
+        # failure: `_fail` keeps the diagnostic's own first line byte-identical
+        # and appends the stage. Emitting the generation IS booting it, so the
+        # stage is `boot`, the same one activation names.
+        #
+        # `emit.EmitError` and nothing wider, on purpose. An internal failure in
+        # the emitter must stay loud: a broader `except` here would turn a real
+        # crash into a tidy sentence, which is a worse defect than the one this
+        # closes.
+        return _fail(str(exc), lifecycle.BOOT)
     except ActivationError as exc:
         # item 372: a component's deferred activation did not complete — report
         # it loudly and named, rather than dropping into a REPL over a

@@ -167,15 +167,30 @@ def _key_service(ir: dict) -> dict[str, str]:
     return out
 
 
-def _emit_components(ir: dict, gen_dir: Path, record: bool = False) -> None:
+def _java_emitter():
+    """Load backends/java/emit.py.
+
+    Loaded, never cached: the emitter carries module-global render state, so a
+    fresh module per emission is the contract this file has always had. The
+    caller keeps the module it was handed, because `EmitError` is a class on the
+    module OBJECT — a second `exec_module` produces a DIFFERENT class, and an
+    `except` against it would not match the instance the first module raised
+    (issue #1393)."""
     spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
     emit_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(emit_module)
+    return emit_module
+
+
+def _emit_components(ir: dict, gen_dir: Path, record: bool = False,
+                     emit_module=None) -> None:
+    emit_module = emit_module if emit_module is not None else _java_emitter()
     (gen_dir / "Components.java").write_text(
         emit_module.emit(ir, "revl", record=record), encoding="utf-8")
 
 
-def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False) -> str:
+def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False,
+           emit_module=None) -> str:
     """Emit revl/Components.java and compile it + the cordis4j stubs +
     PlacementRunner (for its shared JSON parser) + RunOnce into a classes dir;
     return that dir (the ``java -cp`` classpath).
@@ -189,7 +204,7 @@ def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False) -> str:
     out.mkdir()
     gen = tmp / "java_gen" / "revl"
     gen.mkdir(parents=True)
-    _emit_components(ir, gen, record=record)
+    _emit_components(ir, gen, record=record, emit_module=emit_module)
 
     javac = str(Path(jdk_bin) / "javac")
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
@@ -257,11 +272,21 @@ def run_java(ir: dict, config: dict, files, once: bool = False,
     record = bool(wal_path)
     child_env = dict(os.environ) if record else None
 
+    # issue #1393: the emitter module is loaded HERE, not inside `_build`, so the
+    # `EmitError` class below belongs to the module instance that will raise it.
+    # The java tier refuses a document it cannot lower by name (the #1381 family
+    # of tier refusals); before this the refusal escaped `_build` as a raw
+    # traceback, because `EmitError` is a `ValueError` and so matched none of
+    # `(RevlError, RuntimeError, OSError)`. It is added to that tuple and to
+    # nothing wider: an internal emitter fault must still surface loudly.
+    java_emit = _java_emitter()
+
     tmp = Path(tempfile.mkdtemp(prefix="revl_run_java_"))
     try:
         try:
-            classpath = _build(ir, tmp, jdk_bin, record=record)
-        except (RevlError, RuntimeError, OSError) as exc:
+            classpath = _build(ir, tmp, jdk_bin, record=record,
+                               emit_module=java_emit)
+        except (RevlError, RuntimeError, OSError, java_emit.EmitError) as exc:
             print(f"error: could not build the java composition:\n{exc}",
                   file=sys.stderr)
             return 1
