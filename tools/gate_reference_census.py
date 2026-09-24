@@ -9,7 +9,9 @@ two halves, and only one of them was ever measured:
 
   * SOUND REFUSAL — every refusal the crate issues is a real reference refusal,
     with the same code and the same message. `tests/test_gate_crate_admit.py`
-    holds this over the hand-written oracle corpus.
+    holds this over the oracle corpus, whose programs were written to sit on a
+    guarantee boundary. That is what makes them useful here; it is not a claim
+    about who typed them, and issue #1397 records why no such claim holds.
   * NO BYPASS — the crate never raises `no_objection` for a program the
     reference refuses under a guarantee the crate claims to decide. Nothing
     held this. `tools/fuzz_frontend.py --stage gate` can *stumble* on a bypass,
@@ -96,10 +98,15 @@ to ~850 programs with no list to maintain, and is also why a generated document
 is indistinguishable from a hand-written one at the point where it is counted
 as evidence. "The gate agrees with the reference over 848 programs" is worth
 what the independence of those 848 programs is worth, so every run prints a
-second table: per bucket, how many of its programs a model authored at or after
-a named generation, read from `tests/fixtures/corpus_provenance.json` by
-`tools/corpus_provenance.py`. An UNDECLARED document counts as model-authored,
-never as hand-written.
+second table: per bucket, how many of its programs a generation of the
+self-improvement loop authored at or after a named generation, read from
+`tests/fixtures/corpus_provenance.json` by `tools/corpus_provenance.py`. An
+UNDECLARED document counts as loop-authored, never as pre-loop.
+
+That table answers "how much of this evidence did the LOOP write", and the loop
+has never run here. It does NOT answer "how much of it did a person write";
+issue #1397 measured that separately, `corpus_provenance.json` carries it on its
+own `human_authored` axis, and the two must not be read as one.
 
 That table is REPORTING ONLY. It adds no bucket, moves no verdict, and neither
 `--check` nor `--record` reads it, so a provenance change can never alter this
@@ -647,8 +654,8 @@ def _read(path: Path):
         return None
 
 
-# The ADMISSION-SURFACE programs (issue #346), hand-written for the same reason
-# the oracle's are: nothing in the tree sits ON this boundary. Every real `.rvl`
+# The ADMISSION-SURFACE programs (issue #346), written inline for the same
+# reason the oracle's are: nothing in the tree sits ON this boundary. Every real `.rvl`
 # in the repo declares a component or an `fn` body, so a census over the tree
 # alone measures the admission arm on ZERO inputs — a live guard that never
 # fires, which is indistinguishable from the scaffold it replaced.
@@ -694,7 +701,7 @@ ADMISSION_PROGRAMS = (
 
 def load_corpus(oracle, *, everything: bool = False):
     """`[(case_id, source)]` — every `.rvl` in the census directories, plus the
-    oracle's own hand-written programs, which are the only inputs in the tree
+    oracle's own inline programs, which are the only inputs in the tree
     that were WRITTEN to sit on a guarantee boundary, plus `ADMISSION_PROGRAMS`,
     which are the only ones written to sit on the ADMISSION boundary."""
     cases: list[tuple[str, str]] = []
@@ -856,7 +863,8 @@ def provenance_report(buckets: dict[str, list[str]], *, since: int) -> str:
     programs is worth. Printing the count without the provenance split states
     the first half of a fact whose second half is the load-bearing one; see
     `tools/corpus_provenance.py` for why an undeclared document counts as
-    model-authored rather than as hand-written.
+    loop-authored rather than as pre-loop, and why loop-authorship is not the
+    same question as who typed the bytes (issue #1397).
 
     Reporting only: this adds no bucket, moves no verdict, and `--check` and
     `--record` do not read it. The provenance GATE is
@@ -986,7 +994,7 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--examples", type=int, default=4)
     ap.add_argument("--since-generation", type=int, default=1,
                     help="the generation at or after which a corpus document "
-                         "counts as model-authored in the provenance table "
+                         "counts as loop-authored in the provenance table "
                          "(item 542); 1 means 'not independent of the loop'")
     ap.add_argument("--no-provenance", action="store_true",
                     help="skip the provenance table (it reads "

@@ -13,18 +13,32 @@ revl has two independently written implementations of its own semantics.
 same corpus and classifies every disagreement. Agreement means the same
 TAG and the same MESSAGE, not merely the same verdict.
 
-Programs in this run: **894**.
-Checker version: `GATE-CENSUS-1+6b2ec5be4ef4`.
+Distinct programs: **888**. Programs run: **894**.
+Checker version: `GATE-CENSUS-1+378bb31fb76b`.
 Engine: `selfhost`.
 Run: `census-selfhost-71f2f8f1e6f9`.
 
+The two numbers differ because 6 case ids reach
+the corpus twice, from two entries that spell the same
+name. They are run twice and counted twice, in `n` and in every
+bucket below. The number to quote is the distinct one. The repeats,
+named so the gap is checkable rather than asserted:
+
+- `oracle-reject:a ternary with three undeclared arms names the condition`
+- `oracle-reject:an index whose target and subscript are both undeclared names the target`
+- `oracle-reject:an undeclared name left of an unmarked emission is still G1`
+- `oracle-reject:an unmarked emission left of an undeclared name is still G4`
+- `oracle-reject:both operands of a binary op are undeclared: the LEFT one is named`
+- `oracle-reject:two unmarked emissions in one expression name the first (G4)`
+
 Neither identity is a commit or a clock. `run` is a sha256 over the corpus
 this run read; the checker version is a sha256 over the files that decide
-what the census does. Both are recomputable from a checkout.
+what the census does. Every file name inside a digest is relative to the
+checkout root, so both are recomputable from any clone, at any path.
 
 ## The claim, and why it is not the corpus size
 
-The interesting property is not that the two agree over 894 programs.
+The interesting property is not that the two agree over 888 programs.
 It is that the bucket that matters **cannot be written**.
 
 `false-admission` is an issued admission for a program the reference
@@ -73,12 +87,23 @@ admissions over this corpus, and the reference admits every one of them.
 
 `false-admit` is the other direction: the reference refuses under a
 guarantee the gate claims to decide, and the gate raises no objection. It
-is a bypass, it is baselined, and it is **not** zero. Published as it
-stands, with every residual named.
+is a bypass, it is baselined, and it is published as it stands, with
+every residual named.
 
-Total: **0**. Capped by name in `tests/test_gate_reference_census.py`.
+Two numbers, not one. The first is what this run MEASURED. The second
+is what `tools/gate_reference_census_baseline.json`
+RECORDS. Publishing only the first would let a non-empty baseline read
+as an empty allowance, because a baselined
+member that stopped diverging leaves the measured list empty while the
+committed file still grants it tolerance. So both are here, and so is
+every name on which they differ.
 
-No member. The allowance is empty this run.
+Measured this run: **0**. Recorded in the baseline: **0**. Capped by name in `tests/test_gate_reference_census.py`.
+
+No member on either side: the run measured none and the committed
+baseline records none. The allowance is empty, not merely unreported.
+
+The two agree.
 
 A count would let this list churn unread. Names have to be edited, and
 `--check` fails in BOTH directions: on a new member, and on a baselined
@@ -162,7 +187,7 @@ and minutes rather than seconds.
 - programs: **894**
 - tracked buckets agree: **yes**
 - crate `false-admission` members: **0**
-- recorded at checker version: `GATE-CENSUS-1+6b2ec5be4ef4`
+- recorded at checker version: `GATE-CENSUS-1+378bb31fb76b`
 - current for this run: **yes**
 
 What it does not establish: The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.
@@ -182,6 +207,32 @@ Those three need nothing but python and take seconds. The crate engine,
 `tools/gate_reference_census.py --engine crate --check`, additionally
 needs cargo, builds the shipped gate, and is the slow half.
 
+### Checking the numbers in this file rather than trusting them
+
+`--check` re-runs the census and compares every number here against it,
+so a passing `--check` in your own clone is the whole verification: the
+table is yours, not ours. It exits 1 and names each field that moved.
+Nothing in the digests depends on where you cloned to, so the values
+below are the values you should get.
+
+| number here | what recomputes it |
+|---|---|
+| distinct programs, 888 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
+| programs run, 894 | the length of the same list, repeats included |
+| run `census-selfhost-71f2f8f1e6f9` | sha256 over every `(case id, source)` the run read, ids repo-relative |
+| checker version `GATE-CENSUS-1+378bb31fb76b` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
+| `src/revl@sha256:63ca4121d9ff` | sha256 over `src/revl/**/*.py` |
+| every bucket count | `tools/gate_reference_census.py --json out.json` |
+| the false-admit allowance | `tools/gate_reference_census_baseline.json`, which is in the tree |
+| the provenance columns | `tools/corpus_provenance.py` over `tests/fixtures/corpus_provenance.json` |
+
+The corpus is the repository. There is no download, no server and no
+hosted copy to go stale against this one: the programs the census runs
+are the `.rvl` files in the directories named above plus the inline
+program lists in `tests/test_selfhost_lower.py` and
+`tools/gate_reference_census.py`, and `--json` writes out the per-case
+classification if you want to audit an individual verdict.
+
 ## What this does not establish
 
 - This report says nothing about any implementation other than revl's own two. It is not a comparison and carries no comparative claim.
@@ -189,6 +240,7 @@ needs cargo, builds the shipped gate, and is the slow half.
 - Generation zero in the provenance manifest is a declaration about the tree as it stood, not a measurement. What holds from there on is that an arriving document must name its generation, and that an undeclared one counts as loop-authored.
 - Generation zero does not mean a person typed it. Issue #1397 measured the generation-zero set against the commits that introduced it: 153 of 850 entries arrived on a branch named agent/*, 132 more on a commit carrying an AI co-author trailer, 415 on commits pushed to the trunk with no branch to read, and the repository's root commit carries such a trailer itself. Both signals are lower bounds. The honest reading is that this corpus is model-written and pre-loop, and the floors gate the second word, not the first.
 - A mislabelled provenance entry defeats the provenance measurement exactly as re-recording the baseline would defeat the census. Neither is detected by a tool; both are edits in a diff somebody reads.
+- The corpus holds 6 case ids that appear twice, so `n` (894) counts 6 programs twice and `n_distinct` (888) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported.
 
 ## Schema
 
