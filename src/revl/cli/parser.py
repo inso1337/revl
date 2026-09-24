@@ -1999,8 +1999,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend", action="append", default=[], metavar="BACKEND",
         choices=list(BUNDLE_BACKENDS),
         help="a backend to emit into the bundle; repeatable. Omit to emit every "
-             f"backend ({', '.join(BUNDLE_BACKENDS)}); an emitter that refuses "
-             "this IR is recorded as skipped, not a failure")
+             f"backend ({', '.join(BUNDLE_BACKENDS)}). An emitter that is absent "
+             "here is omitted quietly (exit 0); an emitter that REFUSES this IR "
+             "is recorded under refusedBackends with its own diagnostic, printed, "
+             "and exits 4")
     bundle_cmd.add_argument(
         "--topology", default=None, metavar="PLACEMENT",
         help="a placement/topology map (TOML or JSON) to carry in the bundle as "

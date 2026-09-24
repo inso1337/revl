@@ -1447,7 +1447,11 @@ source plus the runtime manifest, so one artifact carries every tier.
   (required).
 - `--backend BACKEND` - a backend to emit into the bundle; repeatable. Omit to
   emit every backend (python, typescript, rust, java, go, wasm). An emitter
-  that refuses this IR is recorded as skipped, not as a failure.
+  that is absent from this machine is omitted quietly and the bundle still
+  exits 0; an emitter that *refuses* this IR is recorded under
+  `refusedBackends` in the runtime manifest with its own diagnostic, printed
+  to stderr in the emitter's own words, and the bundle exits 4
+  (`docs/bundle.md` §4).
 - `--topology PLACEMENT` - a placement/topology map (TOML or JSON) carried in
   the bundle as `topology.json`; omit for a single-process bundle.
 - `--json` - print the bundle path and its runtime manifest as JSON.
