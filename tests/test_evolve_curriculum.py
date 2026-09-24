@@ -9,9 +9,21 @@ order matters:
      unfalsifiable tasks would not be able to make these pass;
   3. the `--check` gate FIRES. This repository has measured five separate
      checks that ran on every PR and could not fail; a sixth is worth nothing.
-     `test_check_reds_when_a_rung_cannot_be_populated` makes it red on the real
-     code path, and `test_check_is_green_on_the_whole_curriculum` is the
-     control that passes on the same tree.
+     `test_check_reds_when_a_rung_is_unreachable` makes it red on the real code
+     path, and `test_check_is_green_on_the_whole_curriculum` is the control
+     that passes on the same tree.
+
+A fourth thing became worth testing with issue #1410. `hard` is derived from
+recorded gate bypasses and the census baseline records none: PR #1396 met item
+391's exit and PR #1404 took the go carried set to zero, so the rung is empty
+because the work behind it was finished. What is gated is therefore whether a
+rung is REACHABLE, and the population is reported beside it. The tests that
+depended on `hard` being occupied would otherwise have been a third instance
+this week of a guard that only worked while something was broken, so each one
+now CONSTRUCTS the state it is about: `test_a_recorded_bypass_fills_the_hard_
+rung_and_removing_it_empties_it` stages a baseline entry and watches the rung
+fill and empty again, and `test_an_empty_rung_and_a_source_that_could_not_run_
+do_not_print_the_same_thing` holds the two apart at the output.
 """
 
 import importlib.util
@@ -35,9 +47,16 @@ def _tool():
 
 
 @pytest.fixture(scope="module")
-def curriculum():
+def derived():
+    """One run of every source, with the measurement kept beside the tasks."""
     tool = _tool()
-    return tool, tool.generate()
+    return tool, tool.derive()
+
+
+@pytest.fixture(scope="module")
+def curriculum(derived):
+    tool, derivations = derived
+    return tool, tool.tasks_of(derivations)
 
 
 # --------------------------------------------------------------------------- #
@@ -63,12 +82,38 @@ def test_task_ids_are_unique(curriculum):
 # --------------------------------------------------------------------------- #
 # 2. The tier is computed, and every rung is populated.                         #
 # --------------------------------------------------------------------------- #
-def test_every_rung_is_non_vacuously_populated(curriculum):
-    tool, tasks = curriculum
-    counts = tool.populations(tasks)
+def test_every_rung_is_reachable_and_the_population_is_measured(derived):
+    """What is gated is reachability; the population is a measurement.
+
+    Every rung must be stamped by some source that is reading its artifacts at
+    HEAD. How many instances that source currently finds is a fact about the
+    tree, not about the ladder: `hard` is 0 at HEAD because the recorded gate
+    bypasses it derives from were all closed.
+    """
+    tool, derivations = derived
+    counts = tool.populations(tool.tasks_of(derivations))
     assert set(counts) == set(tool.TIERS)
-    for rung, n in counts.items():
-        assert n > 0, f"rung {rung!r} has no task at HEAD"
+    who = tool.reached_by(derivations)
+    for rung in tool.TIERS:
+        assert who[rung], f"rung {rung!r} is stamped by no source at HEAD"
+    assert sum(counts.values()) == len(tool.tasks_of(derivations))
+
+
+def test_every_task_signal_is_one_its_source_declares_it_reaches(derived):
+    """The anti-drift guard for the split above.
+
+    Reachability is only worth gating if it is the same measurement the tasks
+    carry. A source that declared one set of signals and stamped another would
+    make a rung look reachable that nothing feeds, which is the decorative rung
+    the gate exists to catch.
+    """
+    _, derivations = derived
+    for d in derivations:
+        declared = set(d.signals)
+        for task in d.tasks:
+            assert task.signal in declared, \
+                f"{d.source} stamps {task.signal} on {task.task_id} and does " \
+                f"not declare it reachable"
 
 
 def test_the_rungs_come_from_different_sources(curriculum):
@@ -162,20 +207,87 @@ def test_expert_tasks_name_a_guarantee_no_lean_file_mentions(curriculum):
             f"{task.task_id} claims {code} is a guarantee the reference enforces"
 
 
-def test_hard_tasks_name_a_program_the_reference_refuses(curriculum):
-    """The census bypasses: the named program must exist AND the reference must
-    really refuse it, which is the half that makes the task a task."""
+def _refuses_every_named_program(tasks):
+    """The census predicate: the named program exists AND the reference really
+    refuses it, which is the half that makes the task a task."""
     from revl import compile_files
     from revl.errors import RevlError
 
-    _, tasks = curriculum
-    hard = [t for t in tasks if t.task_id.startswith("census/")]
-    assert hard
-    for task in hard:
+    for task in tasks:
         path = ROOT / task.artifact
         assert path.is_file(), f"{task.task_id}: {task.artifact} is missing"
         with pytest.raises(RevlError):
             compile_files([str(path)])
+    return len(tasks)
+
+
+def test_hard_tasks_name_a_program_the_reference_refuses(curriculum):
+    """Holds over whatever census tasks HEAD has, which is currently none.
+
+    The assertion is not allowed to be vacuous just because it is empty here,
+    so its teeth are shown on a constructed baseline in
+    `test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it`
+    rather than by requiring the tree to still have an open gate bypass.
+    """
+    _, tasks = curriculum
+    _refuses_every_named_program(
+        [t for t in tasks if t.task_id.startswith("census/")])
+
+
+# A baseline entry is a recorded divergence, so it cannot be conjured from
+# nothing honestly: these are programs the reference genuinely refuses (they
+# are `examples/rejections/`, which exist to be refused), staged into a
+# baseline of this test's own so the generator has an entry to derive from.
+# The staged file says nothing about HEAD and is never written into the tree.
+_STAGED_BYPASSES = (
+    "examples/rejections/t13_unknown_match_case.rvl",
+    "examples/rejections/t18_type_alias_cycle.rvl",
+)
+
+
+def _staged_baseline(tmp_path, cases):
+    import json
+    live = json.loads((ROOT / "tools" / "gate_reference_census_baseline.json")
+                      .read_text())
+    staged = tmp_path / "baseline.json"
+    staged.write_text(json.dumps(
+        {**live, "buckets": {"false-admit/TYPE": list(cases)} if cases else {}}))
+    return staged
+
+
+def test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it(
+        derived, tmp_path):
+    """The demonstration issue #1410 asks for, in both directions.
+
+    A generator nobody has watched produce an empty rung deliberately is not
+    evidence, so: stage two recorded bypasses, watch `hard` fill with them and
+    the gate stay green; take them away, watch the rung empty, the source keep
+    declaring that it reaches `hard`, and the gate stay green for the other
+    reason. What changes between the two runs is one file this test owns.
+    """
+    tool, live = derived
+
+    filled = tool.adapter_census_bypass(
+        _staged_baseline(tmp_path, _STAGED_BYPASSES))
+    assert {t.tier for t in filled.tasks} == {"hard"}
+    assert _refuses_every_named_program(filled.tasks) == len(_STAGED_BYPASSES)
+
+    others = [d for d in live if d.source != "census-bypass"]
+    with_entries = others + [filled]
+    assert tool.populations(tool.tasks_of(with_entries))["hard"] == \
+        len(_STAGED_BYPASSES)
+    assert "hard" not in tool.empty_rungs(with_entries)
+    assert tool.check(with_entries) == []
+
+    emptied = tool.adapter_census_bypass(_staged_baseline(tmp_path, ()))
+    assert emptied.tasks == ()
+    assert emptied.signals == filled.signals      # the same measurement
+    assert "hard" in emptied.rungs()
+    without = others + [emptied]
+    assert tool.populations(tool.tasks_of(without))["hard"] == 0
+    assert tool.empty_rungs(without)["hard"] == ["census-bypass"]
+    assert tool.check(without) == [], \
+        "an empty but reachable rung is a measurement, not a failure"
 
 
 def test_medium_tasks_name_a_dispatch_the_reference_really_has(curriculum):
@@ -206,50 +318,125 @@ def test_medium_tasks_name_a_dispatch_the_reference_really_has(curriculum):
 # --------------------------------------------------------------------------- #
 # 4. The gate fires.                                                            #
 # --------------------------------------------------------------------------- #
-def test_check_is_green_on_the_whole_curriculum(curriculum):
+def test_check_is_green_on_the_whole_curriculum(derived):
     """The control. Same tree, same code path, no problems."""
-    tool, tasks = curriculum
-    assert tool.check(tasks) == []
+    tool, derivations = derived
+    assert tool.check(derivations) == []
 
 
-def test_check_reds_when_a_rung_cannot_be_populated(curriculum):
-    """The firing proof. Restrict the curriculum to the census source alone and
-    the three rungs it cannot reach are named, one line each."""
-    tool, _ = curriculum
-    only_hard = tool.generate(["census-bypass"])
-    assert only_hard
-    assert {t.tier for t in only_hard} == {"hard"}
-    problems = tool.check(only_hard)
-    assert len(problems) == 3
-    for rung in ("easy", "medium", "expert"):
-        assert any(f"tier {rung!r} has no task" in p for p in problems), problems
+def test_check_reds_when_a_rung_is_unreachable(derived):
+    """The firing proof. Restrict the curriculum to one source and the rungs
+    nothing then stamps are named, one line each.
+
+    `unexplained-refusal` is used rather than `census-bypass` on purpose: the
+    proof must not itself depend on a source having live instances, which is
+    the trap the whole issue is about. It holds on the signals, so it would
+    still hold if this source's population went to zero too.
+    """
+    tool, _ = derived
+    only_easy = tool.derive(["unexplained-refusal"])
+    assert tool.reached_by(only_easy)["easy"] == ["unexplained-refusal"]
+    problems = tool.check(only_easy)
+    assert len(problems) == 3, problems
+    for rung in ("medium", "hard", "expert"):
+        assert any(f"tier {rung!r} is unreachable" in p for p in problems), \
+            problems
 
 
-def test_check_reds_on_a_task_whose_artifact_left_the_tree(curriculum):
+def test_check_reds_on_a_source_that_ran_and_measured_nothing(derived):
+    """The state that used to be indistinguishable from a finished rung.
+
+    A source whose artifacts were renamed away skips every branch and returns
+    empty. That must not read as `hard` being done, so a derivation with no
+    signal is named, and the rung it fed reds as unreachable.
+    """
+    tool, derivations = derived
+    import dataclasses
+    blinded = [dataclasses.replace(d, signals=(), tasks=())
+               if d.source == "census-bypass" else d for d in derivations]
+    problems = tool.check(blinded)
+    assert any("'census-bypass' ran and measured no signal" in p
+               for p in problems), problems
+    assert any("tier 'hard' is unreachable" in p for p in problems), problems
+    assert tool.empty_rungs(blinded) == {}, \
+        "a source that measured nothing must not be reported as merely empty"
+
+
+def test_check_reds_on_a_source_that_could_not_be_derived(derived):
+    """And the third state: the generator could not run at all."""
+    tool, _ = derived
+
+    def explodes():
+        raise FileNotFoundError("tools/gate_reference_census_baseline.json")
+
+    saved = tool.ADAPTERS["census-bypass"]
+    tool.ADAPTERS["census-bypass"] = explodes
+    try:
+        broken = tool.derive(["census-bypass", "unexplained-refusal"])
+    finally:
+        tool.ADAPTERS["census-bypass"] = saved
+    problems = tool.check(broken)
+    assert any("'census-bypass' could not be derived at HEAD: "
+               "FileNotFoundError" in p for p in problems), problems
+
+
+def test_check_reds_on_a_task_whose_artifact_left_the_tree(derived):
     """The other firing direction: an invented task. Rewrite one task's artifact
     to a path that is not in the tree and the gate names it."""
-    tool, tasks = curriculum
+    tool, derivations = derived
     import dataclasses
-    mutated = list(tasks)
-    mutated[0] = dataclasses.replace(
-        mutated[0], artifact="docs/design/this-file-does-not-exist.md")
+    mutated = list(derivations)
+    first = mutated[0]
+    mutated[0] = dataclasses.replace(first, tasks=(
+        dataclasses.replace(first.tasks[0],
+                            artifact="docs/design/this-file-does-not-exist.md"),
+    ) + first.tasks[1:])
     problems = tool.check(mutated)
     assert any("is not in the tree" in p for p in problems), problems
 
 
+def _cli(*args):
+    return subprocess.run(
+        [sys.executable, str(ROOT / "tools" / "evolve_curriculum.py"), *args],
+        capture_output=True, text=True, cwd=ROOT)
+
+
 def test_cli_check_exits_zero_and_the_restricted_run_exits_one():
     """Through the CLI, because that is how a gate is actually invoked."""
-    tool_path = ROOT / "tools" / "evolve_curriculum.py"
-    green = subprocess.run(
-        [sys.executable, str(tool_path), "--check"],
-        capture_output=True, text=True, cwd=ROOT)
+    green = _cli("--check")
     assert green.returncode == 0, green.stderr[-2000:]
-    red = subprocess.run(
-        [sys.executable, str(tool_path), "--check",
-         "--adapter", "census-bypass"],
-        capture_output=True, text=True, cwd=ROOT)
+    red = _cli("--check", "--adapter", "census-bypass")
     assert red.returncode == 1
     assert "CURRICULUM-RED" in red.stderr
+
+
+def test_an_empty_rung_and_a_source_that_could_not_run_do_not_print_the_same_thing():
+    """The output-level half of issue #1410.
+
+    Two different events reach the reader of a `--check` run today: `hard` is
+    empty because the bypasses behind it were closed, and a source that cannot
+    read its artifacts. They are held apart by prefix and by exit code, and
+    both halves are read off real runs rather than asserted.
+    """
+    green = _cli("--check")
+    assert green.returncode == 0
+    empty = [ln for ln in green.stderr.splitlines()
+             if ln.startswith("CURRICULUM-EMPTY")]
+    assert len(empty) == 1, green.stderr[-2000:]
+    assert "tier 'hard' has 0 tasks at HEAD" in empty[0]
+    assert "census-bypass" in empty[0], "the empty rung does not say who feeds it"
+    assert "CURRICULUM-RED" not in green.stderr
+    assert "  hard       0  empty, and reachable" in green.stdout, green.stdout[:400]
+
+    red = _cli("--check", "--adapter", "unexplained-refusal")
+    assert red.returncode == 1
+    reds = [ln for ln in red.stderr.splitlines()
+            if ln.startswith("CURRICULUM-RED")]
+    assert len(reds) == 3, red.stderr[-2000:]
+    assert all("is unreachable at HEAD" in ln for ln in reds)
+    # and the two never collide: no line carries both prefixes, and the wording
+    # of an empty rung never appears on a red one.
+    assert not any("has 0 tasks at HEAD" in ln for ln in reds)
 
 
 def test_the_non_vacuity_assertions_would_reject_an_invented_task(curriculum):
