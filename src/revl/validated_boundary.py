@@ -80,6 +80,20 @@ from .errors import RevlError
 #: The tiers with no response-validation seam today. The py tier is deliberately
 #: absent: it owns `validate_response` / `validate_retry` / the grammar registry
 #: at the service-operation carrier, and has its own narrower extern gate.
+#:
+#: The same five names as `session_commit.OWNERLESS_TIERS`, and deliberately NOT
+#: imported from it. Those are two independent capability gaps that agree today
+#: only because python is the only tier that has closed either: a session owner
+#: is a deferral queue, an escrow and a commit verb (item 245); this is a
+#: response-validation seam (items 257 and 513). Neither implies the other, and
+#: the tree already carries the asymmetry. The typescript runtime's
+#: `_jsonSchemaError` is one of five parts away from leaving THIS list and has
+#: nothing at all towards a session owner, while `--target temporal` is durable
+#: machinery on that same tier that says nothing about validating a completion.
+#: Importing one list from the other would let a tier that grew a deferral queue
+#: silently claim it validates completions. Recorded as a deliberate near-miss
+#: in `tests/fixtures/vocabulary_mirror_ledger.json` (issue #1285's gate), with
+#: the reason and the condition for deleting that entry.
 UNVALIDATING_TIERS = ("rust", "go", "java", "wasm", "typescript")
 
 #: The refusal tag, shared with `lower.py`'s frontend `validated` refusals and
