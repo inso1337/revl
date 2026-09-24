@@ -1839,9 +1839,12 @@ verbs it accepts today:
   recomputed hashes tier by tier: version, source, independent pin, dependency
   lock, IR, policy surface, backend version, attestation, and emitted artifact. Each
   tier reports OK, MISMATCH, or "cannot verify" (nothing was recorded for it -
-  honest degradation, not a pass). `reproduce` is a verifier and changes no truc
-  state, so the launcher intercepts it before the component dispatch rather than
-  routing it through `cli.rvl`.
+  honest degradation, not a pass). On the emitted-artifact tier a backend that
+  is absent from this machine is "cannot verify"; a backend that *refuses* the
+  rebuilt IR is a MISMATCH quoting the emitter's own diagnostic, with no rebuilt
+  hash, because nothing was rebuilt (issue #1403). `reproduce` is a verifier and
+  changes no truc state, so the launcher intercepts it before the component
+  dispatch rather than routing it through `cli.rvl`.
   - `component` - the component to reproduce, `name` or `name@version`
     (required; omitting it exits 2). `@version` is a pin: it is checked against
     the version the registry records for the entry (its `version` file, carried
