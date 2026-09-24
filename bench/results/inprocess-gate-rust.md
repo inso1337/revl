@@ -7,23 +7,44 @@ buys and, just as load-bearing, what it does not. Produced by
 `bench/inprocess_gate_rust` (`cargo run --release --manifest-path
 bench/inprocess_gate_rust/Cargo.toml -- --write`).
 
-Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:ef07cdf723612cf8`.
+Gate surface: `api=1.0.0`, `language=2.0.0`, `frontier=selfhost-admit:702dd485a98ede1d`.
 Layer decided: composition + guarantee layer (G1..G4, A1, PRELUDE) and parse (BAD); NOT the reference type layer.
 
-## This gate issues no admissions - read this before wiring it in
+## The VERDICT surface issues no admissions - read this before wiring it in
 
 The py harness (`bench/results/inprocess-gate.md`) proves an IDENTITY:
 `revl.gate.admit` IS the reference admission path, so the in-process verdict IS
 the reference verdict. **This harness cannot and does not claim that.**
 `revl-gate` is the self-host front end compiled to rust; it decides the
-composition/guarantee layer and runs NO type layer, so it has no admission arm
-at all. Its three verdicts are `refused`, `no_objection` and `outside_frontier`,
-and the wire reports `"admitted": false` on every one of them.
+composition/guarantee layer and runs NO type layer, so its VERDICT surface has
+no admission arm at all. Its three verdicts are `refused`, `no_objection` and
+`outside_frontier`, and the wire reports `"admitted": false` on every one of
+them.
 
-What the rust embed buys is the other direction: a local, Python-free REFUSAL
-that agrees with the reference compiler on the covered corpus. A refusal is
-worth acting on. A no-objection is NOT an admission - before running anything,
-get a reference verdict (`revl compile`, or `revl.gate.admit` on py).
+What the rust embed buys on that surface is the other direction: a local,
+Python-free REFUSAL that agrees with the reference compiler on the covered
+corpus. A refusal is worth acting on. A no-objection is NOT an admission -
+before running anything, get a reference verdict (`revl compile`, or
+`revl.gate.admit` on py).
+
+## The ADMISSION surface, and how small it is
+
+`revl_gate::issue_admission` / `issue_admission_into` are a SEPARATE type for a
+separate question, with exactly one admitting arm, and the batch is screened on
+them too (the `admission` column below). A green from them is the reference's
+own answer: `tests/test_inprocess_gate_rust.py::test_every_rust_admission_is_a_
+py_admission` holds every admission this harness records to
+`revl.gate.admit`/`admit_into` on the identical bytes, wire included, with zero
+tolerance.
+
+The arm is confined to `ADMITTED_LAYER` - interface declarations only, over a
+closed scalar vocabulary - which is the region where the covered layer is the
+WHOLE question because the source carries no term the reference type layer
+decides. In this batch exactly one candidate is inside it, `fresh_interface`,
+and it is admitted both standalone and INTO the held composition. Everything
+with a `fn` body, a `component` or a `provide` is WITHHELD, including
+`standalone_twin`, which the py gate admits. That asymmetry is the surface
+being conservative, and it is the direction this crate is allowed to err in.
 
 ## The manifest arm (issue #346): half of it closed here
 
@@ -34,7 +55,7 @@ arm, not an admission arm - it still reports `"admitted": false`, and it refuses
 what the py gate refuses, with the same code and the same why-trace.
 
 What that closes and what it does not, against `held_manifest` =
-`Kv/store/;App/app/;App<store;!services;:Store,get,bump,put;:AppSvc,ping` (the py harness's `base_manifest()` wire):
+`Kv/store/;App/app/;App<store;!services;:Store,get(key:Str),bump(n:Int),put(key:Str|value:Str);:AppSvc,ping()` (the py harness's `base_manifest()` wire):
 
 * **closed** - the ambient half of G2/G3: a candidate whose provides collide
   with a RUNNING key is refused. `ambient_provision_conflict` below is the exit
@@ -54,34 +75,45 @@ What that closes and what it does not, against `held_manifest` =
   shape calling an operation `Store` does declare - is not. Telling those two
   apart is the resolution; a gate reading the wire's service NAMES alone answers
   the same thing about both.
-* **still open** - ISSUING the admission. py's `admit_into` ADMITS
-  `cache_layer` into the running manifest; `revl_gate::Verdict` has no
-  `Admitted` arm at all, so the most this gate says is that it does not object.
-  Closing that is the self-host TYPE LAYER's remaining job (argument typing, the
-  compatibility relation on a redeclaration, and the admission arm itself), its
-  own roadmap lane, and is deliberately NOT attempted here.
+* **still open, and bounded** - ISSUING the admission FOR THIS SHAPE. py's
+  `admit_into` ADMITS `cache_layer` into the running manifest; the admission
+  surface WITHHOLDS it, because `ADMITTED_LAYER` is interface declarations only
+  and `cache_layer` carries a component with a provide-method body. The bound is
+  measured on the same wire: `fresh_interface` goes through
+  `issue_admission_into` against this very manifest and comes back ADMITTED,
+  byte-identically to `revl.gate.admit_into`. So what is open is not "rust
+  cannot issue a green" but "rust cannot issue one for a provide-method body".
+  Closing that is the self-host TYPE LAYER's remaining job (the provide method's
+  return, the delegated call's arity and argument types against the running
+  declaration - whose return type this wire does not yet carry - the
+  compatibility relation on a redeclaration, and the family scan that turns "no
+  objection" into "no reference family applies"), its own roadmap lane, and is
+  deliberately NOT attempted here.
 
 ## The batch, screened in-process
 
-| candidate | standalone | into the held manifest | shared with the py harness | note |
-|---|---|---|---|---|
-| `standalone_twin` | no objection | not asked | yes | standalone-valid, Store inlined; py ADMITS it |
-| `cache_layer` | refuse (G1) | no objection | yes | requires a Store not in the source; refused standalone by both gates, and py ADMITS it into the running manifest |
-| `calls_missing_method` | refuse (G1) | refuse (A6) | yes | calls an operation the running Store does not declare; both gates refuse it into the running manifest (A6) |
-| `ambient_provision_conflict` | no objection | refuse (G2) | no | provides a key the running composition already provides; py refuses it into the manifest (G2) and ADMITS it standalone |
-| `incomplete_provide` | no objection | not asked | yes | provides a service but omits a declared method; py refuses |
-| `provision_conflict` | refuse (G2) | not asked | no | two components provide the same service; py refuses (G2) |
-| `undeclared_emission` | refuse (G4) | not asked | no | an undeclared emission is called from a body; py refuses (G4) |
-| `syntax_error` | no objection | not asked | yes | a genuine parse failure; py refuses |
-| `hole_draft` | no objection | not asked | yes | a draft with an open typed hole; py refuses (T3) |
-| `type_layer_miss` | no objection | not asked | no | a type error; py refuses (T1) |
-| `frontier_oversized` | declined (FRONTIER) | not asked | no | a source over the size bound; py ADMITS, this gate is not entitled to decide |
+| candidate | standalone | into the held manifest | admission | shared with the py harness | note |
+|---|---|---|---|---|---|
+| `standalone_twin` | no objection | not asked | withheld | yes | standalone-valid, Store inlined; py ADMITS it |
+| `cache_layer` | refuse (G1) | no objection | withheld / withheld into | yes | requires a Store not in the source; refused standalone by both gates, and py ADMITS it into the running manifest |
+| `calls_missing_method` | refuse (G1) | refuse (A6) | withheld / withheld into | yes | calls an operation the running Store does not declare; both gates refuse it into the running manifest (A6) |
+| `ambient_provision_conflict` | no objection | refuse (G2) | withheld / withheld into | no | provides a key the running composition already provides; py refuses it into the manifest (G2) and ADMITS it standalone |
+| `fresh_interface` | no objection | no objection | ADMITTED / ADMITTED into | no | interface declarations only, naming no running service; py ADMITS it into the running manifest and so does this gate's ADMISSION surface |
+| `incomplete_provide` | no objection | not asked | withheld | yes | provides a service but omits a declared method; py refuses |
+| `provision_conflict` | refuse (G2) | not asked | withheld | no | two components provide the same service; py refuses (G2) |
+| `undeclared_emission` | refuse (G4) | not asked | withheld | no | an undeclared emission is called from a body; py refuses (G4) |
+| `syntax_error` | no objection | not asked | withheld | yes | a genuine parse failure; py refuses |
+| `hole_draft` | no objection | not asked | withheld | yes | a draft with an open typed hole; py refuses (T3) |
+| `type_layer_miss` | refuse (T1) | not asked | withheld | no | a type error; py refuses (T1) |
+| `frontier_oversized` | declined (FRONTIER) | not asked | withheld | no | a source over the size bound; py ADMITS, this gate is not entitled to decide |
 
-4 refused, 6 no-objection, 1 declined. Every one of them
-serialises as `"admitted": false`; nothing in this batch produced anything a
-host could read as an admission, and every refusal it did issue is a refusal the
-py admission gate also issues, with the same guarantee tag
-(`tests/test_inprocess_gate_rust.py`).
+5 refused, 6 no-objection, 1 declined. Every one of those
+VERDICTS serialises as `"admitted": false`; nothing on that surface produced
+anything a host could read as an admission, and every refusal it did issue is a
+refusal the py admission gate also issues, with the same guarantee tag
+(`tests/test_inprocess_gate_rust.py`). The `admission` column is the other
+surface, and the one green in it is a real reference admission, held to
+`revl.gate` wire and all.
 
 Verdicts are order-independent: screening the batch in a fixed order and in a
 shuffled order in the same process yields identical per-candidate verdicts on
@@ -126,11 +158,13 @@ own words, and against the held manifest the `!services` block supplies `Store`
 and the refusal correctly lifts. Its REQUIREMENT is now resolved too, against the
 operations the same block carries - `calls_missing_method` is the contrast that
 proves it, refused `A6` where `cache_layer` is not. What py does that this gate
-still cannot is the step after that: ISSUING an admission. `revl_gate::Verdict`
-has no `Admitted` arm, so the most this gate says about `cache_layer` into the
-manifest is that it does not object. That last step is the rest of the self-host
-type layer, and this file is where the remaining distance is measured, not
-smoothed over.
+still cannot is the step after that: ISSUING an admission for this shape. The
+VERDICT surface has no `Admitted` arm by design, and the ADMISSION surface
+withholds `cache_layer` because a component with a provide-method body is
+outside `ADMITTED_LAYER`. `fresh_interface` is the control that keeps this a
+price on one shape rather than on the whole question: same manifest, same call,
+a real admission. That last step is the rest of the self-host type layer, and
+this file is where the remaining distance is measured, not smoothed over.
 
 ## Fail closed
 
@@ -153,18 +187,18 @@ I/O, no network, no toolchain, no Python, no process hop. Nothing else is in it.
 
 | candidate size | bytes | median (ms) | p90 (ms) | p99 (ms) | samples |
 |---|---|---|---|---|---|
-| small (3 methods) | 218 | 0.845 | 0.862 | 0.878 | 25 |
-| medium (12 methods) | 636 | 5.904 | 6.018 | 6.039 | 25 |
-| large (48 methods) | 2364 | 69.021 | 71.517 | 147.575 | 25 |
+| small (3 methods) | 218 | 6.838 | 6.985 | 7.175 | 25 |
+| medium (12 methods) | 636 | 54.600 | 58.179 | 60.047 | 25 |
+| large (48 methods) | 2364 | 683.026 | 855.141 | 945.676 | 25 |
 
 The representative scenario (the py harness's `standalone_twin`, 276 B)
-measured median **0.899 ms** (p90 1.238 ms, p99 2.314 ms,
+measured median **7.112 ms** (p90 7.446 ms, p99 7.490 ms,
 n=25).
 
 **This does not inherit the py headline, and it must not be reported as if it
 did.** The py in-process round-trip is tenths of a millisecond and grows roughly
 with candidate size. This one starts in the milliseconds and grows far faster
-than the source does: 10.8x the bytes costs 82x the time
+than the source does: 10.8x the bytes costs 100x the time
 across the size cells, which is quadratic-shaped, not linear. At a few kilobytes
 - an ordinary model-authored component - a single screen costs on the order of a
 second. An agent loop that screens every candidate inline would feel that.
@@ -177,12 +211,12 @@ would be flat across these rows; it is not.
 
 | shape | bytes | verdict | median (ms) | samples |
 |---|---|---|---|---|
-| declaration-heavy | 1212 | no_objection | 18.474 | 6 |
-| statement-heavy | 1214 | no_objection | 16.061 | 6 |
-| comment-padded | 1248 | no_objection | 0.835 | 6 |
+| declaration-heavy | 1212 | no_objection | 194.585 | 6 |
+| statement-heavy | 1214 | no_objection | 137.298 | 6 |
+| comment-padded | 1248 | no_objection | 7.040 | 6 |
 
 The comment-padded shape - the same byte count, a fraction of the tokens - is
-roughly 22x cheaper than the declaration-heavy one, while the
+roughly 28x cheaper than the declaration-heavy one, while the
 statement-heavy shape, which carries ONE declaration and a body full of
 statements, costs the same order as the declaration-heavy one. So the cost
 tracks TOKENS: it lives in the emitted lexer/parser, not in the composition gate
