@@ -183,6 +183,30 @@ Each tier reports one of three outcomes, honestly:
   tier with no recorded evidence cannot be a mismatch, and it never silently
   reads as OK.
 
+On the emitted-artifact tier those two are not the only ways a backend can fail
+to produce bytes, and `reproduce` keeps the three apart (issue #1403):
+
+- the **emitter is absent** here, so nothing was decided about this IR and the
+  tier is `cannot verify`;
+- the **emitter refuses** this IR by name, which is a definite answer from a
+  tier that is installed and ran. The recorded artifact cannot be rebuilt by
+  this toolchain at all, so the recorded claim no longer holds and the tier is a
+  MISMATCH quoting the emitter's own sentence. It prints `rebuilt (none)` rather
+  than a second hash, because none was computed:
+
+  ```console
+    emitted artifact [wasm]  MISMATCH  wasm: the emitter refuses this IR, so the
+                                       recorded artifact cannot be re-emitted at
+                                       all: <the emitter's own diagnostic>
+                                       recorded 000d0832ef582592, rebuilt (none)
+  ```
+
+- the **emitter faults**, which is a compiler bug and is deliberately not caught:
+  it reaches you as a traceback. `reproduce` is what makes a release checkable
+  by someone who did not build it, and "the artifact is wrong", "the compiler
+  moved" and "this tier will not lower this shape" are three different verdicts.
+  Dressing a crash up as one of the other two would be the worse defect.
+
 `@version` is a pin, not a label. A registry entry declares its version in a
 one-line `version` file, `build_index` records it in the index row, and `truc
 add` copies it into your `truc.lock`, so there is a value on both sides for a

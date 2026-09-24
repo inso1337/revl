@@ -556,7 +556,8 @@ def test_emitted_artifact_reproduces_green(registry):
     from revl.registry import _sha256
 
     ir = compile_files([str(_entry(registry) / "component.rvl")])
-    emitted = R._emit_backend_source("python", ir)
+    emitted, refusal = R._emit_backend_source("python", ir)
+    assert refusal is None, refusal
     if emitted is None:
         pytest.skip("python backend emitter not importable in this environment")
     _record_py_artifact(registry, _sha256(emitted))
@@ -571,7 +572,7 @@ def test_emitted_artifact_mismatch_is_reported(registry):
     """A recorded artifact hash that the re-emit does not reproduce is a
     MISMATCH with both hashes, the artifact-reproducibility gap, caught."""
     ir = compile_files([str(_entry(registry) / "component.rvl")])
-    if R._emit_backend_source("python", ir) is None:
+    if R._emit_backend_source("python", ir)[0] is None:
         pytest.skip("python backend emitter not importable in this environment")
     _record_py_artifact(registry, "00" * 32)
 
@@ -580,6 +581,9 @@ def test_emitted_artifact_mismatch_is_reported(registry):
     assert art is not None and art.status == R.MISMATCH
     assert art.recorded == "00" * 32 and art.rebuilt
     assert not report.ok
+    # A byte mismatch carries a REBUILT hash. The refusal MISMATCH below carries
+    # none, and that is how a consumer tells the two apart (issue #1403).
+    assert "refuses this IR" not in art.detail
 
 
 # ------------------------------------------------------------------- CLI wiring
@@ -632,3 +636,251 @@ def test_cli_run_unknown_component_is_cannot_verify_exit_two(registry, capsys):
     code = R.run(["not_a_real_component", "--registry", str(registry)])
     assert code == 2
     assert "cannot verify" in capsys.readouterr().out
+
+
+# ------------------------------- issue #1403: refusal, fault and absence apart
+
+"""`_emit_backend_source` used to catch `ImportError` and nothing else, so an
+emitter that REFUSED the rebuilt IR escaped `truc reproduce` as a raw Python
+traceback (12 frames, measured on the worktree base 2a0b9758a). That is the
+attestation path: it is what turns a published component into a claim someone
+who did not build it can re-check, and a traceback there does not say whether
+the artifact is wrong, the compiler moved, or the tier refuses the document.
+
+Three outcomes, kept apart:
+
+  * the emitter is ABSENT here        -> `cannot verify`, nothing was decided;
+  * the emitter REFUSES this IR       -> MISMATCH quoting the refusal, no
+                                         invented rebuilt hash;
+  * the emitter FAULTS                -> a traceback, unchanged and uncaught.
+
+THE CONTROL CARRIES AS MUCH WEIGHT AS THE FIX. `EmitError` subclasses
+`ValueError`, so a test that only asserts "no traceback" passes just as well
+against a broadened `except ValueError` that swallows genuine emitter crashes -
+the exact pattern PR #1402 removes from `bundle.py`. Every assertion below is
+paired with a bare-`ValueError` control, the same way PRs #1399 and #1402 pair
+theirs.
+"""
+
+# A document the python tier refuses BY NAME: a `validated` extern has no
+# crossing this tier can check (items 257/513, issue #1382). It compiles and
+# admits, so every tier before the artifact one is green and the refusal is the
+# only thing under test.
+REFUSED_BY_PY = """
+type Call = { tool: Str, args: Str }
+type AgentTurn = Final(Str) | ToolCalls(List[Call])
+
+extern emission[model] validated fn complete(h: Str) -> AgentTurn = @py {
+  return {"kind": "Final", "value": "x"}
+}
+
+service Cache {
+  fn get(k: Str) -> Str
+}
+
+component UserCache provides cache: Cache {
+  provide cache {
+    fn get(k) = k
+  }
+}
+"""
+
+
+def _py_emit_module():
+    """The python backend's emitter module, or a skip. Imported exactly the way
+    `_emit_backend_source` imports it, so the `EmitError` class here is the one
+    that instance will be raised from."""
+    import importlib  # noqa: PLC0415
+
+    try:
+        return importlib.import_module("backends.python.emit")
+    except ImportError:  # pragma: no cover - a bare install has no backends/
+        pytest.skip("python backend emitter not importable in this environment")
+
+
+@pytest.fixture
+def refusing_registry(registry):
+    """The throwaway registry, republished with a source the python tier
+    refuses. The registry is rebuilt with `build_index`, so the source / IR /
+    policy tiers all still agree: the entry is honestly published, it is the
+    emitter that will not lower it. Nothing under the repo's own
+    `registry/components/` is touched; this is the tmp_path copy."""
+    from revl.registry import build_index  # noqa: PLC0415
+
+    (_entry(registry) / "component.rvl").write_text(REFUSED_BY_PY, encoding="utf-8")
+    build_index(registry)
+    return registry
+
+
+def test_a_refused_tier_is_a_named_mismatch_and_not_a_traceback(refusing_registry):
+    """The bug, end to end. Before: `backends.python.emit.EmitError` propagated
+    out of `reproduce()`. After: one MISMATCH line carrying the emitter's own
+    sentence verbatim."""
+    module = _py_emit_module()
+    ir = compile_files([str(_entry(refusing_registry) / "component.rvl")])
+    emitted, refusal = R._emit_backend_source("python", ir)
+    if refusal is None:
+        pytest.skip("this tier no longer refuses this document")
+    assert emitted is None
+    assert isinstance(module.EmitError("x"), ValueError)  # why the control exists
+
+    _record_py_artifact(refusing_registry, "00" * 32)
+    report = R.reproduce(COMPONENT, registry=str(refusing_registry))
+
+    art = _tier(report, f"{R.TIER_ARTIFACT} [python]")
+    assert art is not None and art.status == R.MISMATCH
+    assert "the emitter refuses this IR" in art.detail
+    assert refusal in art.detail, "the emitter's own words, not a paraphrase"
+    # No rebuilt hash is invented: nothing was rebuilt.
+    assert art.recorded == "00" * 32
+    assert art.rebuilt == ""
+    # and every tier that was not about the emitter still holds.
+    assert [c.tier for c in report.mismatches] == [f"{R.TIER_ARTIFACT} [python]"]
+    assert _tier(report, R.TIER_SOURCE).status == R.OK
+    assert _tier(report, R.TIER_IR).status == R.OK
+
+
+def test_the_refusal_renders_and_exits_one_without_a_traceback(refusing_registry, capsys):
+    """What the operator sees. The CLI returns 1 (a recorded claim that no
+    longer holds), prints the refusal, and prints `rebuilt (none)` rather than a
+    second hash that was never computed."""
+    ir = compile_files([str(_entry(refusing_registry) / "component.rvl")])
+    if R._emit_backend_source("python", ir)[1] is None:
+        pytest.skip("this tier no longer refuses this document")
+    _record_py_artifact(refusing_registry, "00" * 32)
+
+    code = R.run([COMPONENT, "--registry", str(refusing_registry)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "Traceback" not in out
+    assert "the emitter refuses this IR" in out
+    assert "rebuilt (none)" in out
+    assert "NOT reproduced" in out
+
+
+def test_a_refusal_is_not_a_cannot_verify(refusing_registry):
+    """The distinction this issue is about. `cannot verify` means nothing was
+    decided; here the emitter is installed, it ran, and it answered. Reporting a
+    definite negative as an unchecked tier would let `truc reproduce` exit 0 on
+    a component the toolchain can no longer emit."""
+    ir = compile_files([str(_entry(refusing_registry) / "component.rvl")])
+    if R._emit_backend_source("python", ir)[1] is None:
+        pytest.skip("this tier no longer refuses this document")
+    _record_py_artifact(refusing_registry, "00" * 32)
+
+    report = R.reproduce(COMPONENT, registry=str(refusing_registry))
+    art = _tier(report, f"{R.TIER_ARTIFACT} [python]")
+    assert art.status != R.UNVERIFIED
+    assert art.tier not in [c.tier for c in report.unverified]
+    assert not report.ok
+
+
+def test_an_internal_emitter_fault_still_escapes_as_a_fault(registry, monkeypatch):
+    """CONTROL. `EmitError` IS a `ValueError`, so the catch added for this issue
+    must be the module's own class and nothing wider. A bare `ValueError` out of
+    the same call is a compiler bug and has to keep its traceback: a verifier
+    that answers a crash with a tidy sentence about the artifact is worse than
+    the traceback it replaced."""
+    module = _py_emit_module()
+
+    def boom(_ir):
+        raise ValueError("an internal emitter fault, not a refusal")
+
+    monkeypatch.setattr(module, "emit", boom)
+    ir = compile_files([str(_entry(registry) / "component.rvl")])
+    with pytest.raises(ValueError, match="an internal emitter fault"):
+        R._emit_backend_source("python", ir)
+
+
+def test_the_fault_control_reaches_the_whole_reproduce_run(registry, monkeypatch):
+    """CONTROL, one level up: the fault is not caught by the artifact tier
+    either, so it leaves `reproduce()` rather than becoming a MISMATCH line that
+    blames the artifact for a bug in the compiler."""
+    module = _py_emit_module()
+
+    def boom(_ir):
+        raise ValueError("an internal emitter fault, not a refusal")
+
+    monkeypatch.setattr(module, "emit", boom)
+    _record_py_artifact(registry, "00" * 32)
+    with pytest.raises(ValueError, match="an internal emitter fault"):
+        R.reproduce(COMPONENT, registry=str(registry))
+
+
+def test_a_subclass_of_the_refusal_class_is_still_a_refusal(registry, monkeypatch):
+    """A tier that refines its own `EmitError` is still refusing, so the catch
+    is by class and not by identity."""
+    module = _py_emit_module()
+
+    class Narrower(module.EmitError):
+        pass
+
+    def refuse(_ir):
+        raise Narrower("this tier will not lower that shape")
+
+    monkeypatch.setattr(module, "emit", refuse)
+    ir = compile_files([str(_entry(registry) / "component.rvl")])
+    emitted, refusal = R._emit_backend_source("python", ir)
+    assert emitted is None
+    assert refusal == "this tier will not lower that shape"
+
+
+def test_an_absent_emitter_is_still_cannot_verify(registry):
+    """The `ImportError` leg, unchanged: a backend that is not installed here
+    decided nothing about this IR, so the tier degrades honestly instead of
+    becoming a MISMATCH."""
+    _entry(registry).joinpath("artifacts.json").write_text(json.dumps(
+        {"backends": {"no_such_backend": {"sourceSha256": "00" * 32}}}))
+    report = R.reproduce(COMPONENT, registry=str(registry))
+    art = _tier(report, f"{R.TIER_ARTIFACT} [no_such_backend]")
+    assert art is not None and art.status == R.UNVERIFIED
+    assert "not available here" in art.detail
+    assert report.ok, "an absent toolchain is not a divergence"
+
+
+def test_the_refusal_class_is_read_off_the_module_object(registry):
+    """Why `_refusal_class` exists at all. `EmitError` is defined INSIDE each
+    backend's `emit.py`; there is no class under `src/` to name in an `except`
+    clause, and two loads of the same file produce two unrelated classes, so an
+    `except` against one does not catch an instance of the other. The class has
+    to come off the module that will raise."""
+    import types  # noqa: PLC0415
+
+    first = types.ModuleType("fake_emit_one")
+    second = types.ModuleType("fake_emit_two")
+    first.EmitError = type("EmitError", (ValueError,), {})
+    second.EmitError = type("EmitError", (ValueError,), {})
+
+    assert R._refusal_class(first) is first.EmitError
+    assert R._refusal_class(second) is second.EmitError
+    assert first.EmitError is not second.EmitError
+    assert not isinstance(second.EmitError("x"), first.EmitError)
+
+
+def test_a_module_with_no_refusal_class_treats_everything_as_a_fault(registry, monkeypatch):
+    """CONTROL for the helper. A backend that declares no `EmitError` has no
+    refusal vocabulary, so `_refusal_class` returns None and the catch tuple is
+    empty: everything that emitter raises is a fault and keeps its traceback.
+    Nothing is caught by accident on the way to an empty tuple."""
+    import types  # noqa: PLC0415
+
+    module = _py_emit_module()
+    assert R._refusal_class(types.ModuleType("no_emit_error")) is None
+    # a non-class, and a class that is not an exception, are both "no refusal
+    # vocabulary" rather than a TypeError out of `except`.
+    weird = types.ModuleType("weird")
+    weird.EmitError = "not a class"
+    assert R._refusal_class(weird) is None
+    weird.EmitError = dict
+    assert R._refusal_class(weird) is None
+
+    refusal_class = module.EmitError
+
+    def refuse(_ir):
+        raise refusal_class("a refusal from a module that declares none")
+
+    monkeypatch.delattr(module, "EmitError")
+    monkeypatch.setattr(module, "emit", refuse)
+    ir = compile_files([str(_entry(registry) / "component.rvl")])
+    with pytest.raises(ValueError, match="a refusal from a module that declares none"):
+        R._emit_backend_source("python", ir)
