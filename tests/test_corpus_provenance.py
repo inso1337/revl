@@ -18,6 +18,11 @@ worth nothing. Every claim below is held by an assertion:
     document without a manifest line -- the arm that runs on real inputs
     rather than on a constructed one.
   * REPORTING ONLY. The census's verdict path never reads the manifest.
+  * TWO AXES, NOT ONE. Generation answers "did the loop write this"; the
+    `human_authored` list answers "did a person type this". Issue #1397
+    measured that the first was being read as the second, so the tests below
+    hold them apart: a document can be generation 0 and still not human, and
+    the authorship axis carries no floor.
 """
 
 import importlib.util
@@ -49,9 +54,10 @@ def _census():
     return module
 
 
-def _manifest(generations, floors, current=0):
+def _manifest(generations, floors, current=0, human=()):
     return _tool().Provenance({"current_generation": current,
                                "floors": floors,
+                               "human_authored": list(human),
                                "generations": generations})
 
 
@@ -288,7 +294,9 @@ def test_rewriting_the_manifest_reproduces_it_byte_for_byte(tmp_path):
 
 def test_the_manifest_records_no_counts_or_fractions():
     data = json.loads(_tool().MANIFEST.read_text(encoding="utf-8"))
-    assert set(data) == {"note", "current_generation", "floors", "generations"}
+    assert set(data) == {"note", "current_generation", "floors",
+                         "human_authored", "generations"}
+    assert data["human_authored"] == sorted(data["human_authored"])
     for names in data["generations"].values():
         assert names == sorted(names)
         assert all(isinstance(name, str) for name in names)
@@ -309,3 +317,71 @@ def test_the_bucket_report_splits_a_mixed_population():
     later = tool.bucket_report({"agree-admit": ["a.rvl", "b.rvl", "c.rvl"]},
                                prov, since=4)
     assert "0 / 3" in later, later
+
+
+# ------------------------------------------------------ the authorship axis
+
+def test_generation_zero_does_not_make_a_document_human_authored():
+    """Issue #1397. The two axes are orthogonal, and the fail-closed default
+    on the second one is the same as on the first: not named is not human.
+    Reading generation 0 as "a person typed it" is the conflation that made
+    the published figure mean something other than what it said."""
+    prov = _manifest({"0": ["pre_loop.rvl", "typed.rvl"]}, {},
+                     human=["typed.rvl"])
+    assert prov.generation("pre_loop.rvl") == 0
+    assert not prov.is_model_authored("pre_loop.rvl")
+    assert not prov.is_human_authored("pre_loop.rvl")
+    assert prov.is_human_authored("typed.rvl")
+
+
+def test_an_undeclared_document_is_not_human_authored_either():
+    prov = _manifest({"0": ["a.rvl"]}, {}, human=["a.rvl"])
+    assert not prov.is_human_authored("dropped_in.rvl")
+
+
+def test_the_authorship_split_is_reported_and_carries_no_floor():
+    """A corpus at 0% human must not red the gate. The floors gate the loop
+    axis; a floor on the authorship axis would be a floor at zero."""
+    tool = _tool()
+    prov = _manifest({"0": ["a.rvl", "b.rvl"]}, {"c": 80}, human=[])
+    assert tool.check({"c": ["a.rvl", "b.rvl"]}, prov) == []
+    text = tool.authorship_report({"c": ["a.rvl", "b.rvl"]}, prov)
+    assert "0      2     0.0%" in text, text
+
+
+def test_the_authorship_split_moves_with_the_declaration():
+    tool = _tool()
+    ids = ["a.rvl", "b.rvl", "c.rvl", "d.rvl"]
+    prov = _manifest({"0": ids}, {}, human=["a.rvl"])
+    model, human = prov.human_split(ids)
+    assert human == ["a.rvl"] and len(model) == 3
+    assert "25.0%" in tool.authorship_report({"c": ids}, prov)
+
+
+def test_a_human_authored_entry_that_outlived_its_document_reds_the_gate():
+    """Same shape as the stale-generation arm: an entry that no longer names
+    anything is an entry nobody rereads."""
+    tool = _tool()
+    prov = _manifest({"0": ["a.rvl"]}, {"c": 0}, human=["gone.rvl"])
+    problems = tool.check({"c": ["a.rvl"]}, prov)
+    assert any("STALE human_authored entry: gone.rvl" in p for p in problems), \
+        problems
+
+
+def test_rewriting_the_manifest_carries_the_authorship_axis(tmp_path):
+    tool = _tool()
+    prov = _manifest({"0": ["a.rvl"]}, {"c": 0}, human=["a.rvl"])
+    out = tmp_path / "m.json"
+    tool.write({"c": ["a.rvl"]}, prov, 0, path=out)
+    assert json.loads(out.read_text())["human_authored"] == ["a.rvl"]
+
+
+def test_the_report_does_not_call_the_generation_axis_human():
+    """The word that caused issue #1397. The generation table says
+    `loop-authored`, and the sentence a reader would take as a human-authorship
+    claim lives under the second table, where it is true."""
+    tool = _tool()
+    prov = _manifest({"0": ["a.rvl"]}, {"c": 0})
+    text = tool.report({"c": ["a.rvl"]}, prov)
+    assert "loop-authored at or after generation 1" in text
+    assert "authorship: documents a person is declared to have typed" in text
