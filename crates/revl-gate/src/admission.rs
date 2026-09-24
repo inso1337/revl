@@ -53,7 +53,9 @@
 //!
 //! So the certifier needs the running composition's service NAMES, and the
 //! item-186 row wire carries them: a `!services` header followed by one
-//! `:S,op,op` row per declared service (`revl.manifest.manifest_wire`), whose
+//! `:S,op,op` row per declared service (`revl.manifest.manifest_wire`) — an
+//! operation token optionally carrying its declared parameter list
+//! (`:S,op(k:Str)`, issue #346) — whose
 //! operation names this surface reads but does not use. The HEADER is the
 //! load-bearing half. A wire without it does not claim to enumerate anything, so
 //! the running service set is UNKNOWN rather than empty and a candidate that
@@ -175,7 +177,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
 /// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
 /// bounds the admissions, and a consumer caching an admission compares THIS
 /// before trusting it against a gate built from another tree.
-pub(crate) const SURFACE_ID: &str = "admission-interface:bacfbab0ed8e5bb0";
+pub(crate) const SURFACE_ID: &str = "admission-interface:8e87e2755b457b73";
 
 /// The tail every certificate carries, so the two halves of the basis line
 /// cannot drift apart.
@@ -533,6 +535,50 @@ struct Running<'a> {
 /// and look like a route. The TYPE itself is NOT validated against
 /// [`is_wire_name`] — it is a type spelling, not a name, and the only thing that
 /// may judge it is the relation that compares it.
+/// One operation token of a `:S,…` row: the bare name (`get`), or the name
+/// followed by its declared parameter list (`get(key:Str|n:Int)`, issue #346).
+///
+/// This surface reads only the NAME — its one obligation is that the candidate
+/// redeclares no running service, which is decided per service, not per
+/// operation. The parameter list is VALIDATED and dropped, for the reason every
+/// row on this wire is: a token this reader cannot parse is one the fold
+/// (`selfhost/lower.rvl`'s `parse_optok`) refuses the wire over, and a surface
+/// that admitted on a wire the fold rejects would be issuing a green nobody
+/// checked. The two sides accept the same shape, and this is the assertion of
+/// that.
+///
+/// A parameter's TYPE is taken verbatim and not held to [`is_wire_name`]: it is
+/// a type spelling, not a name, exactly as a handoff row's state shape is. It
+/// may not be empty, and it may not carry the wire's own structural characters
+/// — the renderer withholds a signature that would need one
+/// (`revl.manifest._WIRE_STRUCTURE`), so one arriving here is a garbled row.
+fn is_operation(token: &str) -> bool {
+    let (name, rest) = match token.split_once('(') {
+        Some(split) => split,
+        // no parameter list: the NAME claim alone.
+        None => return is_wire_name(token),
+    };
+    if !is_wire_name(name) {
+        return false;
+    }
+    let params = match rest.strip_suffix(')') {
+        Some(params) => params,
+        None => return false,
+    };
+    if params.is_empty() {
+        // `op()` is the EMPTY parameter list, which is a claim.
+        return true;
+    }
+    params.split('|').all(|one| match one.split_once(':') {
+        Some((pname, pty)) => {
+            is_wire_name(pname)
+                && !pty.is_empty()
+                && !pty.contains(|c| c == '(' || c == ')' || c == '|')
+        }
+        None => false,
+    })
+}
+
 fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
     let mut provided: Vec<&str> = Vec::new();
     let mut required: Vec<&str> = Vec::new();
@@ -568,8 +614,8 @@ fn manifest_shape(manifest: &str) -> Option<Running<'_>> {
             }
             if let Some(ops) = ops {
                 // `:S,` is the EMPTY operation claim and is well formed; any
-                // other list is a comma-separated run of wire names.
-                if !ops.is_empty() && ops.split(',').any(|op| !is_wire_name(op)) {
+                // other list is a comma-separated run of operation tokens.
+                if !ops.is_empty() && ops.split(',').any(|op| !is_operation(op)) {
                     return None;
                 }
             }
