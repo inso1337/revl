@@ -1120,3 +1120,250 @@ def test_the_admitting_fixture_binds_a_two_member_council():
     assert councils["Release"].residence == "on_device"
     placed = model_route.check(program, councils=councils)
     assert placed["Reviewer"]["propose"]["confidential"]["council"] == "Release"
+
+
+# ===========================================================================
+# SLICE 4: per-member inputs (issue #1368)
+#
+# The declaration that gives the adversary an input the proposer is not given,
+# which is what makes design note 543 section 6.1's sentence literally true: a
+# local adversary can read an origin the cloud proposer may not see. Until
+# this slice the council was asked one question with one input, so its ceiling
+# was the conservative join over every member.
+#
+# These programs are INLINE, and the module docstring's rule is why. The
+# self-host port lands with the slice, so the gate does decide the form - but
+# `examples/rejections/` is the tier reproducer set, and a fixture there moved
+# `G-COUNCIL-SPLIT`'s `revl` column from `proved` to `div` once already. The
+# fixture placement rule is that a fixture goes on disk when the corpora
+# reading that directory can DECIDE it, and the tier corpus is not a corpus
+# that decides a declaration-level placement rule.
+# ===========================================================================
+
+# The exit test, both halves in one pair of programs. The adversary is given
+# the confidential origin and runs on the device; the proposer is not given it
+# and runs off the device. That admits. The same council with no per-member
+# input is slice 2's conservative join, and it refuses.
+SCOPED_ADMITTED = """
+model role edge on_device
+model role vast off_device
+
+model council Release {
+  proposer  -> vast,
+  adversary -> edge reads confidential,
+  aggregate unanimous
+}
+
+service Plan { fn review(plan: Str) -> Str }
+
+component Reviewer provides out: Plan {
+  route model on review { confidential -> Release }
+  provide out { fn review(plan) = plan }
+}
+"""
+
+# The same program with the clause removed: one word, and the council is back
+# to one question with one input.
+UNSCOPED_SAME = SCOPED_ADMITTED.replace(" reads confidential", "")
+
+
+def test_a_member_may_be_given_an_origin_its_sibling_is_not():
+    """The exit test's admitting half. The confidential origin is routed to a
+    council whose proposer is `off_device`, and it admits, because the
+    proposer is not given the origin and the member that is stays on the
+    device."""
+    compile_source(SCOPED_ADMITTED, "council.revl")
+
+
+def test_the_same_council_without_the_clause_is_slice_2s_join():
+    """The non-vacuity control, and the measurement that the clause is what
+    moved: the identical program with the four characters `reads confidential`
+    removed refuses on slice 2's conservative join, naming the proposer."""
+    assert UNSCOPED_SAME != SCOPED_ADMITTED
+    err = refusal(UNSCOPED_SAME)
+    assert err.code == PLACE_CODE
+    assert "`proposer`" in err.message
+    assert "model role `vast`" in err.message
+
+
+def test_the_ceiling_is_computed_per_member_not_per_council():
+    """Read off the checker rather than off a diagnostic: the council's own
+    residence is still the join over every member (nothing about slice 2's
+    number moved), and the `confidential` ceiling is the join over the members
+    that RECEIVE it."""
+    from revl import model_council
+    from revl.parser import Parser
+
+    program = Parser(SCOPED_ADMITTED, "council.revl").parse()
+    release = model_council.check(program)["Release"]
+    assert release.scoped
+    assert release.residence == "off_device"
+    assert release.ceiling("confidential") == "on_device"
+    assert [m.function for m in release.receivers("confidential")] \
+        == ["adversary"]
+
+    plain = model_council.check(Parser(UNSCOPED_SAME, "council.revl").parse())
+    plain = plain["Release"]
+    assert not plain.scoped
+    assert plain.ceiling("confidential") == "off_device"
+    assert [m.function for m in plain.receivers("confidential")] \
+        == ["proposer", "adversary"]
+
+
+def test_a_member_given_a_confidential_input_may_not_be_placed_off_device():
+    """The exit test's refusing half. Handing the origin to the member placed
+    off the device is the disclosure the council was built to avoid, written
+    one level down, and the refusal names the member AND the origin."""
+    err = refusal(council(
+        "  proposer  -> vast reads confidential,\n"
+        "  adversary -> edge,\n"
+        "  aggregate unanimous"))
+    assert err.code == PLACE_CODE
+    assert "`proposer`" in err.message
+    assert "reads confidential" in err.message
+    assert "model role `vast`" in err.message
+    assert "may not leave the device" in err.message
+
+
+def test_a_member_reading_a_secret_is_refused_by_name():
+    """`secret` parses so the refusal can give the reason, the `on_tie allow`
+    discipline: a capability-bound secret reaches no model prompt at any
+    residence, so no placement would make the clause safe."""
+    err = refusal(council(
+        "  proposer  -> edge reads secret,\n"
+        "  adversary -> aux,\n"
+        "  aggregate unanimous"))
+    assert err.code == CODE
+    assert "reads secret" in err.message
+    assert "G-SECRET-FLOW" in (err.hint or "")
+
+
+def test_a_member_reading_an_ordinary_origin_is_refused_by_name():
+    """Every member is asked the same question with the same ordinary input,
+    so the only thing the clause can say is which member is given an origin
+    the others are withheld from - and only a confidentiality origin is
+    withheld from anyone."""
+    err = refusal(council(
+        "  proposer  -> edge reads web,\n"
+        "  adversary -> aux,\n"
+        "  aggregate unanimous"))
+    assert err.code == CODE
+    assert "not a confidentiality origin" in err.message
+
+
+def test_an_unknown_origin_in_a_reads_clause_is_a_vocabulary_refusal():
+    err = refusal(council(
+        "  proposer  -> edge reads confidentail,\n"
+        "  adversary -> aux,\n"
+        "  aggregate unanimous"))
+    assert err.code == CODE
+    assert "unknown origin class `confidentail`" in err.message
+
+
+def test_a_member_reading_one_origin_twice_is_refused():
+    """The parser keeps both clauses rather than dropping the second, for the
+    reason it keeps a second `aggregate`: this is a rule with a diagnostic."""
+    err = refusal(council(
+        "  proposer  -> edge reads confidential reads confidential,\n"
+        "  adversary -> aux,\n"
+        "  aggregate unanimous"))
+    assert err.code == CODE
+    assert "reads `confidential` twice" in err.message
+
+
+def test_reads_is_still_an_ordinary_identifier():
+    """`reads` is CONTEXTUAL, read only after a member's role. A program using
+    it as a name keeps parsing, which is what keeps the lexer's `KEYWORDS`
+    table and the self-hosted lexer that mirrors it out of the change."""
+    compile_source(
+        "fn reads(n: Int) -> Int { return n }\n"
+        "pub fn main() -> Int { let reads = 1\n  return reads }\n",
+        "reads.revl")
+
+
+def test_an_unscoped_council_is_byte_identical_through_the_checker():
+    """Every council that predates this slice gets slice 1's reading, and the
+    property that says so is structural: with no member declaring an input,
+    `receivers` is the whole declared set for every origin."""
+    from revl import model_council
+    from revl.parser import Parser
+
+    program = Parser(council(ADMITTED), "council.revl").parse()
+    release = model_council.check(program)["Release"]
+    assert not release.scoped
+    assert release.receivers("confidential") == release.members
+    assert release.receivers("web") == release.members
+    assert all(m.inputs == () for m in release.members)
+
+
+# The VALUE half. The declaration rules above say which council may be
+# declared; item 514's ceiling says which value may cross into its call, and it
+# is a separate rule in a separate module reading the same table. A slice that
+# admitted the declaration and left the value refused would be a feature with
+# no effect, and that is exactly what `Council.residence` alone would have
+# given: it is still the join over EVERY member, so a scoped council with a
+# cloud proposer reads `off_device` there.
+
+_CEILING_ROLES = "model role local on_device\nmodel role cloud off_device\n"
+_CEILING_RECEIVER = ("extern emission[model.complete] fn prompt(p: Secret[Str])"
+                     " -> Int = @py { return 0 }\n")
+
+
+def _ceiling_program(members: str) -> str:
+    """A confidential config field reaching a model crossing in an action
+    routed to a council whose members are `members`."""
+    return (
+        _CEILING_ROLES + _CEILING_RECEIVER
+        + "model council Release {\n" + members + "\n  aggregate unanimous\n}\n"
+        + "service Answer { emission fn summarize(d: Str) -> Int }\n"
+        + "component Summarizer provides out: Answer {\n"
+        + "  config { doc: Secret[Str] }\n"
+        + "  route model on summarize { confidential -> Release }\n"
+        + "  provide out {\n    fn summarize(d) {\n"
+        + "      let r = prompt(config.doc)\n      return 0\n    }\n  }\n}\n")
+
+
+SCOPED_VALUE = _ceiling_program(
+    "  proposer  -> cloud,\n  adversary -> local reads confidential,")
+UNSCOPED_VALUE = _ceiling_program(
+    "  proposer  -> cloud,\n  adversary -> local,")
+
+
+def test_a_confidential_value_crosses_into_a_council_that_withholds_it():
+    """The slice, all the way down to a value that actually crosses. The
+    proposer runs off the device and is not given the origin; the adversary is
+    given it and runs on the device."""
+    compile_source(SCOPED_VALUE, "council.revl")
+
+
+def test_the_same_value_is_refused_when_the_council_withholds_nothing():
+    """The control, one clause apart. `Council.residence` is `off_device` in
+    BOTH programs, which is why the ceiling cannot be read off it.
+
+    The refusal is the ARM's, not the value's, and that ordering is right: the
+    declaration rule runs first and the value never reaches a placement the
+    program was not allowed to write. It names the proposer either way."""
+    assert UNSCOPED_VALUE != SCOPED_VALUE
+    err = refusal(UNSCOPED_VALUE)
+    assert err.code == PLACE_CODE
+    assert "origin to model council `Release`" in err.message
+    assert "`proposer`" in err.message
+
+
+def test_the_value_rule_reads_the_per_origin_ceiling_not_the_join():
+    """Structural, so the two cannot drift: the placement the arm records
+    still carries the council's own `residence`, and `admits` answers on
+    `placement_ceiling`."""
+    from revl import model_council, model_route
+    from revl.parser import Parser
+
+    program = Parser(SCOPED_VALUE, "council.revl").parse()
+    councils = model_council.check(program)
+    placed = model_route.check(program, councils=councils)
+    arms = placed["Summarizer"]["summarize"]
+    assert arms["confidential"]["residence"] == "off_device"
+    assert arms["confidential"]["scoped"] is True
+    assert model_route.placement_ceiling(
+        arms["confidential"], "confidential") == "on_device"
+    verdict = model_route.admits(arms, "confidential", True)
+    assert verdict.ok and verdict.residence == "on_device"
