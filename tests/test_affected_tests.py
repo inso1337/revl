@@ -76,6 +76,32 @@ def test_stdlib_json_selects_json_tests_only():
     assert "tests/test_lexer.py" not in r["pytest"]
 
 
+# --- the roadmap citation gate (issue #1233) ------------------------------- #
+def test_the_claims_gate_selects_its_own_test_instead_of_the_full_suite():
+    """Its covering test is named for the DOCUMENT it reads, so without this
+    branch the generic tools/*.py rule looks for `test_check_roadmap_claims.py`
+    and falls back to FULL, and the two JSON side files fall back as non-python
+    files under tools/. `check_vision_claims.py` imports the module, so its
+    test comes along."""
+    for changed in ("tools/check_roadmap_claims.py",
+                    "tools/roadmap_claim_allowlist.json",
+                    "tools/roadmap_claim_ratchet.json"):
+        r = sel(changed)
+        assert r["full"] is False, changed
+        assert "tests/test_roadmap_claims_gate.py" in r["pytest"], changed
+        assert "tests/test_check_vision_claims.py" in r["pytest"], changed
+        assert r["backends"] == [], changed
+
+
+def test_a_roadmap_edit_runs_the_claims_gate_s_own_test():
+    """The commit that pays off a claim-ratchet entry is a roadmap edit, and
+    the test that says the entry now matches nothing is in that module. Before
+    this, a roadmap edit selected neither."""
+    r = sel("docs/v2.0-roadmap.md")
+    assert r["full"] is False
+    assert "tests/test_roadmap_claims_gate.py" in r["pytest"]
+
+
 # --- unmapped / structural -> FULL (fail safe, never fail open) ------------ #
 def test_unmapped_file_is_full():
     assert sel("weird/random_thing.xyz")["full"] is True

@@ -1,0 +1,36 @@
+{
+  "_comment": [
+    "Citations in docs/v2.0-roadmap.md that tools/check_roadmap_claims.py judges",
+    "and that are STALE. This is debt, not an exception. The allow-list beside it",
+    "says 'the citation is right and the tree is the wrong place to look'; an",
+    "entry here says 'the citation is wrong and the roadmap has to be edited'.",
+    "",
+    "It exists because issue #1233 widened the path rule from 79 judged citations",
+    "to 498 in one change, and a widening that reds the branch it lands on gets",
+    "reverted instead of paid down. Every entry names the sentence and the edit",
+    "that clears it.",
+    "",
+    "HOW IT SHRINKS, which is the only thing that makes a ratchet different from",
+    "a permanent exemption:",
+    "  * `count` restates the number of entries and the loader refuses the file",
+    "    when the two disagree, so debt cannot be added or dropped without a",
+    "    visible diff to a number;",
+    "  * an entry that stops matching is reported by the checker and FAILS",
+    "    tests/test_roadmap_claims_gate.py, so correcting the roadmap sentence",
+    "    forces the entry out and the count down. tools/affected_tests.py selects",
+    "    that test on any edit to docs/v2.0-roadmap.md, so the commit that pays",
+    "    the debt is the commit that runs the check;",
+    "  * at zero entries this file is deleted. A missing file is an empty",
+    "    ratchet, so nothing else has to change."
+  ],
+  "count": 1,
+  "entries": [
+    {
+      "rule": "path",
+      "claim": "canonical_echoer/aggregates/service.core.wat",
+      "location": "docs/v2.0-roadmap.md:4919",
+      "verdict": "cites `canonical_echoer/aggregates/service.core.wat`, which is not a file in the tree",
+      "fix": "Item 432(e) says the hunk moved goldens `in all four` and then names three of them with slashes used as an alternation, which reads as one path and is none. The three files are backends/wasm/golden/canonical_echoer.core.wat, canonical_aggregates.core.wat and canonical_service.core.wat. Spell them out, or write canonical_{echoer,aggregates,service}.core.wat, and this entry and the count go with the edit."
+    }
+  ]
+}
