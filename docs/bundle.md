@@ -92,6 +92,7 @@ established, and the same `Check` type reused verbatim:
 | **dependency lock** | the rebuilt provides/requires surface equals `components.lock` | `truc.reproduce._surface` |
 | **policy surface** | the rebuilt capabilities/emissions equal `policy.json` | `truc.reproduce._policy_of` |
 | **emitted [backend]** | each backend re-emits byte-for-byte to the committed artifact, the emitted output *corresponds to* that backend | the backend emitters |
+| **refused [backend]** | each backend the bundle recorded a refusal for still refuses, with the same diagnostic (only for a bundle that recorded one) | the backend emitters |
 | **backend version** | the recorded interchange schema version matches the current toolchain | `interchange.INTERCHANGE_VERSION` |
 | **attestation** | the item-127 signature is authentic and binds the rebuilt IR | `revl.attest` (item 127) |
 | **gauntlet** | the evidence is present and records an `admissible` verdict | `revl.mcp.gauntlet` (item 31) |
@@ -102,6 +103,13 @@ established, and the same `Check` type reused verbatim:
 allowed), **1** on any MISMATCH, and **2** when the bundle cannot be opened at
 all (a missing directory, a corrupt `runtime-manifest.json`). This mirrors
 `truc reproduce` exactly.
+
+`bundle` exits **0** when every backend it was asked for either emitted or was
+absent from this machine, **1** on a compile or draft refusal, **2** on a usage
+error, and **4** when the bundle was written but at least one tier REFUSED the
+composition (§4, Backends). 4 rather than 3 because across `revl run --backend
+<tier>` 3 already means "that tier's toolchain is absent", which is the case a
+refusal has to stay distinct from.
 
 ---
 
@@ -170,10 +178,33 @@ it for free when `attest` grows it. A dedicated `revl bundle --key` flag is a
 thin follow-up (today the key comes from the environment).
 
 **Backends.** Every backend whose emitter is a pure in-repo function is emitted
-by default. An emitter that refuses this IR (for example the wasm backend on a
-composition that uses floats) is recorded under `skippedBackends` in the
-runtime-manifest with a reason, not treated as a bundle failure, a bundle that
-cannot target one tier is still a valid bundle for the others.
+by default. A backend can end up out of the bundle for two unrelated reasons,
+and `bundle` keeps them apart (issue #1400):
+
+* **The emitter is absent here** (no `backends/<backend>/emit.py` on this
+  machine). Nothing was decided about the composition, so the backend is omitted
+  quietly, recorded under `skippedBackends` as `emitter unavailable here`, and
+  `bundle` exits **0**. A machine without one tier installed must not turn every
+  bundle into a failure.
+* **The emitter refused this IR** (for example the wasm backend on a composition
+  that uses floats). That is an answer about the composition, from the tier that
+  could not lower it, and the whole point of refusing by name is that the person
+  shipping hears it. The emitter's own diagnostic is recorded verbatim under
+  `refusedBackends`, echoed under `skippedBackends` as the reason, printed to
+  stderr in the emitter's own words, and `bundle` exits **4**.
+
+The bundle is still written in the refusal case, and that is the deliberate
+choice. Failing outright would leave the author with nothing, and with no
+record of which tiers refused or why; a bundle that carries five tiers plus a
+named, verifiable account of why the sixth is missing is the more useful
+artifact, and the non-zero exit is what stops it being mistaken for a bundle
+that was only ever meant to have five. `verify` then re-checks each recorded
+refusal (the **refused [backend]** tier above), so the record is evidence and
+not a comment: a recorded refusal that no longer holds is a MISMATCH.
+
+A fault *inside* an emitter is neither case. It is a bug, it is not caught, and
+it reaches the caller as a crash rather than being folded into a silent
+omission.
 
 **Drafts.** A draft (a composition with open holes) compiles but is never
 admitted (`docs/holes.md`), so `bundle` refuses it: a bundle is a production
