@@ -1523,7 +1523,7 @@ def test_an_assert_inside_a_test_still_fails_through_the_test_receiver():
 def test_an_any_typed_receiver_is_subscripted_through_reflection():
     """Go's index operator is type-directed and an interface value has none,
     so `value["k"]` on an `Any` parameter emitted a bare index that did not
-    compile. Reflection is the faithful lowering — the same read python and
+    compile. Reflection is the faithful lowering: the same read python and
     typescript make on a value whose shape only the runtime knows."""
     src = emit.emit(_compile(
         "fn indexed(value: Any) -> Any { return value[\"k\"] }\n"
@@ -1609,8 +1609,8 @@ def test_a_host_stub_beyond_the_fixed_runtime_declares_its_type_and_methods():
 
 
 def test_a_read_opt_takes_the_pointer_form_of_nullish_not_the_tuple():
-    """An Opt that is READ rather than CALLED — a config field — holds the
-    value-position form `*T`, not the `(T, bool)` a service or host call
+    """An Opt that is READ rather than CALLED, such as a config field, holds
+    the value-position form `*T`, not the `(T, bool)` a service or host call
     returns, so destructuring it was Go's "2 variables but 1 value"."""
     src = emit.emit(_compile(
         "type T = { v: Int }\n"
