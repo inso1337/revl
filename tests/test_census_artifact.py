@@ -342,3 +342,175 @@ def test_the_checker_version_moves_with_the_checker(artifact):
     assert set(per_file) == set(artifact.CHECKER_SOURCES)
     for rel in artifact.CHECKER_SOURCES:
         assert (ROOT / rel).is_file(), f"{rel} is not in the tree"
+
+
+# --- the digests are recomputable by someone who cloned somewhere else --------
+
+
+def test_a_digest_names_its_files_relative_to_the_checkout(artifact, tmp_path):
+    """The defect this holds against, stated as the outsider hits it.
+
+    `_digest` used to hash the ABSOLUTE path of each file. So the checker
+    version and the compiler tree digest were functions of the directory the
+    clone sat in: byte-identical checkouts at two paths produced two different
+    values, `--check` reported drift that did not exist, and the recorded crate
+    reproduction read as stale for no reason but a directory name. An artifact
+    published so an outsider can recompute its identity is worth nothing if the
+    identity depends on where the outsider put the repository.
+
+    Driven rather than asserted: the same bytes are digested from two different
+    directories and the two digests have to agree.
+    """
+    first, second = tmp_path / "somewhere", tmp_path / "somewhere-else"
+    digests = []
+    for base in (first, second):
+        (base / "tools").mkdir(parents=True)
+        (base / "tools" / "a.py").write_bytes(b"alpha\n")
+        (base / "tools" / "b.py").write_bytes(b"beta\n")
+        saved = artifact.ROOT
+        artifact.ROOT = base
+        try:
+            digests.append(artifact._digest(
+                [base / "tools" / "a.py", base / "tools" / "b.py"]))
+        finally:
+            artifact.ROOT = saved
+    assert digests[0] == digests[1], (
+        "the same bytes digested from two directories produced two digests; "
+        "the checkout path is leaking into the artifact's identity")
+
+
+def test_a_digest_refuses_a_file_outside_the_checkout(artifact, tmp_path):
+    """The fallback a relative name invites is an absolute one, which is the
+    defect coming back. It raises instead."""
+    stray = tmp_path / "stray.py"
+    stray.write_bytes(b"x\n")
+    with pytest.raises(SystemExit):
+        artifact._digest([stray])
+
+
+def test_the_published_identities_are_digests_and_nothing_else(committed):
+    """Each published identity is a bare hex digest behind its prefix. A path,
+    a hostname or a directory name inside one would both leak and make the
+    value unrepeatable elsewhere."""
+    c = committed["census"]
+    tails = {
+        "checker_version": c["checker_version"].split("+", 1)[1],
+        "compiler_tree_digest": c["compiler_tree_digest"].split("sha256:", 1)[1],
+        "run": c["run"].rsplit("-", 1)[1],
+    }
+    for field, tail in tails.items():
+        assert tail and all(ch in "0123456789abcdef" for ch in tail), (
+            f"{field} carries something that is not a hex digest: {tail!r}")
+    for rel, value in c["checker_sources"].items():
+        assert len(value) == 64 and all(ch in "0123456789abcdef" for ch in value)
+        assert not Path(rel).is_absolute(), f"{rel} is an absolute path"
+
+
+# --- a non-empty baseline cannot be published as an empty allowance ----------
+
+
+def test_the_allowance_publishes_the_committed_baseline_beside_the_run(
+        artifact, census, committed):
+    """The failure this closes, in one sentence: a `false-admit` member that is
+    BASELINED but no longer diverges leaves the measured list empty, so an
+    artifact that reports only the measurement says "the allowance is empty"
+    while the committed baseline still grants tolerance for it.
+
+    `tools/gate_reference_census.py --check` fails in that direction, but a
+    reader holding only the artifact cannot see it. So the artifact carries
+    both lists and the names on which they differ.
+    """
+    alw = committed["census"]["false_admit_allowance"]
+    for key in ("families", "baselined", "baselined_total", "baseline_file",
+                "baselined_but_not_measured", "measured_but_not_baselined",
+                "agrees_with_committed_baseline"):
+        assert key in alw, f"the published allowance does not carry {key}"
+
+    recorded = {k: sorted(v) for k, v in
+                json.loads(census.BASELINE.read_text(encoding="utf-8"))
+                .get("buckets", {}).items()
+                if k.split("/", 1)[0] == census.HARD}
+    assert alw["baselined"] == recorded
+    assert alw["baselined_total"] == sum(len(v) for v in recorded.values())
+
+
+def test_a_stale_non_empty_baseline_cannot_publish_as_an_empty_allowance(
+        artifact, census, monkeypatch, tmp_path):
+    """Driven, not asserted. A baseline that lists a `false-admit` member is
+    handed to `allowance` alongside a run that measured none, which is exactly
+    the shape that used to publish as "the allowance is empty this run"."""
+    stale = tmp_path / "baseline.json"
+    stale.write_text(json.dumps({
+        "buckets": {"false-admit/T1": ["tests/fixtures/ghost.rvl"]},
+    }), encoding="utf-8")
+    monkeypatch.setattr(census, "BASELINE", stale)
+
+    alw = artifact.allowance(census, {"agree-admit": ["ok.rvl"]})
+
+    assert alw["total"] == 0, "the run measured no false-admit member"
+    assert alw["baselined_total"] == 1, "the baseline still grants one"
+    assert alw["agrees_with_committed_baseline"] is False
+    assert alw["baselined_but_not_measured"] == [
+        "false-admit/T1: tests/fixtures/ghost.rvl"]
+    assert alw["measured_but_not_baselined"] == []
+    # The renderer prints both totals and every name in either list, so a
+    # payload carrying these cannot render as "the allowance is empty".
+    assert alw["baselined"] == {
+        "false-admit/T1": ["tests/fixtures/ghost.rvl"]}
+
+
+def test_a_new_bypass_the_baseline_does_not_carry_is_named_too(
+        artifact, census, monkeypatch, tmp_path):
+    """The other direction, which is a live bypass rather than a stale entry."""
+    empty = tmp_path / "baseline.json"
+    empty.write_text(json.dumps({"buckets": {}}), encoding="utf-8")
+    monkeypatch.setattr(census, "BASELINE", empty)
+
+    alw = artifact.allowance(
+        census, {"false-admit/T1": ["tests/fixtures/new_bypass.rvl"]})
+
+    assert alw["total"] == 1
+    assert alw["baselined_total"] == 0
+    assert alw["agrees_with_committed_baseline"] is False
+    assert alw["measured_but_not_baselined"] == [
+        "false-admit/T1: tests/fixtures/new_bypass.rvl"]
+
+
+def test_the_markdown_names_a_baseline_the_run_did_not_measure(committed_md,
+                                                               committed):
+    """Whatever the state is, the markdown states BOTH numbers, so a reader
+    cannot mistake a measured zero for a baselined zero."""
+    alw = committed["census"]["false_admit_allowance"]
+    assert f"Measured this run: **{alw['total']}**" in committed_md
+    assert f"Recorded in the baseline: **{alw['baselined_total']}**" in \
+        committed_md
+    for entry in (alw["baselined_but_not_measured"]
+                  + alw["measured_but_not_baselined"]):
+        assert entry in committed_md
+
+
+# --- n is the distinct count, and the repeats are named ----------------------
+
+
+def test_the_report_states_the_distinct_count_and_names_the_repeats(
+        committed, committed_md):
+    """`n` counts programs RUN. Six case ids reach the corpus twice, so `n`
+    over-counts the corpus by exactly the repeats. A benchmark's n is the
+    number a reader quotes, so the distinct count is published, the repeats
+    are named, and the gap is checkable rather than asserted."""
+    c = committed["census"]
+    assert c["n_distinct"] <= c["n"]
+    assert c["n"] - c["n_distinct"] == len(c["repeated_case_ids"])
+    assert f"Distinct programs: **{c['n_distinct']}**" in committed_md
+    assert f"Programs run: **{c['n']}**" in committed_md
+    for case_id in c["repeated_case_ids"]:
+        assert case_id in committed_md, (
+            f"{case_id} is counted twice but not named in the markdown")
+
+
+def test_the_headline_claim_is_stated_on_the_distinct_count(committed):
+    """The claim a sceptic reads first must not carry the inflated n."""
+    c = committed["census"]
+    head = committed["claims"][0]["text"]
+    assert f"{c['n_distinct']} distinct programs" in head
+    assert f"{c['n']} runs" in head
