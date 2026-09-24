@@ -31,9 +31,12 @@ is not, and it is the shape the roadmap uses most.
           `_v3_self_rebind_locals` is still cited at `backends/go/emit.py`
           and has lived in `src/revl/ownership.py` since item 445 shared it.
 
-  path    A `path:line` citation resolves to a file that exists. Only the file
-          half is judged. Line numbers drift under every edit and a drifted
-          line is not a false claim about the tree, it is a stale coordinate.
+  path    A cited repository path resolves to a file that exists, in all three
+          shapes the roadmap writes: `path:line`, a BARE backticked `path`, and
+          a backticked glob (`tests/test_lifecycle*.py`). Only the file half of
+          a `path:line` is judged. Line numbers drift under every edit and a
+          drifted line is not a false claim about the tree, it is a stale
+          coordinate.
 
   absent  A SCOPED absence claim is actually true: "`path` has no `sym`" and
           "`sym` is absent from `container`". Scoped is the whole point; see
@@ -70,18 +73,69 @@ WHAT IS SKIPPED, ON PURPOSE.
   over `git ls-files`; when several files match, the claim PASSES if any one
   of them satisfies it. A path containing `...` is not judged at all.
 
-  Hypothetical paths. The roadmap writes example user projects
-  (`src/components/agent.rvl`, `./types.ts`, `root/app.rvl`). Backticked paths
-  are therefore never judged on their own — only as the anchor of a `symbol`
-  claim or with a `:line` attached, both of which are citation shapes a
-  hypothetical never takes.
+  Paths spelled relative to the READER. `./types.ts` and `../lib/x.rvl` sit in
+  some other project, next to some other file. Nothing in this repository is
+  ever cited that way: measured on 2026-09-24, the roadmap carries exactly four
+  such spellings and all four resolve to nothing, because all four are about a
+  user's tree. This is the only path shape the rule declines, and it declines
+  it on the spelling rather than on the outcome.
+
+  Bare FILENAMES with no directory (`emit.py`, `truc.lock`). 172 distinct ones,
+  of which 11 resolve to nothing, and the 11 are what makes the shape
+  undecidable: `coverage.py` is the third-party package that measures the
+  reference tier, `cand.rvl` and `c.rvl` are stand-in names inside one sentence
+  about digests, `service_compat.py` is a file item 7's proposed SPLIT would
+  create. Without a directory to anchor it there is nothing in the token that
+  separates a citation from a word, and a rule that reds on those four is a
+  rule that teaches writers to stop naming things. `docs/vision.md`'s gate does
+  judge this shape (`check_vision_claims.py`'s BARE_PATH_RE) because that
+  document is 40 times smaller and writes no such prose.
+
+WHAT THE BARE-PATH RULE COSTS, AND THE ALTERNATIVE THAT WAS MEASURED AND
+REJECTED. Every bare backticked path that names a directory is judged, so a
+sentence about a sibling project needs an allow-list entry with a reason. A
+cheaper rule was written and thrown away: suppress any citation sitting within
+260 characters of `revl-harness` or `the harness`, the way HISTORY_RE suppresses
+a retrospective. It would have replaced 15 of the entries below, at the cost of
+no longer judging 10 citations that resolve TODAY and sit in the same sentences.
+Paying 10 live citations to save 15 lines of JSON is the trade this gate exists
+to refuse, and a prose cue is not evidence about a path.
+
+  A second rule, from the version of this change that was not taken: judge a
+  bare path only when the repository populates its directory with files of that
+  kind. It reads well and it fails in the one direction that matters. The
+  moment a directory is RENAMED, every citation into it stops being populated,
+  so the rule stops judging exactly the citations the rename just made stale.
+  A fail-open that switches on when the defect appears is worse than no rule.
 
 THE ALLOW-LIST. `tools/roadmap_claim_allowlist.json` holds citations that are
-genuinely unresolvable in this tree: a file that belongs to a sibling repo, a
-test that lives on an unmerged branch. Every entry carries a written reason and
-the rule it suppresses, in the shape `.github/ci/known-red.json` uses in the
-harness repo. An entry that no longer matches anything is reported, so the
-allow-list cannot quietly outlive its reason.
+genuinely unresolvable in this tree and SHOULD BE: a file that belongs to a
+sibling repo, a test that lives on an unmerged branch, a path inside a deploy
+bundle this repository produces but does not track. Every entry carries a
+written reason and the rule it suppresses, in the shape `.github/ci/known-red.json`
+uses in the harness repo. An entry that no longer matches anything is reported,
+so the allow-list cannot quietly outlive its reason.
+
+THE RATCHET. `tools/roadmap_claim_ratchet.json` is the other list, and the
+difference is the whole point of having two. An allow-list entry says the
+citation is correct and the tree is the wrong place to look. A ratchet entry
+says the citation is WRONG and the roadmap has to be edited, which this gate
+may not do (see below) and which the author of a gate change is not the right
+person to do either. It is debt, recorded so that widening the rule does not
+red the branch it lands on, and it is built to shrink:
+
+  * every entry names the sentence (`location`) and the edit that clears it
+    (`fix`), so paying it down is a mechanical act, not an investigation;
+  * `count` restates the number of entries and `load_ratchet` refuses the file
+    when the two disagree, so debt cannot be added or removed without a visible
+    one-line diff to a number;
+  * an entry that stops matching is reported exactly as an allow-list entry is,
+    and `tests/test_roadmap_claims_gate.py` turns that report into a failing
+    test. Correcting the roadmap sentence therefore REQUIRES deleting the
+    entry and decrementing `count`. The ratchet cannot stay at its high-water
+    mark by inertia, which is the failure mode a ratchet has;
+  * at zero entries the file is deleted. `load_ratchet` treats a missing file
+    as an empty ratchet, so nothing else has to change.
 
 THIS GATE DOES NOT EDIT THE ROADMAP, for the reason the marker gate gives: a
 gate that rewrites the thing it checks is a laundering step, not a gate. It
@@ -108,19 +162,33 @@ import json
 import re
 import subprocess
 import sys
+from fnmatch import fnmatch
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence, Set, Tuple
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_ROADMAP = ROOT / "docs" / "v2.0-roadmap.md"
 DEFAULT_ALLOWLIST = Path(__file__).resolve().parent / "roadmap_claim_allowlist.json"
+DEFAULT_RATCHET = Path(__file__).resolve().parent / "roadmap_claim_ratchet.json"
 
 RULES = ("test", "symbol", "path", "absent")
 
-# Source extensions a citation can name. Kept narrow: a claim about a `.png`
-# or a `.txt` is not a claim this gate knows how to resolve.
+# Source extensions a citation can name. Kept to kinds this repository tracks:
+# a claim about a `.png` is not a claim this gate knows how to resolve.
+#
+# Longer alternatives come FIRST where one is a prefix of another (`tsv` before
+# `ts`, `json` before `js`). The regexes that embed this are not all anchored,
+# and although backtracking rescues the anchored ones, an unanchored `ts`
+# matching the head of `.tsv` is a silent half-citation.
+#
+# `lean`, `tsv`, `txt`, `lock` and `revl` joined on 2026-09-24 with the
+# bare-path rule (issue #1233). Each names a kind the tree really tracks and
+# the roadmap really cites: 8 citations, all of which resolve today, including
+# `formal/RevL/Theorems/G9_NoAuthorityFromUntrusted.lean` and
+# `src/revl/truc/truc.lock`.
 SOURCE_EXT = (
-    "py|rvl|rs|ts|go|java|mjs|js|json|toml|yml|yaml|sh|wat|wit|md"
+    "py|revl|rvl|rs|tsv|ts|go|java|mjs|json|js|toml|yaml|yml|sh|wat|wit|md"
+    "|lean|txt|lock"
 )
 
 # A repo-relative path: at least one directory segment, then a file with one of
@@ -143,6 +211,21 @@ BARE_TEST_RE = re.compile(r"`(test_[A-Za-z0-9_]+)`")
 
 # `path:line` and `path:line-line`.
 PATH_LINE_RE = re.compile(r"(?P<path>" + PATH + r"):(?P<line>\d+(?:-\d+)?)")
+
+# A backticked path and NOTHING else inside the ticks. The backticks are what
+# make it a citation rather than a word in a sentence, and anchoring both ends
+# is what keeps the two collectors off the same token: a `:line` sits before
+# the closing tick, so a `path:line` citation never matches this.
+BARE_PATH_RE = re.compile(r"`(?P<path>" + PATH + r")`")
+
+# A backticked glob with at least one directory segment: `selfhost/emit_*.rvl`,
+# `crates/revl-gate/**`. The roadmap cites a FAMILY of files this way 25 times,
+# and "these files exist" is as falsifiable for a family as for one file. No
+# extension is required, because `backends/*` and `formal/**` are the shape the
+# document actually uses.
+GLOB_RE = re.compile(
+    r"`(?P<path>(?:[.A-Za-z0-9_-]+/)+[A-Za-z0-9_.-]*\*[A-Za-z0-9_.*-]*)`"
+)
 
 # The four pairings that cite a symbol together with the file it lives in.
 # Each entry is (compiled regex, symbol group, path group).
@@ -173,13 +256,20 @@ ABSENT_RES = (
 # back out, because both are ordinary roadmap vocabulary ("rather than dropped
 # from the corpus") and each one silenced a citation that is genuinely stale.
 # A cue earns its place by naming the CITED ARTIFACT's own lifecycle.
+#
+# `never existed` joined on 2026-09-24 with the bare-path rule (issue #1233).
+# A roadmap that records a citation to a file which turned out never to have
+# been written has to spell the file to say so, and the sentence doing the
+# recording is the LAST one a citation gate should red. Item 536 is that
+# sentence. Measured on the whole document: the cue suppresses that citation
+# and nothing else, in any rule.
 HISTORY_RE = re.compile(
     r"""(
           \brenamed\b | \brename[sd]?\s+to\b
         | \bdelet(?:e|es|ed|ing|ion)\b
         | \bsuperseded\b | \breplaced\s+by\b | \bin\s+its\s+place\b
         | \bused\s+to\b | \bformerly\b | \bpreviously\b
-        | \bno\s+longer\s+exists\b
+        | \bno\s+longer\s+exists\b | \bnever\s+existed\b
         | \bwas\s+the\s+name\b | \bold\s+name\b
     )""",
     re.IGNORECASE | re.VERBOSE,
@@ -235,6 +325,19 @@ class Tree:
             return [cited]
         return list(self._by_suffix.get(cited, ()))
 
+    def glob_matches(self, pattern: str) -> bool:
+        """Does a cited glob match at least one tracked file?
+
+        Exact first, then as a suffix, which is the same abbreviation rule
+        `resolve` applies to a path: the roadmap writes `golden/*.wat` for
+        `backends/wasm/golden/*.wat` exactly as it writes `typescript/runtime.ts`
+        for the file under `backends/`.
+        """
+        return any(
+            fnmatch(rel, pattern) or fnmatch(rel, "*/" + pattern)
+            for rel in self.files
+        )
+
     def defines_test(self, name: str) -> bool:
         pat = re.compile(r"^\s*(?:async\s+)?def\s+" + re.escape(name) + r"\b", re.M)
         return any(pat.search(self.text(rel)) for rel in self.files if rel.endswith(".py"))
@@ -277,6 +380,15 @@ def _elided(path: str) -> bool:
     """`go/.../bridge.go` drops a middle segment. No lookup can honestly expand
     it, so it is not judged and not counted in the denominator either."""
     return "..." in path
+
+
+def _reader_relative(path: str) -> bool:
+    """`./types.ts`, `../lib/x.rvl`. Spelled from wherever the reader is
+    standing, which for these four citations is a user's own project. This
+    repository's files are cited from the repository root and never this way:
+    all four such spellings in the roadmap resolve to nothing, and all four are
+    about someone else's tree."""
+    return path.startswith("./") or path.startswith("../")
 
 
 def _is_historical(source: str, index: int) -> bool:
@@ -334,18 +446,34 @@ def collect_symbol_claims(source: str) -> List[Claim]:
 
 
 def collect_path_claims(source: str) -> List[Claim]:
+    """All three citation shapes, in the order the gate learned them.
+
+    Until 2026-09-24 only the first was collected, so a backticked path that
+    never carried a line number was never made into a claim and never resolved.
+    That exempted 88 percent of the roadmap's path citations and is how item
+    536 came to name `tools/gate_verdict_parity.py` as machinery "here" for a
+    file that has never existed (issue #1233).
+
+    A path is dropped rather than judged only for a reason legible in the
+    CITATION ITSELF: it elides a middle segment, it is spelled relative to the
+    reader, or it sits inside a retrospective sentence. Dropping it keeps it
+    out of the denominator too, so the reported count stays a count of claims
+    that were RESOLVED.
+    """
     claims: List[Claim] = []
     seen: Set[str] = set()
-    for m in PATH_LINE_RE.finditer(source):
-        path = m.group("path")
-        if _elided(path):
-            continue
-        if _is_historical(source, m.start()):
-            continue
-        if path in seen:
-            continue
+
+    def add(path: str, index: int, text: str) -> None:
+        if _elided(path) or _reader_relative(path) or path in seen:
+            return
+        if _is_historical(source, index):
+            return
         seen.add(path)
-        claims.append(Claim("path", path, _line_of(source, m.start()), m.group(0)))
+        claims.append(Claim("path", path, _line_of(source, index), text))
+
+    for pattern in (PATH_LINE_RE, BARE_PATH_RE, GLOB_RE):
+        for m in pattern.finditer(source):
+            add(m.group("path"), m.start(), m.group(0))
     return claims
 
 
@@ -417,6 +545,10 @@ def judge_symbol(claim: Claim, tree: Tree) -> Optional[str]:
 
 
 def judge_path(claim: Claim, tree: Tree) -> Optional[str]:
+    if "*" in claim.key:
+        if tree.glob_matches(claim.key):
+            return None
+        return "cites `%s`, which matches no tracked file" % claim.key
     candidates = tree.resolve(claim.key)
     if candidates is None or candidates:
         return None
@@ -461,6 +593,44 @@ def load_allowlist(path: Path) -> List[dict]:
             )
         if not entry["reason"].strip():
             raise ValueError("allow-list entry %r has an empty reason" % entry)
+        entry["origin"] = "allow-list"
+    return entries
+
+
+RATCHET_FIELDS = ("rule", "claim", "location", "verdict", "fix")
+
+
+def load_ratchet(path: Path) -> List[dict]:
+    """The recorded debt, refused unless it is honestly recorded.
+
+    A missing file is an empty ratchet, which is what the file's own absence
+    is supposed to mean once the last entry is paid down. `count` restating
+    `len(entries)` is the ratchet part: it cannot move in either direction
+    without a diff to a number a reviewer can see.
+    """
+    if not path.exists():
+        return []
+    doc = json.loads(path.read_text())
+    entries = doc["entries"]
+    for entry in entries:
+        missing = set(RATCHET_FIELDS) - set(entry)
+        if missing:
+            raise ValueError(
+                "ratchet entry %r is missing %s; an entry names the sentence "
+                "it excuses and the edit that clears it"
+                % (entry, sorted(missing))
+            )
+        for field in ("verdict", "fix"):
+            if not entry[field].strip():
+                raise ValueError(
+                    "ratchet entry %r has an empty %s" % (entry, field))
+        entry["origin"] = "ratchet"
+    if doc.get("count") != len(entries):
+        raise ValueError(
+            "ratchet says count %r and holds %d entries. The count is there so "
+            "that adding or paying off debt is a visible diff; restate it."
+            % (doc.get("count"), len(entries))
+        )
     return entries
 
 
@@ -470,8 +640,14 @@ def run(
     rules: Iterable[str] = RULES,
     allowlist: Optional[Sequence[dict]] = None,
 ) -> Tuple[Dict[str, int], List[Tuple[Claim, str]], List[dict]]:
-    """Return (denominator per rule, findings, allow-list entries that matched
-    nothing)."""
+    """Return (denominator per rule, findings, entries that matched nothing).
+
+    `allowlist` carries both suppression lists, allow-list and ratchet. They
+    suppress identically and differ in what they MEAN and in who is expected
+    to delete them, which is why they are separate files and why each entry
+    keeps an `origin`. An entry that matched nothing comes back in the third
+    slot whichever file it came from.
+    """
     allowlist = list(allowlist or ())
     suppressed = {(e["rule"], e["claim"]): e for e in allowlist}
     used: Set[Tuple[str, str]] = set()
@@ -498,6 +674,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     parser.add_argument("--roadmap", type=Path, default=DEFAULT_ROADMAP)
     parser.add_argument("--root", type=Path, default=ROOT)
     parser.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST)
+    parser.add_argument("--ratchet", type=Path, default=DEFAULT_RATCHET)
     parser.add_argument("--rule", action="append", choices=RULES, dest="rules")
     parser.add_argument("--check", action="store_true",
                         help="exit 1 on any finding (the CI mode)")
@@ -507,8 +684,9 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     rules = args.rules or list(RULES)
     tree = Tree.from_git(args.root)
     source = args.roadmap.read_text()
+    ratchet = load_ratchet(args.ratchet)
     denominator, findings, unused = run(
-        source, tree, rules, load_allowlist(args.allowlist)
+        source, tree, rules, load_allowlist(args.allowlist) + ratchet
     )
 
     by_rule: Dict[str, List[Tuple[Claim, str]]] = {rule: [] for rule in rules}
@@ -521,14 +699,24 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("  %-7s %4d claims, %d stale"
               % (rule, denominator[rule], len(by_rule[rule])))
 
+    recorded = [e for e in ratchet if e["rule"] in set(rules)]
+    if recorded:
+        print("\n  ratchet %4d recorded stale citation(s), suppressed here and "
+              "owed by the roadmap:" % len(recorded))
+        for entry in recorded:
+            print("    %s  [%s] %s" % (entry["location"], entry["rule"],
+                                       entry["claim"]))
+            print("      fix: %s" % entry["fix"])
+
     if not args.quiet:
         for rule in rules:
             for claim, verdict in by_rule[rule]:
                 print("\n%s:%d  [%s]\n  %s\n  %s"
                       % (args.roadmap.name, claim.line, rule, claim.text.strip(), verdict))
         for entry in unused:
-            print("\nallow-list entry matches nothing and can be removed: "
-                  "[%s] %s" % (entry["rule"], entry["claim"]))
+            print("\n%s entry matches nothing and MUST be removed: [%s] %s"
+                  % (entry.get("origin", "allow-list"), entry["rule"],
+                     entry["claim"]))
 
     print("\nThis gate resolved CITATIONS. It did not, and cannot, check that a "
           "sentence whose citations all resolve is TRUE.")

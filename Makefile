@@ -46,12 +46,14 @@ roadmap-check-all:
 
 # The roadmap's CITATIONS, resolved against the working tree. The gate above
 # asks git whether a marker contradicts a branch; this one asks the tree
-# whether a cited test, symbol, file:line or scoped absence claim still holds.
-# It is ADVISORY and deliberately NOT in `lint`: on 2026-09-15 the roadmap
-# carries six findings it reports, and a red gate on a 1.4 MB document only the
-# owner edits would block every open PR. `--check` is the CI mode, to be wired
-# into the lint line once those six are paid down. See the tool's docstring for
-# the rule that was measured and thrown away, and why.
+# whether a cited test, symbol, path or scoped absence claim still holds. The
+# six findings it reported on 2026-09-15 were paid down in #1110 and CI's
+# `lint` job runs the `--check` line below; this target is the advisory read.
+# Issue #1233 widened the path rule from 75 of the roadmap's 508 backticked
+# path citations to 489 of them, which is where most of its citations live.
+# This target also prints the claim ratchet, the citations that are stale and
+# recorded as debt rather than fixed. See the tool's docstring for the two
+# rules that were measured and thrown away, and why.
 roadmap-claims:
 	python3 tools/check_roadmap_claims.py
 

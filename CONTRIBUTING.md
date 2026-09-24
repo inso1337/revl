@@ -367,9 +367,22 @@ and the working TREE did not: a test renamed out from under its citation, a
 function lifted into a shared module while four paragraphs kept pointing at the
 old file, a named xfail registry emptied because its gap closed. `make
 roadmap-claims` (`tools/check_roadmap_claims.py`) resolves the roadmap's
-citations against the tree instead. It is advisory today and not in `lint`;
+citations against the tree instead, and its `--check` line runs in `lint`.
 `tools/roadmap_claim_allowlist.json` carries the citations that name a sibling
-project, each with a written reason.
+project, each with a written reason. A cited path is judged whether or not it
+carries a `:line`, and whether it names one file or a glob of them: 489 of the
+document's 508 backticked path citations, against 75 before issue #1233. Line
+numbers are still never judged, because a drifted coordinate is not a false
+claim about the tree. The three shapes that are not judged, and the count that
+decided each, are in the tool's docstring.
+
+A citation that is stale and needs a roadmap EDIT does not go in the allow-list.
+It goes in `tools/roadmap_claim_ratchet.json`, which records it with the
+sentence and the edit that clears it, so that widening a rule does not red the
+branch it lands on. That file is debt and is built to come down: its `count`
+has to be restated on every change, and an entry that stops matching fails
+`tests/test_roadmap_claims_gate.py`, so correcting the sentence forces the entry
+out. At zero entries the file is deleted.
 
 1. **State lives in GitHub issues. The roadmap holds the reasoning.** Whether
    something is open, assigned, in flight or closed is a tracker's job, and a
