@@ -34,7 +34,9 @@ the recomputed hashes tier by tier against the recorded ones:
     evidence dossiers beside it are the ones that were signed.
   * **emitted artifact**, when the entry records artifact hashes
     (`artifacts.json`), each backend's emitter is re-run over the rebuilt IR and
-    the emitted source is re-hashed against the recorded hash.
+    the emitted source is re-hashed against the recorded hash. A tier that
+    *refuses* the rebuilt IR is a MISMATCH carrying the emitter's own sentence,
+    never a traceback and never a silent `cannot verify` (issue #1403, below).
 
 Every tier reports one of three outcomes, honestly:
 
@@ -45,6 +47,19 @@ Every tier reports one of three outcomes, honestly:
     recorded artifact, no version), or the toolchain needed to rebuild it is
     absent. This is honest degradation, not a pass and not a crash: a tier with
     no recorded evidence cannot be a mismatch, and it never silently reads as OK.
+
+Three things can go wrong at the emitter, and a verifier that cannot tell them
+apart is not a verifier (issue #1403). The emitter may be **absent** here, in
+which case nothing was decided about this IR and the tier is `cannot verify`.
+The emitter may **refuse** this IR by name, which is a definite answer from a
+tier that is installed and ran: the recorded artifact cannot be rebuilt by this
+toolchain at all, so the recorded claim no longer holds and the tier is a
+MISMATCH quoting the refusal. Or the emitter may **fault**, which is a compiler
+bug and is not caught here at all: it reaches the caller as a traceback,
+because dressing a crash as a statement about the artifact is the one failure
+this path cannot afford. `truc reproduce` is what makes a truc release checkable
+by someone who did not build it, and "the artifact is wrong", "the compiler
+moved" and "the tier refuses this shape" are three different verdicts.
 
 An unverifiable tier is not a pass either. A rebuild with no MISMATCH but with
 tiers that checked nothing is reported as *partially* reproduced, and
@@ -589,20 +604,66 @@ def _load_artifact_record(entry_dir: Path) -> dict | None:
     return backends if isinstance(backends, dict) else None
 
 
-def _emit_backend_source(backend: str, ir: dict) -> str | None:
+def _refusal_class(module) -> type | None:
+    """The `EmitError` class carried on an emitter MODULE object, or None for a
+    module that defines none.
+
+    Each backend defines its own `class EmitError(ValueError)` inside its own
+    `emit.py`, so there is no class under `src/` to name in an `except` clause
+    and no shared base narrower than `ValueError` (issue #1393). The class has
+    to be read off the module that will raise, and off THAT module object:
+    loading `emit.py` twice produces two distinct classes and an `except`
+    against one does not catch an instance of the other.
+
+    This is the same helper `revl.bundle` needs for the same reason (issue
+    #1400); it lives here because the import already runs bundle -> truc.
+    reproduce, which is also where `Check`, `OK`, `MISMATCH` and `UNVERIFIED`
+    come from."""
+    cls = getattr(module, "EmitError", None)
+    if isinstance(cls, type) and issubclass(cls, BaseException):
+        return cls
+    return None
+
+
+def _emit_backend_source(backend: str, ir: dict) -> tuple[str | None, str | None]:
     """Re-emit `backend` source from the rebuilt IR through that backend's own
-    emitter, or None when the toolchain is absent/does not expose a pure
-    `emit(ir)` (the tier then degrades with a reason, mirroring the rest of the
-    repo). Never touches the backend package's internals, it calls the same
-    top-level `emit` the emit tests use."""
+    emitter, as `(source, refusal)`. Never touches the backend package's
+    internals, it calls the same top-level `emit` the emit tests use.
+
+    Three outcomes, and the whole of issue #1403 is that they are three and not
+    two:
+
+      * `(source, None)`, the emitter re-emitted this IR. Its hash is what the
+        artifact tier compares.
+      * `(None, None)`, the emitter is ABSENT here (no importable
+        `backends.<backend>.emit`, or a module with no `emit`). Nothing was
+        decided about this IR, so the tier degrades to `cannot verify`.
+      * `(None, "<sentence>")`, the emitter REFUSED this IR, and the sentence is
+        the emitter's own diagnostic verbatim.
+
+    A fault INSIDE an emitter is none of those and is deliberately not caught:
+    it propagates, exactly as it does through the `revl run` / `revl test` /
+    emitter-CLI boundaries (issue #1393) and through `revl bundle` (issue
+    #1400, where a blanket `except Exception` had been folding a genuine
+    emitter crash into a silent omission). `truc reproduce` is the attestation
+    path, so of all the callers this is the one that must not answer a compiler
+    bug with a tidy sentence about the artifact."""
     try:
         module = importlib.import_module(f"backends.{backend}.emit")
     except ImportError:
-        return None
+        return None, None
     emit = getattr(module, "emit", None)
     if emit is None:
-        return None
-    return emit(ir)
+        return None, None
+    refusal_class = _refusal_class(module)
+    # `except ()` catches nothing, which is the right behaviour for a module
+    # that declares no refusal class: everything it raises is a fault.
+    refusals = (refusal_class,) if refusal_class is not None else ()
+    try:
+        emitted = emit(ir)
+    except refusals as error:
+        return None, str(error)
+    return emitted, None
 
 
 def _check_artifacts(entry_dir: Path, ir: dict) -> list[Check]:
@@ -610,7 +671,20 @@ def _check_artifacts(entry_dir: Path, ir: dict) -> list[Check]:
     the rebuilt IR and compare its hash against the recorded one. A backend whose
     toolchain is absent is skipped with a reason; a recorded hash that differs is
     a MISMATCH with both hashes. No recorded artifacts at all is one honest
-    `cannot verify` line."""
+    `cannot verify` line.
+
+    A tier that REFUSES the rebuilt IR is a fourth thing and is reported as one
+    (issue #1403). It is not `cannot verify`: the emitter is present here, it
+    ran, and it gave a definite answer, so claiming the tier could check nothing
+    would be a lie in the direction that matters least honestly. It is a
+    MISMATCH, because the record asserts this tier emitted these bytes and the
+    current toolchain cannot produce them at all, which is exactly a recorded
+    claim that no longer holds. But it is not phrased as a byte difference and
+    it does not invent a rebuilt hash: `rebuilt` stays empty, so the line reads
+    `recorded <hash>, rebuilt (none)`, and the detail carries the emitter's own
+    sentence. A consumer has to be able to tell "the artifact was tampered
+    with" from "this tier will not lower this shape any more", and printing two
+    hashes for a run that produced no second hash would erase that."""
     from ..registry import _sha256  # noqa: PLC0415
 
     record = _load_artifact_record(entry_dir)
@@ -625,7 +699,14 @@ def _check_artifacts(entry_dir: Path, ir: dict) -> list[Check]:
             checks.append(Check(label, UNVERIFIED,
                                 f"{backend}: recorded artifact has no sourceSha256"))
             continue
-        emitted = _emit_backend_source(backend, ir)
+        emitted, refusal = _emit_backend_source(backend, ir)
+        if refusal is not None:
+            checks.append(Check(label, MISMATCH,
+                                f"{backend}: the emitter refuses this IR, so the "
+                                "recorded artifact cannot be re-emitted at all: "
+                                f"{refusal}",
+                                recorded_hash, ""))
+            continue
         if emitted is None:
             checks.append(Check(label, UNVERIFIED,
                                 f"{backend} emitter toolchain is not available "
