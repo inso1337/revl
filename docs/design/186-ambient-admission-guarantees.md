@@ -86,6 +86,7 @@ C=k:T        handoff: C exports state of type T at key k                       (
 !services    header: the `:S` rows are the WHOLE running service set          (item 346)
 :S           service: the running composition declares service S              (item 346)
 :S,a,b       service: ... and its operations are exactly `a` and `b`          (457 T4b)
+:S,a(k:Str)  service: ... and `a`'s declared parameters are exactly those    (issue #346)
 ```
 
 Provision rows are exactly today's; a manifest of provision rows parses as
@@ -103,7 +104,21 @@ and the operation list a `:S,a,b` row carries says what that requirement offers,
 which is what lets the fold refuse a call to an operation the running service
 does not declare (`A6`, docs/design/457 T4b). The comma is the claim - a bare
 `:S` says nothing about the surface and decides no member, the same
-silence-is-not-emptiness rule the header carries for the names. `-C` and `C=k:T` are the
+silence-is-not-emptiness rule the header carries for the names.
+
+An operation token may carry its own declared PARAMETER LIST behind it
+(`:S,a(k:Str|n:Int)`, issue #346), which is the same claim one level further
+down and is what lets a call through a requirement be TYPED against the running
+declaration rather than only resolved against it: `store.bump(key)` on a running
+`bump(n: Int)` is refused `T1` in the reference's own sentence. The bracket is
+the claim there, so `a()` is the empty parameter list while a bare `a` says
+nothing about the arguments and leaves the rule silent. The renderer WITHHOLDS a
+list it cannot spell without one of the wire's own structural characters
+(`Map[Str, Int]` carries the operation separator), so a token that arrives
+carrying one is a garbled row and refuses the wire by name rather than being
+read as a shorter parameter list. Return types, emission and async markings are
+NOT on the wire: the G4 and A1 arms read those, and an arm answering from a
+declaration nobody sent is the wave-through this block exists to avoid. `-C` and `C=k:T` are the
 contrast: each of them CHANGES what the fold must compute, which is why one is
 folded in full and the other still refuses. A malformed `:S` name is held to the
 same bare-identifier rule a `-C` name is, and refuses the same way.
