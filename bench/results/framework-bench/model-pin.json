@@ -1,0 +1,124 @@
+{
+  "endpoint_kind": "ollama",
+  "endpoint": "http://127.0.0.1:11434",
+  "endpoint_is_local": true,
+  "sampling": {
+    "temperature": 0.0,
+    "top_p": 1.0,
+    "seed": 0,
+    "max_output_tokens": 8192
+  },
+  "machine": "Darwin 25.2.0 arm64 \u00b7 Python 3.14.7",
+  "probe_prompt": "Count from one to twenty in English words, one per line.",
+  "model": {
+    "requested": "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M",
+    "resolved": "hf.co/ornith-ai/Ornith-1.5-35B-A3B-GGUF:Q4_K_M",
+    "resolution": "exact",
+    "digest": "e418857d056538b10aaffb08e62148e1841fed50ed8c0ba44b6d2de0036e332e",
+    "quantisation": "unknown",
+    "quantisation_reported_by_endpoint": "unknown",
+    "quantisation_from_tag": "Q4_K_M",
+    "parameter_size": "35.5B",
+    "context_length": 262144,
+    "family": "qwen35moe",
+    "format": "gguf",
+    "size_bytes": 22616286186,
+    "capabilities": [
+      "completion",
+      "vision"
+    ]
+  },
+  "reachable": true,
+  "throughput": {
+    "samples": [
+      {
+        "generation_tps": 24.67349544205362,
+        "generation_tokens": 128,
+        "load_ms": 1.610625,
+        "total_ms": 533268.997375,
+        "unaccounted_ms": 527805.57675,
+        "accounted_fraction": 0.010245149543464024,
+        "load_average_1m": 11.97,
+        "prompt_tps": 83.92414716646537,
+        "prompt_tokens": 23,
+        "index": 0,
+        "cold": true
+      },
+      {
+        "generation_tps": 25.28832143827328,
+        "generation_tokens": 128,
+        "load_ms": 2.323166,
+        "total_ms": 286677.39475,
+        "unaccounted_ms": 281361.32658399997,
+        "accounted_fraction": 0.018543729862746706,
+        "load_average_1m": 35.84,
+        "prompt_tps": 91.22640012692368,
+        "prompt_tokens": 23,
+        "index": 1,
+        "cold": false
+      },
+      {
+        "generation_tps": 24.170074238005366,
+        "generation_tokens": 128,
+        "load_ms": 9.840541,
+        "total_ms": 154925.47975,
+        "unaccounted_ms": 149348.144209,
+        "accounted_fraction": 0.03600011792766451,
+        "load_average_1m": 43.25,
+        "prompt_tps": 84.65530567926682,
+        "prompt_tokens": 23,
+        "index": 2,
+        "cold": false
+      },
+      {
+        "generation_tps": 24.192700910930792,
+        "generation_tokens": 128,
+        "load_ms": 12.284041,
+        "total_ms": 20048.835166,
+        "unaccounted_ms": 14483.551125000002,
+        "accounted_fraction": 0.27758640314615074,
+        "load_average_1m": 39.75,
+        "prompt_tps": 87.73669835360178,
+        "prompt_tokens": 23,
+        "index": 3,
+        "cold": false
+      },
+      {
+        "generation_tps": 22.726671471227057,
+        "generation_tokens": 128,
+        "load_ms": 2.495583,
+        "total_ms": 16276.443041,
+        "unaccounted_ms": 10344.289458,
+        "accounted_fraction": 0.3644625283335577,
+        "load_average_1m": 36.49,
+        "prompt_tps": 77.30858562261982,
+        "prompt_tokens": 23,
+        "index": 4,
+        "cold": false
+      },
+      {
+        "generation_tps": 24.87538984400021,
+        "generation_tokens": 128,
+        "load_ms": 2.419958,
+        "total_ms": 15461.723791,
+        "unaccounted_ms": 10021.392832999998,
+        "accounted_fraction": 0.3518579837240866,
+        "load_average_1m": 33.51,
+        "prompt_tps": 78.69624276764421,
+        "prompt_tokens": 23,
+        "index": 5,
+        "cold": false
+      }
+    ],
+    "n_warm": 5,
+    "generation_tps_mean": 24.25063158048734,
+    "generation_tps_sd": 0.9746054318670532,
+    "cold_sample_included_in_mean": false,
+    "accounted_fraction_mean": 0.20969015259884127,
+    "contention_note": "the fraction of each request's wall clock that the server accounted for as load, prompt eval or generation. Well under 1 means the request spent most of its time waiting, which is a contended machine. The throughput figures are the server's accounted rates and are not adjusted by this.",
+    "load_average_1m_mean": 37.768,
+    "load_average_1m_max": 43.25,
+    "prompt_tps_mean": 83.92464651001126,
+    "prompt_tps_sd": 5.905287362203498
+  }
+}
