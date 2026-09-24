@@ -1,22 +1,8 @@
 {
- "checker_version": "GATE-CENSUS-1+809b1804f3f7",
+ "checker_version": "GATE-CENSUS-1+6b2ec5be4ef4",
  "engine": "crate",
  "false_admissions": [],
- "n": 848,
+ "n": 894,
  "note": "A recorded `tools/gate_reference_census.py --engine crate` run, read by tools/census_artifact.py. It is recorded rather than re-run because it needs cargo and takes minutes. The checker version it was taken at is recorded with it, and a reproduction taken at a different version is reported as stale and lifts no claim.",
- "tracked_buckets": {
-  "false-admit/T1": [
-   "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-   "examples/rejections/t17_arrow_body_unchecked.rvl",
-   "examples/rejections/t32_arrow_value_result_flows.rvl",
-   "examples/rejections/t33_arrow_value_arity.rvl",
-   "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-   "examples/rejections/v2_match_nonexhaustive.rvl"
-  ],
-  "false-admit/TYPE": [
-   "examples/rejections/t13_unknown_match_case.rvl",
-   "examples/rejections/t18_type_alias_cycle.rvl",
-   "examples/rejections/t5_destructure_nonrecord.rvl"
-  ]
- }
+ "tracked_buckets": {}
 }
