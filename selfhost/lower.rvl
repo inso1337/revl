@@ -8312,7 +8312,8 @@ fn is_alias_target(target: Str, declared: List[Str]) -> Bool {
   return is_aliasable_builtin(p.head) || contains(declared, p.head)
 }
 
-type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str] }
+type AliasScan = { declared: List[Str], names: List[Str], targets: List[Str],
+                   lines: List[Int] }
 
 // Every type DECLARATION in the file: the names it declares (the reference's
 // `declared` set, which an `event` contributes to as well — the parser appends an
@@ -8326,6 +8327,7 @@ fn alias_scan(ts: List[Token]) -> AliasScan {
   var declared: List[Str] = []
   var names: List[Str] = []
   var targets: List[Str] = []
+  var lines: List[Int] = []
   var i = 0
   while (i < ts.length() && !atk(ts, i, "eof")) {
     if (at_event(ts, i)) {
@@ -8345,12 +8347,16 @@ fn alias_scan(ts: List[Token]) -> AliasScan {
             && !cfg_is_variant_rhs(ts, j + 1, end)) {
           names = names.push(nm)
           targets = targets.push(type_at(ts, j + 1).ty)
+          // the DECLARATION's own line: `_resolve_type_aliases` anchors the
+          // cycle refusal at `aliases[head].line`, the line of the alias the
+          // expansion came back round to, not at the use site.
+          lines = lines.push(tkc(ts, i).line)
         }
       }
       i = end > i ? end : skip_line(ts, i)
     } else { i += 1 }
   }
-  return { declared: declared, names: names, targets: targets }
+  return { declared: declared, names: names, targets: targets, lines: lines }
 }
 
 fn alias_at(al: Map[Str, Str], name: Str) -> Str {
@@ -8422,6 +8428,96 @@ fn alias_map(ts: List[Token]) -> Map[Str, Str] {
     round += 1
   }
   return out
+}
+
+// ------------------------------------------- the alias CYCLE (457 §2.1 item 1)
+//
+// `_resolve_type_aliases`' `expand` recursion, which is the FIRST obligation of
+// the reference's declaration level — ahead of `_validate_declared_types` and so
+// ahead of every phase `collect_nonlink` already runs. A transparent alias is
+// substituted verbatim at every declaration site, so a cycle has no expansion to
+// substitute and the reference refuses it outright rather than looping in the
+// resolver or emitting a type no tier defines.
+//
+// `alias_map` above computes the same fixed point for the PRODUCER side and
+// bounds its rounds so a cycle terminates with a harmless answer; that is the
+// right shape there, because it runs behind this gate. Here the cycle is the
+// answer.
+//
+// The chain is the reference's, character for character: the stack from the
+// first occurrence of the repeated head, with that head appended, joined
+// " -> ". The refusal is anchored at the repeated alias's own DECLARATION line.
+type AcExp = { cyc: Str, line: Int }
+
+fn ac_clean() -> AcExp { return { cyc: "", line: 0 } }
+
+// `" -> ".join(stack[stack.index(head):] + (head,))`
+fn ac_chain(stack: List[Str], from_: Int, head: Str) -> Str {
+  var out = ""
+  var i = from_
+  while (i < stack.length()) {
+    out = i == from_ ? stack[i] : out.concat(" -> ").concat(stack[i])
+    i += 1
+  }
+  return out == "" ? head : out.concat(" -> ").concat(head)
+}
+
+fn ac_expand(ty: Str, stack: List[Str], names: List[Str], targets: List[Str],
+             lines: List[Int]) -> AcExp {
+  let p = ty_parse(ty)
+  // a type APPLICATION rewrites its ARGUMENTS under the same stack and leaves
+  // its head alone — the reference consults `aliases` only for a bare name.
+  if (p.args.length() > 0) {
+    return ac_expand_args(p.args, 0, stack, names, targets, lines)
+  }
+  let k = names.indexOf(p.head)
+  if (k == 0 - 1) { return ac_clean() }
+  let si = stack.indexOf(p.head)
+  if (si != 0 - 1) { return { cyc: ac_chain(stack, si, p.head), line: lines[k] } }
+  return ac_expand(targets[k], stack.push(p.head), names, targets, lines)
+}
+
+fn ac_expand_args(args: List[Str], i: Int, stack: List[Str], names: List[Str],
+                  targets: List[Str], lines: List[Int]) -> AcExp {
+  if (i >= args.length()) { return ac_clean() }
+  let r = ac_expand(args[i], stack, names, targets, lines)
+  if (r.cyc != "") { return r }
+  return ac_expand_args(args, i + 1, stack, names, targets, lines)
+}
+
+// The transparent aliases in DECLARATION order, which is the order
+// `_resolve_type_aliases` walks its `aliases` dict in, so a file with two
+// disjoint cycles draws the one the earlier declaration reaches.
+type AcTbl = { names: List[Str], targets: List[Str], lines: List[Int] }
+
+fn ac_table(sc: AliasScan) -> AcTbl {
+  var names: List[Str] = []
+  var targets: List[Str] = []
+  var lines: List[Int] = []
+  var i = 0
+  while (i < sc.names.length()) {
+    if (is_alias_target(sc.targets[i], sc.declared)
+        && !contains(names, sc.names[i])) {
+      names = names.push(sc.names[i])
+      targets = targets.push(sc.targets[i])
+      lines = lines.push(sc.lines[i])
+    }
+    i += 1
+  }
+  return { names: names, targets: targets, lines: lines }
+}
+
+fn alias_cycle_refusal(ts: List[Token]) -> Verd {
+  let t = ac_table(alias_scan(ts))
+  var i = 0
+  while (i < t.names.length()) {
+    let r = ac_expand(t.targets[i], [t.names[i]], t.names, t.targets, t.lines)
+    if (r.cyc != "") {
+      return mk_verd(tagged("TYPE", "type alias cycle: ".concat(r.cyc)), r.line)
+    }
+    i += 1
+  }
+  return no_verd()
 }
 
 
@@ -9660,17 +9756,100 @@ fn tk_infer_raw(e: Expr, env: List[Bind]) -> TInf {
     Lst(l)      => tk_items(l.items, 0, env, infer_list_ty(l.items, env)),
     If(f)       => tk_if(f.cond, f.then_, f.els, env),
     Templ(t)    => tk_parts(t.parts, 0, env),
-    Match(m)    => tk_ok(infer_match_ty(m, env)),
+    Match(m)    => tk_match(m, env),
     Hole(h)     => tk_ok(h.ty),
-    // an optional chain SHORT-CIRCUITS, so its own member rules are T2d's
-    // slice; the target is still walked, because a refusal inside it is one
-    // the reference reaches too.
-    OptField(f) => tk_sub(f.target, env),
-    OptCall(c)  => tk_sub(c.target, env),
-    // out of this slice: an arrow body (T2c), an `emit` operand, an asset, and
-    // a node the parser already refused.
+    // an optional chain SHORT-CIRCUITS. Its LEFT-HAND rule is ported
+    // (docs/design/457 T2d); the member's own type is not, so the chain's
+    // result stays unknown.
+    OptField(f) => tk_optchain(f.target, [], env),
+    OptCall(c)  => tk_optchain(c.target, c.args, env),
+    // item 75(a) §3.1/§3.2 (docs/design/457 T2c): an arrow always types, and
+    // its body is an ordinary expression over the enclosing scope.
+    Arrow(a)    => tk_arrow(a, env),
+    // out of this slice: an `emit` operand, an asset, and a node the parser
+    // already refused.
     _           => tk_ok(""),
   }
+}
+
+// ----------------------------------------- match totality (457 T3b, §2.3)
+//
+// `_check_match_exhaustiveness`, at the position `_lower_pure_expr` runs it:
+// after `_expr_static_type` has answered the scrutinee's type and BEFORE the
+// scrutinee or any arm is lowered, so a match over a known variant is judged on
+// its arm NAMES ahead of anything inside it. The two refusals are ordered as the
+// reference orders them — an arm naming a case the ADT does not declare first,
+// then the missing cases — and the second is skipped outright when a `_` arm is
+// present.
+//
+// Where it stays SILENT, and why each silence is the sound direction:
+//   * a scrutinee whose type the annotation engine cannot answer. The reference
+//     calls this check best-effort for exactly that reason, and its own
+//     `types.get(None)` misses.
+//   * a scrutinee whose type is not a DECLARED variant this text spells out —
+//     a record, a builtin, `Opt[T]`/`Result[T, E]` (whose arms the reference
+//     also leaves alone, because `types` holds no entry under those spellings),
+//     or a parameterized ADT's applied form.
+//   * a variant with an empty case list, which `adt_case_row` records no row
+//     for.
+// Each of those admits a program the reference may refuse; none refuses one the
+// reference admits, which is the only direction that would be a regression.
+fn tk_unknown_case_msg(pat: Str, ty: Str, declared: List[Str]) -> Str {
+  return "`".concat(pat).concat("` is not a case of `").concat(ty)
+    .concat("` (cases: ").concat(quote_join(declared)).concat(")")
+}
+
+fn tk_missing_msg(missing: List[Str]) -> Str {
+  return "non-exhaustive match: missing "
+    .concat(missing.length() == 1 ? "case " : "cases ")
+    .concat(quote_join(missing))
+}
+
+fn tk_unknown_arm(arms: List[ArmN], i: Int, ty: Str,
+                  declared: List[Str]) -> Str {
+  if (i >= arms.length()) { return "" }
+  let p = arms[i].pat
+  if (p != "" && p != "_" && !contains(declared, p)) {
+    return tagged("TYPE", tk_unknown_case_msg(p, ty, declared))
+  }
+  return tk_unknown_arm(arms, i + 1, ty, declared)
+}
+
+fn tk_arm_covers(arms: List[ArmN], i: Int, name: Str) -> Bool {
+  if (i >= arms.length()) { return false }
+  if (arms[i].pat == name) { return true }
+  return tk_arm_covers(arms, i + 1, name)
+}
+
+fn tk_missing_cases(declared: List[Str], i: Int, arms: List[ArmN],
+                    acc: List[Str]) -> List[Str] {
+  if (i >= declared.length()) { return acc }
+  let next = tk_arm_covers(arms, 0, declared[i]) ? acc : acc.push(declared[i])
+  return tk_missing_cases(declared, i + 1, arms, next)
+}
+
+fn tk_exhaustive(m: MatchN, env: List[Bind]) -> Str {
+  // `_expr_static_type` is `infer_ast` in its NON-raising form, which is the
+  // annotation engine here: a scrutinee this walk would refuse is one the
+  // reference reaches only AFTER this check, so borrowing the refusing walk's
+  // answer would reorder the two.
+  let sty = infer(m.scrut, env)
+  if (sty == "") { return "" }
+  let row = tenv_get(env, "cases ".concat(sty))
+  if (row == "") { return "" }
+  let declared = split_top_commas(row)
+  let unknown = tk_unknown_arm(m.arms, 0, sty, declared)
+  if (unknown != "") { return unknown }
+  if (tk_arm_covers(m.arms, 0, "_")) { return "" }
+  let missing = tk_missing_cases(declared, 0, m.arms, [])
+  if (missing.length() == 0) { return "" }
+  return tagged("T1", tk_missing_msg(missing))
+}
+
+fn tk_match(m: MatchN, env: List[Bind]) -> TInf {
+  let v = tk_exhaustive(m, env)
+  if (v != "") { return { ty: "", v: v } }
+  return tk_ok(infer_match_ty(m, env))
 }
 
 // Walk a sub-expression for its refusal only; the result type is out of slice.
@@ -9984,6 +10163,13 @@ fn tk_call(c: CallN, env: List[Bind]) -> TInf {
   // annotation engine's best effort below is what answers then.
   let nmd = tk_named(c, env, a.tys)
   if (nmd.hit) { return nmd.r }
+  // docs/design/457 T2c: a call through a function VALUE. It is asked after the
+  // signature table because this walk's environment spells a module `fn`'s own
+  // name as a function type too, and that declaration's refusals are the
+  // signature table's — `tk_named` declines exactly the names a body rebinds,
+  // which is the set the reference reads out of `tenv` first.
+  let fv = tk_fnvalue(c, env, a.tys, tv.ty)
+  if (fv.hit) { return fv.r }
   let mth = tk_method(c, env, a.tys, tv.ty)
   if (mth.hit) { return mth.r }
   if (tk_unknown_receiver(c.target, env)) { return tk_ok("") }
@@ -10021,11 +10207,17 @@ fn tk_call_result(t: Str) -> Str {
 // the same kind: `xs.push(1)` reads no field `push` off `xs`, so a method
 // callee walks its RECEIVER and stops, while every other callee shape is an
 // ordinary expression.
+// Its TYPE is kept on the third arm, not discarded. A callee that is neither a
+// bare name nor a method receiver is the function-VALUE position, and the type
+// this descent already computed is the one that arm needs. Inferring the callee
+// a second time to get it costs a whole extra descent PER CALL LEVEL, which on
+// a call spine (`a()()()…`) is exponential rather than merely quadratic: at
+// depth 40 the walk does not finish.
 fn tk_callee(callee: Expr, env: List[Bind]) -> TInf {
   return match callee {
     Var(n)   => tk_ok(""),
     Field(f) => tk_infer(f.target, env),
-    _        => tk_sub(callee, env),
+    _        => tk_infer(callee, env),
   }
 }
 
@@ -10951,6 +11143,304 @@ fn tk_unknown_recv_check(method: Str, argTys: List[Str]) -> TCall {
 
 fn tk_no_field() -> FieldN { return { target: NullLit, name: "" } }
 
+// ------------------------- arrows and function values (docs/design/457 T2c)
+//
+// An arrow is an EXPRESSION, and item 75(a) settles what expression: its
+// parameters are their written annotations or ⊥, its result is the written
+// return or — only where the body cannot mention a ⊥ parameter (§3.2) — what
+// the body infers to, and it ALWAYS types, as a function type with every ⊥
+// rendered `Any`. Returning nothing here is what threw the ARITY away with the
+// types, and arity is purely syntactic and never in doubt.
+//
+// Three things follow, and they are the three documents this slice moves:
+//
+//   * the BODY is walked. It is an ordinary expression over the enclosing
+//     scope — parameters shadow into the unknown, free variables keep their
+//     types — so reaching through an optional inside a lambda is the same
+//     refusal it is outside one.
+//   * a call THROUGH such a value is checked (`call_function_value`): arity
+//     first, then each argument against the parameter type.
+//   * a type name written in an arrow annotation is NOT quantified (rule G).
+//     An arrow is not a signature, so a name in its annotation resolves to a
+//     type parameter of the ENCLOSING `fn` — the `tparam ` rows `fb_function`
+//     seeds — else to a declared type, else to an ordinary opaque nominal that
+//     unifies with nothing. Never to a fresh parameter.
+//
+// What it does NOT do, each silence in the under-refusing direction: an arrow
+// in a CHECKING position is not read off the expectation (`_check_arrow`'s
+// contravariant parameters), so `let g: (Int) -> Int = (x) => ...` still types
+// `x` as ⊥ rather than `Int`; `_check_arrow_args` does not give an arrow
+// ARGUMENT its checking position; and `tk_compatible` keeps the permissive
+// function-type frontier it had, so no comparison against a function type
+// newly refuses.
+
+// Rule C1's A1 refusal — an arrow may not declare its own async colour — is
+// the arrow-colour phase's, upstream of this walk and already agreeing with
+// the reference message for message. Reading such an annotation HERE as an
+// ordinary return would hold the body to `Async[...]` and could draw a second,
+// different verdict on the same node, so the whole arrow is declined instead.
+//
+// BOTH spellings are asked, the written one and the alias-erased one, because
+// issue #1151 is precisely that the two can differ: the colour phase reads the
+// written annotation and the reference erases first, so `-> Later` over
+// `type Later = Async[Int]` draws the reference's A1 and no verdict here. That
+// issue is not closed by this walk — declining on either spelling only keeps it
+// from turning a missing refusal into a DIFFERENT one.
+fn tk_arrow(a: ArrowN, env: List[Bind]) -> TInf {
+  let inner = tk_arrow_env(a.params, 0, env)
+  let indep = !tk_arrow_dependent(a.params, 0, a.body)
+  // `tk_solid` for the same reason every other declared spelling passes through
+  // it: an annotation naming a type this walk cannot resolve is answered "",
+  // and "" is the inference position, so the body is walked and not compared.
+  let ret = tk_solid(tk_arrow_ann(taint_strip(a.ret), env), env)
+  if (ty_mentions_async(a.ret) || ty_mentions_async(ret)) { return tk_ok("") }
+  if (a.ret != "" && indep) {
+    // the annotation is a claim about the body, so check it — but only where
+    // the body cannot mention a ⊥ parameter, under which the claim could only
+    // pass vacuously or misfire.
+    let c = tk_check(a.body, ret, inner,
+                     "the body of this arrow (from its return annotation)")
+    if (c.v != "") { return c }
+    return tk_ok(tk_arrow_ty(a.params, 0, [], ret, env))
+  }
+  let b = tk_infer(a.body, inner)
+  if (b.v != "") { return b }
+  // §3.2: a result inferred from a body typed under unknown parameters is not
+  // sound (`[x]` infers `List[Never]`, `{ a: x }` infers `{a: Any}` — half
+  // solved types that look known and are not), so it stays ⊥ instead.
+  return tk_ok(tk_arrow_ty(a.params, 0, [],
+                           a.ret != "" ? ret : (indep ? b.ty : ""), env))
+}
+
+// A parameter takes its written annotation; a bare one SHADOWS whatever the
+// enclosing scope bound that name to, into the unknown (the reference's
+// `inner.pop(param, None)`). A row valued "" is what a lookup reads as unknown,
+// so the shadow is the row.
+fn tk_arrow_env(ps: List[ParamN], i: Int, env: List[Bind]) -> List[Bind] {
+  if (i >= ps.length()) { return env }
+  let ty = tk_solid(tk_arrow_ann(taint_strip(ps[i].ty), env), env)
+  return tk_arrow_env(ps, i + 1, tenv_put(env, ps[i].name, ty))
+}
+
+// Rule G's resolution, as a spelling transform, in the reference's own order:
+// a TRANSPARENT ALIAS is erased first (an arrow's annotations live inside a
+// body, so `_subst_body_annotations` rewrites them rather than the declaration
+// sweep, but the substitution is the same one), then a name the ENCLOSING `fn`
+// quantifies is marked `?T` and is a wildcard downstream. Every other name is
+// left exactly as written, which is what makes `(x: Q): Q => x` a `(Q) -> Q`
+// that `Int` does not flow into.
+fn tk_arrow_ann(ty: Str, env: List[Bind]) -> Str {
+  if (ty == "") { return "" }
+  let p = ty_parse(ty)
+  if (p.args.length() == 0) {
+    let ex = tenv_get(env, tk_alias_key(p.head))
+    // the alias table is already expanded to its FIXED POINT, so an expansion
+    // names no alias and the marking below is all that is left to do.
+    if (ex != "") { return tk_mark_ann(ex, env) }
+    return tk_mark_ann(p.head, env)
+  }
+  var out: List[Str] = []
+  var k = 0
+  while (k < p.args.length()) {
+    out = out.push(tk_arrow_ann(p.args[k], env))
+    k += 1
+  }
+  return ty_render(p.head, out)
+}
+
+// `mark_tparams` over the enclosing `fn`'s rows rather than a list.
+fn tk_mark_ann(ty: Str, env: List[Bind]) -> Str {
+  if (ty == "") { return "" }
+  let p = ty_parse(ty)
+  if (p.args.length() == 0) {
+    return tenv_get(env, tk_tparam_key(p.head)) != "" ? "?".concat(p.head)
+                                                      : p.head
+  }
+  var out: List[Str] = []
+  var k = 0
+  while (k < p.args.length()) { out = out.push(tk_mark_ann(p.args[k], env))  k += 1 }
+  return ty_render(p.head, out)
+}
+
+fn tk_tparam_key(n: Str) -> Str { return "tparam ".concat(n) }
+fn tk_alias_key(n: Str) -> Str { return "alias ".concat(n) }
+
+// The document's transparent aliases as environment rows, from the same fixed-
+// point table the declaration sweep substitutes with. The key is not a legal
+// revl identifier, so no program can collide with it.
+fn tk_alias_rows(al: Map[Str, Str], env: List[Bind]) -> List[Bind] {
+  if (al.size() == 0) { return env }
+  let ks = al.keys()
+  var out = env
+  var i = 0
+  while (i < ks.length()) {
+    out = tenv_put(out, tk_alias_key(ks[i]), alias_at(al, ks[i]))
+    i += 1
+  }
+  return out
+}
+
+// The enclosing `fn`'s quantified names, as environment rows. The key is not a
+// legal revl identifier, so no program can collide with it.
+fn tk_tparam_rows(tps: List[Str], i: Int, env: List[Bind]) -> List[Bind] {
+  if (i >= tps.length()) { return env }
+  return tk_tparam_rows(tps, i + 1, tenv_put(env, tk_tparam_key(tps[i]), "1"))
+}
+
+// `_resolve_arrow`'s function type: every ⊥ renders `Any`, which is the ABSENCE
+// of a claim rather than the erased-dynamic type (`tk_call_result` reads it
+// back as unknown). A spelling this walk may not use is a ⊥ like any other.
+fn tk_arrow_ty(ps: List[ParamN], i: Int, acc: List[Str], ret: Str,
+               env: List[Bind]) -> Str {
+  if (i >= ps.length()) {
+    let r = tk_solid(ret, env)
+    return ty_render("->", acc.push(r == "" ? "Any" : r))
+  }
+  let t = tk_solid(tk_arrow_ann(taint_strip(ps[i].ty), env), env)
+  return tk_arrow_ty(ps, i + 1, acc.push(t == "" ? "Any" : t), ret, env)
+}
+
+// §3.2's bottom-parameter-independence rule: does a ⊥ parameter occur in the
+// body? Syntactic and deliberately conservative — it OVER-approximates (an
+// inner binder that shadows the name still counts as an occurrence), because
+// naming one occurrence too many withholds a result while naming one too few
+// claims a result the parameter could have shaped.
+fn tk_arrow_dependent(ps: List[ParamN], i: Int, body: Expr) -> Bool {
+  if (i >= ps.length()) { return false }
+  if (ps[i].ty == "" && tk_mentions(body, ps[i].name)) { return true }
+  return tk_arrow_dependent(ps, i + 1, body)
+}
+
+fn tk_mentions(e: Expr, n: Str) -> Bool {
+  return match e {
+    Var(v)      => v == n,
+    Bin(b)      => tk_mentions(b.l, n) || tk_mentions(b.r, n),
+    Un(u)       => tk_mentions(u.e, n),
+    Emit(u)     => tk_mentions(u.e, n),
+    Call(c)     => tk_mentions(c.target, n) || tk_mentions_xs(c.args, 0, n),
+    Field(f)    => tk_mentions(f.target, n),
+    OptField(f) => tk_mentions(f.target, n),
+    OptCall(c)  => tk_mentions(c.target, n) || tk_mentions_xs(c.args, 0, n),
+    Index(x)    => tk_mentions(x.target, n) || tk_mentions(x.idx, n),
+    If(f)       => tk_mentions(f.cond, n) || tk_mentions(f.then_, n)
+                     || tk_mentions(f.els, n),
+    Rec(r)      => tk_mentions_inits(r.fields, 0, n),
+    RecUpd(r)   => tk_mentions(r.base, n) || tk_mentions_inits(r.upds, 0, n),
+    Lst(l)      => tk_mentions_xs(l.items, 0, n),
+    Arrow(a)    => tk_mentions(a.body, n),
+    Match(m)    => tk_mentions(m.scrut, n) || tk_mentions_arms(m.arms, 0, n),
+    Templ(t)    => tk_mentions_parts(t.parts, 0, n),
+    _           => false,
+  }
+}
+
+fn tk_mentions_xs(xs: List[Expr], i: Int, n: Str) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (tk_mentions(xs[i], n)) { return true }
+  return tk_mentions_xs(xs, i + 1, n)
+}
+
+fn tk_mentions_inits(xs: List[InitN], i: Int, n: Str) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (tk_mentions(xs[i].value, n)) { return true }
+  return tk_mentions_inits(xs, i + 1, n)
+}
+
+fn tk_mentions_arms(xs: List[ArmN], i: Int, n: Str) -> Bool {
+  if (i >= xs.length()) { return false }
+  if (tk_mentions(xs[i].body, n)) { return true }
+  return tk_mentions_arms(xs, i + 1, n)
+}
+
+fn tk_mentions_parts(ps: List[PartN], i: Int, n: Str) -> Bool {
+  if (i >= ps.length()) { return false }
+  if (ps[i].kind == "e" && tk_mentions(ps[i].e, n)) { return true }
+  return tk_mentions_parts(ps, i + 1, n)
+}
+
+// `call_function_value`: a call through a value of function type — a `let`-bound
+// arrow, a parameter, a record field read into a `let`. The reference reads a
+// local of function type BEFORE the case table and before the signature table,
+// so this arm is asked for a bare name only where `tk_named` has already
+// declined it (which it does on exactly the names the body rebinds).
+// `calleeTy` is what `tk_callee` already inferred for this call's target, so
+// nothing here descends a second time. It is the RECEIVER's type on a method
+// callee, which is why that arm misses: a method call is not a function value.
+fn tk_fnvalue(c: CallN, env: List[Bind], argTys: List[Str],
+              calleeTy: Str) -> TCall {
+  return match c.target {
+    Var(n)   => tk_fnvalue_named(n, c, env, argTys),
+    Field(f) => tk_miss(),
+    // any other callee expression: an arrow applied in place, a function value
+    // read out of a `let` chain, …
+    _        => tk_is_fn_ty(calleeTy)
+                  ? tk_hit(tk_fn_call(calleeTy, "this call's callee", c.args,
+                                      argTys))
+                  : tk_miss(),
+  }
+}
+
+fn tk_fnvalue_named(n: Str, c: CallN, env: List[Bind],
+                    argTys: List[Str]) -> TCall {
+  // a module declaration is the signature table's, not this arm's: its row
+  // carries the arity window and the type-parameter marking, and its refusal
+  // names the callee without quoting a function type.
+  if (sig_declared(env, n)) { return tk_miss() }
+  if (n == "Some" || n == "None" || n == "Ok" || n == "Err") { return tk_miss() }
+  if (tenv_get(env, "case ".concat(n)) != "") { return tk_miss() }
+  let t = tenv_get(env, n)
+  if (!tk_is_fn_ty(t)) { return tk_miss() }
+  return tk_hit(tk_fn_call(t, "`".concat(n).concat("`"), c.args, argTys))
+}
+
+fn tk_fn_call(fnTy: Str, what: Str, args: List[Expr],
+              argTys: List[Str]) -> TInf {
+  let parts = ty_parse(fnTy).args
+  if (parts.length() == 0) { return tk_ok("") }
+  let nps = parts.length() - 1
+  // arity is purely syntactic and never in doubt, so it is checked even when
+  // nothing about the parameter types is known; revl has no default, optional
+  // or variadic parameters, so it is exact.
+  if (args.length() != nps) {
+    return tk_no("T1", what.concat(" is a `").concat(tk_render(fnTy))
+      .concat("` and takes ").concat(nps.to_str()).concat(" argument(s), ")
+      .concat(args.length().to_str()).concat(" given"))
+  }
+  let m = tk_fn_args(parts, argTys, 0, nps, what)
+  if (m.v != "") { return m }
+  let ret = parts[nps]
+  // ELIMINATION (item 92 §2): calling an async-typed value yields the unwrapped
+  // `T`. `Any` is the absence of a claim, not a type — unknown, not `Any`.
+  return tk_ok(tk_call_result(ret))
+}
+
+fn tk_fn_args(ps: List[Str], argTys: List[Str], i: Int, nps: Int,
+              what: Str) -> TInf {
+  if (i >= nps || i >= argTys.length()) { return tk_ok("") }
+  if (ps[i] != "" && argTys[i] != "" && !tk_compatible(ps[i], argTys[i])) {
+    return tk_mismatch("argument ".concat((i + 1).to_str()).concat(" of ")
+                         .concat(what), ps[i], argTys[i])
+  }
+  return tk_fn_args(ps, argTys, i + 1, nps, what)
+}
+
+// `?.` REQUIRES an optional on the left and always yields one on the right. On a
+// value that is always present the short-circuit is dead syntax the strict
+// tiers cannot render (rust and java have no `?.` on a plain value), which is
+// the mirror of `??` on a non-optional. The member's own type is out of this
+// slice, so the chain's result stays unknown.
+fn tk_optchain(target: Expr, args: List[Expr], env: List[Bind]) -> TInf {
+  let t = tk_infer(target, env)
+  if (t.v != "") { return t }
+  if (!tk_wild(t.ty) && parse_head(t.ty) != "Opt") {
+    return tk_no("T1", "`?.` needs an optional on the left, got `"
+      .concat(tk_render(t.ty)).concat("`"))
+  }
+  let a = tk_arg_walk(args, 0, env, [])
+  if (a.v != "") { return a.r }
+  return tk_ok("")
+}
+
 // ------------------------------------------ §4.4 step 6: the LOWERING refusals
 //
 // `_lower_pure_expr`'s method branch. These are NOT inference refusals: the
@@ -11373,15 +11863,59 @@ fn fb_host_value(e: Expr, scope: List[Bind]) -> Bool {
   }
 }
 
+// `_record_pattern`: `{ a, b }`, names only — the grammar has no renaming form.
+// `i` is the index just past the opening brace; `ok` is false for anything this
+// reader cannot spell in full, and for the two shapes the reference refuses with
+// a sentence this slice does not carry (an empty pattern, a repeated name), so
+// such a statement stays the undecidable bail it has always been rather than
+// drawing some other refusal in their place. On success `i` is the closing
+// brace.
+type FbPat = { names: List[Str], i: Int, ok: Bool }
+
+fn fb_rec_pattern(ts: List[Token], i: Int) -> FbPat {
+  var k = i
+  var names: List[Str] = []
+  var ok = true
+  var go = true
+  while (go) {
+    if (atk(ts, k, "}")) { go = false }
+    else {
+      if (!atk(ts, k, "ident")) { go = false  ok = false }
+      else {
+        let nm = tkc(ts, k).text
+        if (contains(names, nm)) { ok = false }
+        names = names.push(nm)
+        k += 1
+        if (atk(ts, k, ",")) { k += 1 }
+        else { if (!atk(ts, k, "}")) { go = false  ok = false } }
+      }
+    }
+  }
+  if (names.length() == 0) { ok = false }
+  return { names: names, i: k, ok: ok }
+}
+
 // One statement of a fn body. Mirrors `own_one`'s reader token for token, so the
 // two cannot disagree about where a statement ends; what differs is the payload.
 fn fb_one(ts: List[Token], i: Int, hi: Int, al: Map[Str, Str]) -> FbStepR {
   let t = tkc(ts, i)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
-    // a destructuring pattern binds names this reader does not enumerate
-    if (atk(ts, i + 1, "{") || atk(ts, i + 1, "[")) {
-      return { step: fb_bail(), i: hi }
+    // a RECORD destructuring pattern is read far enough to ask the one question
+    // `_lower_let_pattern_stmt` asks before it binds anything — is the value a
+    // record — and no further: the step still ENDS the block (`i: hi`), exactly
+    // as the bail it replaces did, so nothing after it is judged and every
+    // consumer of this tree that treated the bail as "undecidable" still does
+    // (`rp_has_bail`, `csh_binders`). A LIST pattern keeps the plain bail: its
+    // own rule is a different message this slice does not port.
+    if (atk(ts, i + 1, "{")) {
+      let pr = fb_rec_pattern(ts, i + 2)
+      if (!pr.ok || !atk(ts, pr.i + 1, "=")) { return { step: fb_bail(), i: hi } }
+      let r = expr_at(ts, pr.i + 2)
+      if (is_bad(r.e) || r.i <= pr.i + 2) { return { step: fb_bail(), i: hi } }
+      return { step: fb_step7("letpat", pr.names.join(","), t.text == "var",
+                              t.line, r.e, "", ""), i: hi }
     }
+    if (atk(ts, i + 1, "[")) { return { step: fb_bail(), i: hi } }
     let name = tkc(ts, i + 1).text
     var j = i + 2
     var dty = ""
@@ -11497,6 +12031,35 @@ fn fb_scan(ts: List[Token], lo: Int, hi: Int, al: Map[Str, Str]) -> List[FbStep]
   return out
 }
 
+// The first destructured name already bound in this function, else "".
+fn fb_pat_scope(names: List[Str], i: Int, scope: List[Bind]) -> Str {
+  if (i >= names.length()) { return "" }
+  if (tenv_get(scope, names[i]) != "") { return names[i] }
+  return fb_pat_scope(names, i + 1, scope)
+}
+
+fn tk_destructure_msg(ty: Str) -> Str {
+  return "record destructuring requires a record, but `".concat(tk_render(ty))
+    .concat("` is not a record")
+}
+
+// `_BUILTIN_NONRECORD`: the builtin heads a record pattern can never destructure.
+fn tk_nonrecord_head(h: Str) -> Bool {
+  return h == "Str" || h == "Int" || h == "Int32" || h == "Bool" || h == "Float"
+      || h == "Bytes" || h == "Unit" || h == "List" || h == "Map" || h == "Opt"
+      || h == "Result" || h == "Criterion" || h == "Guard"
+}
+
+// Is this value's type one the reference PROVES is not a record? A declared
+// VARIANT is (`types[value_type]["kind"] != "record"`); a builtin non-record
+// head is. Everything else — a structural spelling, a nominal record, a type
+// this walk could not infer — answers no, which is the silent direction.
+fn tk_nonrecord_value(ty: Str, env: List[Bind]) -> Bool {
+  if (ty == "") { return false }
+  if (tenv_get(env, "cases ".concat(ty)) != "") { return true }
+  return tk_nonrecord_head(parse_head(ty))
+}
+
 fn fb_clean(scope: List[Bind], tys: List[Bind]) -> FbR {
   return { v: no_verd(), scope: scope, tys: tys }
 }
@@ -11527,6 +12090,27 @@ fn fb_walk(steps: List[FbStep], i: Int, scope: List[Bind], tys: List[Bind],
   if (i >= steps.length()) { return fb_clean(scope, tys) }
   let s = steps[i]
   if (s.kind == "bail") { return fb_clean(scope, tys) }
+  // docs/design/457 T3b: `_lower_let_pattern_stmt`'s RECORD branch, in its own
+  // order — the per-name scope guard first, then the value's type. Only the two
+  // arms that spell "requires a record" are ported: a DECLARED type whose
+  // `types` entry is not a record (the variant rows `adt_case_row` builds), and
+  // a builtin non-record head (`_BUILTIN_NONRECORD`). The unknown-field and
+  // element-type arms need the field table at a precision this walk does not
+  // hold, so they stay silent. The block ends here either way: the binder is not
+  // threaded on, so no statement after it is judged.
+  if (s.kind == "letpat") {
+    let names = split_top_commas(s.name)
+    let g = fb_pat_scope(names, 0, scope)
+    if (g != "") {
+      return fb_refuse("G6", fb_already_msg(g), s.line, scope, tys)
+    }
+    let vt = infer(s.value, tys)
+    if (tk_nonrecord_value(vt, tys)) {
+      return fb_type_refuse(tagged("TYPE", tk_destructure_msg(vt)), s.line,
+                            scope, tys)
+    }
+    return fb_clean(scope, tys)
+  }
   if (s.kind == "let") {
     if (tenv_get(scope, s.name) != "") {
       return fb_refuse("G6", fb_already_msg(s.name), s.line, scope, tys)
@@ -11805,7 +12389,7 @@ fn rp_returns(steps: List[FbStep], i: Int) -> Bool {
 fn rp_has_bail(steps: List[FbStep], i: Int) -> Bool {
   if (i >= steps.length()) { return false }
   let s = steps[i]
-  if (s.kind == "bail") { return true }
+  if (s.kind == "bail" || s.kind == "letpat") { return true }
   if (rp_has_bail(s.then_, 0) || rp_has_bail(s.els, 0)
       || rp_has_bail(s.body, 0)) { return true }
   return rp_has_bail(steps, i + 1)
@@ -11894,8 +12478,11 @@ fn fb_function(ts: List[Token], i: Int, sp: FbSpan, gtys: List[Bind],
   // body to it refuses a program the reference admits. The RETURN-PATH rule
   // below reads `sp.retDecl`, not this, because "does every path return" does
   // not depend on what the return type means.
+  // the same names, as rows an ARROW annotation can be resolved against: rule
+  // G says a name written in an arrow annotation is the enclosing `fn`'s type
+  // parameter where there is one, and never a fresh one (docs/design/457 T2c).
   let v = fb_walk(steps, 0, fb_params_scope(sp.ps, 0, []),
-                  fb_params_tys(sp.ps, 0, gtys, tps, al),
+                  fb_params_tys(sp.ps, 0, tk_tparam_rows(tps, 0, gtys), tps, al),
                   tk_solid(mark_tparams(alias_subst(sp.ret, al), tps), gtys)).v
   if (v.v != "") { return v }
   return rp_refusal(ts, sp, steps)
@@ -11912,7 +12499,11 @@ fn fb_refusal(ts: List[Token], i: Int) -> Verd {
   // stream, because the type-parameter marking a signature carries depends on
   // the DECLARED type names, which a `type` written after the `fn` still joins.
   let al = alias_map(ts)
-  return fb_refusal_at(ts, i, nr_binds(ts, sig_binds(ts, case_binds(ts, al), al)), al)
+  // the alias table rides the environment too, because an ARROW's annotations
+  // are the one declared spelling this walk meets without a token span to
+  // substitute over (docs/design/457 T2c).
+  return fb_refusal_at(ts, i,
+    tk_alias_rows(al, nr_binds(ts, sig_binds(ts, case_binds(ts, al), al))), al)
 }
 
 fn fb_refusal_at(ts: List[Token], i: Int, gtys: List[Bind],
@@ -12124,7 +12715,7 @@ fn csh_binders(steps: List[FbStep], i: Int, acc: CshBs) -> CshBs {
   if (i >= steps.length()) { return acc }
   let s = steps[i]
   var out = acc
-  if (s.kind == "bail") { out = { bs: acc.bs, ok: false } }
+  if (s.kind == "bail" || s.kind == "letpat") { out = { bs: acc.bs, ok: false } }
   if (s.kind == "let") { out = csh_add(acc, s.name, s.line) }
   if (s.kind == "for") {
     out = csh_binders(s.body, 0, csh_add(acc, s.name, s.line))
@@ -13253,6 +13844,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // `_validate_declared_types`, the earliest of all), then cache-purity,
   // host-acquire in a reachable fn, then the module-fn A1 twins, all ahead of
   // the component loop.
+  // the ALIAS CYCLE is first of all: `_resolve_type_aliases` runs ahead of
+  // `_validate_declared_types` in `check_and_lower`, and it RAISES, so on a
+  // program that trips it nothing else is reached.
+  let acv = alias_cycle_refusal(ts)
+  if (acv.v != "") { return { done: true, refs: [acv] } }
   // the DECLARED-TYPE validation runs at the head of `_validate_declared_types`,
   // ahead of the config-is-data walk that closes the same function, so a
   // malformed annotation on a `fn`/`extern` signature is decided before it.
@@ -16433,7 +17029,10 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> Ca
     // carries a space, which no identifier may, so it can never collide with a
     // binding.
     let named = tenv_put(a.binds, "decl ".concat(tkc(ts, i + 1).text), "1")
-    let d = decl_cases(ts, i, { binds: named, amb: a.amb }, al)
+    // docs/design/457 T3b: the ORDERED case list beside the per-case rows, which
+    // is what the two match rules compare an arm list against.
+    let withCases = adt_case_row(ts, i, al, named)
+    let d = decl_cases(ts, i, { binds: withCases, amb: a.amb }, al)
     return case_binds_walk(ts, d.i, d.a, al)
   }
   if (t.text == "test") {
@@ -16461,6 +17060,67 @@ fn case_binds_walk(ts: List[Token], i: Int, a: CaseAcc, al: Map[Str, Str]) -> Ca
   if (t.text == "service") { return case_binds_walk(ts, p_service(ts, i, empty_prog()).i, a, al) }
   if (t.text == "component") { return case_binds_walk(ts, p_component(ts, i, empty_prog()).i, a, al) }
   return case_binds_walk(ts, skip_line(ts, i), a, al)
+}
+
+// ----------------------------------- the variant table (457 T3b, §2.1 item 3)
+//
+// `_lower_type_decls`' `types[name]["cases"]`, read for the ONE question the
+// match rules ask of it: which case names a variant declares, in declaration
+// order. Recorded as a row keyed `cases <Type>` — the space is what no
+// identifier may carry, so the key can never collide with a binding — and
+// valued with the names comma-joined.
+//
+// The reader is `ir_type_decl`'s, decision for decision, because that one is
+// already byte-exact against the reference's emitted `types` section: a
+// transparent ALIAS contributes nothing (the reference has erased its
+// declaration before `_lower_type_decls` runs), a record BODY is a record and
+// not a variant, and a bare single-case right-hand side is the one-case nominal
+// the reference reads it as. The row is keyed by the DECLARED name alone, so a
+// parameterized `type Box[T]` is found only by a scrutinee whose spelling is the
+// bare `Box` — which is exactly what the reference's `types.get(type_name)` does
+// with the full spelling `Box[Int]`, namely miss and decide nothing.
+//
+// An EMPTY case list records NO row: `tenv_get` cannot tell an empty value from
+// an absent key, and "absent" is the silent direction.
+fn adt_case_names(ts: List[Token], lo: Int, hi: Int) -> Str {
+  var k = lo
+  var out = ""
+  var first = true
+  while (k < hi) {
+    if (atk(ts, k, "ident")) {
+      let nm = tkc(ts, k).text
+      var nk = k + 1
+      // a payload's own type spelling is stepped over, never read as a case
+      if (atk(ts, k + 1, "(")) {
+        let tr = type_at(ts, k + 2)
+        nk = tr.i
+        if (atk(ts, nk, ")")) { nk += 1 }
+      }
+      out = first ? nm : out.concat(",").concat(nm)
+      first = false
+      k = nk
+    } else { k += 1 }
+  }
+  return out
+}
+
+fn adt_case_row(ts: List[Token], i: Int, al: Map[Str, Str],
+                acc: List[Bind]) -> List[Bind] {
+  let lineHi = type_decl_end(ts, i + 1)
+  let nm = tkc(ts, i + 1).text
+  var j = i + 2
+  if (atk(ts, j, "[")) { j = skip_brackets(ts, j) }
+  if (!atk(ts, j, "=")) { return acc }
+  // a transparent alias is ERASED before the type table is built
+  if (al.has(nm)) { return acc }
+  if (atk(ts, j + 1, "{")) { return acc }
+  let names = adt_case_names(ts, j + 1, lineHi)
+  if (names == "") { return acc }
+  // a name declared twice is `duplicate type`, which the reference refuses and
+  // this walk does not port: keep the FIRST row rather than letting the second
+  // win, so nothing here claims a surface the reference never built.
+  if (tenv_get(acc, "cases ".concat(nm)) != "") { return acc }
+  return tenv_put(acc, "cases ".concat(nm), names)
 }
 
 // The built-in half of `_case_table`, declared first so a user ADT can shadow
@@ -20633,6 +21293,55 @@ service V { fn take(t: Secret[Str]) -> Int  fn plain(n: Int) -> Int }""")
   assert ir.indexOf("\"name\": \"t\", \"type\": \"Str\", \"secret\": true") != 0 - 1
   assert ir.indexOf("\"name\": \"n\", \"type\": \"Int\"}") != 0 - 1
   assert ir.indexOf("Secret[") == 0 - 1
+}
+
+// ------------- arrows, function values and `?.` (docs/design/457 T2c / T2d)
+//
+// The four arrow documents and the optional-chain one are pinned on tag AND
+// message by `tests/test_selfhost_lower.py`'s `REJECTED_PROGRAMS`, off the
+// fixtures in `examples/rejections/`. What the fixture corpus does NOT spell is
+// below: the three shapes that must stay ADMITTED, because this slice's whole
+// risk is refusing one of them, and the zero-argument spelling of the arity
+// refusal.
+
+test "§3.2: an arrow whose body depends on a bottom parameter claims no result" {
+  // `(x) => x` types under an UNKNOWN `x`, so its result is unknown too and
+  // nothing flows from it. Reading it as a `Str` — or as anything — would refuse
+  // this program, which the reference admits.
+  let v = admit_src("""fn takes_int(n: Int) -> Int {
+  return n
+}
+
+fn demo() -> Int {
+  let f = (x) => x
+  return takes_int(f(1))
+}""")
+  assert v == ""
+}
+
+test "an arrow value called at its arity with compatible arguments is admitted" {
+  let v = admit_src("""fn demo() -> Str {
+  let f = (x: Str): Str => x
+  return f("s")
+}""")
+  assert v == ""
+}
+
+test "a call through an arrow value with no arguments names the arity" {
+  let v = admit_src("""fn demo() -> Str {
+  let f = (x) => "s"
+  return f()
+}""")
+  assert v == "T1|`f` is a `(Any) -> Str` and takes 1 argument(s), 0 given"
+}
+
+test "`?.` on an actual optional is admitted" {
+  let v = admit_src("""type Row = { name: Str }
+
+fn label(r: Opt[Row]) -> Opt[Str] {
+  return r?.name
+}""")
+  assert v == ""
 }
 
 // ------------------------------- the fn-body binding discipline (item 391, G6)

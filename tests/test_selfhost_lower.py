@@ -1529,6 +1529,89 @@ component C requires sink: Sink {
   every o in sub { emit sink.write(o) }
 }
 """),
+    # ---- docs/design/457 slice T3b: what the totality rules must NOT refuse -
+    # The accepting twins of the match, alias and destructuring rows in
+    # REJECTED_PROGRAMS. Each is one token away from a refusing neighbour
+    # there, so a rule that over-reached would show up here as a false
+    # rejection rather than as a silent admission nobody measures.
+    ("a match that covers every case", """
+type Status = Active | Retired
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    Retired => 2,
+  }
+}
+"""),
+    ("a catch-all arm covers the cases nothing names", """
+type Status = Active | Retired | Pending
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    _ => 0,
+  }
+}
+"""),
+    # `Opt`/`Result` carry no `types` entry under their APPLIED spelling, so
+    # the reference asks the exhaustiveness question of neither and nor does
+    # the gate. A partial match over one must stay admitted.
+    ("a partial match over an Opt draws no exhaustiveness verdict", """
+fn f(o: Opt[Int]) -> Int {
+  return match o {
+    Some(v) => v,
+    None => 0,
+  }
+}
+"""),
+    # a PARAMETERIZED ADT: the reference looks its `types` entry up under the
+    # applied spelling (`Box[Int]`) and misses, so a missing case is admitted.
+    ("a match over a parameterized ADT draws no verdict", """
+type Box[T] = Full(T) | Empty
+
+fn f(b: Box[Int]) -> Int {
+  return match b {
+    Empty => 0,
+  }
+}
+"""),
+    # an alias CHAIN that terminates is the whole point of the erasure; only a
+    # cycle has no expansion.
+    ("a terminating chain of transparent aliases", """
+type Count = Int
+type Tally = Count
+
+fn f(t: Tally) -> Int {
+  return t
+}
+"""),
+    # `type Status = Pending` over an UNDECLARED head is a one-case nominal,
+    # not an alias, so it is no cycle even though it names only itself-shaped
+    # text.
+    ("a one-case nominal is not an alias", """
+type Status = Pending
+
+fn f(s: Status) -> Int {
+  return 1
+}
+"""),
+    # destructuring a real record, nominal and structural alike.
+    ("record destructuring of a nominal record", """
+type Row = { id: Int, name: Str }
+
+fn f(r: Row) -> Int {
+  let { id, name } = r
+  return id
+}
+"""),
+    ("record destructuring of a structural record", """
+fn f() -> Int {
+  let pt = { x: 1, y: 2 }
+  let { x, y } = pt
+  return x
+}
+"""),
 ]
 
 
@@ -1678,6 +1761,24 @@ boot component B2 provides e2: Env2 {
      _fixture("host_method_not_on_surface"), "HOST-METHOD"),
     ("g4 an extern undo slot's argument type",
      _fixture("g4_extern_undo_wrong_arg_type"), "T1"),
+    # ---- arrows and function values (docs/design/457 T2c) ------------------
+    # An arrow is an expression and item 75(a) settles which one: its body is
+    # walked over the enclosing scope, its arity is exact whatever its
+    # parameter types are, and a name written in its annotation is the
+    # enclosing `fn`'s type parameter or an opaque nominal, never a fresh one.
+    ("t17 an arrow body reaching through an optional",
+     _fixture("t17_arrow_body_unchecked"), "T1"),
+    ("t32 an arrow value's result in a position that cannot hold it",
+     _fixture("t32_arrow_value_result_flows"), "T1"),
+    ("t33 a call through an arrow value at the wrong arity",
+     _fixture("t33_arrow_value_arity"), "T1"),
+    ("t35 an arrow annotation is not quantified",
+     _fixture("t35_arrow_annotation_not_quantified"), "T1"),
+    # ---- optional chaining (docs/design/457 T2d) ---------------------------
+    # `?.` requires an optional on its left; on a value that is always present
+    # the short-circuit is dead syntax the strict tiers cannot render.
+    ("t14 an optional chain on a non-optional",
+     _fixture("t14_optional_chain_on_nonoptional"), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
@@ -2824,6 +2925,86 @@ component C requires sink: Sink provides api: Api {
   provide api { fn go() { return sink.write("x") } }
 }
 """, "G4"),
+    # ---- docs/design/457 slice T3b: totality and the declaration level ------
+    # `_check_match_exhaustiveness` (both halves), `_resolve_type_aliases`'
+    # cycle and `_lower_let_pattern_stmt`'s "requires a record" arms. All four
+    # fixtures were pinned in TYPE_LAYER_GAP below and have been struck from it.
+    ("a match arm naming a case the ADT does not declare",
+     _fixture("t13_unknown_match_case"), "TYPE"),
+    ("a match over a variant missing a case",
+     _fixture("v2_match_nonexhaustive"), "T1"),
+    # the plural sentence, which is a different string and not a join of the
+    # singular one.
+    ("a match missing two cases", """
+type Status = Active | Retired | Pending
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+  }
+}
+""", "T1"),
+    # the unknown ARM outranks the missing cases: this program trips both and
+    # the reference names the arm.
+    ("an unknown arm outranks the missing cases", """
+type Status = Active | Retired | Pending
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    Lapsed => 2,
+  }
+}
+""", "TYPE"),
+    # a payload arm binds a name; the case list is read past the payload's own
+    # type spelling, so a payload type that happens to name another case would
+    # otherwise join the declared list.
+    ("a match over a variant with payloads misses one", """
+type Row = { id: Int }
+type Outcome = Ok(Row) | Invalid(Str)
+
+fn describe(o: Outcome) -> Str {
+  return match o {
+    Ok(r) => "ok",
+  }
+}
+""", "T1"),
+    ("a type alias cycle", _fixture("t18_type_alias_cycle"), "TYPE"),
+    # the one-element cycle, whose chain is the same name twice.
+    ("a type alias that names itself", """
+type Handle = Handle
+
+fn open(h: Handle) -> Int {
+  return 1
+}
+""", "TYPE"),
+    # the expansion rewrites a type APPLICATION's ARGUMENTS under the same
+    # stack, so a cycle that runs through one is still a cycle.
+    ("a type alias cycle through a type application", """
+type Handle = List[Ref]
+type Ref = Handle
+
+fn open(h: Handle) -> Int {
+  return 1
+}
+""", "TYPE"),
+    ("record destructuring of a list",
+     _fixture("t5_destructure_nonrecord"), "TYPE"),
+    ("record destructuring of a scalar", """
+fn f(n: Int) -> Int {
+  let { a } = n
+  return 1
+}
+""", "TYPE"),
+    # a DECLARED type whose `types` entry is a variant rather than a record.
+    ("record destructuring of a declared variant", """
+type Status = Active | Retired
+
+fn f(s: Status) -> Int {
+  let { a } = s
+  return 1
+}
+""", "TYPE"),
 ]
 
 
@@ -3640,52 +3821,48 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # `dynamic_reserved_key` moved into REJECTED_PROGRAMS above, where tag AND
     # message are compared, and left this list.
     #
-    # What stays needs the optional-chaining rules the expression slice did not
-    # build: `?.` on a non-optional is decided from the target's type at the
-    # CHAIN, which is T2d's.
-    "expression typing (T1/T2)": [
-        ("t14_optional_chain_on_nonoptional", "T1"),
-    ],
+    # The optional-chaining rule closed the rest (docs/design/457 T2d):
+    # `t14_optional_chain_on_nonoptional` is now in REJECTED_PROGRAMS above,
+    # where tag AND message are compared, so this family has no row left here.
     # calls and signatures: LANDED whole (docs/design/457 T2b). The signature
     # table, `unify`/`substitute`, the host stub surface, `_BUILTIN_SIG` and the
     # four lowering-time method refusals moved all nine of this family's
     # fixtures into REJECTED_PROGRAMS above, where tag AND message are compared,
     # so the family has no row left here.
-    # arrows and function values: arrow-body checking, function-value flow and
-    # arity, arrow annotations. (The self-declared async colour,
-    # t34_arrow_self_declared_async, was in this family until the gate learned
-    # to parse an arrow's written return annotation and refuse a self-declared
-    # `Async[…]` colour — rule C1 — so it now AGREES with the reference and has
-    # left this gap; see agree-refuse/A1 in the census.)
-    "arrows and function values": [
-        ("t17_arrow_body_unchecked", "T1"),
-        ("t32_arrow_value_result_flows", "T1"),
-        ("t33_arrow_value_arity", "T1"),
-        ("t35_arrow_annotation_not_quantified", "T1"),
-    ],
-    # return paths and match: unknown/missing match cases. The RETURN-PATH half
-    # has LANDED (docs/design/457 T3b): `fb_function` runs
-    # `_check_returns_on_every_path` over the statement tree `fb_scan` already
-    # builds, so `t8_missing_return` and `t9_return_path_incomplete` moved into
-    # REJECTED_PROGRAMS above, where tag AND message are compared. What stays
-    # here needs the variant table and the arm algebra, which is T2d's.
-    "return paths and match": [
-        ("t13_unknown_match_case", "TYPE"),
-        ("v2_match_nonexhaustive", "T1"),
-    ],
-    # declarations: alias cycles and non-record destructuring. The DECLARED-TYPE
-    # half of this family has LANDED (slice T1): `selfhost/lower.rvl` `use`s the
-    # spelling algebra in `selfhost/types.rvl` and runs `check_type_wellformed`
-    # over every module `fn`/`extern` signature and every config field, so
-    # `t6_bare_generic` now refuses with the reference's tag and message and has
-    # moved into REJECTED_PROGRAMS above. What stays pinned here is decided
-    # elsewhere: the alias cycle in `_resolve_type_aliases` and the destructuring
-    # rule in `_lower_let_pattern_stmt`, neither of which is a declared-type
-    # question.
-    "declarations": [
-        ("t18_type_alias_cycle", "TYPE"),
-        ("t5_destructure_nonrecord", "TYPE"),
-    ],
+    # arrows and function values: LANDED WHOLE (docs/design/457 T2c). The
+    # self-declared async colour (t34_arrow_self_declared_async) left first,
+    # when the gate learned to parse an arrow's written return annotation and
+    # refuse a self-declared `Async[…]` colour — rule C1. The other four went
+    # with the expression rule: an arrow types as a function value, its body is
+    # walked over the enclosing scope, a call through such a value is checked
+    # for arity and per argument, and an arrow annotation names the enclosing
+    # `fn`'s type parameter or an opaque nominal but never a fresh one. All
+    # four are in REJECTED_PROGRAMS above, where tag AND message are compared.
+    # return paths and match: EMPTY. The RETURN-PATH half landed first
+    # (docs/design/457 T3b): `fb_function` runs `_check_returns_on_every_path`
+    # over the statement tree `fb_scan` already builds, so `t8_missing_return`
+    # and `t9_return_path_incomplete` moved into REJECTED_PROGRAMS above. The
+    # MATCH half closed the rest: `adt_case_row` records each declared
+    # variant's ORDERED case list beside the per-case rows, and
+    # `_check_match_exhaustiveness` runs at the position `_lower_pure_expr`
+    # runs it — the unknown arm first, then the missing cases unless a `_` arm
+    # covers them — so `t13_unknown_match_case` and `v2_match_nonexhaustive`
+    # moved there too, where tag AND message are compared. The key is kept
+    # rather than deleted so the family's name stays attached to the slice that
+    # closed it.
+    "return paths and match": [],
+    # declarations: EMPTY. The DECLARED-TYPE half landed with slice T1
+    # (`selfhost/lower.rvl` `use`s the spelling algebra in `selfhost/types.rvl`
+    # and runs `check_type_wellformed` over every module `fn`/`extern`
+    # signature and every config field, which moved `t6_bare_generic`). T3b
+    # took the other two, each decided somewhere else entirely:
+    # `_resolve_type_aliases`' `expand` recursion at the head of the
+    # declaration level — ahead of `_validate_declared_types`, where the
+    # reference RAISES it — for `t18_type_alias_cycle`, and
+    # `_lower_let_pattern_stmt`'s two "requires a record" arms, read off a
+    # record destructuring pattern the fn-body walk used to step over, for
+    # `t5_destructure_nonrecord`. Both are in REJECTED_PROGRAMS above.
+    "declarations": [],
     # provide-method and component bodies: EMPTY. This family has landed
     # (docs/design/457, the provide-method slice). All seven of its documents —
     # `t1_service_arg_type`, `t4_field_arg_type`,
@@ -3825,7 +4002,7 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_9_fixtures():
+def test_the_type_layer_gap_is_empty():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     42 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
@@ -3834,13 +4011,22 @@ def test_the_type_layer_gap_is_exactly_9_fixtures():
     more, the declared-type slice (T1) `t6_bare_generic`, and the provide-method
     / component slice the whole `provide-method and component bodies` family,
     all seven of it; on top of those, the name-RESOLUTION half of the G1/G6
-    family (docs/design/457, the G1 read position) took the last two. The
-    twelfth document that moved with T3a, `dynamic_reserved_key`, never had a
-    row here because this pin addresses its fixtures by bare name under
-    `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 9, len(_TYPE_LAYER_CASES)
-    names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 9, "a fixture is listed twice"
+    family (docs/design/457, the G1 read position) took two more, and the rest
+    of T3b — match exhaustiveness with its unknown-arm twin, the transparent
+    alias cycle and the non-record destructuring rule — took four more,
+    emptying both the `return paths and match` and the `declarations` families.
+    The twelfth document that moved with T3a, `dynamic_reserved_key`, never had
+    a row here because this pin addresses its fixtures by bare name under
+    `examples/rejections/`.
+
+    The last five went together: the optional-chain rule (T2d) took
+    `t14_optional_chain_on_nonoptional` out of the expression-typing family,
+    and the function-value rule (T2c) took the four arrow documents. Nothing is
+    pinned here any more, so this pin now reads as a floor rather than a
+    ceiling: a fixture the gate stops refusing has to come back through a row
+    added here and through `KNOWN_BYPASSES`, in the diff, rather than by
+    widening a number."""
+    assert _TYPE_LAYER_CASES == [], _TYPE_LAYER_CASES
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,

@@ -124,83 +124,97 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # file pins the divergence per fixture; the two lists move together. Each later
 # slice (T1..T4) refuses a family for real, at which point its fixtures leave
 # BOTH lists and the census baseline is re-recorded.
-KNOWN_BYPASSES = {
-    # -- fn-body binding rules (G1/G6): CLOSED, no row left --
-    # The ASSIGNMENT half landed with item 391's binding-discipline slice (the
-    # `let`/`var`/parameter scope walk over a module `fn` body, plus the
-    # arrow-body write form): `v2_let_reassignment`,
-    # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
-    # `g6_closure_mutates_capture` refused with the reference's message
-    # byte-for-byte and were struck from this list, and the callable-shadowing
-    # slice struck `shadowed_module_fn_call` the same way. The name-RESOLUTION
-    # rule (docs/design/457 §2.3) took the last two, `g1_template_undeclared`
-    # and `v2_undeclared_fn_var`: a name READ now resolves against the fn's
-    # scope and the callable universe, so the gate refuses both under G1 in the
-    # reference's own sentence and this family has no open bypass.
-    # -- expression typing (T1/T2) --
-    # The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
-    # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
-    # `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
-    # reference's own sentence and have been struck from this list, and the
-    # provide-method slice has since struck `t30` the same way: the walk over a
-    # component body now carries the environment that slice left empty — the
-    # method parameters at the service's declared types, the body's annotated
-    # and inferred locals, the activation locals at the operations they bind.
-    # What remains is the optional-chain rule, which is T2d's.
-    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-    # -- calls and signatures --
-    # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
-    # type parameters, the arity window, `unify`/`substitute` at a generic call
-    # site, the host stub surface, `_BUILTIN_SIG` with its receiver families and
-    # bottom learning, and the four refusals the reference makes while LOWERING
-    # a method call. All nine of this family's fixtures now refuse with the
-    # reference's own tag and sentence and are struck from this list.
-    # -- arrows and function values --
-    "examples/rejections/t17_arrow_body_unchecked.rvl",
-    "examples/rejections/t32_arrow_value_result_flows.rvl",
-    "examples/rejections/t33_arrow_value_arity.rvl",
-    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-    # -- return paths and match --
-    # The RETURN-PATH half landed with docs/design/457 T3b: `fb_function` runs
-    # `_check_returns_on_every_path` over the statement tree the fn-body walk
-    # already builds, so `t8_missing_return` and `t9_return_path_incomplete`
-    # now refuse with the reference's message AND its line and are struck from
-    # this list. What remains needs the variant table and the arm algebra.
-    "examples/rejections/t13_unknown_match_case.rvl",
-    "examples/rejections/v2_match_nonexhaustive.rvl",
-    # -- declarations --
-    # `t6_bare_generic` LEFT this list with the type layer's slice T1:
-    # `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
-    # `selfhost/types.rvl` and runs `check_type_wellformed` over every module
-    # `fn`/`extern` signature and every config field, at the phase position
-    # `_validate_declared_types` gives it. What stays here is decided somewhere
-    # else entirely: the alias cycle in `_resolve_type_aliases`, the
-    # destructuring rule in `_lower_let_pattern_stmt`.
-    "examples/rejections/t18_type_alias_cycle.rvl",
-    "examples/rejections/t5_destructure_nonrecord.rvl",
-    # -- provide-method and component bodies: NONE --
-    # The whole family closed with the provide-method slice (docs/design/457).
-    # `t1_service_arg_type`, `t4_field_arg_type`,
-    # `t7_provide_param_annotation_mismatch`,
-    # `t16_provide_method_missing_return`,
-    # `t31_index_non_int_provide_method` and `t3_config_default_type` now refuse
-    # with the reference's own sentence; `t30_field_read_on_any_provide_method`
-    # left the expression-typing group above in the same change.
-    # -- NOT the type layer: the parameterized rows are STRUCK --
-    # `_check_spawn_attenuation`'s two parameterized rows --
-    # `g4_spawn_widens_parameter` (a `path` cone) and `g4_spawn_widens_budget`
-    # (a `calls` ceiling) -- are STRUCK: `selfhost/lower.rvl` now carries the
-    # `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
-    # so both sides of the attenuation fold are spelled in the boundary's own
-    # namespace and both refuse with the reference's message byte-for-byte.
-    # `examples/rejections/g4_dotted_capability_key.rvl` is the corpus document
-    # for the shape that change caught and nothing spelled: a dotted item-343
-    # emission scope, which the old scope-list reader split into two
-    # capabilities so that the wiring key landed in the declared scope by
-    # accident. The other shape it caught -- a widening laundered through a key
-    # SPELLED the same on both sides -- is pinned by an in-file test in
-    # `selfhost/lower.rvl` instead; see the capability-order header there.
-}
+# -- fn-body binding rules (G1/G6): CLOSED, no row left --
+# The ASSIGNMENT half landed with item 391's binding-discipline slice (the
+# `let`/`var`/parameter scope walk over a module `fn` body, plus the
+# arrow-body write form): `v2_let_reassignment`,
+# `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
+# `g6_closure_mutates_capture` refused with the reference's message
+# byte-for-byte and were struck from this list, and the callable-shadowing
+# slice struck `shadowed_module_fn_call` the same way. The name-RESOLUTION
+# rule (docs/design/457 §2.3) took the last two, `g1_template_undeclared`
+# and `v2_undeclared_fn_var`: a name READ now resolves against the fn's
+# scope and the callable universe, so the gate refuses both under G1 in the
+# reference's own sentence and this family has no open bypass.
+# -- expression typing (T1/T2) --
+# The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
+# the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
+# `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
+# reference's own sentence and have been struck from this list, and the
+# provide-method slice has since struck `t30` the same way: the walk over a
+# component body now carries the environment that slice left empty — the
+# method parameters at the service's declared types, the body's annotated
+# and inferred locals, the activation locals at the operations they bind.
+# The optional-chain rule (docs/design/457 T2d) closed the rest: `?.` now
+# requires an optional on its left, so `t14_optional_chain_on_nonoptional`
+# refuses with the reference's own sentence and is struck from this list.
+# This family has no open bypass.
+# -- calls and signatures --
+# CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
+# type parameters, the arity window, `unify`/`substitute` at a generic call
+# site, the host stub surface, `_BUILTIN_SIG` with its receiver families and
+# bottom learning, and the four refusals the reference makes while LOWERING
+# a method call. All nine of this family's fixtures now refuse with the
+# reference's own tag and sentence and are struck from this list.
+# -- arrows and function values --
+# CLOSED WHOLE by docs/design/457 T2c: an arrow types as a function value
+# (parameters at their annotations or bottom, the result from the body only
+# where no bottom parameter reaches it), its body is walked as an ordinary
+# expression over the enclosing scope, a call through such a value is
+# checked for arity and then per argument, and an annotation's type name
+# resolves to the enclosing `fn`'s type parameter or an opaque nominal and
+# never to a fresh one. All four remaining fixtures of this family now
+# refuse with the reference's own tag and sentence and are struck from this
+# list; `t34_arrow_self_declared_async` left it earlier with rule C1.
+# -- return paths and match: CLOSED, no row left --
+# The RETURN-PATH half landed first (docs/design/457 T3b): `fb_function`
+# runs `_check_returns_on_every_path` over the statement tree the fn-body
+# walk already builds, so `t8_missing_return` and
+# `t9_return_path_incomplete` refuse with the reference's message AND its
+# line. The MATCH half closed the rest: the declaration scan now records
+# each variant's ordered case list, and `_check_match_exhaustiveness` runs
+# at the position `_lower_pure_expr` runs it, so `t13_unknown_match_case`
+# and `v2_match_nonexhaustive` refuse with the reference's own sentence and
+# are struck from this list.
+# -- declarations: CLOSED, no row left --
+# `t6_bare_generic` LEFT this list with the type layer's slice T1:
+# `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
+# `selfhost/types.rvl` and runs `check_type_wellformed` over every module
+# `fn`/`extern` signature and every config field, at the phase position
+# `_validate_declared_types` gives it. The other two followed with T3b:
+# `_resolve_type_aliases`' `expand` recursion is ported at the head of the
+# declaration level (`t18_type_alias_cycle`), and
+# `_lower_let_pattern_stmt`'s "requires a record" arms are read off a
+# record destructuring pattern the fn-body walk used to step over
+# (`t5_destructure_nonrecord`).
+# -- provide-method and component bodies: NONE --
+# The whole family closed with the provide-method slice (docs/design/457).
+# `t1_service_arg_type`, `t4_field_arg_type`,
+# `t7_provide_param_annotation_mismatch`,
+# `t16_provide_method_missing_return`,
+# `t31_index_non_int_provide_method` and `t3_config_default_type` now refuse
+# with the reference's own sentence; `t30_field_read_on_any_provide_method`
+# left the expression-typing group above in the same change.
+# -- NOT the type layer: the parameterized rows are STRUCK --
+# `_check_spawn_attenuation`'s two parameterized rows --
+# `g4_spawn_widens_parameter` (a `path` cone) and `g4_spawn_widens_budget`
+# (a `calls` ceiling) -- are STRUCK: `selfhost/lower.rvl` now carries the
+# `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
+# so both sides of the attenuation fold are spelled in the boundary's own
+# namespace and both refuse with the reference's message byte-for-byte.
+# `examples/rejections/g4_dotted_capability_key.rvl` is the corpus document
+# for the shape that change caught and nothing spelled: a dotted item-343
+# emission scope, which the old scope-list reader split into two
+# capabilities so that the wiring key landed in the declared scope by
+# accident. The other shape it caught -- a widening laundered through a key
+# SPELLED the same on both sides -- is pinned by an in-file test in
+# `selfhost/lower.rvl` instead; see the capability-order header there.
+#
+# EMPTY: nothing on this list is open any more. It is spelled `set()` rather
+# than `{}` so the empty case stays a SET -- the comparisons below are set
+# differences, and an empty dict literal would make them a type error rather
+# than a measurement.
+KNOWN_BYPASSES: set[str] = set()
 
 
 def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):

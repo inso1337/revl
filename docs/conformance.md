@@ -238,7 +238,7 @@ The six host columns share their verdict wherever a register does not separate t
 | `A6` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/a6_method_not_in_service.rvl`](../examples/rejections/a6_method_not_in_service.rvl) |
 | `A8` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/v2_fail_in_pure_fn.rvl`](../examples/rejections/v2_fail_in_pure_fn.rvl) |
 | `A9` | proved | proved | proved | proved | proved | proved | unimpl | [`examples/rejections/a9_provide_key_not_declared.rvl`](../examples/rejections/a9_provide_key_not_declared.rvl) |
-| `T1` | proved | proved | proved | proved | proved | proved | **div** | [`examples/rejections/t1_service_arg_type.rvl`](../examples/rejections/t1_service_arg_type.rvl) |
+| `T1` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/t1_service_arg_type.rvl`](../examples/rejections/t1_service_arg_type.rvl) |
 | `T2` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/t2_null_in_expression.rvl`](../examples/rejections/t2_null_in_expression.rvl) |
 | `T3` | no repro | no repro | no repro | no repro | no repro | no repro | no repro | [`src/revl/gate.py`](../src/revl/gate.py) |
 | `G-COUNCIL-SPLIT` | proved | proved | proved | proved | proved | proved | proved | [`examples/rejections/gcouncilsplit_on_tie_allow.rvl`](../examples/rejections/gcouncilsplit_on_tie_allow.rvl) |
@@ -256,7 +256,7 @@ The six host columns share their verdict wherever a register does not separate t
 | java | 19 | 2 | 4 | 0 |
 | wasm | 19 | 2 | 4 | 0 |
 | go | 19 | 2 | 4 | 0 |
-| revl | 6 | 6 | 5 | 8 |
+| revl | 7 | 5 | 5 | 8 |
 
 **Why a cell is not `proved`.** Every non-`proved` cell above, with the register or the reason that decided it:
 
@@ -273,7 +273,6 @@ The six host columns share their verdict wherever a register does not separate t
 - `A5` on py, ts, rust, java, wasm, go, revl has **no reproducer**. Compensation accompanies an emission by construction: the grammar attaches `compensate` to the `emit` that carries it, so a violating program is not expressible and cannot be written as a fixture.
 - `A8` on revl is **unimplemented**. The self-host gate raises no objection to any A8 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `A9` on revl is **unimplemented**. The self-host gate raises no objection to any A9 reproducer (the self-host frontier, roadmap item 391; the type layer is item 417).
-- `T1` on revl is a **recorded divergence**. The self-host gate agrees on 24 of 30 T1 reproducers; the rest it admits.
 - `T3` on py, ts, rust, java, wasm, go, revl has **no reproducer**. An open hole is refused at the ADMISSION gate rather than by `compile_files`, so a hole fixture compiles here and is refused one stage later; the reproducers live with the gate (`src/revl/holes.py`, `docs/holes.md`).
 - `G-RETAIN` on revl is **unimplemented**. The self-host gate answers every G-RETAIN reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `G-SECRET` on py, ts, java, wasm, go is a **recorded divergence**. Roadmap item 421 F6 claims closure citing only `backends/rust/` and never names this tier (`--check-tier-parity`, subjects: redact, secret); and the confidentiality fixtures in `examples/rejections/` are refused under `G-SECRET-FLOW` (the disclosure-sink half). `G-SECRET` (the capability-reach half) is enforced in `src/revl/taint.py` and exercised by the per-tier secret registry suites, not by a fixture this corpus compiles.
@@ -393,18 +392,6 @@ surface, not a value width: `Int` is an i64 there, and `Str`, `Bytes`,
 lists, records, variants, `Opt` and `Result` cross the service boundary
 as canonical-ABI pointers (`backends/wasm/emit.py`,
 `_V3Emitter._check_type`).
-
-A `lim` cell is not just "the emitter raised". An emitter also refuses because
-of the shape of the document a case is written as, and because a stdlib method
-has no arm on the path that case takes; all three arrive as the same exception,
-and only the first is a statement about the tier. So each `lim` is written down
-in `tools/conformance_tier_limits.json` with the capability limit it is, keyed
-on the refusal's own wording so a reworded refusal has to be judged again. A
-refusal that is not written down there is not downgraded to `lim`: it stops the
-generator, and this file keeps the last measurement it was allowed to publish
-until somebody classifies the cell or closes it. Issue #1347 is the worked
-example — of 24 unclassified go cells, 22 were the document shape, one was a
-missing `to_int32` arm, and one was a tier limit.
 
 ### Extern `config` coeffect (item 378)
 
