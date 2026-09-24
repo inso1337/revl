@@ -85,6 +85,25 @@ command to record the improvement — that is what keeps the number monotone
 rather than merely bounded. A function that appears with uncovered statements
 and is not in the ledger fails.
 
+AND A BUDGET, because the ratchet above was not enough on its own (issue #1419).
+It moves both ways and has moved both ways (21 of the 88 changes to the ledger
+LOWERED the mass, and the 2026-09-05 corpus triage took 2234 statements out of
+it in five commits), but nothing bounded it, so `--write` plus a written reason was
+a complete answer to the gate firing, and over 2026-09-16..24 that is the answer
+that got given. `_budget` in the ledger is the bound: a per-half, per-tier count
+that `--write` does not write and that the gate holds the recorded mass to
+EXACTLY, so recording costs an integer raised by hand in the diff and an
+improvement permanently lowers the ceiling instead of leaving headroom. The
+target it shrinks toward is zero.
+
+THE THIRD OPTION, same issue. `tests/fixtures/emit_<tier>_refusals/` holds
+documents the tier's reference REFUSES BY NAME. Both halves are driven over them.
+A refusal is logic both halves carry and no CORPUS document can reach, because a
+corpus document is one the reference emits and a refusal path runs only where it
+does not: there are no reference bytes to agree with. Before this directory the
+gate's instruction ("add a corpus document, or record the count") offered that
+population nothing but `--write`. See `refusal_documents()`.
+
 WHAT THIS CANNOT KNOW. Statement coverage is not branch coverage: a line that
 executed once, on one shape of input, counts as covered here. BOTH sides are
 measured, but the port's emitted Python statements map to `.rvl` FUNCTIONS,
@@ -177,6 +196,44 @@ def corpus_documents(tier: str) -> list[Path]:
     directory = ROOT / "tests" / "fixtures" / f"emit_{tier}_corpus"
     return [directory / name
             for name in sorted(set(re.findall(r'"([^"]+\.rvl)"', block.group(1))))]
+
+
+def refusal_documents(tier: str) -> list[Path]:
+    """Documents this tier's REFERENCE REFUSES BY NAME, driven through both halves.
+
+    THE THIRD OPTION, and the reason it had to exist. Until this directory, the
+    gate's message offered two responses to an uncovered statement: reach it with
+    a corpus document, or record it with a reason. For a whole population of
+    statements only the second was possible, and that population is not small:
+    every refusal a tier states by name has a mirror in the port, and NEITHER
+    half can be reached by a byte-agreement document. A corpus document is one
+    the reference EMITS; a refusal path runs only on a document the reference
+    REFUSES, so there are no reference bytes for the oracle to agree with and the
+    document cannot be in `CORPUS` at all. `--write` was the only move available,
+    so `--write` is the move that got made, and the ledger accumulated a class of
+    entry that no amount of corpus authoring could ever have retired.
+
+    Measured on `bb22be665`, driving the one rust document here moved three
+    counts, all downward and all in exactly that class:
+
+        reference/rust `_refuse_required_stream`   1 -> 0
+        selfhost/rust  `require_ty`                1 -> 0   (issue #1419's red)
+        selfhost/rust  `render_inner`              5 -> 2
+
+    THE NON-VACUITY GUARD, because a directory of documents nobody checks is a
+    way to cover anything. `measure()` asserts that this tier's reference REFUSES
+    every document here. One it emits is a byte-agreement case and belongs in
+    `CORPUS`, where the oracle will hold its bytes; dropping it here instead
+    would buy coverage with no agreement assertion behind it, which is the shape
+    item 429 exists to rule out. The refusal's TEXT is not this gate's business:
+    that is the tier oracle's, and for the document here it is
+    `tests/test_selfhost_emit_rust.py::
+    test_a_required_stream_coeffect_the_reference_refuses_is_named_here_too`.
+    """
+    directory = ROOT / "tests" / "fixtures" / f"emit_{tier}_refusals"
+    if not directory.is_dir():
+        return []
+    return sorted(directory.glob("*.rvl"))
 
 
 def _owners(path: Path) -> dict[int, str]:
@@ -275,6 +332,7 @@ def measure(frontend: bool = False) -> dict:
     targets += [str(ROOT / "src" / "revl" / name) for name in FRONTEND]
     cov = coverage.Coverage(data_file=None, include=targets)
     cov.start()
+    emitted_a_refusal: list[str] = []
     try:
         sys.path.insert(0, str(ROOT / "src"))
         from revl import compile_files  # noqa: PLC0415 - must be traced
@@ -289,8 +347,27 @@ def measure(frontend: bool = False) -> dict:
         for tier in TIERS:
             for document in corpus_documents(tier):
                 emitters[tier].emit(compile_files([str(document)]))
+            # The refusal corpus. Every line the reference ran before raising is
+            # reference logic, and it is the only way these lines run at all. A
+            # document this tier does NOT refuse is collected and reported after
+            # the session: see refusal_documents() for why that has to fail.
+            for document in refusal_documents(tier):
+                try:
+                    emitters[tier].emit(compile_files([str(document)]))
+                except Exception:  # noqa: BLE001 - the refusal IS the measured path
+                    continue
+                emitted_a_refusal.append(f"{tier}: {document.name}")
     finally:
         cov.stop()
+    if emitted_a_refusal:
+        raise SystemExit(
+            "these documents are in tests/fixtures/emit_<tier>_refusals/ and the "
+            "tier's reference EMITS them: " + ", ".join(sorted(emitted_a_refusal))
+            + ". A document the reference emits is a byte-agreement case and "
+            "belongs in the tier's CORPUS list, where the oracle holds its bytes. "
+            "Left here it buys line coverage with no agreement assertion behind "
+            "it, which is the certifying-less-than-it-appears shape item 429 "
+            "exists to rule out.")
 
     result: dict[str, dict] = {}
     for tier, package in TIERS.items():
@@ -395,6 +472,13 @@ def measure_selfhost() -> dict:
                 with selfhost_module(tier, reference, scratch) as (module, _):
                     for document in corpus_documents(tier):
                         _entry(module, tier)(compile_files([str(document)]))
+                    # The refusal corpus, driven the same way and NOT wrapped.
+                    # The port's contract on a document the reference refuses is
+                    # to answer it by name, not to crash: a traceback out of here
+                    # is a finding, and burying it under an `except` would turn a
+                    # port that falls over into a port with good coverage.
+                    for document in refusal_documents(tier):
+                        _entry(module, tier)(compile_files([str(document)]))
             finally:
                 cov.stop()
             found = _per_function(cov, module_path)
@@ -446,6 +530,79 @@ GROUPS: tuple[tuple[str, str], ...] = (
 def _load_ledger() -> dict:
     raw = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
     return {k: v for k, v in raw.items() if not k.startswith("_")}
+
+
+def _load_budget() -> dict:
+    """`_budget`: what the ledger is allowed to hold, per half and tier.
+
+    WHY A SECOND COPY OF A NUMBER THE LEDGER ALREADY IMPLIES. Because the ledger
+    is regenerable and this is not. `--write` re-measures every per-function
+    count and rewrites them all; it does not touch `_budget`, and it is not
+    supposed to. So recording a newly unreached statement takes two edits in two
+    places, and the second one is a single integer going UP in a diff a reviewer
+    reads in one second. Before this, recording took `--write` plus a sentence,
+    and a sentence is easy to write and hard to count.
+
+    The gate holds the budget to the mass EXACTLY, in both directions:
+
+      mass ABOVE the budget: statements were recorded that the budget does not
+      have. Reach them, or raise the number and say why in the same diff.
+
+      mass BELOW the budget: an improvement landed and left headroom. Lower the
+      number. Headroom is the form in which a recorded improvement gets quietly
+      spent again on the next unreached region, which is exactly how a ratchet
+      stops being one.
+
+    So the budget is monotone DOWN except where a human deliberately raises it,
+    and the target it is shrinking toward is zero: every statement here is one
+    that some document should reach, or that should not exist. The 2026-09-24
+    value is 9086. It has been as high as 10321 (`1d0d8748f`, 2026-09-05) and the
+    five triage commits that followed took it to 8087, so a falling direction is
+    something this ledger has done and not an aspiration.
+    """
+    raw = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
+    budget = raw.get("_budget")
+    return budget if isinstance(budget, dict) else {}
+
+
+def _budget_problems(ledger: dict, budget: dict) -> list[str]:
+    problems: list[str] = []
+    for half in ("reference", "selfhost"):
+        side = ledger.get(half)
+        declared = budget.get(half)
+        if not isinstance(side, dict):
+            continue
+        if not isinstance(declared, dict):
+            problems.append(
+                f"{half}: no `_budget` declared in {LEDGER.name}. Every recorded "
+                f"statement has to come out of a number someone raised on "
+                f"purpose, or recording is free and the ledger is an inventory.")
+            continue
+        for tier in TIERS:
+            entry = side.get(tier)
+            if not isinstance(entry, dict):
+                continue
+            mass = sum(_flatten(entry).values())
+            allowed = declared.get(tier)
+            if type(allowed) is not int or allowed < 0:
+                problems.append(
+                    f"{half}/{tier}: `_budget` is missing or not a count. It is "
+                    f"{mass} today; write that number and the gate holds you to it.")
+            elif mass > allowed:
+                problems.append(
+                    f"{half}/{tier}: the ledger records {mass} uncovered "
+                    f"statement(s) and `_budget` allows {allowed}. Reach the "
+                    f"{mass - allowed} extra statement(s) with a corpus or refusal "
+                    f"document, or raise `_budget.{half}.{tier}` to {mass} in this "
+                    f"same diff and say in the commit message what bought the rise.")
+            elif mass < allowed:
+                problems.append(
+                    f"{half}/{tier}: the ledger records {mass} uncovered "
+                    f"statement(s) and `_budget` still allows {allowed}. Lower "
+                    f"`_budget.{half}.{tier}` to {mass}. Unspent budget is budget "
+                    f"the next unreached region spends without anyone noticing, "
+                    f"which is how a two-way ratchet becomes a one-way inventory.")
+    return problems
 
 
 def _flatten(entry: dict) -> dict[str, int]:
@@ -526,6 +683,7 @@ WHERE = {
 def check(data: dict) -> list[str]:
     ledger = _load_ledger()
     problems = _closure_problems(ledger)
+    problems += _budget_problems(ledger, _load_budget())
     if not isinstance(data, dict):
         return problems + ["survey data is not a map"]
     for half in ("reference", "selfhost"):
@@ -562,15 +720,25 @@ def check(data: dict) -> list[str]:
                         f"{half}/{tier}: `{name}` has {now} statement(s) that no "
                         f"corpus document executes, and is not in {LEDGER.name}. "
                         f"The byte-agreement oracle runs {WHERE[half]} and never "
-                        f"runs these lines. Add a corpus document that reaches "
-                        f"them, or record the count with a reason.")
+                        f"runs these lines. THREE responses, in order of "
+                        f"preference. (1) A corpus document that reaches them. "
+                        f"(2) If they only run on a document this tier's "
+                        f"reference REFUSES, no corpus document can ever reach "
+                        f"them, because there are no reference bytes to agree with, so "
+                        f"add the document to tests/fixtures/emit_{tier}_refusals/ "
+                        f"instead, and assert the refusal's text in the tier "
+                        f"oracle. (3) If they run on nothing at all, delete them. "
+                        f"Recording the count is the LAST resort and costs a "
+                        f"`_budget` raise in the same diff.")
                 elif now > before:
                     problems.append(
                         f"{half}/{tier}: `{name}` went from {before} to {now} "
                         f"uncovered statement(s). Logic arrived in a mirrored "
                         f"emitter that no corpus document reaches — exactly how "
                         f"the item-429(d) `Secret[T]` gap opened, and the oracle "
-                        f"will stay green over it. Add the corpus case.")
+                        f"will stay green over it. Add the corpus case, or the "
+                        f"refusal document if the reference refuses what reaches "
+                        f"it (tests/fixtures/emit_{tier}_refusals/).")
                 elif now < before:
                     problems.append(
                         f"{half}/{tier}: `{name}` is down to {now} uncovered "
@@ -581,6 +749,16 @@ def check(data: dict) -> list[str]:
 
 
 def write_ledger(data: dict) -> None:
+    """Rewrite the per-function counts. `_budget` and `_about` are NOT rewritten.
+
+    That omission is the point. `--write` is the fastest green, it is always
+    available, and it will stay both of those things; what it cannot do is
+    finish the job. It leaves `_budget` exactly where it was, so a `--write` that
+    records a new region leaves `--check` RED with a message naming the tier and
+    the number, and the only way out is one integer edited by hand. Issue #1419
+    asked for a mechanism that survives `--write`. This is it: not a harder
+    `--write`, a `--write` that is no longer sufficient.
+    """
     raw = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
     for half in ("reference", "selfhost"):
         out: dict[str, dict] = {}
@@ -677,6 +855,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.write:
         write_ledger(data)
         print(f"wrote {LEDGER.relative_to(ROOT)}")
+        for problem in _budget_problems(_load_ledger(), _load_budget()):
+            print(f"STILL RED {problem}")
+        print("`_budget` was not touched; run --check.")
         return 0
     if args.check:
         problems = check(data)
