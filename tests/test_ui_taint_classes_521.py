@@ -107,27 +107,56 @@ FAMILY = (
 )
 
 
-# A target minted OUTSIDE the screen, for the one measurement that needs its
-# first argument clean. `ui.text`'s derivation is all-arguments (a capability
-# token carries no parameter roles), so a target that came from `ui.find`
-# would taint argument 1 too and the refusal would name it instead of the
-# value - measuring the target, which two other tests already measure, rather
-# than the key input, which only this one does.
-_PURE_TARGET = (
-    'extern pure fn a_target(field: Str) -> UiTarget = @py { return None }\n'
-)
+# A target that is CLEAN, for the two measurements that need argument 1 to
+# carry no origin. `ui.text`'s derivation is all-arguments (a capability token
+# carries no parameter roles), so a target that came from `ui.find` would taint
+# argument 1 too and the refusal would name it instead of the value - measuring
+# the target, which two other tests already measure, rather than the key input,
+# which only this one does.
+#
+# It is a CONFIG FIELD rather than the `extern pure fn a_target(...) ->
+# UiTarget` this file used before issue #1371. That extern is now refused:
+# `lower._check_ui_target_provenance` reads a host boundary returning the
+# record without `emission[ui.find]` as a target nothing resolved, which is
+# what it is. A config field is the one entry point that check leaves open by
+# name - the operator supplying a target is the same authority that granted
+# the component `ui.click` - so it is where a fixture that needs an
+# origin-free target belongs now.
+_CONFIG_TARGET = "  config { target: UiTarget }\n"
 
 
-def _component(body: str, returns: str = "Int", sig: str = "Int") -> str:
+def _component(body: str, returns: str = "Int", sig: str = "Int",
+               config: str = "") -> str:
     return (
         FAMILY
         + f"service Worker {{ emission fn act(region: Str) -> {sig} }}\n"
         "component Billing provides worker: Worker {\n"
-        "  provide worker {\n"
+        + config
+        + "  provide worker {\n"
         f"    fn act(region) {{\n{body}    }}\n"
         "  }\n"
         "}\n"
     )
+
+
+#: A value of a NON-SCREEN origin reaching a UI actuation, and the same
+#: program with a screen origin. Shared by the two tests that measure them and
+#: by the non-vacuity list, so a repair to one cannot leave the replay
+#: measuring the old shape.
+_WEB_VALUE_INTO_A_UI_ACTUATION = _component(
+    "      let page = emit fetch(region)\n"
+    "      emit ui_text(config.target, page)\n"
+    "      return 0\n",
+    config=_CONFIG_TARGET).replace(
+    "fn restore_field() { }\n",
+    "fn restore_field() { }\n"
+    'extern emission[web] fn fetch(url: Str) -> Str = @py { return "" }\n')
+
+_SCREEN_VALUE_INTO_A_UI_ACTUATION = _component(
+    "      let seen = emit screen_observe(region)\n"
+    "      emit ui_text(config.target, seen)\n"
+    "      return 0\n",
+    config=_CONFIG_TARGET)
 
 
 def _refusal(src: str, profile=None) -> RevlError:
@@ -226,17 +255,21 @@ def test_an_untrusted_value_of_any_origin_is_refused_at_a_click() -> None:
     an actuation is the same refusal: a UI actuation is a position where the
     value IS the authority, in the same sense as a shell string.
 
-    The fetched value goes STRAIGHT to the click, with no `ui.find` between.
-    That is not incidental: `ui.find` is itself a source, so routing a web value
-    through it would have relabelled the origin `screen` and this test would
-    have measured the wrong thing."""
-    src = _component(
-        "      let page = emit fetch(region)\n"
-        "      return emit ui_click(page)\n").replace(
-        "fn restore_field() { }\n",
-        "fn restore_field() { }\n"
-        'extern emission[web] fn fetch(url: Str) -> UiTarget\n'
-        '  = @py { return None }\n')
+    The fetched value goes STRAIGHT to the actuation, with no `ui.find`
+    between. That is not incidental: `ui.find` is itself a source, so routing a
+    web value through it would have relabelled the origin `screen` and this
+    test would have measured the wrong thing.
+
+    WHERE THE WEB VALUE SITS, and why it moved (issue #1371). It used to be the
+    TARGET of a `ui.click`, which meant `fetch` was declared `emission[web] ...
+    -> UiTarget`: a host boundary handing back a target it did not resolve.
+    That program is now refused before taint runs at all, so the fixture would
+    have measured the new G8 rather than this file's G9. The web value is now
+    the key input of a `ui.text`, which is a UI actuation by the same table
+    (`ui_family.TAINT_ROLES` makes every argument of `ui.text` a sink), so the
+    claim - `ui` is a sink class and not a screen-specific one - is measured on
+    a program that still compiles far enough to be measured."""
+    src = _WEB_VALUE_INTO_A_UI_ACTUATION
     error = _refusal(src, _strict())
     assert classify(error)["code"] == "G9"
     assert "web" in error.message
@@ -257,13 +290,7 @@ def test_the_value_typed_into_a_field_is_a_sink() -> None:
     all-arguments, exactly as `shell` already is. Per-parameter precision
     remains available only through an explicit `Trusted[T]` annotation, which is
     author-side and therefore never the derivation."""
-    src = _component(
-        "      let seen = emit screen_observe(region)\n"
-        '      let field = a_target("amount")\n'
-        "      emit ui_text(field, seen)\n"
-        "      return 0\n").replace(
-        "fn restore_field() { }\n",
-        "fn restore_field() { }\n" + _PURE_TARGET)
+    src = _SCREEN_VALUE_INTO_A_UI_ACTUATION
     error = _refusal(src, _strict())
     assert classify(error)["code"] == "G9"
     assert "argument 2" in error.message
@@ -426,20 +453,8 @@ def test_non_vacuity_the_four_programs_that_flipped() -> None:
         SCREEN_TO_CLICK.replace(
             "fn screen_observe(region: Str) -> Str",
             "fn screen_observe(region: Str) -> Untrusted[Str]"),
-        _component(
-            "      let page = emit fetch(region)\n"
-            "      return emit ui_click(page)\n").replace(
-            "fn restore_field() { }\n",
-            "fn restore_field() { }\n"
-            'extern emission[web] fn fetch(url: Str) -> UiTarget\n'
-            '  = @py { return None }\n'),
-        _component(
-            "      let seen = emit screen_observe(region)\n"
-            '      let field = a_target("amount")\n'
-            "      emit ui_text(field, seen)\n"
-            "      return 0\n").replace(
-            "fn restore_field() { }\n",
-            "fn restore_field() { }\n" + _PURE_TARGET),
+        _WEB_VALUE_INTO_A_UI_ACTUATION,
+        _SCREEN_VALUE_INTO_A_UI_ACTUATION,
     ]
     assert len(flipped) == 4
     for src in flipped:
