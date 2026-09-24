@@ -954,3 +954,71 @@ def test_an_older_corpus_without_the_field_loses_no_cells(tmp_path, monkeypatch)
     (run / "results.jsonl").write_text(
         json.dumps({"spec": "01-a", "variant": "v2", "attempt": 1, "ok": True}))
     assert framework_bench._unanswered_cells("old", 1) == set()
+
+
+# ---------------------------------------------------------------------------
+# The committed artifact, and what it is allowed to say about this machine
+# ---------------------------------------------------------------------------
+
+
+COMMITTED_REPORT = BENCH / "results" / "framework-bench" / "report.json"
+
+
+def test_the_report_names_the_grading_checkout_without_publishing_a_layout():
+    """`report.json` is committed and this repository is public. Which checkout
+    graded the report is load-bearing, because an editable install registers a
+    meta-path finder consulted before `sys.path` and a report can be graded by
+    a tree it was not pointed at. The operator's directory layout is not
+    load-bearing, and an absolute path publishes it."""
+    reported = framework_bench.checker_version().get("compiler_path", "")
+    assert not Path(reported).is_absolute(), reported
+    assert "outside this checkout" in reported or reported == "src/revl", reported
+
+
+def test_no_committed_artifact_carries_an_absolute_path():
+    """The same rule applied to what is on disk rather than to what the code
+    would produce next time, because the artifacts are what a reader reads."""
+    out = BENCH / "results" / "framework-bench"
+    offenders = []
+    for path in sorted(out.glob("*.json")) + sorted(out.glob("*.md")):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            for token in line.replace('"', " ").replace("`", " ").split():
+                if token.startswith("/") and "/" in token[1:]:
+                    offenders.append(f"{path.name}:{lineno}: {token}")
+    assert not offenders, offenders
+
+
+def test_a_compiler_outside_the_checkout_is_named_without_its_directory():
+    outside = Path("/somewhere/else/build/site-packages/revl")
+    reported = framework_bench._compiler_path(outside)
+    assert reported == "revl (outside this checkout)"
+    assert "/somewhere/else" not in reported
+
+
+def test_the_committed_report_is_what_the_documented_command_reproduces():
+    """`bench/README.md` documents `python3 bench/framework_bench.py --write`
+    with no flags. If a cell only appears when a flag names the corpus that is
+    committed beside the report, the documented command silently drops it and
+    the artifact stops being reproducible from the repository. The defaults
+    carry the committed corpora; `none` is how a caller drops one."""
+    defaults = framework_bench.build_parser().parse_args([])
+    assert defaults.admits_from == "typed-deepseek-v4-pro"
+    assert defaults.residue_from == "hand-corpus"
+    assert defaults.injection_from == "injection-ornith"
+    for label in (defaults.admits_from, defaults.residue_from,
+                  defaults.injection_from):
+        assert (BENCH / "results" / label).is_dir(), (
+            f"a default names {label}, which is not committed")
+
+
+def test_the_committed_report_headline_agrees_with_a_fresh_recompute():
+    """The refused column is the headline and it is recomputed from ledgers
+    that move. A committed artifact whose headline no longer matches the tree
+    is a published number nobody can reproduce."""
+    committed = json.loads(COMMITTED_REPORT.read_text())["columns"]["refused"]
+    section = refusal_inventory.build()["sections"]["native-chain-residual"]
+    assert committed["headline"]["documents_refused"] == section["total_residual"]
+    assert committed["headline"]["corpus"] == section["total_corpus"]
+    assert committed["headline"]["n"] == section["total_corpus"]
+    assert committed["headline"]["per_tier"] == {
+        tier: body["residual"] for tier, body in section["tiers"].items()}
