@@ -467,6 +467,11 @@ NOT_A_RULE = {
     "sandbox_runtime": "the child-process sandbox `placement` launches.",
     "synthesize": "`revl synthesize`, a generator rather than a checker.",
     "tee_attestation": "TEE quote verification at run time.",
+    "refusal": "tells a backend emitter's EmitError apart from its fault "
+               "after the frontend has admitted the document; `placement` "
+               "reads it only on the emit path. Measured: making "
+               "`refusal_class` answer None moves no verdict over the 230 "
+               "programs under `examples/`.",
 }
 
 #: The modules SCANNED for the G-codes the ruleset cites. `diagnostics` is
