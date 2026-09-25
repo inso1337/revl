@@ -8588,40 +8588,43 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
 
 def _refuse_unmarked_emission_call(node: dict, name: str, env: Env,
                                    filename: str, line: int) -> None:
-    """The marker demand inside an `emit` head's argument list, for the HOST
-    EXTERN carrier (issue #1427).
+    """The `emit` marker demand for the HOST EXTERN carrier: a named call to an
+    `emission` extern, or to a function that reaches one (issues #1427, #1437,
+    docs/design/1437-emit-marks-every-crossing.md).
 
-    `emit` marks one crossing. The head's arguments lower in the enclosing mode
-    (`_emit_head_args`), and every carrier that can cross there has to be held
-    to the same rule, or "one marker per crossing" reads as a property of the
-    required-service spelling rather than of the rule. The `req` and
-    spawn-handle carriers were already held to it — `_lower_postfix` and the
-    `instance-get` arm each refuse an unmarked emission in the argument list.
-    A direct call to an emission extern reaches neither, so `emit send(charge(1))`
-    put a second crossing under one marker and was admitted.
+    `_is_emission_call` states the rule: such a call "is a boundary crossing
+    exactly as a service emission is, so `emit` marks it too". The `req` carrier
+    (`_component_req_call`, `_lower_postfix`) and the spawn-handle carrier (the
+    `instance-get` arm) were already held to it in every setup-mode position.
+    This carrier was held to it only inside an `emit` head's argument list
+    (#1427), so an unmarked `charge(n)` anywhere else in an activation or
+    provide-method body compiled, and the least reversible crossings were the
+    least visible ones. It is now held to it wherever the other two are:
+    `_expr_mode == "setup"`. A teardown slot (`undo`, `compensate`) keeps its
+    documented bare-emission exception, and a marked head's arguments lower in
+    the enclosing mode, so they are judged here as that mode judges them.
 
-    Scope is deliberately the argument list and nothing wider. Outside it, an
-    unmarked extern call is judged by the provider upper bound
-    (`_method_emissions`: a plain-declared method that reaches an emission
-    extern is refused by name), and this does not touch that judgment. What it
-    fixes is the one position where the reference already promised the
-    arguments are judged as the enclosing position judges them.
+    A `witnessed` extern is not held to it. It is reversible by construction,
+    it is legal only in effect position (docs/design/243-witnessed-externs.md),
+    and there `effect` is its marker; everywhere else it is refused by rule 1.
 
     The refusal is the `req` carrier's verbatim, tag and message, because it is
     the same rule: a crossing the author has not marked."""
-    if not getattr(env, "_in_emit_args", False):
-        return
     if getattr(env, "_expr_mode", "setup") != "setup":
+        return
+    if name in getattr(env, "witnessed_externs", ()):
         return
     if not _is_emission_call(node, env):
         return
+    hint = ("an emission crosses the system boundary and cannot be reverted; "
+            "`emit` makes that visible at the call site")
+    if getattr(env, "_in_emit_args", False):
+        hint += (". One marker admits one crossing, so hoist this call into an "
+                 "`emit` step of its own")
     raise RevlError(
         filename, line,
         f"call to emission `{name}` must be marked `emit` (G4)",
-        hint="an emission crosses the system boundary and cannot be reverted; "
-             "`emit` makes that visible at the call site. One marker admits one "
-             "crossing, so hoist this call into an `emit` step of its own",
-        code="G4", category="emission",
+        hint=hint, code="G4", category="emission",
     )
 
 

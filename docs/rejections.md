@@ -188,6 +188,38 @@ component Auditor requires db: Database {
 call to emission `db.execute` must be marked `emit` (G4)
 ```
 
+The carrier does not change the rule. A host `emission` extern crosses the
+boundary exactly as a service operation does, and so does a module `fn` that
+reaches one, so each call needs the marker in every position a service call
+does: a binding, a return, an expression-bodied method, an arrow body, an
+`effect` bracket's acquisition (g4_unmarked_host_emission.rvl,
+g4_unmarked_host_emission_helper.rvl, g4_unmarked_host_emission_acquire.rvl):
+
+```revl reject G4
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) {
+      let paid = charge(cents)
+      return paid
+    }
+  }
+}
+```
+
+```
+call to emission `charge` must be marked `emit` (G4)
+```
+
+`let paid = emit charge(cents)` is admitted. A teardown slot (`undo`,
+`compensate`) keeps its bare-emission exception, and a `witnessed` extern in
+effect position is marked by `effect` (docs/design/243-witnessed-externs.md).
+Until issue #1437 an unmarked extern call was refused only inside an `emit`'s
+arguments; docs/design/1437-emit-marks-every-crossing.md records the change.
+
 **A crossing nested in an `emit`'s arguments** — one `emit` marks one
 boundary crossing. The marker covers the head call it is written on, and the
 head's arguments are judged in the position the `emit` itself sits in, so an

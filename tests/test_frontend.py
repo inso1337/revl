@@ -323,6 +323,13 @@ REJECTIONS = {
     "g4_nested_service_emission_in_host_emit.rvl": "call to emission `ledger.fetch` must be marked `emit` (G4)",
     "g4_nested_emit_expression_host.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
     "g4_nested_unmarked_emission_method.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
+    # issue #1437: the marker is required on every carrier in every position,
+    # not only inside an `emit`'s arguments. A host emission extern, a module
+    # fn that reaches one, and an extern as an `effect` bracket's acquisition
+    # each draw the refusal the `req` carrier draws.
+    "g4_unmarked_host_emission.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_unmarked_host_emission_helper.rvl": "call to emission `settle` must be marked `emit` (G4)",
+    "g4_unmarked_host_emission_acquire.rvl": "call to emission `open_session` must be marked `emit` (G4)",
     # --- the indirection cluster ------------------------------------------
     # One shape recurs across all of these: an obligation is carried through an
     # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function

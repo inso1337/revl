@@ -95,7 +95,7 @@ component Summarizer provides out: Answer {
   route model on summarize { * -> cloud }
   provide out {
     fn summarize(d) {
-      let r = prompt(config.doc)
+      let r = emit prompt(config.doc)
       return 0
     }
   }

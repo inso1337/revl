@@ -263,7 +263,7 @@ The six host columns share their verdict wherever a register does not separate t
 - `G1` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G1 reproducers; the rest it admits.
 - `G2` on revl is a **recorded divergence**. The self-host gate agrees on 2 of 3 G2 reproducers; the rest it admits.
 - `G3` on revl is a **recorded divergence**. The self-host gate agrees on 1 of 2 G3 reproducers; the rest it admits.
-- `G4` on revl is a **recorded divergence**. The self-host gate agrees on 26 of 27 G4 reproducers; the rest it admits.
+- `G4` on revl is a **recorded divergence**. The self-host gate agrees on 29 of 30 G4 reproducers; the rest it admits.
 - `G5` on revl is **unimplemented**. The self-host gate answers every G5 reproducer under G4 (the self-host frontier, roadmap item 391; the type layer is item 417).
 - `G6` on revl is a **recorded divergence**. The self-host gate agrees on 5 of 6 G6 reproducers; the rest it admits.
 - `G7` on revl is **unimplemented**. The self-host gate answers every G7 reproducer under BAD (the self-host frontier, roadmap item 391; the type layer is item 417).

@@ -115,7 +115,7 @@ def _reach_zoo(kinds: frozenset[str]) -> str:
             'extern emission[cap_ext] fn host_extern(msg: Str) -> Str = @py { return msg }',
             'fn reach_extern(x: Str) -> Str { return host_extern(x) }',
         ]
-        meth.append('let a = reach_extern(x)')
+        meth.append('let a = emit reach_extern(x)')
     if "firstclass" in kinds:
         decl += [
             'extern emission fn launder_write(msg: Str) -> Str = @py { return msg }',
@@ -203,7 +203,7 @@ def _taint_zoo(kinds: frozenset[str]) -> str:
             'fn wrapped(p: Str) -> Untrusted[Str] { return read_fs(p) }',
             'extern emission fn host_sink(s: Str) -> Int = @py { return 0 }',
         ]
-        meth += ['let pfs = wrapped(x)', 'emit host_sink(pfs)']
+        meth += ['let pfs = emit wrapped(x)', 'emit host_sink(pfs)']
     if "nested_res" in kinds:
         # the tainted value is nested in a record and the WHOLE record is emitted;
         # a fold that stops unioning record fields reads the container clean.
@@ -298,7 +298,10 @@ def _secret_zoo(kind: str, tainted: bool) -> str:
     whose return is minted `secret`) or a clean parameter (`u`). WITH the key the
     crossing raises G-SECRET; WITHOUT it the identical crossing compiles - the
     discriminating pair that proves the raise genuinely depends on this crossing."""
-    crossed = "complete(u)" if tainted else "u"
+    # every emission call carries its `emit` marker (issue #1437), so the
+    # bound-key source and the host sinks below are all marked; what the zoo
+    # varies is the crossing KIND, not whether it is marked
+    crossed = "emit complete(u)" if tainted else "u"
     if kind == "firstclass":
         return (_SECRET_FC_PRELUDE
                 + "component Agent provides ops: Ops {\n  provide ops {\n"
@@ -321,11 +324,11 @@ def _secret_zoo(kind: str, tainted: bool) -> str:
         body += "      emit snk.out(s)\n"
     elif kind == "extern":
         decl = "extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"
-        body += "      let x = host_sink(s)\n"
+        body += "      let x = emit host_sink(s)\n"
     elif kind == "nested_res":
         decl = ("type Box = { key: Str, tag: Str }\n"
                 "extern emission fn host_box(b: Box) -> Int = @py { return 0 }\n")
-        body += "      let r = { key: s, tag: \"t\" }\n      let x = host_box(r)\n"
+        body += "      let r = { key: s, tag: \"t\" }\n      let x = emit host_box(r)\n"
     else:
         raise AssertionError(f"unknown secret kind {kind!r}")
     return (_SECRET_PRELUDE + decl + "component Agent " + reqs
@@ -485,7 +488,7 @@ def _cache_zoo(kinds: frozenset[str]) -> str:
             'compensate undo_pay() = @py { return 0 }',
             'fn reach_c(r: Str) -> Int { return c_ext(r) }',
         ]
-        meth.append("let a = reach_c(x)")
+        meth.append("let a = emit reach_c(x)")
     if "firstclass" in kinds:
         decl += [
             'extern emission fn fc_write(msg: Str) -> Str = @py { return msg }',

@@ -935,7 +935,7 @@ extern emission async fn http_post(url: Str, body: Str) -> Str
   = @py { return url }
 service Http { emission async fn post(url: Str, body: Str) -> Str }
 component Poster provides http: Http {
-  provide http { async fn post(url, body) = http_post(url, body) }
+  provide http { async fn post(url, body) = emit http_post(url, body) }
 }
 """),
     # per-realm G2: the same key provided in two DIFFERENT realms composes —
@@ -1144,7 +1144,7 @@ extern emission async fn tick() -> Int = @py { return 1 }
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission async fn go() -> Int }
 component C provides s: S {
-  provide s { async fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { async fn go() { let r = caller(() => emit tick())   return 0 } }
 }
 """),
     # item 53: a `handoff` on a PROVIDED key is valid state-handoff wiring —
@@ -1204,7 +1204,7 @@ fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
 fn plain(f: (Str) -> Str) -> Str { return f("a") }
 service S { emission async fn go(y: Str) -> Str }
 component C provides s: S {
-  provide s { async fn go(y) { let r = plain(w => wrap(z => tick(z), w))   return r } }
+  provide s { async fn go(y) { let r = plain(w => wrap(z => emit tick(z), w))   return r } }
 }
 """),
     ("a fn whose only async reach is a coerced arrow stays sync", """
@@ -1892,7 +1892,7 @@ component LyingCache provides cache: Cache {
     fn put(key, value) {
       effect store.insert(key, value)
       undo   store.remove(key)
-      let n = write_through(key)
+      let n = emit write_through(key)
     }
   }
 }
@@ -1901,7 +1901,7 @@ component LyingCache provides cache: Cache {
 fn helper(u: Str) -> Str { return http_post(u, u) }
 service Http { emission fn post(url: Str, body: Str) -> Str }
 component Poster provides http: Http {
-  provide http { fn post(url, body) = helper(url) }
+  provide http { fn post(url, body) = emit helper(url) }
 }
 """, "A1"),
     # G1: `db` is read but never declared in the requires row (fixture).
@@ -2122,7 +2122,7 @@ component C requires d: D provides s: S {
 fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 service S { emission async fn go() -> Str }
 component C provides s: S {
-  provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } }
+  provide s { async fn go() { let r = apply(msgs => emit tick(msgs), "x")   return r } }
 }
 """, "A1"),
     # `_refuse_leaky_pure_arrow`: the module-fn twin — a sync arrow in a pure fn
@@ -2185,7 +2185,7 @@ component Supervisor requires other: Store provides sup: Sup {
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission fn go() -> Int }
 component C provides s: S {
-  provide s { fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { fn go() { let r = caller(() => emit tick())   return 0 } }
 }
 """, "A1"),
     # code-less spawn-form: a spawn naming a component not in this composition
@@ -3191,17 +3191,18 @@ component Bookkeeper provides ledger: Ledger {
   }
 }
 """, "G4"),
-    # Control 3: an ordinary statement that merely REACHES the same extern
-    # through a helper, with no `emit` marker of its own. It is not an emit
-    # step, so it draws `helper()` and nothing more on both sides.
-    ("an unmarked reach through a helper carries no host label", """
+    # Control 3: a binding that REACHES the same extern through a helper. The
+    # call carries its own `emit` marker, as every crossing does (issue #1437;
+    # unmarked it is the G4 marker refusal instead), but a binding is not an
+    # emit step, so it draws `helper()` and nothing more on both sides.
+    ("a reach through a helper carries no host label", """
 extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
 fn helper(row: Str) -> Int { return pg_write(row) }
 service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let receipt = helper(row)
+      let receipt = emit helper(row)
       return receipt
     }
   }
@@ -3663,8 +3664,11 @@ def test_nested_coerced_arrows_agree(admit, oneline, async_slot, calls_param,
                                      nested, async_method):
     cb_type = "(Str) -> Async[Str]" if async_slot else "(Str) -> Str"
     wrap_body = "return cb(y)" if calls_param else "return y"
-    call = ("plain(w => wrap(z => tick(z), w))" if nested
-            else "wrap(z => tick(z), y)")
+    # the arrow's crossing carries its own `emit` marker (issue #1437), so the
+    # verdict is decided by the coloring approximation this sweep measures and
+    # not by the marker rule
+    call = ("plain(w => wrap(z => emit tick(z), w))" if nested
+            else "wrap(z => emit tick(z), y)")
     decl = "emission async fn go(y: Str) -> Str" if async_method \
         else "emission fn go(y: Str) -> Str"
     method = "async fn go(y)" if async_method else "fn go(y)"

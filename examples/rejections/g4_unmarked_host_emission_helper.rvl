@@ -1,0 +1,24 @@
+// REJECTED (G4): a crossing reached through a module `fn`, called without the
+// `emit` marker.
+//
+// `settle` is a plain top-level `fn`, but its body calls the `emission` extern
+// `charge`, so calling `settle` crosses the boundary one indirection later. A
+// function that reaches an emission is an emission call for the marker rule,
+// the same set `_is_emission_call` reads (issue #1437). Without this, wrapping
+// an extern in a one-line helper would be enough to take the marker off every
+// call site.
+//
+// expected error:
+//   call to emission `settle` must be marked `emit` (G4)
+
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+fn settle(cents: Int) -> Int { return charge(cents) }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) = settle(cents)
+  }
+}

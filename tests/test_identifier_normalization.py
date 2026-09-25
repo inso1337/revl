@@ -77,7 +77,9 @@ _CAPTURE = (
     'extern emission fn send(data: Str) -> Int = @py {{ print("HOST EMISSION: " + data); return 1 }}\n'
     'pub fn {name}(data: Str) -> Int {{ var acc = 0  acc += data.length()  return acc }}\n'
     'service Pure {{ fn calc(x: Str) -> Int }}\n'
-    'component P provides p: Pure {{ provide p {{ fn calc(x) = {name}(x) }} }}\n'
+    # the call is marked, as an emission call must be (issue #1437), so the
+    # ASCII control below is refused by the upper bound the exploit evaded
+    'component P provides p: Pure {{ provide p {{ fn calc(x) = emit {name}(x) }} }}\n'
 )
 
 
