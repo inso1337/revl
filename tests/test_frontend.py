@@ -309,6 +309,20 @@ REJECTIONS = {
     # the position the `emit` sits in, and a marker written there is refused.
     "g4_nested_unmarked_emission.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     "g4_nested_emit_expression.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    # issue #1427: the same rule, on the spellings the two fixtures above do
+    # not reach. Both of them nest a REQUIRED SERVICE crossing in an ACTIVATION
+    # body with an UNSCOPED declaration, so three axes went unmeasured: the
+    # host emission extern carrier, a provide-method body, and a
+    # capability-scoped extern. The head's carrier is an axis too, and the
+    # extern carrier was the one that admitted.
+    "g4_nested_host_emission_activation.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_method.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_scoped.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_scoped_method.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_in_service_emit.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_service_emission_in_host_emit.rvl": "call to emission `ledger.fetch` must be marked `emit` (G4)",
+    "g4_nested_emit_expression_host.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    "g4_nested_unmarked_emission_method.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     # --- the indirection cluster ------------------------------------------
     # One shape recurs across all of these: an obligation is carried through an
     # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function

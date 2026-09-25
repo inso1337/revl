@@ -9253,7 +9253,14 @@ fn fn_call(name: String, args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac 
     if contains__m2(&cx.colored, &name) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: union_into(na.areach.clone(), vec![name.clone()]), aops: na.aops.clone(), avals: na.avals.clone() };
     }
-    return walk_args(args, marked, cx.clone(), na.clone());
+    let wa = walk_args(args, marked, cx.clone(), na.clone());
+    if (wa.msg != "") {
+        return wa;
+    }
+    if (((cx.emitPos == "args") && (!marked)) && contains__m2(&cx.emittingNames, &name)) {
+        return ac_refuse(wa.clone(), String::from("G4"), (String::from("call to emission `").revl_concat(&name)).revl_concat("` must be marked `emit` (G4)"));
+    }
+    return wa;
 }
 
 fn var_check(name: String, cx: Ctx__m2, a: Ac) -> Ac {
@@ -27113,6 +27120,17 @@ fn an_emission_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
 }
 
 #[test]
+fn an_emission_extern_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(charge(1)) }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(emit charge(1)) }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
+    assert!((admit_src(String::from("extern emission fn charge(c: Int) -> Int = @py { return 1 } service A { emission fn send(n: Int) -> Int } component C requires a: A { emit a.send(charge(1)) }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } service B { emission fn fetch() -> Int } component C requires b: B { emit log_line(b.fetch()) }")) == "G4|call to emission `b.fetch` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern pure fn twice(n: Int) -> Int = @py { return n * 2 } component C { emit log_line(twice(1)) }")) == ""));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { emit log_line(charge(n)) return 1 } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
+    assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }")) == ""));
+}
+
+#[test]
 fn config_field_of_an_opaque_type_is_refused__g4___exact_wording() {
     assert!((admit_src(String::from("component y{config{l:t}}")) == "G4|config field `l` of component `y` has type `t`, which reaches the opaque type `t`; a config field must be static data"));
 }
@@ -28281,13 +28299,13 @@ fn an__on___as__body_still_refuses_an_undeclared_name__g1_() {
 
 #[test]
 fn an__every___in__body_is_not_pruned_the_way_a_timer_body_is__a1_() {
-    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit sink.write(hf(o)) }\n}"));
+    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  let src = effect Stream.source() undo src.close()\n  let sub = subscribe src undo sub.close()\n  every o in sub { emit hf(o) }\n}"));
     assert!((v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"));
 }
 
 #[test]
 fn the_timer_body_s_prune_survives_the_iteration_branch() {
-    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  every 15s { emit sink.write(hf(\"x\")) }\n}"));
+    let v = admit_src(String::from("extern emission async fn hf(p: Str) -> Str = @py { return p }\nservice Sink { emission fn write(v: Str) }\ncomponent C requires sink: Sink {\n  every 15s { emit hf(\"x\") }\n}"));
     assert!((v == ""));
 }
 

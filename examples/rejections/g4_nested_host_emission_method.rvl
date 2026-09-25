@@ -1,0 +1,26 @@
+// REJECTED — G4: the host emission extern nested in an `emit`'s arguments,
+// this time in a PROVIDE METHOD body rather than an activation body
+// (`g4_nested_host_emission_activation.rvl` is the activation spelling).
+//
+// The position is the axis under test. A provide method has a value binding
+// an activation body does not, so it is where the fix for this shape is
+// written (`let paid = emit charge(cents)` on its own line, then
+// `emit log_line(paid)`), and it has to draw the same refusal before that fix
+// is worth naming.
+//
+// expected error:
+//   call to emission `charge` must be marked `emit` (G4)
+
+extern emission fn log_line(n: Int) -> Int = @py { return 1 }
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) {
+      emit log_line(charge(cents))
+      return 1
+    }
+  }
+}

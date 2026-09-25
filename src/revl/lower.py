@@ -8586,6 +8586,45 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
     return {"kind": "do", "stmts": stmts, "tail": tail}
 
 
+def _refuse_unmarked_emission_call(node: dict, name: str, env: Env,
+                                   filename: str, line: int) -> None:
+    """The marker demand inside an `emit` head's argument list, for the HOST
+    EXTERN carrier (issue #1427).
+
+    `emit` marks one crossing. The head's arguments lower in the enclosing mode
+    (`_emit_head_args`), and every carrier that can cross there has to be held
+    to the same rule, or "one marker per crossing" reads as a property of the
+    required-service spelling rather than of the rule. The `req` and
+    spawn-handle carriers were already held to it — `_lower_postfix` and the
+    `instance-get` arm each refuse an unmarked emission in the argument list.
+    A direct call to an emission extern reaches neither, so `emit send(charge(1))`
+    put a second crossing under one marker and was admitted.
+
+    Scope is deliberately the argument list and nothing wider. Outside it, an
+    unmarked extern call is judged by the provider upper bound
+    (`_method_emissions`: a plain-declared method that reaches an emission
+    extern is refused by name), and this does not touch that judgment. What it
+    fixes is the one position where the reference already promised the
+    arguments are judged as the enclosing position judges them.
+
+    The refusal is the `req` carrier's verbatim, tag and message, because it is
+    the same rule: a crossing the author has not marked."""
+    if not getattr(env, "_in_emit_args", False):
+        return
+    if getattr(env, "_expr_mode", "setup") != "setup":
+        return
+    if not _is_emission_call(node, env):
+        return
+    raise RevlError(
+        filename, line,
+        f"call to emission `{name}` must be marked `emit` (G4)",
+        hint="an emission crosses the system boundary and cannot be reverted; "
+             "`emit` makes that visible at the call site. One marker admits one "
+             "crossing, so hoist this call into an `emit` step of its own",
+        code="G4", category="emission",
+    )
+
+
 def _check_component_call(node: dict, env: Env, filename: str, line: int) -> None:
     """Item 423: a component-body call to a declared `fn` or extern is held to
     the callee's declared arity and argument types.
@@ -8990,6 +9029,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 node = {"kind": "fn", "name": name,
                         "args": _coerce_async_args(name, filled, env, line)}
                 _check_component_call(node, env, filename, line)
+                _refuse_unmarked_emission_call(node, name, env, filename, line)
                 return node
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
