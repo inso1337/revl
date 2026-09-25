@@ -8256,6 +8256,45 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         refuse_approval_on_ownerless_tier(ir, "java")
     except RevlError as exc:
         raise EmitError(exc.message) from None
+def _refuse_validated_emissions(ir: dict) -> None:
+    """Items 257/513 tier gate (issue #1373): a `validated` emission is a CHECKED
+    boundary. The crossing validates the completion against the schema derived
+    from its return type, builds the declared value from the validated payload,
+    raises a typed validation fault when it does not conform, and honours the
+    stated decoding grammar and the `retry` budget. This tier has none of that
+    seam, and it used to DROP the modifier and both derived keys silently:
+    byte-identical output with and without `validated`, no marker, nothing for a
+    byte oracle to catch. So it refuses by name instead, through EmitError, this
+    tier's existing refusal channel.
+
+    The scan and the single canonical wording live in `revl.validated_boundary`,
+    shared by all five tiers so five backends do not invent five messages.
+    DECLARATION-keyed, not call-site keyed (`_refuse_deferred_emissions` above is
+    the other shape): the tier emits the crossing whether or not this document
+    also calls it, so an uncalled declaration still reaches the output as an
+    unchecked boundary."""
+    try:
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    try:
+        refuse_validated_on_unvalidating_tier(ir, "java")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
+
 
 
 _REVL_SYNC_SUFFIX = "_revl_sync"
@@ -8319,6 +8358,7 @@ def emit(ir: dict, package_name: str = "revl", record: bool = False) -> str:
     ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
+    _refuse_validated_emissions(ir)
 
     _refuse_fault_tests(ir)
 

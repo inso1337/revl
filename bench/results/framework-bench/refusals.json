@@ -1,0 +1,472 @@
+{
+  "sections": {
+    "native-chain-residual": {
+      "source": "tests/test_selfhost_compile.py:LOWER_GAP_DOCS",
+      "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
+      "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
+      "tiers": {
+        "go": {
+          "residual": 0,
+          "corpus": 23,
+          "reproduced": 23,
+          "documents": []
+        },
+        "java": {
+          "residual": 0,
+          "corpus": 59,
+          "reproduced": 59,
+          "documents": []
+        },
+        "py": {
+          "residual": 5,
+          "corpus": 57,
+          "reproduced": 52,
+          "documents": [
+            "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
+            "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+            "../../../src/revl/truc/components/cli.rvl",
+            "branches.rvl",
+            "services_control_flow.rvl"
+          ]
+        },
+        "rust": {
+          "residual": 2,
+          "corpus": 40,
+          "reproduced": 38,
+          "documents": [
+            "comp_stream.rvl",
+            "component_edges.rvl"
+          ]
+        },
+        "ts": {
+          "residual": 4,
+          "corpus": 61,
+          "reproduced": 57,
+          "documents": [
+            "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+            "../../../examples/java_match.rvl",
+            "../emit_py_corpus/services_control_flow.rvl",
+            "component_edges.rvl"
+          ]
+        },
+        "wasm": {
+          "residual": 0,
+          "corpus": 21,
+          "reproduced": 21,
+          "documents": []
+        }
+      },
+      "total_residual": 11,
+      "total_corpus": 261,
+      "clean_tiers": [
+        "go",
+        "java",
+        "wasm"
+      ]
+    },
+    "unported-constructs": {
+      "source": "tests/fixtures/selfhost_blind_spots.json",
+      "gate": "python3 tools/selfhost_coverage.py --check",
+      "means": "constructs the reference emitter implements and the self-host port does not",
+      "tiers": {
+        "go": {
+          "unported_constructs": 65,
+          "unported_reasons": 10,
+          "blind_constructs": 4,
+          "reasons": {
+            "Builtin Opt/Result constructors, matching, coalescing and optional chaining need the absent tagged generic preambles/payload renderer. Declared user variants are implemented and covered; the static case/name/pattern markers here refer to builtin Some/None/Ok/Err, not all ADTs.": [
+              "case=Err",
+              "case=None",
+              "case=Ok",
+              "case=Some",
+              "kind=optcall",
+              "kind=optfield",
+              "name=Err",
+              "name=None",
+              "name=Ok",
+              "name=Some",
+              "pattern=Err",
+              "pattern=None",
+              "pattern=Ok",
+              "pattern=Some"
+            ],
+            "General Str/List/Map stdlib and checked-division helpers are explicitly deferred by the Go oracle/scaffold. Arithmetic conversion builtins are handled separately and covered; those do not supply length/concat/collection helper bodies or Map/Result preambles.": [
+              "fn=Map.new",
+              "kind=len",
+              "kind=maplit",
+              "method=checked_div_trunc",
+              "method=length",
+              "method=push",
+              "method=set",
+              "name=length"
+            ],
+            "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
+              "kind=bool",
+              "kind=fn",
+              "kind=format",
+              "kind=int",
+              "kind=str"
+            ],
+            "Lifecycle fault/teardown harness assertion checks runtime residue; in-file lifecycle tests and the live component teardown ABI are outside emit_go.rvl.": [
+              "step=assert_no_residue"
+            ],
+            "Live stc-go component/lifecycle ABI: config, requires/provides, host acquisitions, spawn handles, streams/timers, effects and undo/load/unload harness steps. The pure selfhost emit_src entry does not assemble activation/service/runtime code; these are explicitly excluded by its module-only scope. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all.": [
+              "has_config=<true>",
+              "idempotent=<true>",
+              "kind=config",
+              "kind=host",
+              "kind=instance-get",
+              "kind=req",
+              "kind=spawn",
+              "kind=stream-merge",
+              "kind=subscribe",
+              "lifecycle=<true>",
+              "method=next",
+              "mode=every",
+              "stage=filter",
+              "stage=map",
+              "stage=take",
+              "step=advance",
+              "step=await",
+              "step=call",
+              "step=effect",
+              "step=emit",
+              "step=fail",
+              "step=intercept",
+              "step=let-effect",
+              "step=load",
+              "step=provide",
+              "step=stream-iter",
+              "step=timer",
+              "step=unload",
+              "step=var",
+              "subscribe=<true>"
+            ],
+            "Surviving service/config/extern secret markings select runtime redaction through _declares_secret only after Go's pure-module early return. The corpus already covers a Secret extern return wrapper, but it does not establish parameter/call-descriptor or secret-witness WAL redaction parity (roadmap 421F6).": [
+              "secret=<true>"
+            ],
+            "The Go reference explicitly raises for v3 record_update; this is a backend refusal, not a missing supported port corpus family.": [
+              "kind=record_update"
+            ],
+            "Unresolved holes are rejected by the reference's pre-emission _refuse_holes pass; successful source corpus documents cannot exercise hole emission.": [
+              "kind=hole"
+            ],
+            "Witnessed effects require component method/activation frames and WAL inverse descriptors. Their witness and secret-witness handling is outside the pure module port; roadmap 421F6 still tracks runtime redaction separately from ordinary Secret extern return wrapping.": [
+              "class=witnessed",
+              "secret_witness=<true>"
+            ],
+            "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR; ordinary equality is covered, while these compatibility aliases cannot be selected by a source corpus document.": [
+              "op=!==",
+              "op===="
+            ]
+          }
+        },
+        "java": {
+          "unported_constructs": 30,
+          "unported_reasons": 14,
+          "blind_constructs": 6,
+          "reasons": {
+            "Existing built-in Result boundary: _v3_match_expr emits Ok/Err switch arms and _uses_builtin_result inspects cases/patterns; the port has no Result runtime. Strict result_ctor_302.rvl preserves the family divergence.": [
+              "case=Err",
+              "case=Ok",
+              "pattern=Err",
+              "pattern=Ok"
+            ],
+            "Existing destructuring boundary: _v3_stmt/_emit_setup_stmt handle let_pattern record/list bindings; the port v3_stmt has no destructuring arm and setup is rejected by its component gate.": [
+              "pattern=record",
+              "step=let_pattern"
+            ],
+            "Existing in-file/lifecycle-test boundary: _emit_v3_lifecycle_tests/_v3_lifecycle_step dispatch lifecycle, advance, assert_no_residue, call, load and unload. The port emits no tests; strict records.rvl retains the related in-file test divergence.": [
+              "lifecycle=<true>",
+              "step=advance",
+              "step=assert_no_residue",
+              "step=call",
+              "step=load",
+              "step=unload"
+            ],
+            "Existing local-arrow/first-class-function boundary: _inline_arrow/_bind_local_arrow implement beta reduction/captures; port render_inner rejects arrows. Strict control.rvl reproduces this alongside stdlib demand.": [
+              "kind=arrow"
+            ],
+            "Existing spawn/instance boundary: _v3_instance_get emits provision lookup from a spawn handle; port render_inner has no instance-get arm. Strict instance_accessor.rvl reproduces the family.": [
+              "kind=instance-get"
+            ],
+            "Existing witnessed-extern boundary: _emit_witnessed_step consults secret_witness when recording/redacting inverse witnesses. Extern/witness lowering is not ported; strict method_witnessed.rvl retains a representative divergence, not a claim that secrecy is unnecessary.": [
+              "secret_witness=<true>"
+            ],
+            "Item 421 F6 added the Secret[T] runtime registry to the reference java backend (backends/java/emit.py), but the item-199 Path B self-host java emitter (selfhost/emit_java.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's _SECRET_MODE redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_java.rvl ports the registry.": [
+              "secret=<true>",
+              "secret_return=<true>"
+            ],
+            "Item 458: a `${...}` operand now carries the frontend's `interp_type`, and the reference `_is_float_expr` reads `interp_type=Float` to route the operand through the canonical ECMAScript renderer (revlFtoa). No corpus document can reach it: this port DEFERS the revlFtoa block itself, which is why every emit_java_corpus document already excludes a `${aFloat}` interpolation (see this file's port header). Adding one flips the byte-agreement oracle RED rather than closing the gap, because the reference emits the helper and the port does not. WHAT WOULD HAVE TO CHANGE for a corpus case to be possible: port the revlFtoa emission and its demand scan into selfhost/emit_java.rvl, the way selfhost/emit_py.rvl carries `ftoa_block` and `uses_float_interp` (tests/fixtures/emit_py_corpus/floats.rvl is the corpus case that exercise exactly this on the py tier). The reference half is executed on all six tiers by tests/test_458_interpolation_types.py.": [
+              "interp_type=Float"
+            ],
+            "Reference refusal in _expr/_refuse_stream_host: subscribe and stream-merge require the unimplemented Java Stream runtime. Refusal parity is outside the successful-byte contract.": [
+              "kind=stream-merge",
+              "kind=subscribe"
+            ],
+            "Reference refusal in _expr: optfield/optcall optional-chain nodes raise EmitError. This is not the supported Opt Some/None/coalesce/match surface, which is covered.": [
+              "kind=optcall",
+              "kind=optfield"
+            ],
+            "Reference refusal in _expr: record_update raises rather than producing Java bytes; record construction/field access are separately supported and covered.": [
+              "kind=record_update"
+            ],
+            "Reference refusal, not successful output: _refuse_holes.walk detects holes and _refuse_holes raises before assembly; a kind=hole cannot enter an agreeing successful-byte corpus.": [
+              "kind=hole"
+            ],
+            "`Float` receiver builtins (e.g. `Float.to_str()`) were added to the reference by item 548 / PR #703 (typecheck.py/lower.py plus the reference java backend). The item-199 Path B self-host (selfhost/lower.rvl and the self-host java emitter selfhost/emit_java.rvl) does not port Float-receiver lowering yet; no corpus document reaches a `recv=Float` construct, so every byte-agreement oracle stays green while the ledger would otherwise flag it as an untracked blind construct. It remains a named unported baseline until the self-host ports Float receivers (tracked under self-host parity #106).": [
+              "recv=Float"
+            ],
+            "item 130 landed the `Stream[T]` surface on the reference java backend (backends/java/emit.py: the emitted `Stream`/`Subscription`/`EventContract` runtime, the `subscribe` acquisition and the `stream-iter` loop that lowers `every \u2026 in` / `on \u2026 as`). The item-199 Path B self-host java emitter (selfhost/emit_java.rvl) does not port any of it \u2014 the go and rust ports do not either \u2014 and no corpus document holds a stream, so every byte-agreement oracle stays green. A corpus document reaching a stream would emit the whole runtime from the reference and nothing from the port, so it stays a named unported baseline until the port grows a stream lowering (tracked under self-host parity #106). item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all.": [
+              "stage=filter",
+              "stage=map",
+              "stage=take",
+              "step=stream-iter",
+              "subscribe=<true>"
+            ]
+          }
+        },
+        "py": {
+          "unported_constructs": 28,
+          "unported_reasons": 11,
+          "blind_constructs": 1,
+          "reasons": {
+            "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
+              "kind=stream-merge",
+              "kind=subscribe",
+              "stage=take",
+              "step=await",
+              "step=stream-iter",
+              "subscribe=<true>"
+            ],
+            "Async-runtime planner boundary: emit.py::_group_eligible requires idempotent emissions with safe compensation; _emit_parallel_group emits await/flush/raise ordering and emit adds service metadata. emit_py.rvl::emit_services_table/body_step has sequential dispatch only. tests/test_parallel_259.py::HDR and its commutative/disjoint cases reproduce the family. Witnessed undo_idempotent registration is separately supported.": [
+              "commutative=<true>",
+              "idempotent=<true>"
+            ],
+            "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
+              "kind=lease-acquire",
+              "kind=lease-revoke",
+              "step=approval"
+            ],
+            "Component host-runtime boundary from the port banner: emit.py::_ComponentEmitter._expr lowers host roots via runtime imports; emit_py.rvl::cexpr returns a named marker for kind=host. backends/go/scenarios/advance.rvl reproduces host, pinned by test_named_runtime_and_harness_boundaries. Module builtins and interpolation are supported and not included; component-body kind=format (the `${\u2026}` template) is now ported and covered by emit_py_corpus/services_interp.rvl.": [
+              "kind=host"
+            ],
+            "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
+              "deferred=<true>"
+            ],
+            "Existing deterministic-destructuring boundary: emit.py::_let_pattern_stmt emits record bindings and exact/rest list unpacking using _Lines.next_destructure_seq. emit_py.rvl::fn_stmt has no let_pattern arm. Representative let {a} = record and let [a, ...rest] = list forms are in tests/test_v2_language.py. Item 179 removed id-based naming, not this port omission.": [
+              "pattern=list",
+              "pattern=record",
+              "step=let_pattern"
+            ],
+            "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
+              "lifecycle=<true>",
+              "step=abort",
+              "step=advance",
+              "step=assert_no_residue",
+              "step=call",
+              "step=load",
+              "step=unload"
+            ],
+            "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
+              "kind=hole"
+            ],
+            "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
+              "kind=__rendered__"
+            ],
+            "Spawn/instance runtime boundary: emit.py::_ComponentEmitter._expr calls runtime spawn and handle.get; emit_py.rvl::cexpr emits markers. backends/go/scenarios/accessor.rvl reproduces both; the spawn marker is independently pinned by test_named_runtime_and_harness_boundaries.": [
+              "kind=instance-get",
+              "kind=spawn"
+            ],
+            "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
+              "validated=<true>"
+            ]
+          }
+        },
+        "rust": {
+          "unported_constructs": 20,
+          "unported_reasons": 7,
+          "blind_constructs": 14,
+          "reasons": {
+            "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
+              "secret=<true>",
+              "secret_return=<true>"
+            ],
+            "Item 458: a `${...}` operand now carries the frontend's `interp_type`, and the reference `_v3_is_float` reads `interp_type=Float` to route the operand through the canonical ECMAScript renderer (revl_ftoa). No corpus document can reach it: this port DEFERS the revl_ftoa block itself, which is why every emit_rust_corpus document already excludes a `${aFloat}` interpolation (see this file's port header). Adding one flips the byte-agreement oracle RED rather than closing the gap, because the reference emits the helper and the port does not. WHAT WOULD HAVE TO CHANGE for a corpus case to be possible: port the revl_ftoa emission and its demand scan into selfhost/emit_rust.rvl, the way selfhost/emit_py.rvl carries `ftoa_block` and `uses_float_interp` (tests/fixtures/emit_py_corpus/floats.rvl is the corpus case that exercise exactly this on the py tier). The reference half is executed on all six tiers by tests/test_458_interpolation_types.py.": [
+              "interp_type=Float"
+            ],
+            "Reference host Map construction and access use runtime descriptors and borrowed-key conventions. The self-host pure-v3 port has no host Map value representation, so its Map names and get/next operations are not renderable.": [
+              "name=Map",
+              "name=remove"
+            ],
+            "The reference Rust builtin renderer implements these positional-string, mutable-collection, conversion, and repetition families. The self-host renderer's supported subset ends at covered length/to_str/read-only string operations and returns an explicit unsupported marker for these methods.": [
+              "method=set"
+            ],
+            "These expression and destructuring forms are rejected before or inside the self-host pure-v3 renderer: unresolved holes, legacy format nodes, optional call/field chaining, record update, and list/record binding patterns all require lowering absent from the port.": [
+              "bind=_",
+              "kind=hole",
+              "kind=optcall",
+              "kind=optfield",
+              "kind=record_update",
+              "pattern=list",
+              "pattern=record"
+            ],
+            "Witnessed effects, lifecycle tests, streams, child instances, timers, and host scheduling terminate in reference-only frame/router/runtime emission. The self-host module emitter does not implement those runtime protocols and reports them through explicit refusal or DEFER paths. item 130 Slice 2 added the derived-stream combinator chain (`map`/`filter`/`take`) to this reference emitter as nested `stage` links inside the subscription's acquisition, so the three `stage=` constructs join the same unported set for the same reason: the port emits no stream lowering at all.": [
+              "kind=instance-get",
+              "secret_witness=<true>",
+              "step=assert_no_residue",
+              "step=call",
+              "step=load",
+              "step=unload"
+            ],
+            "`Float` receiver builtins (e.g. `Float.to_str()`) were added to the reference by item 548 / PR #703 (typecheck.py/lower.py plus the reference rust backend). The item-199 Path B self-host (selfhost/lower.rvl and the self-host rust emitter selfhost/emit_rust.rvl) does not port Float-receiver lowering yet; no corpus document reaches a `recv=Float` construct, so every byte-agreement oracle stays green while the ledger would otherwise flag it as an untracked blind construct. It remains a named unported baseline until the self-host ports Float receivers (tracked under self-host parity #106).": [
+              "recv=Float"
+            ]
+          }
+        },
+        "ts": {
+          "unported_constructs": 16,
+          "unported_reasons": 8,
+          "blind_constructs": 4,
+          "reasons": {
+            "component `call`, `load`, and `unload` steps require routed instance/reference lifecycle machinery rather than the mirrored provide/guard/effect subset; their source branches terminate in the reference component runtime, not v3 statement emission": [
+              "step=call",
+              "step=load",
+              "step=unload"
+            ],
+            "in-file lifecycle tests are emitted by reference-only `_emit_ts_lifecycle_tests`; corpus oracle documents compile library/application output and the port intentionally has no test-runner generation path": [
+              "lifecycle=<true>"
+            ],
+            "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81: the java tier, which still refuses the whole stream surface)": [
+              "kind=stream-merge",
+              "kind=subscribe",
+              "stage=take",
+              "step=stream-iter"
+            ],
+            "reference roots named `stdlib` enter `_emit_ts_ref_runtime`/`_emit_ts_ref_thunk`; the self-host corpus contract requires ordinary host roots and refuses missing host roots instead of synthesizing reference-runtime thunks": [
+              "root=stdlib"
+            ],
+            "temporal `every` and component timer/advance/assert-no-residue steps are handled by reference-only `_emit_temporal` and runtime scheduler hooks, outside the self-host emitter's synchronous component subset": [
+              "mode=every",
+              "step=advance",
+              "step=assert_no_residue",
+              "step=timer"
+            ],
+            "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
+              "kind=do"
+            ],
+            "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
+              "class=witnessed"
+            ],
+            "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
+              "kind=hole"
+            ]
+          }
+        },
+        "wasm": {
+          "unported_constructs": 46,
+          "unported_reasons": 11,
+          "blind_constructs": 4,
+          "reasons": {
+            "Inline arrow/capture lowering is explicitly deferred by the selfhost oracle, and escaping function values/declared function-type signatures are refused by the WASM MVP reference. The kind=fn spelling also serves legacy component calls, unlike canonical v3 callee nodes.": [
+              "kind=arrow",
+              "kind=fn"
+            ],
+            "Internal pre-lowered WAT node injected by _ComponentEmitter._to_v3/_delegate, not a frontend source construct. Pure modules render source expressions directly and never enter this component bridge.": [
+              "kind=__wat"
+            ],
+            "Interpolation and indexOf/join/split demand helper bodies absent from the selfhost preamble and are explicit oracle deferrals. Component format is the older $0-template encoding rewritten to interp; ordinary binary Str concatenation is covered.": [
+              "kind=format",
+              "kind=interp",
+              "method=indexOf",
+              "method=join",
+              "method=split"
+            ],
+            "Legacy component reference spelling consumed by _ComponentEmitter; canonical pure source references lower to kind=var. This syntax-census mismatch does not mean variable reads are unsupported.": [
+              "kind=name"
+            ],
+            "Live component activation/provide/job/spawn/resource and witnessed undo ABI is implemented by the separate _ComponentEmitter, which the module-only selfhost port does not instantiate. This includes teardown/transactional frames and secret-witness WAL metadata; runtime redaction remains a separate roadmap 421F6 boundary.": [
+              "async=<true>",
+              "class=witnessed",
+              "fn=Job.run",
+              "kind=bracket",
+              "kind=compensation",
+              "kind=config",
+              "kind=host",
+              "kind=instance-get",
+              "kind=req",
+              "kind=spawn",
+              "kind=transactional",
+              "lifecycle=<true>",
+              "method=dispose",
+              "secret_witness=<true>",
+              "step=await",
+              "step=effect",
+              "step=emit",
+              "step=let-effect",
+              "step=provide",
+              "subscribe=<true>",
+              "witness=Str"
+            ],
+            "Map literals and Map stdlib operations are explicitly refused by _V3Emitter rather than lowered by this backend; corresponding helper dispatch entries are not evidence of a supported source family.": [
+              "kind=maplit",
+              "method=has",
+              "method=keys",
+              "method=lookup",
+              "method=remove",
+              "method=set",
+              "method=size"
+            ],
+            "Tagged reads are explicitly deferred: coalescing and match require tag/payload loads and arm binding. WASM tagged construction is covered; it does not implement the match wildcard/Any-payload inference paths.": [
+              "kind=match",
+              "pattern=_",
+              "payload_type=Any"
+            ],
+            "The WASM reference explicitly rejects operands=Float and Float-valued module types. Source / yields Float (including Int/Int), so its legacy integer WAT instruction entry is not evidence of supported source division; named integer division builtins are a separate covered family.": [
+              "op=/"
+            ],
+            "The WASM reference explicitly rejects record update and optional field/call chaining. Plain records/field reads and Opt construction are covered but do not provide these operations.": [
+              "kind=optcall",
+              "kind=optfield",
+              "kind=record_update"
+            ],
+            "The reference's pre-emission _refuse_holes pass rejects unresolved holes; accepted source corpus documents contain no hole emission.": [
+              "kind=hole"
+            ],
+            "The whole checked-division family is unported on this tier: selfhost/emit_wasm.rvl carries the $int_* arithmetic helper bodies but not the _builtin_expr arm that lowers checked_div_trunc/floor/euclid/mod into tagged Ok/Err cells, and no wasm corpus document spells a checked_* call. Only `checked_mod` shows up as a construct here because it is the one member the reference names by itself \u2014 it is the exception to the Int.MIN/-1 overflow Err the other three answer, since its own answer at that divisor is 0. The rest of the family reaches the reference through `method in _CHECKED_DIVS`, which is not a discriminant this census reads. A corpus case would need the tagged-union port first.": [
+              "method=checked_mod"
+            ]
+          }
+        }
+      },
+      "total_unported": 205
+    },
+    "unreached-constructs": {
+      "source": "tests/fixtures/oracle_construct_reach_ledger.json",
+      "gate": "python3 tools/oracle_construct_reach.py --check",
+      "means": "dispatch arms an oracle's reference implementation can take that no corpus document exhibits; an unexercised path, not a refusal",
+      "oracles": {
+        "compile": 1,
+        "emit_go": 69,
+        "emit_java": 36,
+        "emit_py": 29,
+        "emit_rust": 34,
+        "emit_ts": 20,
+        "emit_wasm": 50,
+        "gate_census": 5,
+        "lower_ir": 6
+      },
+      "total_unreached": 250
+    },
+    "gate-reference-divergence": {
+      "source": "tools/gate_reference_census_baseline.json",
+      "gate": "python3 tools/gate_reference_census.py --check",
+      "means": "programs the embeddable gate admits that the reference compiler refuses; the fail-open direction",
+      "false_admit_buckets": {},
+      "false_admit_programs": {},
+      "total_false_admit": 0,
+      "named_programs": []
+    }
+  },
+  "unavailable": {}
+}

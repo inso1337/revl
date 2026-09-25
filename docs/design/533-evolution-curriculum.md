@@ -28,8 +28,12 @@ maintained implementations of revl semantics the mechanism makes agree
 (`impls`), how many top-level repository directories its corpus spans
 (`breadth`), and whether it proves rather than samples (`proved`). At `52fb8ef3`
 that yields 266 tasks and populations easy 7, medium 244, hard 9, expert 6,
-each rung fed by a different source. `--check` reds when a rung is empty or a
-task names a path that is not in the tree, and both reds are exercised.
+each rung fed by a different source. At `076a748d9` it yields 257 tasks and
+easy 7, medium 244, hard 0, expert 6: the `hard` rung is derived from recorded
+gate bypasses and PR #1396 and PR #1404 closed the last of them. `--check`
+reds when a source cannot be derived, when a rung is one no source reaches, or
+when a task names a path that is not in the tree. A rung a source reaches and
+finds nothing on is reported with its count and is not a red; §4.3 is why.
 
 ## 1. Why the tier is the hard half
 
@@ -248,9 +252,12 @@ could not fail. `--check` is not allowed to be the sixth, so it is shown red on
 the real code path in two independent directions, with a control that is green
 on the same tree:
 
-- `test_check_reds_when_a_rung_cannot_be_populated` restricts the curriculum to
-  `census-bypass` alone and asserts exactly three problems, one naming each of
-  `easy`, `medium` and `expert`;
+- `test_check_reds_when_a_rung_is_unreachable` restricts the curriculum to
+  `unexplained-refusal` alone and asserts exactly three problems, one naming
+  each of `medium`, `hard` and `expert`;
+- `test_check_reds_on_a_source_that_ran_and_measured_nothing` and
+  `test_check_reds_on_a_source_that_could_not_be_derived` take the two ways a
+  source stops reading the tree;
 - `test_check_reds_on_a_task_whose_artifact_left_the_tree` rewrites one task's
   artifact to a path that is not in the tree and asserts the gate names it,
   which is the failure mode of an invented task;
@@ -258,11 +265,50 @@ on the same tree:
   through the CLI, since that is how a gate is actually invoked;
 - `test_check_is_green_on_the_whole_curriculum` is the control.
 
-An empty rung is a RED rather than a lowered expectation, which is what the
-issue asks for and has a consequence worth stating plainly: closing every task
-on a rung reds the gate. That is intended. A rung the tree can no longer
-populate needs a new source, not a shorter ladder, and the red is how the
-curriculum says so.
+### 4.3 An empty rung, and what it is allowed to mean (issue #1410)
+
+The first version of the gate red on an empty rung. That was right while a
+rung described work the tree still had, and it became wrong the day the work
+was finished. `hard` is derived from the census's recorded gate bypasses; PR
+#1396 met item 391's exit and PR #1404 took the go carried set from 16 to 0,
+the baseline went to `{}`, and the rung emptied because the bypasses were
+closed. A gate that fires on the repository improving has exactly one cheap
+way to be cleared, which is to re-open a closed gap, and that is the trade
+issue #1407 forbids for the census baseline.
+
+Widening the rung's definition was the other option and it is worse. The rung
+is a total function of a measured signal, and moving the line so the bucket
+stays full is calling something hard because the ladder wants it to be, which
+is the asserted-difficulty problem this module exists to remove.
+
+So the two halves are measured separately. Each source reports the SIGNALS it
+stamps, computed from the artifacts it reads and independent of how many
+instances it finds, and the tasks it found. What is gated is reachability: a
+rung no source stamps is a decorative rung, which is the real content of the
+review's "a tier that cannot be populated is a RED", and it still needs a new
+source rather than a shorter ladder. What is reported is population, with the
+source that feeds the rung named beside the count.
+
+Three states, three outputs, and no two of them the same:
+
+| state | output | exit |
+|---|---|---|
+| a source raised, or ran and measured no signal | `CURRICULUM-RED source 'x' ...` | 1 |
+| no source stamps a rung | `CURRICULUM-RED tier 'x' is unreachable at HEAD` | 1 |
+| a source reaches a rung and found nothing | `CURRICULUM-EMPTY tier 'x' has 0 tasks at HEAD, and is reachable: ...` | 0 |
+
+The middle row is what a renamed artifact used to look like. An adapter whose
+subject file has moved skips every branch and returns nothing, which under the
+old gate printed the same line as a rung whose work was done; now a source
+that measured no signal is named on its own line and the rungs it fed red as
+unreachable rather than passing as finished.
+
+`test_a_recorded_bypass_fills_the_hard_rung_and_removing_it_empties_it` is the
+demonstration: two programs the reference genuinely refuses are staged into a
+baseline the test owns, `hard` fills with them and `check` is green; the
+entries are taken away, the rung empties, `census-bypass` still declares it
+reaches `hard`, and `check` is green for the other reason. Nothing is written
+into the tree and no closed gap is re-opened.
 
 ## 5. What the signal gets wrong, and how that was measured
 

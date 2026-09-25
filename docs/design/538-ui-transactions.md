@@ -410,6 +410,22 @@ residue. The FAILING step's own registered compensation does run: an unmet
 postcondition says revl could not see the effect land, which is not knowing it
 did not, and restoring a field is correct either way.
 
+The unit is only as complete as the step set it is computed over, and that is
+the half issue #1327 held open. `method_plan`'s walk read three statement
+shapes and only the top node of each one's expression, so an actuation written
+in any of seven other positions was not a step of the transaction it is a step
+of. Tail position is the one that matters here, because a `provide` method
+that returns what it clicked has nothing left to bind. Keyed by label, a run
+over such a transaction raised `LookupError`: revl could not be told which step
+failed. Keyed by index it did not raise at all, and reported an aggregate of
+`restored` for a transaction holding an uncompensated click, because the
+aggregate is the weakest state PRESENT and the step that would have dragged it
+down was absent from the fold. The generic walk is section 5.1 of
+`docs/design/553-ui-transaction-phases.md`;
+`tests/test_ui_transaction_run_1369.py`'s last section is the run over that
+shape, of which two tests fail on the walk it replaces and two are the controls
+that say what each run was entitled to claim.
+
 What did not land with it: revl performs nothing. It computes the run, and the
 compensating crossings are the substrate's (item 539), exactly as the
 actuations are. A compensation that is performed and FAILS has no word in
