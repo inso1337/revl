@@ -1,0 +1,437 @@
+{
+  "schema": "UNLOAD-SURVEY-2",
+  "what_this_measures": "named claims about a published package's surface, at a pinned version, each confirmed or falsified by searching the artifact the index served. A confirmed 'present' claim says a symbol exists, not what it does; a confirmed 'absent' claim is scoped to the paths it names.",
+  "deregistration_names": [
+    "unregister",
+    "deregister",
+    "removeTool",
+    "remove_tool",
+    "removePlugin",
+    "remove_plugin",
+    "removeFunction",
+    "remove_function"
+  ],
+  "frameworks": [
+    {
+      "id": "modelcontextprotocol-sdk",
+      "name": "@modelcontextprotocol/sdk",
+      "ecosystem": "npm",
+      "version": "1.30.0",
+      "role": "candidate",
+      "category": "tool-host",
+      "registration_api": "McpServer.registerTool(name, config, handler)",
+      "note": [
+        "remove() is implemented as update({ name: null }), which deletes the",
+        "registry entry. It calls nothing on the handler, so a tool that acquired",
+        "something at registration has no callback in which to give it back. That",
+        "is the residue shape, and it is why this framework is worth measuring",
+        "rather than a reason to disqualify it."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "modelcontextprotocol-sdk-1.30.0.tgz"
+      },
+      "claims": [
+        {
+          "kind": "present",
+          "symbol": "remove(): void",
+          "path": "package/dist/esm/server/mcp.d.ts",
+          "proves": "unload",
+          "granularity": "per-registration",
+          "means": "a registration hands back a handle that can retire itself",
+          "files_searched": 1,
+          "hits": [
+            {
+              "file": "package/dist/esm/server/mcp.d.ts",
+              "line": 289,
+              "symbol": "remove(): void"
+            },
+            {
+              "file": "package/dist/esm/server/mcp.d.ts",
+              "line": 319,
+              "symbol": "remove(): void"
+            },
+            {
+              "file": "package/dist/esm/server/mcp.d.ts",
+              "line": 341,
+              "symbol": "remove(): void"
+            },
+            {
+              "file": "package/dist/esm/server/mcp.d.ts",
+              "line": 361,
+              "symbol": "remove(): void"
+            }
+          ],
+          "verdict": "confirmed"
+        },
+        {
+          "kind": "present",
+          "symbol": "sendToolListChanged",
+          "path": "package/dist/esm/server/mcp.js",
+          "proves": "unload",
+          "granularity": "per-registration",
+          "means": "retiring a tool is announced to the peer, so the surface a caller sees actually narrows",
+          "files_searched": 1,
+          "hits": [
+            {
+              "file": "package/dist/esm/server/mcp.js",
+              "line": 646,
+              "symbol": "sendToolListChanged"
+            },
+            {
+              "file": "package/dist/esm/server/mcp.js",
+              "line": 651,
+              "symbol": "sendToolListChanged"
+            },
+            {
+              "file": "package/dist/esm/server/mcp.js",
+              "line": 765,
+              "symbol": "sendToolListChanged"
+            },
+            {
+              "file": "package/dist/esm/server/mcp.js",
+              "line": 767,
+              "symbol": "sendToolListChanged"
+            }
+          ],
+          "verdict": "confirmed"
+        },
+        {
+          "kind": "present",
+          "symbol": "close(): Promise<void>",
+          "path": "package/dist/esm/server/mcp.d.ts",
+          "proves": "unload",
+          "granularity": "per-host",
+          "means": "the host itself has a teardown",
+          "files_searched": 1,
+          "hits": [
+            {
+              "file": "package/dist/esm/server/mcp.d.ts",
+              "line": 44,
+              "symbol": "close(): Promise<void>"
+            }
+          ],
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "pydantic-ai-slim",
+      "name": "pydantic-ai-slim",
+      "ecosystem": "pypi",
+      "version": "2.46.0",
+      "role": "candidate",
+      "category": "agent-framework",
+      "registration_api": "Agent(toolsets=[...]) with AbstractToolset",
+      "note": [
+        "The runner-up, and the closest thing to a real teardown contract among",
+        "the python frameworks here: __aexit__ is documented as where a toolset",
+        "tears down connections. It is scoped to the toolset, not to a tool, and",
+        "for_run_step hands lifecycle transitions back to the caller in so many",
+        "words."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "pydantic_ai_slim-2.46.0-py3-none-any.whl",
+        "sha256": "c683dce9e9e05e9fe9302fb43ce95ae8e2456f43ed7ccbfc1ccee102c3a55a53"
+      },
+      "claims": [
+        {
+          "kind": "present",
+          "symbol": "async def __aexit__",
+          "path": "pydantic_ai/toolsets/abstract.py",
+          "proves": "unload",
+          "granularity": "per-toolset",
+          "means": "a toolset is an async context manager, so there is a scope exit where it can release what it took",
+          "files_searched": 1,
+          "hits": [
+            {
+              "file": "pydantic_ai/toolsets/abstract.py",
+              "line": 151,
+              "symbol": "async def __aexit__"
+            }
+          ],
+          "verdict": "confirmed"
+        },
+        {
+          "kind": "absent",
+          "names": [
+            "unregister",
+            "deregister",
+            "removeTool",
+            "remove_tool",
+            "removePlugin",
+            "remove_plugin",
+            "removeFunction",
+            "remove_function"
+          ],
+          "path": "pydantic_ai/toolsets",
+          "means": "teardown is at toolset scope only; an individual registered tool has no retirement path",
+          "files_searched": 19,
+          "hits": [],
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "semantic-kernel",
+      "name": "semantic-kernel",
+      "ecosystem": "pypi",
+      "version": "1.44.1",
+      "role": "candidate",
+      "category": "agent-framework",
+      "registration_api": "Kernel.add_plugin(...) / add_function(...)",
+      "note": [
+        "The one mainstream framework that calls its unit a plugin, which made it",
+        "the expected pick. It keeps them in a plain dict field and publishes",
+        "add_plugin with no counterpart, so a caller who wants one mutates the",
+        "dict, and no plugin is ever told it was removed.",
+        "The claim was first written against the whole package and the checker",
+        "falsified it on the word 'unregistered' in a comment about azure agent",
+        "threads. It is scoped to the plugin registry's own modules now, which is",
+        "the scope it should have had."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "semantic_kernel-1.44.1-py3-none-any.whl",
+        "sha256": "95bd49c3055710473a46472dfceaeafe11d97a546dc715ee6d5359c2f47ec754"
+      },
+      "claims": [
+        {
+          "kind": "present",
+          "symbol": "def add_plugin",
+          "path": "semantic_kernel/functions/kernel_function_extension.py",
+          "proves": "registration",
+          "means": "registration exists and is named a plugin. This is NOT unload evidence and the verdict must not read it as any",
+          "files_searched": 1,
+          "hits": [
+            {
+              "file": "semantic_kernel/functions/kernel_function_extension.py",
+              "line": 64,
+              "symbol": "def add_plugin"
+            },
+            {
+              "file": "semantic_kernel/functions/kernel_function_extension.py",
+              "line": 126,
+              "symbol": "def add_plugin"
+            },
+            {
+              "file": "semantic_kernel/functions/kernel_function_extension.py",
+              "line": 226,
+              "symbol": "def add_plugin"
+            }
+          ],
+          "verdict": "confirmed"
+        },
+        {
+          "kind": "absent",
+          "names": [
+            "remove_plugin",
+            "remove_function",
+            "unregister",
+            "deregister"
+          ],
+          "path": "semantic_kernel/functions",
+          "means": "nothing published retires a registered plugin",
+          "files_searched": 14,
+          "hits": [],
+          "verdict": "confirmed"
+        },
+        {
+          "kind": "absent",
+          "names": [
+            "remove_plugin",
+            "remove_function"
+          ],
+          "path": "semantic_kernel/kernel.py",
+          "means": "and the kernel itself has no counterpart to add_plugin",
+          "files_searched": 1,
+          "hits": [],
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "langchain-js",
+      "name": "langchain",
+      "ecosystem": "npm",
+      "version": "1.5.11",
+      "role": "candidate",
+      "category": "agent-framework",
+      "registration_api": "createAgent({ tools: [...] })",
+      "note": [
+        "The framework most readers mean by 'agent framework'."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "langchain-1.5.11.tgz"
+      },
+      "claims": [
+        {
+          "kind": "absent",
+          "names": [
+            "unregister",
+            "deregister",
+            "removeTool",
+            "remove_tool",
+            "removePlugin",
+            "remove_plugin",
+            "removeFunction",
+            "remove_function"
+          ],
+          "path": "package/dist",
+          "means": "tools are a constructor argument; the published surface exposes no retirement path",
+          "files_searched": 222,
+          "hits": [],
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "langchain-core-py",
+      "name": "langchain-core",
+      "ecosystem": "pypi",
+      "version": "1.6.3",
+      "role": "candidate",
+      "category": "agent-framework",
+      "registration_api": "model.bind_tools([...])",
+      "note": [
+        "The python side of the same framework."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "langchain_core-1.6.3-py3-none-any.whl",
+        "sha256": "114fe1868c9ed60606662b9dd0074bf3152cc6b0b1522ba37cbd6b04f55ca77d"
+      },
+      "claims": [
+        {
+          "kind": "absent",
+          "names": [
+            "unregister",
+            "deregister",
+            "removeTool",
+            "remove_tool",
+            "removePlugin",
+            "remove_plugin",
+            "removeFunction",
+            "remove_function"
+          ],
+          "path": "langchain_core/tools",
+          "means": "bind_tools returns a new runnable rather than mutating a registry, so there is nothing to retire",
+          "files_searched": 7,
+          "hits": [],
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "openai-agents",
+      "name": "@openai/agents",
+      "ecosystem": "npm",
+      "version": "0.18.0",
+      "role": "candidate",
+      "category": "agent-framework",
+      "registration_api": "new Agent({ tools: [...] })",
+      "note": [
+        "First-party agent SDK."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "openai-agents-0.18.0.tgz"
+      },
+      "claims": [
+        {
+          "kind": "absent",
+          "names": [
+            "unregister",
+            "deregister",
+            "removeTool",
+            "remove_tool",
+            "removePlugin",
+            "remove_plugin",
+            "removeFunction",
+            "remove_function"
+          ],
+          "path": "package/dist",
+          "means": "same shape: tools are constructor state",
+          "files_searched": 24,
+          "hits": [],
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "crewai",
+      "name": "crewai",
+      "ecosystem": "pypi",
+      "version": "1.15.22",
+      "role": "candidate",
+      "category": "agent-framework",
+      "registration_api": "Agent(tools=[...]) / Crew(...)",
+      "note": [
+        "crewai does publish an event_bus unregister for event handlers, which is",
+        "a different registry and does not retire a tool. The claim is scoped to",
+        "the agent package for that reason."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "crewai-1.15.22-py3-none-any.whl",
+        "sha256": "7675c2bb1166933c60d67596936cd8b4ce63d77361dd3aeb925b210180298e5a"
+      },
+      "claims": [
+        {
+          "kind": "absent",
+          "names": [
+            "remove_tool",
+            "unregister",
+            "deregister"
+          ],
+          "path": "crewai/agent",
+          "means": "an agent's tools are constructor state with no retirement path",
+          "files_searched": 6,
+          "hits": [],
+          "verdict": "confirmed"
+        }
+      ]
+    },
+    {
+      "id": "cordis",
+      "name": "cordis",
+      "ecosystem": "npm",
+      "version": "4.0.0-rc.10",
+      "role": "control",
+      "category": "plugin-runtime",
+      "registration_api": "ctx.plugin(...) returning a Fiber",
+      "note": [
+        "The control. The raw-ts host already runs on a fork of this, pinned by",
+        "commit, and its unload path is known to exist, so a survey that failed to",
+        "find one here would be reporting on its own regexes rather than on the",
+        "ecosystem. The published 4.0.0-rc.10 is scanned rather than the fork,",
+        "because a reader can fetch the published one."
+      ],
+      "fetched": true,
+      "artifact": {
+        "filename": "cordis-4.0.0-rc.10.tgz"
+      },
+      "claims": [
+        {
+          "kind": "present",
+          "symbol": "dispose",
+          "path": "package/lib/fiber.d.ts",
+          "proves": "unload",
+          "granularity": "per-registration",
+          "means": "a loaded plugin is a fiber and the fiber disposes",
+          "files_searched": 1,
+          "hits": [
+            {
+              "file": "package/lib/fiber.d.ts",
+              "line": 54,
+              "symbol": "dispose"
+            }
+          ],
+          "verdict": "confirmed"
+        }
+      ]
+    }
+  ]
+}
