@@ -7713,6 +7713,277 @@ def _check_ui_target_binding(program: Program, types: dict, filename: str) -> No
                             code="G8", category="boundary")
 
 
+def _ui_nodes(root, kinds: tuple) -> list:
+    """Every node of one of `kinds` reachable from `root`, by reflection over
+    the dataclass graph rather than by a list of statement kinds.
+
+    The list-of-kinds shape is what issue #1327 measured the cost of: a walk
+    that names three statement kinds and reads the top node of each one's
+    expression missed SEVEN spellings of the same crossing, and every miss was
+    in the fail-open direction. A reflective walk has no position to miss, so
+    a new statement or expression node cannot quietly open a hole in the
+    caller below.
+
+    Order is unspecified: the caller asks a question about the SET of nodes in
+    a program (is a target built anywhere?), never about the order they run
+    in. `id()` marks what has been seen, so a shared or cyclic node graph
+    terminates.
+    """
+    import dataclasses  # noqa: PLC0415 - stdlib, kept beside its one user
+
+    found: list = []
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node is None or isinstance(node, (str, bytes, int, float, bool)):
+            continue
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, kinds):
+            found.append(node)
+        if isinstance(node, (list, tuple, set, frozenset)):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif dataclasses.is_dataclass(node):
+            stack.extend(getattr(node, f.name, None)
+                         for f in dataclasses.fields(node))
+    return found
+
+
+def _ui_target_producers(program: Program) -> set:
+    """The names of this program's externs that RESOLVE a target."""
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    names = set()
+    for ext in program.externs:
+        for cap in ext.capabilities or ():
+            verb = ui_family.verb_of(cap) or ui_family._bare(cap)
+            if verb in ui_family.TARGET_PRODUCERS:
+                names.add(ext.name)
+                break
+    return names
+
+
+def _ui_target_names(body, params, producers: set, returns: dict) -> set:
+    """The names bound to a TARGET in one declaration's scope.
+
+    Only used to decide whether a record UPDATE's base is a target, so it
+    under-approximates on purpose: a name this cannot trace is not reported as
+    a target, and the update over it is admitted. That direction is what keeps
+    the update refusal off records that merely share a field name with the
+    registry (`name`, `action` and `window` are ordinary field names), and it
+    is safe because the CONSTRUCTED and MINTED refusals below hold the
+    invariant on their own - they refuse a target entering the program at all,
+    which needs no dataflow.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    strip = ui_family.strip_qualifiers_shallow
+    names = {n for n, t in params if strip(t) == ui_family.TARGET_TYPE}
+
+    def is_target(expr) -> bool:
+        if isinstance(expr, EmitExpr):
+            return is_target(expr.expr)
+        if isinstance(expr, ExprRecordUpdate):
+            return is_target(expr.base)
+        if isinstance(expr, ExprVar):
+            return expr.name in names
+        if isinstance(expr, ExprCall):
+            callee = expr.callee
+            if isinstance(callee, ExprVar):
+                return callee.name in producers
+            if isinstance(callee, ExprField):
+                return strip(returns.get(callee.name)) == \
+                    ui_family.TARGET_TYPE
+        return False
+
+    bindings = [(s.name, s.value, getattr(s, "type", None))
+                for s in _ui_nodes(body, (LetStmt, AssignStmt))]
+    # A fixpoint rather than one pass: a name may be bound from a later name
+    # in a loop body, and one pass over an unspecified order would answer
+    # differently depending on which node the reflection reached first.
+    changed = True
+    while changed:
+        changed = False
+        for name, value, declared in bindings:
+            if name in names:
+                continue
+            if strip(declared) == ui_family.TARGET_TYPE or is_target(value):
+                names.add(name)
+                changed = True
+    return names
+
+
+def _check_ui_target_provenance(program: Program, types: dict,
+                                filename: str) -> None:
+    """Where an actuated target CAME FROM (roadmap item 521, issue #1371,
+    docs/design/565-ui-target-binding.md §7).
+
+    Slice 4 checks the signature. §7 recorded what that leaves open - "revl
+    checks the signature, not the dataflow between two crossings" - and named
+    slice 2's taint discipline as the bound. Measured on `fc0d84ce`, that
+    bound runs the wrong way: `ui.find` is a source and `ui.click` is an
+    all-arguments sink, so under `taint_strict` the program that resolves a
+    target and clicks it is REFUSED, while the program that clicks a
+    `UiTarget` record literal it wrote itself is ADMITTED, under every
+    profile. A forged target carries no origin, so there is nothing on it to
+    refuse.
+
+    THE INVARIANT. In an admitted program every `UiTarget` originates in a
+    target-producing crossing. Three refusals hold it, and they are placed on
+    the CONSTRUCTION rather than on the flow to a use, so completeness is not
+    a property of a walk:
+
+    1. CONSTRUCTED - a record literal carrying the declared target's fields,
+       anywhere in the program. Found by reflection over the whole AST, so a
+       literal in a helper `fn`, in a loop body, or in a different component
+       that hands the target over a service is the same refusal.
+    2. MINTED - an extern returning the record without declaring the
+       resolution. A second host boundary handing back a target is the way
+       around rule 1 rather than a use of it.
+    3. REBOUND - a functional update rewriting a REGISTRY-OWNED field of a
+       target. The ten fields are one binding: an update keeps the resolved
+       control's evidence hash and renames what it points at. A field the
+       registry does not name is the author's own (§3's floor) and may still
+       be updated.
+
+    SCOPE, and the two cuts.
+
+    ONLY WHERE SOMETHING ACTUATES. Gated on a declared target CONSUMER, not on
+    the family. A program that resolves targets and never acts on one has no
+    authority at stake, and §3's floor argument says not to refuse where
+    there is none.
+
+    WHAT IT DOES NOT CLAIM, restated from issue #1371 so a reader does not
+    take more from it than it proves: not that the target is the one resolved
+    for THIS step (a program that resolves two and acts on the second acted on
+    a target it resolved), and not that the resolution is still fresh. A
+    resolved HANDLE that a phase boundary carries needs the substrate that
+    resolves a target (item 539) and is not promised here.
+
+    Inert for every program that declares no computer-use actuation.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    strip = ui_family.strip_qualifiers_shallow
+    actuates = False
+    for ext in program.externs:
+        for cap in ext.capabilities or ():
+            verb = ui_family.verb_of(cap) or ui_family._bare(cap)
+            if verb in ui_family.TARGET_CONSUMERS:
+                actuates = True
+                break
+        if actuates:
+            break
+    if not actuates:
+        return
+
+    spec = types.get(ui_family.TARGET_TYPE)
+    if not isinstance(spec, dict) or spec.get("kind") != "record":
+        return  # `_check_ui_target_binding` already refused this program
+    target_fields = set(spec.get("fields") or {})
+    if not target_fields:
+        return
+
+    def refuse(origin: str, where: str, line: int) -> None:
+        message, hint = ui_family.target_origin_refusal(origin, where)
+        raise RevlError(filename, line, message, hint,
+                        code="G8", category="boundary")
+
+    # 2. MINTED, first: it is a property of the DECLARATION table alone, so it
+    # is decided before any body is read and its diagnostic points at the
+    # declaration an author has to change.
+    producers = _ui_target_producers(program)
+    for ext in program.externs:
+        if strip(ext.returns) != ui_family.TARGET_TYPE:
+            continue
+        if ext.name not in producers:
+            refuse(ui_family.MINTED, ext.name, ext.line)
+
+    # 1. CONSTRUCTED. The field set is compared against the PROGRAM'S OWN
+    # declared record, not against the registry: a literal carrying exactly
+    # those keys is a `UiTarget` by revl's own structural inference, and one
+    # carrying any other set is not a target at all (an extra field is already
+    # a type error at the actuation, measured).
+    for node in _ui_nodes(program, (ExprRecord,)):
+        if isinstance(node, ExprAsset):
+            continue  # `asset "..."` - two pinned fields, never a target
+        names = {f[0] for f in node.fields if isinstance(f, tuple)}
+        if names == target_fields:
+            refuse(ui_family.CONSTRUCTED, "", node.line)
+
+    # 3. REBOUND, per declaration scope, because "is this base a target" is a
+    # question about the names visible where the update is written.
+    for body, params, returns in _ui_scopes(program):
+        names = _ui_target_names(body, params, producers, returns)
+        for node in _ui_nodes(body, (ExprRecordUpdate,)):
+            if not _ui_update_base_is_target(node.base, names, producers):
+                continue
+            for field_name, _value in node.updates:
+                if field_name in ui_family.TARGET_FIELDS:
+                    refuse(ui_family.REBOUND, field_name, node.line)
+
+
+def _ui_scopes(program: Program) -> list:
+    """`(body, [(param, declared type)], {method: declared return})` for every
+    declaration with a statement body, one entry per NAME SCOPE.
+
+    A component contributes its activation body and each provide method
+    separately, so a name bound in one method is not read as a target in
+    another. A provide method's parameter types come from the service (A6:
+    the service is the source of truth) and from the optional annotation where
+    the author wrote one.
+    """
+    scopes: list = []
+    for fn in program.fn_decls:
+        scopes.append((fn.body, [(p.name, p.type) for p in fn.params], {}))
+    services = {s.name: s for s in program.services}
+    for comp in program.components:
+        # every service this component can call THROUGH, so a target arriving
+        # from `emit <local>.<method>(...)` is recognised as a target.
+        returns: dict = {}
+        for _local, svc_name, _line in comp.requires or ():
+            svc = services.get(svc_name)
+            for method in (svc.methods or {}).values() if svc else ():
+                returns[method.name] = method.returns
+        scopes.append(([s for s in comp.body or ()
+                        if not isinstance(s, ProvideStmt)], [], returns))
+        for stmt in comp.body or ():
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            svc_name = next((s for key, s, _ in comp.provides or ()
+                             if key == stmt.key), None)
+            svc = services.get(svc_name)
+            for method in stmt.methods:
+                declared = dict(zip(method.params, method.param_types or []))
+                spec = (svc.methods or {}).get(method.name) if svc else None
+                for pname, ptype in (spec.params if spec else ()):
+                    declared.setdefault(pname, ptype)
+                scopes.append((method.body, list(declared.items()), returns))
+    return scopes
+
+
+def _ui_update_base_is_target(base, names: set, producers: set) -> bool:
+    """Is the base of a record update a value this can SHOW is a target?
+
+    Under-approximates: `False` for a base it cannot trace, which admits the
+    update. See `_ui_target_names` for why that direction is the safe one
+    here.
+    """
+    if isinstance(base, EmitExpr):
+        return _ui_update_base_is_target(base.expr, names, producers)
+    if isinstance(base, ExprRecordUpdate):
+        return _ui_update_base_is_target(base.base, names, producers)
+    if isinstance(base, ExprVar):
+        return base.name in names
+    if isinstance(base, ExprCall) and isinstance(base.callee, ExprVar):
+        return base.callee.name in producers
+    return False
+
+
 def _check_ui_rung_prefix_closure(program: Program, ir: dict,
                                   filename: str) -> None:
     """The computer-use ladder's prefix-closure rule (roadmap item 521,
@@ -7900,6 +8171,7 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # the record table is what it is checked against. Inert - one loop over
     # the extern list that finds nothing - for a program declaring no UI verb.
     _check_ui_target_binding(program, types, program.filename)
+    _check_ui_target_provenance(program, types, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     # item 130 Slice 5: the typed-event contracts. Built after the record table
