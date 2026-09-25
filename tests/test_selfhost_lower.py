@@ -203,7 +203,24 @@ def _classify(e: RevlError) -> str:
             or m.endswith(") names no declared model role")
             or (m.startswith("`route model on ")
                 and (m.endswith(" names no role")
-                     or " names no action of " in m))):
+                     or " names no action of " in m))
+            # ---- item 515: the device profile and the candidate set --------
+            # Seven more sentences the gate now spells byte for byte, added on
+            # the same terms as every marker above: a marker here is a CLAIM
+            # of byte agreement, so only a ported refusal gets one. Item 519's
+            # reach fold is deliberately absent - it is a capability product
+            # over a component's HELD set, the gate has none, and it stays
+            # out for the same reason the item-514 value side does.
+            or m.startswith("unknown device class `")
+            or (m.startswith("model role `") and " declares `memory " in m)
+            or m.endswith(") places the origin on any available role")
+            or " appears twice among the candidates for `" in m
+            or (m.startswith("model council `") and " is one of " in m
+                and " candidates for `" in m)
+            or (m.startswith("the candidates for `")
+                and " do not agree on residence: " in m)
+            or m.endswith(" declare no device profile, so the candidate set "
+                          "cannot be ordered")):
         return "MODEL"
     # ---- item 516: the model COUNCIL declaration ---------------------------
     # `selfhost/lower.rvl`'s model-council section decides `model council` and

@@ -8108,16 +8108,18 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # deleted (docs/design/543-model-council.md). A program declaring no
     # council walks an empty list and is byte-identical through here.
     model_councils = _model_council.check(program)
-    taint_model.model_routes = _model_route.check(program,
-                                                  councils=model_councils)
+    model_routes = _model_route.check(program, councils=model_councils)
+    taint_model.model_routes = model_routes
     # item 512 slice 4: the role TABLE, which is what makes a `model.<tail>`
     # capability token readable as a placement rather than as an operation
     # name. `check()` validated it on the line above (it calls `roles()` first
     # and refuses there); this asks for it again rather than threading it back
     # out, which keeps `check()`'s return shape the one section 9 of the design
     # note promised item 514. An empty table leaves every `model.*` crossing
-    # the operation token it has always been.
-    taint_model.model_roles = _model_route.roles(program)
+    # the operation token it has always been. Item 519's attenuation fold reads
+    # the same table, so the two see one set of roles and one set of routes.
+    model_roles = _model_route.roles(program)
+    taint_model.model_roles = model_roles
 
     ambient_services = {
         name: _service_from_ir(name, spec)
@@ -8472,6 +8474,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                  live_components, services, spawn_reg,
                                  program.filename, untrusted=untrusted)
 
+    # The MODEL ROLE in that same product (item 519): a component's effective
+    # ceiling is the union of what it holds and what the model role it routes
+    # through can reach, so a role reaching past its component is refused with
+    # both sets named. Inert for a program that declares no `model role`, which
+    # is every program that does not opt in (docs/design/541-model-in-
+    # attenuation.md).
+    model_product = _collect(_check_model_attenuation, live_components,
+                             services, model_roles, model_routes,
+                             program.filename)
+
     # Emission budgets, static check (item 260 §3.2): a declared `budget.requests`
     # / `calls` ceiling that the proved cardinality max exceeds is a red compile,
     # and a finite ceiling over an `unbounded`/symbolic body is unprovable. Gated
@@ -8494,6 +8506,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         # key, so its manifest is byte-identical to before (docs/capability-
         # attenuation.md).
         manifest["instances"] = attenuation_chain
+    if manifest and model_product:
+        # additive and role-only: a composition that declares no `model role`
+        # has no `model_reach` key, so its manifest is byte-identical to
+        # before. This is the record issue #1223 reads to decide whether a
+        # boundary the kernel must own is inside a component's effective
+        # ceiling (docs/capability-attenuation.md).
+        manifest["model_reach"] = model_product
     if manifest and spawn_reg["named_instances"]:
         # item 10 placement horizon, next slice: enumerate the named instances
         # (`spawn C … as "<name>"`) at the composition layer, so a later
@@ -15839,6 +15858,192 @@ def _check_kernel_boundary(components: list[dict], services: dict,
             "disjoint": True,
         })
     return record
+
+
+def _model_reach_caps(role) -> set:
+    """A `model role`'s declared reach as fold elements (item 519).
+
+    Resolved through the same bridge every other capability string takes
+    (`cap_order.parse_cap`, with the `_cap_keyed` fallback), so a role's
+    `reaches [fs.write(path="/tmp")]` is compared with its valuation and not as
+    a bare token. A role that declares NO reach resolves to
+    `model_route.UNDECLARED_REACH`, which is the unnameable `*`: covered by
+    nothing, hence refused against any held set that does not itself hold `*`.
+    """
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    out: set = set()
+    for token in role.reach_tokens:
+        if token == "*":
+            out.add(cap_order.Cap("*", ()))
+            continue
+        try:
+            out.add(cap_order.parse_cap(token))
+        except cap_order.CapError:
+            out.add(cap_order.Cap("*", ()))
+    return out
+
+
+def _consults_a_model(held: set) -> bool:
+    """Whether a component holds a boundary that could be a model call (519).
+
+    A sound over-approximation, in the direction the rest of this file takes:
+    a held boundary counts unless its DECLARED capability token proves it is
+    some other boundary. Three shapes count -
+
+    * a token whose head is `model` (the declared model crossing, item 343 -
+      the same token `revl.taint` reads for the origin ceiling);
+    * the unnameable `*` (a host emission or a first-class dispatch, which no
+      `emission[...]` list can name and which may therefore be a model call);
+    * a `svc:` element (`_UNDECLARED_NS`, item 561) - a boundary whose
+      declaration names no capability token at all, so nothing rules a model
+      call out.
+
+    A component whose held boundaries are all declared non-model tokens
+    consults no model, and a `route model` block over it places a call it
+    cannot make. That is not an exemption: a role steers a component by
+    choosing among the boundaries the component can reach, so a component that
+    reaches none has no ceiling for a role to widen. The gate reads the HELD
+    set rather than the component's own emit steps because a provider body
+    crosses through a `requires` key, and it is the key's service that declares
+    the `model.*` token - the body only names the key."""
+    for cap in held:
+        token = cap.token
+        if token == "*" or token.startswith(_UNDECLARED_NS):
+            return True
+        if token == "model" or token.startswith("model."):
+            return True
+    return False
+
+
+def _check_model_attenuation(components: list[dict], services: dict,
+                             roles: dict, routes: dict,
+                             filename: str) -> list[dict]:
+    """The model role in the capability attenuation product (item 519).
+
+    A model is an AUTHORITY SURROGATE: it picks which capability the component
+    consulting it reaches for. Until this check, the product
+    (`docs/capability-attenuation.md`) accounted for services, realms, taints
+    and budgets but not for the model, so a component holding `net` whose
+    decisions run through a role able to reach `shell` was accounted as if the
+    role were inert. Its EFFECTIVE ceiling is the pair's, not its own.
+
+        effective(C)  =  held(C)  u  reach(R)   for every role R that C routes to
+        effective(C)  ⊆  held(C)               -> admit
+        effective(C)  ⊄  held(C)               -> REFUSE, naming both sets
+
+    which is the item-66 rule with a model-route edge in place of a spawn edge,
+    folded by the same `cap_order.covers`, so a parameterised reach is actually
+    compared and a role reaching `fs.write` under a component holding
+    `fs.write(path="/tmp")` is refused.
+
+    WHICH WAY IT FAILS. Toward refusing, at both unknowns. A role that declares
+    no `reaches [...]` clause reaches the unnameable `*`
+    (`model_route.UNDECLARED_REACH`), which no held set covers - reading
+    silence as "reaches nothing" would make an unknown model inert in the
+    product, and an unknown model is the whole reason the item exists. A
+    crossing whose declared token does not PROVE it is some other boundary
+    counts as a model call (`_consults_a_model`).
+
+    SCOPE. Slice 1 of `docs/design/541-model-in-attenuation.md`: the roles a
+    component's `route model` block NAMES, against what that component holds.
+    Which role a given crossing actually reaches is item 512's slice 4 (the
+    crossing carries a `model.<role>` token), and until it lands every named
+    role is folded in, which over-approximates in the refusing direction.
+    "Names" means every candidate of an item-515 ordered set and not only its
+    head: a fallback the scheduler may pick is a role the component routes
+    through, so folding only the head would let the first fallback widen a
+    ceiling the head respects.
+
+    Returns the per-edge product record for the audit surface; raises on a
+    widening. Inert - not even a fold - for a program that declares no role,
+    which is every program on the tree today."""
+    if not roles or not routes:
+        return []
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    base = _spawn_reached_surface_pairs(components, services)
+    product: list[dict] = []
+    for comp in components:
+        actions = routes.get(comp["name"])
+        if not actions:
+            continue
+        own = base.get(comp["name"], set())
+        held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
+        if not _consults_a_model(held):
+            continue
+        where = comp.get("source") or filename
+        held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held)) \
+            or "no capabilities"
+        for action in sorted(actions):
+            for origin in sorted(actions[action]):
+                placement = actions[action][origin]
+                # EVERY candidate of an item-515 ordered set, not just the
+                # head: a fallback the scheduler may pick is a role the
+                # component routes through, and a reach checked only on the
+                # head would be widened by the first fallback. A one-role arm
+                # has a one-tuple here, so a program written against item 512
+                # folds exactly what it folded before.
+                for name in placement.get("candidates", (placement["role"],)):
+                    role = roles[name]
+                    reach = _strip_ceilings(_model_reach_caps(role))
+                    extra = cap_order.covers_set(held, reach)
+                    if extra:
+                        extra = sorted(extra, key=lambda c: c.to_str())
+                        offending = ", ".join(_cap_offending(c) for c in extra)
+                        if role.reach_declared:
+                            why = (f"model role `{role.name}` declares "
+                                   f"`reaches [{', '.join(role.reach_tokens)}]` on "
+                                   f"line {role.line}")
+                            fix = (f"narrow `{role.name}`'s `reaches [...]` to what "
+                                   f"`{comp['name']}` holds, or add the matching "
+                                   f"`requires` to `{comp['name']}` so it holds what "
+                                   f"the model it consults can reach")
+                        else:
+                            why = (f"model role `{role.name}` (line {role.line}) "
+                                   f"declares no reach, so its reach is the "
+                                   f"unnameable `*`")
+                            fix = (f"declare it - `model role {role.name} "
+                                   f"{role.residence} reaches [...]` - naming the "
+                                   f"capabilities a call to it can reach; an "
+                                   f"undeclared reach is not an empty one, because "
+                                   f"a model that steers a component is exactly the "
+                                   f"one whose reach must be written down")
+                        raise RevlError(
+                            where, placement.get("line", comp.get("line", 1)),
+                            f"`{comp['name']}` routes `{action}` ({origin}) through "
+                            f"model role `{role.name}`, which reaches {offending}, "
+                            f"but `{comp['name']}` holds only {held_str} - a "
+                            f"component's effective ceiling is the pair's, so a "
+                            f"model may not reach past the component that consults "
+                            f"it (G-MODEL-PLACE)",
+                            hint=f"{why}. A model role is an authority surrogate: it "
+                                 f"chooses which capability the component reaches "
+                                 f"for, so routing through it widens the component's "
+                                 f"effective ceiling to the union "
+                                 f"(docs/capability-attenuation.md, item 519). "
+                                 f"{fix}",
+                            code=_model_route.CODE,
+                            category="capability-attenuation",
+                        )
+                    product.append({
+                        "component": comp["name"],
+                        "action": action,
+                        "origin": origin,
+                        "role": role.name,
+                        "residence": role.residence,
+                        "holds": _cap_sorted_strs(held),
+                        "reaches": _cap_sorted_strs(reach),
+                        "effective": _cap_sorted_strs(held),
+                        "attenuated": _cap_sorted_strs(
+                            {c for c in held
+                             if not cap_order.covered_by_any(reach, c)}),
+                        "reach_declared": role.reach_declared,
+                    })
+    # `role` joins the sort key only to keep an ordered candidate set stable;
+    # a one-role arm produces one record per (component, action, origin), so
+    # the order is the one item 519 shipped.
+    product.sort(key=lambda r: (r["component"], r["action"], r["origin"],
+                                r["role"]))
+    return product
 
 
 def _check_spawn_attenuation(components: list[dict], services: dict,
