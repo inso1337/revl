@@ -796,7 +796,8 @@ jobs:
   # like `root-suite-affected` and for the same reason: the defect it covers is
   # "nobody was looking", and a check with an `if:` can report `skipping`,
   # which is indistinguishable from a pass in the merge box. It costs one
-  # `gh pr list` and one `git merge-base --is-ancestor` per pull request.
+  # `gh pr list` and one `git merge-base --is-ancestor` per pull request, plus
+  # the baseline's pinned tests (about a minute).
   #
   # `fetch-depth: 0` is load-bearing twice over. The merge commits live on the
   # base branches, not on main, so a single-branch clone does not have them --
@@ -828,9 +829,20 @@ jobs:
       # step stays because it keeps the common case to zero network calls
       # inside the checker.
       - run: git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
+      # The same run re-measures each baseline entry's WITNESS (issue #1434):
+      # the merge's added inventory, the byte-identity of every file claimed
+      # carried, and the tests named for every file that has drifted since.
+      # `--pinned run` executes those tests rather than only collecting them,
+      # so the job needs revl and pytest installed; a skipped pin fails, since
+      # a skip is not a pass. Entries it cannot check (REWORKED) are printed
+      # UNCHECKED rather than counted as verified.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}"
+        run: python tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}" --pinned run
 
   # The held-out scoring set (roadmap item 537, issue #1207). Every other
   # corpus that scores a change here is a file in this repository, so the
