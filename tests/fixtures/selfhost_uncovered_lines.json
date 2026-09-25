@@ -52,8 +52,8 @@
       "go": 3348,
       "java": 986,
       "py": 663,
-      "rust": 1195,
-      "ts": 537,
+      "rust": 1200,
+      "ts": 542,
       "wasm": 1558
     },
     "selfhost": {
@@ -1009,7 +1009,7 @@
         },
         "Standalone transport boundary: the oracle imports emit directly, so module execution, argparse/stdin/file output, and separately requested Cargo manifest generation are not entered.": {
           "<module>": 1,
-          "_main": 11,
+          "_main": 16,
           "cargo_toml": 1
         },
         "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. item 130's required-`Stream[T]` coeffect refusal (`_refuse_required_stream`) used to be recorded here on the same grounds, and is not any more: a corpus document cannot reach it, but a REFUSAL document can, and tests/fixtures/emit_rust_refusals/required_stream_coeffect.rvl does (issue #1419).": {
@@ -1169,7 +1169,7 @@
         },
         "Standalone transport only: `<module>` calls `_main`; `_main` parses `--runtime`, stdin/file JSON, usage and missing-argument errors, then writes `emit`. The oracle imports and calls `emit` directly, so these statements do not represent an emitter branch": {
           "<module>": 1,
-          "_main": 17
+          "_main": 22
         },
         "Temporal backend delegation: `_emit_temporal` adjusts import paths, installs an `emit` proxy, imports `emit_temporal`, delegates the document, and then restores both process-global bindings (`sys.modules[\"emit\"]` and the backend directory on `sys.path`) that it borrowed. Temporal IR is rejected from mixed v3 emission and is not implemented by the self-host TypeScript emitter, so no byte-agreement document reaches any of this, the restoring half included. The restore is pinned instead by tests/test_emit_temporal_leaves_no_global_state.py": {
           "_emit_temporal": 23

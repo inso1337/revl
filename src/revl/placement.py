@@ -77,6 +77,7 @@ from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
 from .peer_offer import PlacementSlot, offer_admission, offer_eligible
+from .refusal import refusals
 from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
 from .tee_attestation import TeeError, TeeRequirement
 from .typecheck import FN_HEAD, parse_type
@@ -2498,6 +2499,21 @@ _EMIT_GATE_PATHS = {
 }
 
 
+class PlanRefusal(RuntimeError):
+    """A tier REFUSED a slice at plan time: an answer, carrying the refusing
+    tier's own sentence.
+
+    A `RuntimeError` subclass because that is what every caller of this module's
+    build path already catches, and because the gate's own node-arm refusal
+    (`_dryrun_emit`) has always been spelled as one. Its job is to be a type the
+    gate can name in an `except` clause, so that an emitter FAULT is no longer
+    indistinguishable from a tier limit (issue #1406): the gate used to catch
+    `Exception`, so `'NoneType' object has no attribute 'get'` out of a buggy
+    emitter was reported to the author as "component 'X' cannot be placed on the
+    `rust` tier", sending them to rewrite a program that was never the problem.
+    """
+
+
 def _emit_gate_module(backend: str):
     if backend not in _EMIT_GATE_MODULES:
         path = _EMIT_GATE_PATHS[backend]
@@ -2573,7 +2589,7 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
                                  & unemittable)
                 reach_str = ", ".join(reached) or "a py-only extern"
                 details.append(f"{cname} (reaches {reach_str})")
-            raise RuntimeError(
+            raise PlanRefusal(
                 "a node-placed component reaches a `@py`-only extern (no `@ts` "
                 "body and no `@ts ref`), which the ts tier cannot emit: "
                 + "; ".join(details)
@@ -2581,11 +2597,21 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
                 "across the seam as a bridge proxy (place it on `py`, give the "
                 "extern a `@ts` body, or point it at a host module with "
                 "`= @ts ref sym from \"...\"`)")
-        module.emit(safe)
-    elif backend == "go":
-        module.emit_placement(sliced, "emitted")
-    else:  # py, rust, java
-        module.emit(sliced)
+    # A tier limit is an ANSWER and becomes a `PlanRefusal`; anything else the
+    # emitter raises is a FAULT and propagates with its traceback intact (issue
+    # #1406). `refusals(module)` is THIS module object's own `EmitError` -- the
+    # class is defined inside each dynamically loaded `emit.py`, so there is
+    # none to name here and two loads of the same file give two unrelated
+    # classes.
+    try:
+        if backend == "node":
+            module.emit(safe)
+        elif backend == "go":
+            module.emit_placement(sliced, "emitted")
+        else:  # py, rust, java
+            module.emit(sliced)
+    except refusals(module) as refusal:
+        raise PlanRefusal(str(refusal)) from refusal
 
 
 def tier_capability_gate(ir: dict, placed: dict, backends: dict) -> str | None:
@@ -2608,14 +2634,18 @@ def tier_capability_gate(ir: dict, placed: dict, backends: dict) -> str | None:
         if backend and backend != "py":
             by_backend.setdefault(backend, []).append(cname)
     for backend, comps in by_backend.items():
+        # `PlanRefusal` and nothing wider (issue #1406). `_dryrun_emit` raises it
+        # for a tier limit and lets an emitter FAULT through untouched, so a bug
+        # inside an emitter is no longer rendered as this program's fault: it
+        # keeps its traceback and reaches whoever can fix it.
         try:
             _dryrun_emit(backend, placement_slice(ir, set(comps)))
-        except Exception as whole:  # noqa: BLE001 — any refusal is a plan diagnostic
+        except PlanRefusal as whole:
             culprit, reason = None, str(whole).strip()
             for cname in comps:
                 try:
                     _dryrun_emit(backend, placement_slice(ir, {cname}))
-                except Exception as single:  # noqa: BLE001
+                except PlanRefusal as single:
                     culprit, reason = cname, str(single).strip()
                     break
             named = f"component {culprit!r}" if culprit else "a component"
@@ -2923,6 +2953,20 @@ def process_cycle_refusal(requires: dict, provides: dict, owner: dict,
         "  the partition along the component DAG instead of across it.")
 
 
+def _tier_emitter(name: str, path) -> object:
+    """Load a backend `emit.py` and hand the CALLER the module object.
+
+    The caller keeps it because `EmitError` is a class on the module OBJECT: a
+    second `exec_module` produces a different class, and an `except` against it
+    would not catch the instance the first module raised (issue #1406). One
+    function so the three build steps below load an emitter the same way, and so
+    a test can substitute a refusing or a faulting emitter for any of them."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _emit_ts_module(ir: dict, tmp: Path) -> str:
     """Emit the cordis-ts module for node processes into backends/typescript/
     _gen/ so its `../runtime.ts` / `cordis` imports resolve.
@@ -2951,10 +2995,17 @@ def _build_java(ir: dict, tmp: Path) -> str:
     out.mkdir()
     gen = tmp / "java_gen" / "revl"
     gen.mkdir(parents=True)
-    spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
-    emit_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(emit_module)
-    (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
+    emit_module = _tier_emitter("revl_java_emit", _JAVA_DIR / "emit.py")
+    # issue #1406: a java tier limit is an answer, and the callers of this
+    # function report a `RuntimeError` as one (`abort(str(exc))` in the
+    # conductor, `error: could not build ...` in `revl run`). An `EmitError` is a
+    # `ValueError`, so before this it escaped every one of those catches as a
+    # traceback. An emitter FAULT is not caught and still does.
+    try:
+        components = emit_module.emit(ir)
+    except refusals(emit_module) as refusal:
+        raise RuntimeError(f"java emit failed:\n{refusal}") from refusal
+    (gen / "Components.java").write_text(components, encoding="utf-8")
 
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
     # Estop.java carries the operator E-Stop seam (item 443, issue #122): the
@@ -3022,13 +3073,15 @@ def _build_go(ir: dict, tmp: Path) -> str:
     `go build`. Regenerating per composition is what makes the go runner general
     — cordis-go services are static Go interfaces, so generality is codegen, not
     a runtime-generic proxy (the same shape the rust runner takes)."""
-    spec = importlib.util.spec_from_file_location("revl_go_emit", _GO_DIR / "emit.py")
-    emit_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(emit_module)
+    emit_module = _tier_emitter("revl_go_emit", _GO_DIR / "emit.py")
+    # A go tier limit becomes the one-diagnostic `RuntimeError` every caller
+    # already reports. Narrowed from `except Exception` for issue #1406: that
+    # catch also swallowed an emitter FAULT into the same sentence, so a bug in
+    # the go emitter read as a property of the author's program.
     try:
         source = emit_module.emit_placement(ir, "emitted")
-    except Exception as exc:  # noqa: BLE001 — surface emit failures as one diagnostic
-        raise RuntimeError(f"go emit failed:\n{exc}") from exc
+    except refusals(emit_module) as refusal:
+        raise RuntimeError(f"go emit failed:\n{refusal}") from refusal
     # emit_placement concatenates gen.go and bridge_gen.go with a form-feed
     # sentinel so each file carries its own import block.
     module_src, bridge_src = source.split("\f", 1)
@@ -3078,10 +3131,12 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
     out.mkdir()
     gen = tmp / "java_real_gen" / "revl"
     gen.mkdir(parents=True)
-    spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
-    emit_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(emit_module)
-    (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
+    emit_module = _tier_emitter("revl_java_emit", _JAVA_DIR / "emit.py")
+    try:                                       # issue #1406, as in `_build_java`
+        components = emit_module.emit(ir)
+    except refusals(emit_module) as refusal:
+        raise RuntimeError(f"java emit failed:\n{refusal}") from refusal
+    (gen / "Components.java").write_text(components, encoding="utf-8")
     compile_result = subprocess.run(
         [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
          str(_JAVA_DIR / "placement" / "Estop.java"),

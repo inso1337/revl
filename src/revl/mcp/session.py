@@ -29,6 +29,7 @@ from .. import intent as _intent
 from .._paths import backends_root
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
+from ..refusal import refusals
 from ..taint import REDACTED_SECRET
 from ..typecheck import compatible
 from . import operator as _operator
@@ -1263,6 +1264,30 @@ class Session:
         if error is not None:
             raise SessionError(str(error).split("\n")[0])
 
+    def _emit_or_refuse(self, driver, ir: dict):
+        """`driver._emit_module(ir)`, with the py tier's REFUSAL turned into a
+        `SessionError` (issue #1406).
+
+        The emitter refuses a document it cannot lower rather than silently
+        emitting less than it was given. That refusal is an ANSWER, and the MCP
+        transport classifies an answer by the exception type it arrives as: a
+        `SessionError` becomes `category: "session"`, while anything else falls
+        through to the generic handler and becomes `category: "internal"`. So a
+        named tier limit was advertised over the wire as an internal revl fault,
+        and an agent branching on `category` was told to file a bug rather than
+        change the document. In-process (`Session.load` called directly, as the
+        embedding tests and `truc` do) it was worse: a raw 16-frame traceback.
+
+        `refusals(driver.emit)` is that emitter module's own `EmitError` and
+        nothing wider. An emitter FAULT stays uncaught and still reaches the
+        transport's generic handler, which is where a compiler bug belongs.
+        """
+        try:
+            return driver._emit_module(ir)
+        except refusals(driver.emit) as refusal:
+            raise SessionError(
+                f"the py emitter refused this composition: {refusal}") from refusal
+
     def _prepare_module(self, ir: dict):
         """Emit the module and, when recording, instrument it before load.
 
@@ -1271,7 +1296,7 @@ class Session:
         at plugin time and there is no way in afterwards.
         """
         driver = self._driver
-        module = driver._emit_module(ir)
+        module = self._emit_or_refuse(driver, ir)
         if self.recorder is not None:
             filename, source = driver.emitted
             self.recorder.register_source(filename, source)
@@ -2613,8 +2638,8 @@ class Session:
         operations = artifact["operations"]
 
         registry_baseline = driver.root.registry.size
-        result_module = driver._emit_module(resulting_ir)
-        running_module = (driver._emit_module(running_ir)
+        result_module = self._emit_or_refuse(driver, resulting_ir)
+        running_module = (self._emit_or_refuse(driver, running_ir)
                           if any(o["op"] == "dispose" for o in operations) else None)
         # the driver now reflects the resulting composition so its namespace
         # sees the keys under change; a rollback restores this to `running_ir`.
