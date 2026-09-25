@@ -43,8 +43,9 @@ GUARANTEES = {
                 "index/cache/queue/wal crossing), unless P declares a legal "
                 "hold, which overrides the deadline",
     "G-MODEL-PLACE": "a model role declared `off_device` never receives a "
-                     "confidentiality origin, and an action reaches only the "
-                     "roles its `route model` block names",
+                     "confidentiality origin, an action reaches only the "
+                     "roles its `route model` block names, and a role reaches "
+                     "no capability the component routing through it holds",
     "G-COUNCIL-SPLIT": "a model council never resolves disagreement toward "
                        "allow: its aggregation is written down, is total over "
                        "the DECLARED members, and names no value rather than "
@@ -104,7 +105,11 @@ FIXES = {
                      "route the origin to a role declared `on_device`, declare "
                      "the role the arm names, or drop the arm (`*` never covers "
                      "a confidentiality origin, so an unrouted confidential "
-                     "input is not placed at all)",
+                     "input is not placed at all). Where the refusal is about "
+                     "REACH, narrow the role's `reaches [...]` to what the "
+                     "component holds, or hold what the model can reach: an "
+                     "omitted clause leaves the reach undeclared, which is the "
+                     "unnameable `*` and not an empty set",
     "G-COUNCIL-SPLIT": "write the aggregation down and let it name no value: a "
                        "rule from `unanimous`, `majority` or `veto`, a floor "
                        "counted over the declared members (`quorum declared`, "

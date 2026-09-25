@@ -450,6 +450,15 @@ fn atw(ts: List[Token], i: Int, w: Str) -> Bool {
   return t.kind == "kw" && t.text == w
 }
 
+// `atw`'s CONTEXTUAL twin: an ordinary identifier read as a clause word in one
+// slot, which is what `device`, `memory` and `quant` are (item 515) and what
+// `model` and `role` already were. Neither lexer's KEYWORDS table moves, so a
+// program using any of them as an ordinary name keeps compiling.
+fn at_word(ts: List[Token], i: Int, w: Str) -> Bool {
+  let t = tkc(ts, i)
+  return t.kind == "ident" && t.text == w
+}
+
 // item 350: `boot` is a CONTEXTUAL keyword, recognised only immediately before
 // `component`. It marks the composition's ENVIRONMENT CONTRACT arrival point —
 // an admission-time config concern, not a composition-guarantee one — so this
@@ -13289,9 +13298,18 @@ type NoLink = { done: Bool, refs: List[Verd] }
 // it bites on a value, which is item 514's — but the arm-level refusals below
 // are what make it true of what an author can WRITE.
 
-type MRole = { rname: Str, rres: Str, rline: Int }
+// `rprof` is false for a role with no item-515 `device` clause, which is every
+// role written against item 512 alone; the four fields after it are read only
+// when it is true. `rpline` is the `device` token's line, because that is the
+// line the reference's own refusal points at and not the role's head.
+type MRole = { rname: Str, rres: Str, rline: Int, rprof: Bool,
+               rdev: Str, rmem: Int, rquant: Str, rpline: Int }
 
-type MArm = { aorig: Str, arole: Str, aline: Int }
+// `arole` is the arm's HEAD, which is the placement item 514's ceiling reads.
+// `acands` is the whole ORDERED CANDIDATE SET (item 515), head included, so a
+// one-role arm carries a one-element list and everything written against item
+// 512 is walked exactly as it was.
+type MArm = { aorig: Str, arole: Str, aline: Int, acands: List[Str] }
 
 // One `route model on <action> { ... }` block. `bok` is false when the block
 // is not in the arm form this gate reads; see `model_blocks_in`.
@@ -13307,6 +13325,13 @@ type MSpan = { sname: Str, slo: Int, shi: Int }
 // compile time so a typo is a refusal and never a silent placement, the same
 // reason `known_strategies` is closed for `isolate ... in realms(...)`.
 fn model_residences() -> List[Str] { return ["on_device", "off_device"] }
+
+// The closed device vocabulary (`model_profile.DEVICE_CLASSES`, item 515).
+// Closed for `model_residences`'s reason: a typo is a refusal, never a profile
+// that matches any device. The QUANTISATION tag beside it is deliberately NOT
+// a vocabulary - it is an open world the compiler must not learn - so nothing
+// here lists one.
+fn model_device_classes() -> List[Str] { return ["cpu", "gpu", "npu"] }
 
 // The item-249 origin lattice an arm may be keyed by (`taint.ORIGIN_CLASSES`,
 // the public frozen view the declaration surface reads so a new origin class
@@ -13329,11 +13354,59 @@ fn mres_msg(res: Str, name: Str) -> Str {
     .concat(name).concat("`")
 }
 
+fn mdevclass_msg(dev: Str, name: Str) -> Str {
+  return "unknown device class `".concat(dev).concat("` on model role `")
+    .concat(name).concat("`")
+}
+
+fn mmemory_msg(name: Str, mem: Int) -> Str {
+  return "model role `".concat(name).concat("` declares `memory ")
+    .concat(mem.to_str())
+    .concat("`, which no placement can fail to meet")
+}
+
 fn mrole_twice_msg(name: Str, fline: Int, fres: Str, res: Str) -> Str {
   return "model role `".concat(name)
     .concat("` is declared twice (first on line ").concat(fline.to_str())
     .concat(", as `").concat(fres).concat("`; here as `").concat(res)
     .concat("`)")
+}
+
+fn mstar_candidate_msg(orig: Str, act: Str, cname: Str) -> Str {
+  return "`".concat(orig).concat(" -> *` in `route model on ").concat(act)
+    .concat("` (").concat(cname).concat(") places the origin on any available role")
+}
+
+fn mdup_candidate_msg(name: Str, orig: Str, act: Str, cname: Str) -> Str {
+  return "model role `".concat(name)
+    .concat("` appears twice among the candidates for `").concat(orig)
+    .concat("` in `route model on ").concat(act).concat("` (").concat(cname)
+    .concat(")")
+}
+
+fn mcouncil_in_set_msg(name: Str, n: Int, orig: Str, act: Str,
+                       cname: Str) -> Str {
+  return "model council `".concat(name).concat("` is one of ")
+    .concat(n.to_str()).concat(" candidates for `").concat(orig)
+    .concat("` in `route model on ").concat(act).concat("` (").concat(cname)
+    .concat(")")
+}
+
+fn mresidence_split_msg(orig: Str, act: Str, cname: Str, hname: Str,
+                        hres: Str, hline: Int, oname: Str, ores: Str,
+                        oline: Int) -> Str {
+  return "the candidates for `".concat(orig).concat("` in `route model on ")
+    .concat(act).concat("` (").concat(cname)
+    .concat(") do not agree on residence: `").concat(hname).concat("` is `")
+    .concat(hres).concat("` (line ").concat(hline.to_str()).concat(") and `")
+    .concat(oname).concat("` is `").concat(ores).concat("` (line ")
+    .concat(oline.to_str()).concat(")")
+}
+
+fn munprofiled_msg(names: Str, orig: Str, act: Str, cname: Str) -> Str {
+  return "candidate(s) ".concat(names).concat(" for `").concat(orig)
+    .concat("` in `route model on ").concat(act).concat("` (").concat(cname)
+    .concat(") declare no device profile, so the candidate set cannot be ordered")
 }
 
 fn maction_twice_msg(act: Str, cname: Str) -> Str {
@@ -13444,12 +13517,45 @@ fn model_roles_of(ts: List[Token]) -> List[MRole] {
     if (atk(ts, i, "{")) { depth += 1 }
     if (atk(ts, i, "}")) { depth -= 1 }
     if (depth == 0 && at_model_role(ts, i)) {
-      out = out.push({ rname: tkc(ts, i + 2).text, rres: tkc(ts, i + 3).text,
-                       rline: tkc(ts, i).line })
+      out = out.push(model_role_at(ts, i))
     }
     i += 1
   }
   return out
+}
+
+// One `model role` declaration, with the item-515 `device` clause if it wrote
+// one. The clause is read ONLY in the exact shape the reference parser accepts,
+// `device <ident> memory <int> quant <ident>`, which is what keeps this reader
+// and that parser agreeing about what a profile even is. A clause written any
+// other way is a reference PARSE refusal, and this gate carries no verdict for
+// a parse refusal: `rprof` stays false, the two profile rules below do not run,
+// and the ordinary parse refusal stands. `reaches [...]` (item 519) sits in the
+// same slot and is skipped here for the same reason its fold is not ported -
+// see the section note above `model_roles_refusal`.
+fn model_role_at(ts: List[Token], i: Int) -> MRole {
+  let name = tkc(ts, i + 2).text
+  let res = tkc(ts, i + 3).text
+  let line = tkc(ts, i).line
+  let j = i + 4
+  let bare = { rname: name, rres: res, rline: line, rprof: false,
+               rdev: "", rmem: 0, rquant: "", rpline: line }
+  if (!(at_word(ts, j, "device") && atk(ts, j + 1, "ident")
+        && at_word(ts, j + 2, "memory") && atk(ts, j + 3, "int")
+        && at_word(ts, j + 4, "quant") && atk(ts, j + 5, "ident"))) {
+    return bare
+  }
+  // The memory floor is compared as a NUMBER, so the gate's "no placement can
+  // fail to meet" refusal fires on the same values the reference's does. A
+  // spelling this reader cannot turn into one (a radix or separator form the
+  // lexer accepts and `to_int` does not) leaves the profile unread rather than
+  // refused at a guessed value: a wrong number in a message is worse than no
+  // verdict, and no verdict is the direction this gate is allowed to take.
+  let mem = match tkc(ts, j + 3).text.to_int() { Some(v) => v, None => 0 - 1 }
+  if (mem == 0 - 1) { return bare }
+  return { rname: name, rres: res, rline: line, rprof: true,
+           rdev: tkc(ts, j + 1).text, rmem: mem,
+           rquant: tkc(ts, j + 5).text, rpline: tkc(ts, j).line }
 }
 
 fn mrole_at(rs: List[MRole], n: Str, i: Int) -> Int {
@@ -13472,6 +13578,18 @@ fn model_roles_refusal(rs: List[MRole]) -> Verd {
     if (p != i) {
       return mverd(mrole_twice_msg(r.rname, rs[p].rline, rs[p].rres, r.rres),
                    r.rline)
+    }
+    // item 515, in the reference's own per-declaration order: the profile is
+    // validated where `roles()` builds the `Role`, which is after this
+    // declaration's residence and twice rules and before the next
+    // declaration's. Both refusals point at the `device` token's line.
+    if (r.rprof) {
+      if (!contains(model_device_classes(), r.rdev)) {
+        return mverd(mdevclass_msg(r.rdev, r.rname), r.rpline)
+      }
+      if (r.rmem <= 0) {
+        return mverd(mmemory_msg(r.rname, r.rmem), r.rpline)
+      }
     }
     i += 1
   }
@@ -13556,10 +13674,17 @@ fn model_action_names(ts: List[Token], lo: Int, hi: Int) -> List[Str] {
   return out
 }
 
-// The arms of one block: `<origin> -> <role>` separated by `,` or `;`, with a
-// trailing separator allowed exactly as the reference allows one. `xok` is
-// false for anything else, which is what `mundecided_msg` then refuses by name
-// rather than stepping over — see that function for why the direction matters.
+// The arms of one block: `<origin> -> <candidate> | <candidate> | ...`
+// separated by `,` or `;`, with a trailing separator allowed exactly as the
+// reference allows one. `xok` is false for anything else, which is what
+// `mundecided_msg` then refuses by name rather than stepping over — see that
+// function for why the direction matters.
+//
+// A CANDIDATE is an identifier or the literal `*`. `*` parses here and is
+// refused by name in `model_arms_refusal`, mirroring the reference parser
+// exactly: a scheduler that may pick a role no arm names is the shape item 515
+// exists to remove, and an author who writes it deserves the reason rather
+// than a grammar complaint.
 fn model_arms_in(ts: List[Token], lo: Int, hi: Int) -> MArmR {
   var i = lo
   var out: List[MArm] = []
@@ -13576,10 +13701,24 @@ fn model_arms_in(ts: List[Token], lo: Int, hi: Int) -> MArmR {
         return { xarms: out, xok: false }
       }
       if (!atk(ts, i + 1, "arrow")) { return { xarms: out, xok: false } }
-      if (!atk(ts, i + 2, "ident")) { return { xarms: out, xok: false } }
-      out = out.push({ aorig: orig, arole: tkc(ts, i + 2).text,
-                       aline: tkc(ts, i).line })
-      i += 3
+      let line = tkc(ts, i).line
+      var j = i + 2
+      var cands: List[Str] = []
+      var more = true
+      while (more) {
+        if (atk(ts, j, "*")) {
+          cands = cands.push("*")
+        } else if (atk(ts, j, "ident")) {
+          cands = cands.push(tkc(ts, j).text)
+        } else {
+          return { xarms: out, xok: false }
+        }
+        j += 1
+        if (atk(ts, j, "|")) { j += 1 } else { more = false }
+      }
+      out = out.push({ aorig: orig, arole: cands[0], aline: line,
+                       acands: cands })
+      i = j
     }
   }
   return { xarms: out, xok: true }
@@ -13671,35 +13810,99 @@ fn model_arms_refusal(b: MBlock, cname: Str, rs: List[MRole],
     if (marm_origin_at(b.barms, a.aorig, 0) != i) {
       return mverd(morigin_twice_msg(a.aorig, b.bact, cname), a.aline)
     }
-    let ri = mrole_at(rs, a.arole, 0)
-    let ci = ri == 0 - 1 ? ccl_at(cs, a.arole, 0) : 0 - 1
+    // item 515: an arm is an ORDERED CANDIDATE SET and every rule below runs
+    // on every member of it, in the reference's own per-candidate order. An
+    // arm whose head stays on the device and whose fallback does not is
+    // exactly the fail-open shape a scheduler introduces, so the head gets no
+    // special treatment beyond being first.
+    let cv = model_candidates_refusal(b, a, cname, rs, cs)
+    if (cv.v != "") { return cv }
+    i += 1
+  }
+  return no_verd()
+}
+
+// One arm's candidates, in the reference's order. Returns the first refusal,
+// or the empty verdict. The two SET rules (residence uniformity, every
+// candidate profiled) run after the per-candidate walk and only for a set of
+// two or more, which is why nothing written against item 512 reaches them.
+fn model_candidates_refusal(b: MBlock, a: MArm, cname: Str, rs: List[MRole],
+                            cs: List[CDecl]) -> Verd {
+  var k = 0
+  var seen: List[Str] = []
+  var resolved: List[Int] = []
+  while (k < a.acands.length()) {
+    let name = a.acands[k]
+    if (name == "*") {
+      return mverd(mstar_candidate_msg(a.aorig, b.bact, cname), a.aline)
+    }
+    if (contains(seen, name)) {
+      return mverd(mdup_candidate_msg(name, a.aorig, b.bact, cname), a.aline)
+    }
+    seen = seen.push(name)
+    let ri = mrole_at(rs, name, 0)
+    let ci = ri == 0 - 1 ? ccl_at(cs, name, 0) : 0 - 1
     if (ri == 0 - 1 && ci == 0 - 1) {
-      return mverd(mundeclared_role_msg(a.aorig, a.arole, b.bact, cname),
-                   a.aline)
+      return mverd(mundeclared_role_msg(a.aorig, name, b.bact, cname), a.aline)
     }
     if (a.aorig == "secret") {
       if (ci != 0 - 1) {
-        return mverd(msecret_council_msg(b.bact, cname, a.arole), a.aline)
+        return mverd(msecret_council_msg(b.bact, cname, name), a.aline)
       }
-      return mverd(msecret_arm_msg(b.bact, cname, a.arole), a.aline)
+      return mverd(msecret_arm_msg(b.bact, cname, name), a.aline)
     }
     if (ci != 0 - 1) {
+      // A COUNCIL IS A PLACEMENT, NOT A CANDIDATE. A council already
+      // aggregates its members by a declared, total rule; a scheduler
+      // choosing among candidates is a second aggregation over the same call,
+      // written nowhere, so the two constructs do not nest.
+      if (a.acands.length() > 1) {
+        return mverd(mcouncil_in_set_msg(name, a.acands.length(), a.aorig,
+                                         b.bact, cname), a.aline)
+      }
       if (contains(model_confidentiality_origins(), a.aorig)) {
         let mi = ccl_off_member(cs[ci], rs, a.aorig)
         if (mi != 0 - 1) {
           let m = cs[ci].cmems[mi]
           let mr = rs[mrole_at(rs, m.crole, 0)]
-          return mverd(mcouncil_off_device_msg(b.bact, cname, a.aorig, a.arole,
+          return mverd(mcouncil_off_device_msg(b.bact, cname, a.aorig, name,
                                                m.cfun, m.crole, mr.rres,
                                                mr.rline), a.aline)
         }
       }
-    } else if (contains(model_confidentiality_origins(), a.aorig)
-               && rs[ri].rres == "off_device") {
-      return mverd(moff_device_msg(b.bact, cname, a.aorig, a.arole,
+      return no_verd()
+    }
+    if (contains(model_confidentiality_origins(), a.aorig)
+        && rs[ri].rres == "off_device") {
+      return mverd(moff_device_msg(b.bact, cname, a.aorig, name,
                                    rs[ri].rres, rs[ri].rline), a.aline)
     }
-    i += 1
+    resolved = resolved.push(ri)
+    k += 1
+  }
+  if (resolved.length() < 2) { return no_verd() }
+  let head = rs[resolved[0]]
+  var m = 1
+  while (m < resolved.length()) {
+    let r = rs[resolved[m]]
+    if (r.rres != head.rres) {
+      return mverd(mresidence_split_msg(a.aorig, b.bact, cname, head.rname,
+                                        head.rres, head.rline, r.rname,
+                                        r.rres, r.rline), a.aline)
+    }
+    m += 1
+  }
+  var bare = ""
+  var n = 0
+  while (n < resolved.length()) {
+    let r = rs[resolved[n]]
+    if (!r.rprof) {
+      bare = bare == "" ? r.rname : bare.concat(", ").concat(r.rname)
+    }
+    n += 1
+  }
+  if (bare != "") {
+    return mverd(munprofiled_msg(bare, a.aorig, b.bact, cname), a.aline)
   }
   return no_verd()
 }
@@ -23702,6 +23905,149 @@ component C requires model: Model provides out: M {
 component C provides out: M {
   provide out { fn go(model) = model }
 }""") == ""
+}
+
+// ---------------------------------------- the device profile (item 515)
+//
+// `docs/design/539-model-portfolio.md`. A `model role` may carry an optional
+// `device <class> memory <MiB> quant <tag>` clause after its residence, and
+// two of its rules are DECLARATION rules this gate decides: the device class
+// is a closed vocabulary, and the memory floor must be positive. The
+// quantisation tag is checked against nothing on purpose.
+//
+// What this section does NOT decide, recorded so its silence is not read as an
+// admission: the ORDERED CANDIDATE SET (`confidential -> fast | small`) and
+// item 519's `reaches [...]` fold. An arm written as a candidate set does not
+// reach `model_arms_in`'s reader at all - the `|` is neither a separator nor a
+// role name there - so the block is refused BY NAME as one this gate does not
+// decide, which is the direction it is allowed to err in. The reach fold is a
+// capability product over a component's HELD set, the shape item 514's value
+// half has, and this gate raises no objection to it for item 514's own reason.
+
+test "a profiled role admits, and the profile is read rather than stepped over" {
+  let v = admit_src("""model role fast on_device device gpu memory 6144 quant q4_k_m
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { * -> fast }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+}
+
+test "the device vocabulary is closed, so a typo is a refusal" {
+  // the same sentence the residence rule makes one declaration earlier: a
+  // device class nobody checked is a profile that matches any device, which is
+  // the fail-open reading of a resource requirement.
+  let v = admit_src("""model role fast on_device device gpu0 memory 6144 quant q4_k_m
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|unknown device class `gpu0` on model role `fast`"
+}
+
+test "a memory floor no placement can fail to meet is refused" {
+  let v = admit_src("""model role fast on_device device gpu memory 0 quant q4_k_m
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|model role `fast` declares `memory 0`, which no placement can fail to meet"
+}
+
+test "the residence rule still runs ahead of the profile rules" {
+  // the reference validates one declaration at a time - residence, then the
+  // one-declaration rule, then the profile - so a role that breaks two rules
+  // is refused by the FIRST one. A gate that ran the profile pass separately
+  // would answer the second, and the two would diverge on exactly this
+  // program.
+  let v = admit_src("""model role fast on_devise device gpu0 memory 0 quant q4_k_m
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  provide out { fn classify(text) = text }
+}""")
+  assert v == "MODEL|unknown residence `on_devise` for model role `fast`"
+}
+
+test "an unprofiled role beside a profiled one is not refused for the omission" {
+  // the `device` clause is OPTIONAL, which is what keeps every program written
+  // against item 512 compiling. Only a multi-candidate arm needs one, and a
+  // multi-candidate arm is not a shape this gate decides.
+  let v = admit_src("""model role fast on_device device gpu memory 6144 quant q4_k_m
+model role small on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { * -> small }
+  provide out { fn classify(text) = text }
+}""")
+  assert v == ""
+}
+
+test "the profile words stay ordinary identifiers" {
+  // `device`, `memory` and `quant` are read as clause words in ONE slot, so
+  // neither lexer's KEYWORDS table moves and a program using them as ordinary
+  // names keeps compiling.
+  assert admit_src("""service M { fn go(device: Str, memory: Str, quant: Str) -> Str }
+component C provides out: M {
+  provide out { fn go(device, memory, quant) = device }
+}""") == ""
+}
+
+// ------------------------------------- the ordered candidate set (item 515)
+
+// Two profiled on-device roles and one off-device one, which is every input
+// the four set rules need.
+fn mset(arms: Str) -> Str {
+  return """model role fast on_device device gpu memory 6144 quant q4_k_m
+model role small on_device device cpu memory 512 quant int8
+model role slow off_device device cpu memory 512 quant int8
+model role bare on_device
+service Answer { fn classify(text: Str) -> Str }
+component Classifier provides out: Answer {
+  route model on classify { """.concat(arms).concat(""" }
+  provide out { fn classify(text) = text }
+}""")
+}
+
+test "an ordered candidate set of comparable roles admits" {
+  assert admit_src(mset("* -> fast | small")) == ""
+}
+
+test "`*` is not a candidate, and the refusal gives the reason" {
+  // 531 section 9: a scheduler "must not be able to pick a role no arm names".
+  // The spelling an author reaches for parses and is refused BY NAME, so the
+  // diagnostic carries the reason instead of a grammar complaint.
+  assert admit_src(mset("* -> fast | *"))
+    == "MODEL|`* -> *` in `route model on classify` (Classifier) places the origin on any available role"
+}
+
+test "a candidate named twice has two positions and no preference" {
+  assert admit_src(mset("* -> fast | fast"))
+    == "MODEL|model role `fast` appears twice among the candidates for `*` in `route model on classify` (Classifier)"
+}
+
+test "residence is uniform across a candidate set" {
+  // the set rule that matters most: a head that stays on the device and a
+  // fallback that does not lets a scheduler carry the work across the line
+  // item 514's ceiling drew, at a moment no admission check is watching.
+  assert admit_src(mset("* -> fast | slow"))
+    == "MODEL|the candidates for `*` in `route model on classify` (Classifier) do not agree on residence: `fast` is `on_device` (line 1) and `slow` is `off_device` (line 3)"
+}
+
+test "every candidate of a set declares a device profile" {
+  // the scheduler ranks the set by the profile, so an unrankable candidate is
+  // the one a fallback lands on when the profiled ones are unavailable.
+  assert admit_src(mset("* -> fast | bare"))
+    == "MODEL|candidate(s) bare for `*` in `route model on classify` (Classifier) declare no device profile, so the candidate set cannot be ordered"
+}
+
+test "item 512's rules reach the TAIL of a set, not only its head" {
+  // leaving them on the head would have been this item's own failure mode:
+  // the fallback is the candidate no rule was watching.
+  assert admit_src(mset("* -> fast | nope"))
+    == "MODEL|`* -> nope` in `route model on classify` (Classifier) names no declared model role"
+  assert admit_src(mset("confidential -> fast | slow"))
+    == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `slow`, which is declared `off_device` on line 3: a confidential input may not leave the device (G-MODEL-PLACE)"
 }
 
 // --------------------------------------------------- model councils (item 516)
