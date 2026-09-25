@@ -365,8 +365,8 @@ def test_secret_receiving_model_op_still_compiles():
         "component Agent provides ops: Ops {\n"
         "  provide ops {\n"
         "    fn go(u) {\n"
-        "      let t = charge(u)\n"
-        "      let r = prompt(t)\n"
+        "      let t = emit charge(u)\n"
+        "      let r = emit prompt(t)\n"
         "      return 0\n"
         "    }\n"
         "  }\n}\n")
@@ -1122,7 +1122,7 @@ def test_end_to_end_secret_tainted_arg_suppresses_the_digest():
     "= @py { return a }\n"
     "service Ops { emission fn go(u: Str) -> Int }\n"
     "component Agent provides ops: Ops {\n  provide ops {\n"
-    "    fn go(u) {\n      let t = charge(u)\n      return 0\n    }\n  }\n}\n",
+    "    fn go(u) {\n      let t = emit charge(u)\n      return 0\n    }\n  }\n}\n",
     # a `Secret[T]` extern parameter (a declared disclosure receiver, §7b)
     "extern emission[model.complete] fn prompt(p: Secret[Str]) -> Str "
     "= @py { return \"\" }\n"

@@ -248,7 +248,7 @@ service Db {
 extern emission fn store(key: Str, value: Str) = @py { # ... }
 component DbProvider provides db: Db {
   provide db {
-    fn write(key, value) = store(key, value)
+    fn write(key, value) = emit store(key, value)
   }
 }
 """, tmp_path)

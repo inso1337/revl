@@ -188,7 +188,7 @@ def test_the_same_emission_on_the_forward_path_still_compiles():
 service S { emission fn note(x: Str) -> Unit }
 component C provides s: S {
   let p = effect Pool.open("u", 1) undo p.close()
-  provide s { fn note(x) = send_email(x) }
+  provide s { fn note(x) = emit send_email(x) }
 }
 """, "t.rvl")
     assert ir["components"][0]["name"] == "C"

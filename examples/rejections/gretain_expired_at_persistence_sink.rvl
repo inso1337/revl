@@ -45,7 +45,7 @@ component Store provides ops: Ops {
   provide ops {
     fn go(k) {
       let row = load(k)
-      let n = db_put(row)
+      let n = emit db_put(row)
       return n
     }
   }

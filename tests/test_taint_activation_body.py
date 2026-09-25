@@ -212,22 +212,22 @@ def test_a_secret_receiver_may_not_log_its_own_parameter():
     same value straight into `logit` was correctly refused, but routed through a
     receiver it leaked with `Launderer taint = null` and no
     `declassify:confidential` token on the audit surface."""
-    err = _refuses(_vault("      let a = logit(x)"), "G-SECRET-FLOW")
+    err = _refuses(_vault("      let a = emit logit(x)"), "G-SECRET-FLOW")
     assert "disclosure sink" in err.message
 
 
 def test_a_secret_receiver_may_not_prompt_with_its_own_parameter():
-    _refuses(_vault("      let a = prompt(x)"), "G-SECRET-FLOW")
+    _refuses(_vault("      let a = emit prompt(x)"), "G-SECRET-FLOW")
 
 
 def test_a_secret_receiver_may_not_serialize_its_own_parameter():
-    _refuses(_vault("      let a = to_json(x)"), "G-SECRET-FLOW")
+    _refuses(_vault("      let a = emit to_json(x)"), "G-SECRET-FLOW")
 
 
 def test_a_secret_receiver_may_not_launder_through_concatenation():
     """The lattice join holds inside the receiver too: a trusted prefix does not
     launder the confidential suffix."""
-    _refuses(_vault('      let a = logit("token=" + x)'), "G-SECRET-FLOW")
+    _refuses(_vault('      let a = emit logit("token=" + x)'), "G-SECRET-FLOW")
 
 
 def test_a_secret_receiver_may_not_return_its_own_parameter():
@@ -250,7 +250,7 @@ def test_a_top_level_fn_secret_param_may_not_reach_a_disclosure_sink():
         + "fn leak(x: Secret[Str]) -> Int { return logit(x) }\n"
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      let a = leak(charge(u))\n"
+        + "    fn go(u) {\n      let c = emit charge(u)\n      let a = emit leak(c)\n"
         + "      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G-SECRET-FLOW"
 
@@ -274,7 +274,7 @@ def test_a_secret_receiver_may_pass_the_value_to_a_secret_extern_receiver():
     """An extern that declares a `Secret[T]` parameter is a declared receiver
     too, so a receiver body may hand its parameter to one."""
     src = _vault(
-        "      let a = vault_put(x)",
+        "      let a = emit vault_put(x)",
         extra="extern emission[fs.write] fn vault_put(s: Secret[Str]) -> Int "
               "= @py { return 0 }\n")
     assert _code_of(src) is None
@@ -282,7 +282,7 @@ def test_a_secret_receiver_may_pass_the_value_to_a_secret_extern_receiver():
 
 def test_a_secret_receiver_may_use_clean_values_freely():
     """Only the confidential parameter is fenced; the rest of the body moves."""
-    assert _code_of(_vault('      let a = logit("stored one token")')) is None
+    assert _code_of(_vault('      let a = emit logit("stored one token")')) is None
 
 
 def test_an_explicit_endorse_is_still_the_one_declassification_path():
@@ -297,7 +297,7 @@ def test_an_explicit_endorse_is_still_the_one_declassification_path():
         + "component Launderer provides v: Vault {\n"
         + "  provide v {\n    fn store(x) {\n"
         + "      let c = endorse[confidential](x, reason = \"redacted digest\")\n"
-        + "      let a = logit(c)\n      return 0\n    }\n  }\n}\n")
+        + "      let a = emit logit(c)\n      return 0\n    }\n  }\n}\n")
     ir = compile_source(src, "act.rvl")
     comp = {c["name"]: c for c in ir["components"]}["Launderer"]
     assert "confidential" in comp["taint"]["declassify"]
@@ -308,5 +308,5 @@ def test_an_undeclared_endorse_in_a_receiver_is_still_refused():
     audited path cannot be taken silently either."""
     src = _vault(
         "      let c = endorse[confidential](x, reason = \"nope\")\n"
-        "      let a = logit(c)")
+        "      let a = emit logit(c)")
     assert _code_of(src) == "G9"

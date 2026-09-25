@@ -157,7 +157,7 @@ service Svc { emission fn run() -> Int }
 extern emission fn boom() -> Int = @py { return 1 }
 fn rec(n: Int) -> Int { if (n <= 0) { return 0 } let x = boom(); return rec(n - 1) }
 component C provides svc: Svc {
-  provide svc { fn run() -> Int { return rec(5) } }
+  provide svc { fn run() -> Int { return emit rec(5) } }
 }
 """)
     assert card["C"]["verdict"] == "unbounded"
@@ -179,7 +179,7 @@ fn loopy(n: Int) -> Int {
   return t
 }
 component C provides svc: Svc {
-  provide svc { fn run() -> Int { return loopy(5) } }
+  provide svc { fn run() -> Int { return emit loopy(5) } }
 }
 """)
     assert card["C"]["verdict"] == "unbounded"
@@ -198,7 +198,7 @@ service Svc { emission fn run() -> Int }
 extern emission fn boom() -> Int = @py { return 1 }
 fn helper() -> Int { let x = boom(); return x }
 component C provides svc: Svc {
-  provide svc { fn run() -> Int { return helper() } }
+  provide svc { fn run() -> Int { return emit helper() } }
 }
 """)
     assert card["C"]["verdict"] == "unbounded"
@@ -383,7 +383,7 @@ fn f(n: Int) -> Int {
   return f(n - 1)
 }
 component C provides svc: Svc {
-  provide svc { fn run() -> Int { return f(5) } }
+  provide svc { fn run() -> Int { return emit f(5) } }
 }
 """)
     assert card["C"]["verdict"] == "unbounded"

@@ -1,0 +1,20 @@
+// REJECTED (G4): a host emission extern as an `effect` bracket's acquisition,
+// without the `emit` marker.
+//
+// `effect` names a reversible acquisition; it is not a marker for an
+// irreversible one. `open_session` is declared `emission`, so the bracket's own
+// acquisition crosses the boundary, and the call site has to say so the same
+// way a required service's emission does in this position
+// (g4_unmarked_emission.rvl). A `witnessed` extern is the exception by design:
+// it is reversible, it is legal only in effect position, and `effect` is its
+// marker there (docs/design/243-witnessed-externs.md).
+//
+// expected error:
+//   call to emission `open_session` must be marked `emit` (G4)
+
+extern emission fn open_session(user: Str) -> Str = @py { return user }
+extern pure fn close_session(s: Str) -> Unit = @py { return }
+
+component Portal {
+  let s = effect open_session("admin") undo close_session(s)
+}

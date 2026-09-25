@@ -58,7 +58,7 @@ _263 = (
     '  = @py { return k + " -> got" }\n'
     '  = @ts { return k + " -> got" }\n'
     "component RealStore provides store: Store {\n"
-    "  provide store { async fn get(k) = backend(k) }\n"
+    "  provide store { async fn get(k) = emit backend(k) }\n"
     "}\n"
     "component Facade requires store: Store provides router: Router {\n"
     "  provide router {\n"
@@ -113,7 +113,7 @@ _264 = (
     "  return t\n"
     "}\n"
     "component RealModel provides model: Model {\n"
-    "  provide model { async fn complete(msgs) = remote(msgs) }\n"
+    "  provide model { async fn complete(msgs) = emit remote(msgs) }\n"
     "}\n"
     "component Agent requires model: Model provides runner: Runner {\n"
     "  provide runner { async fn run(prompt) = "

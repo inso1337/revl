@@ -71,7 +71,7 @@ def test_the_direct_call_is_still_refused():
 extern emission fn ship(x: Str) -> Str = @py { print("SHIP EMITTED"); return x }
 service S { fn quiet(a: Str) -> Str }
 component C provides s: S {
-  provide s { fn quiet(a) = ship(a) }
+  provide s { fn quiet(a) = emit ship(a) }
 }
 """)
     assert "declared plain, but this implementation reaches `ship()`" \
@@ -112,7 +112,7 @@ fn dispatch(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 fn getship() -> (Str) -> Str { return ship }
 service S { fn quiet(a: Str) -> Str }
 component C provides s: S {
-  provide s { fn quiet(a) = dispatch(getship(), a) }
+  provide s { fn quiet(a) = dispatch(emit getship(), a) }
 }
 """)
     assert "`S.quiet` is declared plain" in str(excinfo.value)
@@ -148,7 +148,7 @@ fn b(x: Str) -> Str { return c(x) }
 fn top(x: Str) -> Str { return b(x) }
 service S { fn quiet(a: Str) -> Str }
 component C provides s: S {
-  provide s { fn quiet(a) = top(a) }
+  provide s { fn quiet(a) = emit top(a) }
 }
 """)
     # the message names the nearest culprit; the why-trace walks the whole

@@ -48,7 +48,7 @@ extern emission fn http_heartbeat_post_status()
 component HeartbeatProvider provides heartbeat: Heartbeat {
   provide heartbeat {
     fn get_status() = http_heartbeat_get_status()
-    fn post_status() = http_heartbeat_post_status()
+    fn post_status() = emit http_heartbeat_post_status()
   }
 }
 ```

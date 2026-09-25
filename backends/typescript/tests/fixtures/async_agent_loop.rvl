@@ -40,7 +40,7 @@ component Agent provides agent: Loop {
   config { max_steps: Int = 8 }
   provide agent {
     async fn run(prompt) {
-      return agent_loop(prompt, decode_response, config.max_steps)
+      return emit agent_loop(prompt, decode_response, config.max_steps)
     }
   }
 }

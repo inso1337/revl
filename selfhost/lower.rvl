@@ -3215,7 +3215,8 @@ type AmbSvc = { ops: List[Str], sigs: List[MSig] }
 // from a declaration it does not have.
 type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              reqMap: Map[Str, Str], caps: CapsT,
-             colored: List[Str], emittingNames: List[Str], asyncExterns: List[Str],
+             colored: List[Str], emittingNames: List[Str], witnessed: List[Str],
+             asyncExterns: List[Str],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
@@ -3397,7 +3398,8 @@ fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
 fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
@@ -3911,14 +3913,17 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
   }
   let wa = walk_args(args, marked, cx, na)
   if (wa.msg != "") { return wa }
-  // issue #1427: the marker demand reaches the HOST EXTERN carrier too, in the
-  // one position the `req` and handle carriers are already held in. `emitPos ==
-  // "args"` is a marked head's argument list, and `marked` is false there for a
-  // body statement and true for a teardown slot (`args_marked`), so this is the
-  // same admission the other two carriers read. Raised AFTER the arguments are
-  // walked because the reference lowers a call's arguments before it builds the
-  // call node, so an inner refusal wins.
-  if (cx.emitPos == "args" && !marked && contains(cx.emittingNames, name)) {
+  // issues #1427, #1437: the `emit` marker demand on the HOST EXTERN carrier,
+  // wherever the `req` and handle carriers are held to it: an unmarked call to
+  // an emission extern, or to a function reaching one, in any position the
+  // walk reaches unmarked. `marked` is false for a body statement and inside a
+  // marked head's argument list (`args_marked`), and true under an `emit` head
+  // and in a teardown slot, so this is the admission the other two carriers
+  // read. A `witnessed` extern is left alone: `effect` is its marker (item 243).
+  // Raised AFTER the arguments are walked because the reference lowers a
+  // call's arguments before it builds the call node, so an inner refusal wins.
+  if (!marked && contains(cx.emittingNames, name)
+      && !contains(cx.witnessed, name)) {
     return ac_refuse(wa, "G4", "call to emission `".concat(name)
       .concat("` must be marked `emit` (G4)"))
   }
@@ -3977,7 +3982,8 @@ fn bare_declared(cx: Ctx, name: Str) -> Bool {
 fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
            scopeNames: union_into(cx.scopeNames, names), fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
@@ -3991,7 +3997,8 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
 fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
@@ -4004,7 +4011,8 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
 fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
@@ -4018,7 +4026,8 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
 fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
@@ -4037,7 +4046,8 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
 fn ctx_under_arrow(cx: Ctx) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
@@ -4210,7 +4220,7 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
           slots: Map[Str, List[Int]], pks: Map[Str, Str]) -> Ctx {
   return { svcs: svcs, ambOps: Map.empty(), reqMap: rm, caps: caps,
            colored: colored,
-           emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
+           emittingNames: emitting, witnessed: [], asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
            provAlias: Map.empty(), localArrows: Map.empty(),
@@ -4223,7 +4233,8 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
 fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: union_into(cx.fnNames, names),
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
@@ -4245,7 +4256,26 @@ fn amb_ops_map(xs: List[SvcOps], i: Int,
 fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
   return { svcs: cx.svcs, ambOps: ops, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
-           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           emittingNames: cx.emittingNames, witnessed: cx.witnessed,
+           asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
+           underArrow: cx.underArrow, handles: cx.handles,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+}
+
+// The same context with the program's `witnessed` extern names. A witnessed
+// extern crosses the boundary, so it is in `emittingNames` for the G4 evidence,
+// but it is not an EMISSION: it is reversible by construction, legal only in
+// effect position, and `effect` is its marker there (item 243). The `emit`
+// marker demand in `fn_call` reads this list to leave it alone, as the
+// reference's `_refuse_unmarked_emission_call` reads `env.witnessed_externs`.
+fn ctx_witnessed(cx: Ctx, names: List[Str]) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, witnessed: names,
+           asyncExterns: cx.asyncExterns,
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
@@ -4269,6 +4299,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
   return { svcs: base.svcs, ambOps: base.ambOps,
            reqMap: req_map_of(comp.reqMap), caps: base.caps,
            colored: base.colored, emittingNames: base.emittingNames,
+           witnessed: base.witnessed,
            asyncExterns: base.asyncExterns, scopeNames: scope_names_of(comp),
            fnNames: base.fnNames, compName: comp.name,
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
@@ -14194,8 +14225,10 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
-  let base = ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
-                         amb_ops_map(ambOps, 0, Map.empty()))
+  let base = ctx_witnessed(
+    ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
+                amb_ops_map(ambOps, 0, Map.empty())),
+    witnessed_extern_names(ts))
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
@@ -21351,6 +21384,29 @@ test "an emission extern in an emit head's arguments needs its own marker (G4)" 
   assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }""") == ""
 }
 
+// issue #1437: the marker demand on the HOST EXTERN carrier in every position
+// the `req` carrier is held in, not only an `emit` head's arguments. A named
+// call to an emission extern, or to a fn that reaches one, is refused unmarked
+// and admitted marked; a `witnessed` extern in effect position is marked by
+// `effect` and stays admitted, and a `compensate` slot keeps its bare
+// exception.
+test "an unmarked host emission is refused in every body position (G4)" {
+  let ex = "extern emission fn charge(n: Int) -> Int = @py { return 1 } service S { emission fn go(n: Int) -> Int } "
+  assert admit_src(ex.concat("component C provides s: S { provide s { fn go(n) { let r = charge(n) return r } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src(ex.concat("component C provides s: S { provide s { fn go(n) { let r = emit charge(n) return r } } }")) == ""
+  assert admit_src(ex.concat("component C provides s: S { provide s { fn go(n) = charge(n) } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src(ex.concat("component C provides s: S { provide s { fn go(n) = emit charge(n) } }")) == ""
+  assert admit_src(ex.concat("fn settle(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = settle(n) } }")) == "G4|call to emission `settle` must be marked `emit` (G4)"
+  assert admit_src(ex.concat("fn settle(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = emit settle(n) } }")) == ""
+  assert admit_src(ex.concat("component C provides s: S { provide s { fn go(n) { let g = (y: Int) => charge(y) return emit g(n) } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src("extern emission fn open_s(u: Str) -> Str = @py { return u } extern pure fn close_s(s: Str) -> Unit = @py { return } component C { let s = effect open_s(\"a\") undo close_s(s) }") == "G4|call to emission `open_s` must be marked `emit` (G4)"
+  assert admit_src("extern emission fn open_s(u: Str) -> Str = @py { return u } extern pure fn close_s(s: Str) -> Unit = @py { return } component C { let s = effect emit open_s(\"a\") undo close_s(s) }") == ""
+  assert admit_src("extern emission async fn later(n: Int) -> Int = @py { return n } service H { emission async fn wait(n: Int) } component P provides h: H { provide h { async fn wait(x) { await later(x) return } } }") == "G4|call to emission `later` must be marked `emit` (G4)"
+  assert admit_src("extern emission async fn later(n: Int) -> Int = @py { return n } service H { emission async fn wait(n: Int) } component P provides h: H { provide h { async fn wait(x) { await emit later(x) return } } }") == ""
+  assert admit_src("extern emission fn charge(n: Int) -> Int = @py { return 1 } extern emission fn refund(n: Int) -> Int = @py { return 1 } component C { emit charge(1) compensate refund(1) }") == ""
+  assert admit_src("type St = { p: Str } extern pure fn un(w: St) -> Unit = @py { return } extern witnessed[fs] fn stash(p: Str) -> Result[St, Str] undo un(result) = @py { return 1 } component C { effect stash(\"a\") }") == ""
+}
+
 // An arrow's body is not in the enclosing `emit`'s argument list: it runs when
 // the arrow is called. The inline spelling and its two `let` twins are the same
 // crossings in the same order and all three admit; before `ctx_under_arrow`
@@ -21418,17 +21474,17 @@ test "two providers of one key are refused (G2)" {
 }
 
 test "sync provide method reaching an async extern is refused (A1)" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }")
   assert v == "A1|`Http.post` is declared sync, but this implementation reaches async extern `http_post` — a sync method has no in-flight window (A1)"
 }
 
 test "async-declared op admits the same async body" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = emit http_post(url, body) } }")
   assert v == ""
 }
 
 test "sync method implementing an async op is refused (signature parity)" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }")
   assert v == "A1|method `post` of provision `http` is not async but service Http declares it async"
 }
 
@@ -22164,11 +22220,11 @@ test "sync-typed arrow reaching an async op leaks (A1)" {
 }
 
 test "an arrow in an Async[T] slot is coerced, not leaky (admits)" {
-  assert admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Async[Str], x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } } }""") == ""
+  assert admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Async[Str], x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), "x")   return r } } }""") == ""
 }
 
 test "the same arrow in a sync slot leaks (A1)" {
-  let v = admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } } }""")
+  let v = admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), "x")   return r } } }""")
   assert v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"
 }
 
@@ -22454,7 +22510,7 @@ test "rule-2 param-colored fn in a sync method is refused (A1)" {
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission fn go() -> Int }
 component C provides s: S {
-  provide s { fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { fn go() { let r = caller(() => emit tick())   return 0 } }
 }""")
   assert v == "A1|`S.go` is declared sync, but this implementation reaches async function `caller`, `tick` — a sync method has no in-flight window (A1)"
 }
@@ -22466,7 +22522,7 @@ test "async method reaching a rule-2-colored fn admits" {
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission async fn go() -> Int }
 component C provides s: S {
-  provide s { async fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { async fn go() { let r = caller(() => emit tick())   return 0 } }
 }""") == ""
 }
 
@@ -22734,7 +22790,7 @@ fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
 fn plain(f: (Str) -> Str) -> Str { return f("a") }
 service S { emission async fn go(y: Str) -> Str }
 component C provides s: S {
-  provide s { async fn go(y) { let r = plain(w => wrap(z => tick(z), w))   return r } }
+  provide s { async fn go(y) { let r = plain(w => wrap(z => emit tick(z), w))   return r } }
 }""") == ""
 }
 

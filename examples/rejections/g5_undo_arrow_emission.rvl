@@ -19,7 +19,7 @@ component C provides cache: Cache {
   let store = effect Map.new() undo store.drop()
   provide cache {
     fn set(key) {
-      let f = (x: Str) => send(x)
+      let f = (x: Str) => emit send(x)
       effect store.insert(key, "v")
       undo   f(key)
     }

@@ -840,7 +840,10 @@ class _Generator:
                 f"{self._host_comment(f'call the WIT export {target} here')} }}"
             )
             args = ", ".join(_snake(pname) for pname, _ in func.params)
-            methods.append(f"    fn {op}({args}) = {extern}({args})")
+            # an emission crossing carries its `emit` marker at the call site,
+            # like every other carrier (issue #1437)
+            mark = "" if assertion else "emit "
+            methods.append(f"    fn {op}({args}) = {mark}{extern}({args})")
         return ops, externs, methods
 
     def _service_name(self, wit_name: str, line: int, suffix: str = "") -> str:

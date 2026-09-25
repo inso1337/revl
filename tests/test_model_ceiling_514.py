@@ -66,7 +66,7 @@ _ROLES = "model role local on_device\nmodel role cloud off_device\n"
 
 def _program(route="", call="prompt", externs=_RECEIVER, body=None,
              extra="", roles=_ROLES):
-    body = body or "      let r = %s(config.doc)\n" % call
+    body = body or "      let r = emit %s(config.doc)\n" % call
     return (
         roles + externs + extra
         + "service Answer { emission fn summarize(d: Str) -> Int }\n"
@@ -187,7 +187,7 @@ def test_a_non_confidential_value_is_not_refused_by_the_ceiling():
                    "-> Int = @py { return 0 }\n"
                  + "extern emission[web.get] fn fetch(u: Str) -> Untrusted[Str] "
                    "= @py { return u }\n"),
-        body="      let page = fetch(d)\n      let r = ask(page)\n")
+        body="      let page = emit fetch(d)\n      let r = emit ask(page)\n")
     _admits(src)
 
 
@@ -215,7 +215,7 @@ def test_an_unrouted_action_in_a_routed_component_is_refused():
         + "  config { doc: Secret[Str] }\n"
         + "  route model on draft { confidential -> local }\n"
         + "  provide out {\n"
-        + "    fn summarize(d) {\n      let r = prompt(config.doc)\n"
+        + "    fn summarize(d) {\n      let r = emit prompt(config.doc)\n"
           "      return 0\n    }\n"
         + "    fn draft(d) { return 0 }\n"
         + "  }\n}\n")
@@ -293,7 +293,7 @@ def test_the_bound_key_re_entry_item_256_admits_is_not_refused_by_the_ceiling():
         + "  route model on summarize { * -> cloud }\n"
         + "  provide out {\n"
         + "    fn summarize(d) {\n"
-          "      let k = complete(d)\n      let x = echo(k)\n      return 0\n"
+          "      let k = emit complete(d)\n      let x = emit echo(k)\n      return 0\n"
           "    }\n  }\n}\n")
     _admits(src)
 
@@ -330,7 +330,7 @@ def test_a_declared_endorse_still_downgrades_the_value():
         + "  provide out {\n"
         + "    fn summarize(d) {\n"
           "      let c = endorse[confidential](config.doc, reason = \"cleared\")\n"
-          "      let r = ask(c)\n      return 0\n    }\n  }\n}\n")
+          "      let r = emit ask(c)\n      return 0\n    }\n  }\n}\n")
     _admits(src)
 
 
@@ -350,7 +350,7 @@ def test_the_ceiling_follows_the_value_through_a_helper_fn():
         + "  config { doc: Secret[Str] }\n"
         + "  route model on summarize { * -> cloud }\n"
         + "  provide out {\n"
-        + "    fn summarize(d) {\n      let r = relay(config.doc)\n"
+        + "    fn summarize(d) {\n      let r = emit relay(config.doc)\n"
           "      return 0\n    }\n  }\n}\n")
     err = _refuses(src)
     assert "confidential" in err.message
@@ -367,7 +367,7 @@ def test_the_helper_fn_seam_control_is_admitted_when_the_origin_is_placed():
         + "  config { doc: Secret[Str] }\n"
         + "  route model on summarize { confidential -> local }\n"
         + "  provide out {\n"
-        + "    fn summarize(d) {\n      let r = relay(config.doc)\n"
+        + "    fn summarize(d) {\n      let r = emit relay(config.doc)\n"
           "      return 0\n    }\n  }\n}\n")
     _admits(src)
 
@@ -382,7 +382,7 @@ def test_a_confidential_parameter_of_the_action_is_placed_too():
         + "component Summarizer provides out: Answer {\n"
         + "  route model on summarize { * -> cloud }\n"
         + "  provide out {\n"
-        + "    fn summarize(d) {\n      let r = prompt(d)\n"
+        + "    fn summarize(d) {\n      let r = emit prompt(d)\n"
           "      return 0\n    }\n  }\n}\n")
     _refuses(src)
 

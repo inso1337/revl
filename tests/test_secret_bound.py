@@ -47,7 +47,7 @@ def _pyemit():
 
 
 # a bound secret and the emission extern it is confined to. `complete`'s return
-# is minted `secret` unconditionally (§4a.1), so `let s = complete(u)` puts a
+# is minted `secret` unconditionally (§4a.1), so `let s = emit complete(u)` puts a
 # `secret`-origin value into the revl value graph — the thing that must never
 # cross.
 _PRELUDE = (
@@ -87,7 +87,7 @@ def test_kind1_emit_arm_refuses_a_secret():
     """The `emit` arm: a `secret` crossing an emission is refused, not merely
     recorded (the crossing today only folds outbound origins into `reaches`)."""
     err = _refuses(_agent(
-        "      let s = complete(u)\n      emit snk.out(s)",
+        "      let s = emit complete(u)\n      emit snk.out(s)",
         extra="service Sink { emission fn out(s: Str) -> Int }\n",
         reqs="requires snk: Sink "))
     assert "emission" in err.message
@@ -97,7 +97,7 @@ def test_kind2_plain_extern_call_refuses_a_secret():
     """The plain (non-declared-sink, non-source) extern call: an ordinary host
     extern must not receive the bound key."""
     err = _refuses(_agent(
-        "      let s = complete(u)\n      let x = host_sink(s)",
+        "      let s = emit complete(u)\n      let x = emit host_sink(s)",
         extra="extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
     assert "extern" in err.message
 
@@ -107,7 +107,7 @@ def test_kind3_unnameable_indirect_callable_refuses_a_secret():
     cannot name must refuse a `secret` argument — independently of `any_sink`
     (what cannot be named cannot be proven to re-emit through the bound cap)."""
     err = _refuses(_agent(
-        "      let s = complete(u)\n      let y = cb(s)",
+        "      let s = emit complete(u)\n      let y = cb(s)",
         sig="fn go(cb: (Str) -> Int, u: Str) -> Int", params="cb, u"))
     assert "first-class" in err.message
 
@@ -119,7 +119,7 @@ def test_kind4_provide_method_return_refuses_a_secret():
         _PRELUDE
         + "service Ops { emission fn go(u: Str) -> Str }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      return complete(u)\n    }\n  }\n}\n")
+        + "    fn go(u) {\n      return emit complete(u)\n    }\n  }\n}\n")
     err = _refuses(src)
     assert "provide-method return" in err.message
 
@@ -130,8 +130,8 @@ def test_kind5_secret_nested_in_a_record_is_not_laundered():
     container's origin union carries `secret`)."""
     # nested in a record, whole record handed to an extern
     _refuses(_agent(
-        "      let s = complete(u)\n      let r = { key: s, tag: \"t\" }\n"
-        "      let x = host_box(r)",
+        "      let s = emit complete(u)\n      let r = { key: s, tag: \"t\" }\n"
+        "      let x = emit host_box(r)",
         extra="type Box = { key: Str, tag: Str }\n"
               "extern emission fn host_box(b: Box) -> Int = @py { return 0 }\n"))
 
@@ -140,7 +140,7 @@ def test_kind5_secret_through_a_generic_round_trip_is_not_laundered():
     """A generic `id(secret)` round-trip does not erase the origin: taint rides
     the value, not the declared type (the A2 no-launder-through-generic case)."""
     _refuses(_agent(
-        "      let s = complete(u)\n      let g = id(s)\n      let x = host_sink(g)",
+        "      let s = emit complete(u)\n      let g = id(s)\n      let x = emit host_sink(g)",
         extra="fn id(x: Str) -> Str { return x }\n"
               "extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
 
@@ -155,7 +155,7 @@ def test_reflected_key_is_refused_at_the_first_downstream_crossing():
     first crossing it reaches downstream, whichever kind that is."""
     # the body "returns the key"; revl code then tries to emit it further
     err = _refuses(_agent(
-        "      let leaked = complete(u)\n      let x = host_sink(leaked)",
+        "      let leaked = emit complete(u)\n      let x = emit host_sink(leaked)",
         extra="extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
     assert "bound provider key" in err.message
 
@@ -170,7 +170,7 @@ def test_same_capability_reemission_is_allowed():
     bound emission, so passing the key back into it is admitted — it returns via
     the `secret` source before any crossing raise."""
     # compiles: the secret is threaded back into the same bound capability
-    compile_source(_agent("      let s = complete(u)\n      let s2 = complete(s)"),
+    compile_source(_agent("      let s = emit complete(u)\n      let s2 = emit complete(s)"),
                    "reemit.rvl")
 
 
@@ -182,9 +182,9 @@ def test_endorse_secret_is_refused_unconditionally():
     """`endorse[secret]` is refused before the declared-slot check — no
     declaration can ever grant a downgrade for a bound key."""
     err = _refuses(_agent(
-        "      let s = complete(u)\n"
+        "      let s = emit complete(u)\n"
         "      let c = endorse[secret](s, reason = \"trust me\")\n"
-        "      let x = host_sink(c)",
+        "      let x = emit host_sink(c)",
         extra="extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
     assert "no declassifier" in err.message
 
@@ -193,7 +193,7 @@ def test_verified_fn_declassifier_does_not_launder_a_secret():
     """A `verified fn` returning `Trusted[T]` — the parser-declassifier — does NOT
     clean a `secret`-carrying argument; the crossing is refused."""
     _refuses(_agent(
-        "      let s = complete(u)\n      let c = wash(s)\n      let x = host_sink(c)",
+        "      let s = emit complete(u)\n      let c = wash(s)\n      let x = emit host_sink(c)",
         extra="verified fn wash(x: Str) -> Trusted[Str] { return x }\n"
               "extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
 
@@ -210,7 +210,7 @@ _HONEST_G8 = (
     "= @py { return len(m) + len(api_key) }\n"
     "service Ops { emission fn go(u: Str) -> Int }\n"
     "component A provides ops: Ops {\n  provide ops {\n"
-    "    fn go(u) {\n      let n = send(u)\n      return 0\n    }\n  }\n}\n"
+    "    fn go(u) {\n      let n = emit send(u)\n      return 0\n    }\n  }\n}\n"
 )
 
 
@@ -261,7 +261,7 @@ _SECRET_FREE = (
     "extern emission[net.send] fn send(m: Str) -> Int = @py { return 0 }\n"
     "service Ops { emission fn go(u: Str) -> Int }\n"
     "component A provides ops: Ops {\n  provide ops {\n"
-    "    fn go(u) {\n      let n = send(u)\n      return 0\n    }\n  }\n}\n"
+    "    fn go(u) {\n      let n = emit send(u)\n      return 0\n    }\n  }\n}\n"
 )
 
 
@@ -290,7 +290,7 @@ def test_key_is_injected_only_into_the_bound_extern_body():
         "extern emission[fs.write] fn write_fs(p: Str) -> Int = @py { return 0 }\n"
         "service Ops { emission fn go(u: Str) -> Int }\n"
         "component A provides ops: Ops {\n  provide ops {\n"
-        "    fn go(u) {\n      let n = send(u)\n      let w = write_fs(u)\n"
+        "    fn go(u) {\n      let n = emit send(u)\n      let w = emit write_fs(u)\n"
         "      return 0\n    }\n  }\n}\n")
     ir = compile_source(src, "nowhere.rvl")
     externs = {e["name"]: e for e in ir["externs"]}
@@ -390,6 +390,6 @@ def test_g_secret_is_a_registered_diagnostic():
     record = explain("G-SECRET")
     assert record["ok"] and record["guarantee"] and record["fix"]
     err = _refuses(_agent(
-        "      let s = complete(u)\n      let x = host_sink(s)",
+        "      let s = emit complete(u)\n      let x = emit host_sink(s)",
         extra="extern emission fn host_sink(s: Str) -> Int = @py { return 0 }\n"))
     assert classify(err)["code"] == "G-SECRET"

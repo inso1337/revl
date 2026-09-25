@@ -394,12 +394,12 @@ def _bound_index(services_by_name: dict) -> dict[tuple[str, str], tuple[str, tup
 #: exporter writes one only for a callee `_fn_emitting` put in the set.
 HOST_SERVICE = "@host"
 
-#: The marker contexts a host emission is judged in. The checker holds the
-#: extern carrier to the marker inside an `emit` head's argument list (issue
-#: #1427), and a marker written there is refused whatever it marks; the head
-#: itself is the marked crossing. A host emission in a `plain` position is not
-#: judged by the marker rule, so it gets no row.
-HOST_MARKER_CONTEXTS = ("emit", "emitarg", "emitnested")
+#: The marker contexts a host emission is judged in: all of them. The checker
+#: holds the extern carrier to the marker wherever it holds a service
+#: emission (issue #1437, docs/design/1437-emit-marks-every-crossing.md), so
+#: a host emission in a `plain` position is refused as an unmarked service
+#: emission is. (Issue #1427 had judged only the argument-list contexts.)
+HOST_MARKER_CONTEXTS = ("emit", "emitarg", "emitnested", "plain")
 
 
 def _fn_emitting(prog) -> set[str]:
@@ -887,6 +887,15 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
             out.append((*route, ctx))
         for a in node.args:
             walk_calls(a, out, ctx)
+        return
+    if isinstance(node, (EffectStmt, LetEffect)):
+        # A bracket's `undo` is a teardown slot. The checker lowers it in
+        # "undo" mode, where the marker rule does not apply (an emission there
+        # is G5's to refuse), so its calls are recorded as `undo`: judged as
+        # `plain` for a service crossing, as before, and given no host row.
+        for f in dataclasses.fields(node):
+            walk_calls(getattr(node, f.name), out,
+                       "undo" if f.name == "undo" else ctx)
         return
     if isinstance(node, ExprArrow) and ctx == "emitarg":
         # An arrow's body runs when the arrow is CALLED, not while the

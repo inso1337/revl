@@ -30,7 +30,7 @@ from revl.diagnostics import classify, explain
 ROOT = Path(__file__).resolve().parents[1]
 
 # a `Secret[T]` source: an emission that hands back a confidential payment token.
-# Its return is minted `confidential` (§7a), so `let t = charge(u)` puts a
+# Its return is minted `confidential` (§7a), so `let t = emit charge(u)` puts a
 # `confidential`-origin value into the value world — the thing the disclosure
 # fence keeps out of every sink below.
 _PRELUDE = (
@@ -76,18 +76,18 @@ def _code_of(src: str) -> str | None:
 # ===========================================================================
 
 def test_refused_at_a_log():
-    err = _refuses(_agent("      let t = charge(u)\n      let x = logit(t)"))
+    err = _refuses(_agent("      let t = emit charge(u)\n      let x = emit logit(t)"))
     assert "disclosure sink" in err.message or "log" in err.message
 
 
 def test_refused_at_ordinary_json_serialization():
-    _refuses(_agent("      let t = charge(u)\n      let x = to_json(t)"))
+    _refuses(_agent("      let t = emit charge(u)\n      let x = emit to_json(t)"))
 
 
 def test_refused_at_an_llm_prompt():
     """An argument to a `model.*` emission is a disclosure sink — a confidential
     value may not enter the model context."""
-    _refuses(_agent("      let t = charge(u)\n      let r = prompt(t)"))
+    _refuses(_agent("      let t = emit charge(u)\n      let r = emit prompt(t)"))
 
 
 def test_refused_at_an_mcp_tool_return():
@@ -97,7 +97,7 @@ def test_refused_at_an_mcp_tool_return():
         _PRELUDE
         + "service Ops { emission fn go(u: Str) -> Str }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      return charge(u)\n    }\n  }\n}\n")
+        + "    fn go(u) {\n      return emit charge(u)\n    }\n  }\n}\n")
     err = _refuses(src)
     assert "MCP tool return" in err.message
 
@@ -106,7 +106,7 @@ def test_refused_at_an_undeclared_receiver_across_a_capability_crossing():
     """A required service operation that does NOT declare a `Secret[T]` parameter
     is an undeclared receiver — the general rule the named sinks instance (§7b)."""
     err = _refuses(_agent(
-        "      let t = charge(u)\n      emit snk.out(t)",
+        "      let t = emit charge(u)\n      emit snk.out(t)",
         extra="service Sink { emission fn out(s: Str) -> Int }\n",
         reqs="requires snk: Sink "))
     assert "emission crossing" in err.message
@@ -116,7 +116,7 @@ def test_refused_at_an_unnameable_first_class_callable():
     """What cannot be named cannot be shown to declare a `Secret[T]` receiver, so
     a confidential argument to it is an undeclared disclosure crossing."""
     err = _refuses(_agent(
-        "      let t = charge(u)\n      let y = cb(t)",
+        "      let t = emit charge(u)\n      let y = cb(t)",
         sig="fn go(cb: (Str) -> Int, u: Str) -> Int", params="cb, u"))
     assert "first-class" in err.message
 
@@ -129,7 +129,7 @@ def test_declared_secret_service_operation_parameter_admits_the_crossing():
     """A `Secret[T]` service-operation parameter is the dual of a `Trusted[T]`
     sink: the ONE crossing that admits a confidential value."""
     src = _agent(
-        "      let t = charge(u)\n      emit vault.store(t)",
+        "      let t = emit charge(u)\n      emit vault.store(t)",
         extra="service Vault { emission fn store(x: Secret[Str]) -> Int }\n",
         reqs="requires vault: Vault ")
     compile_source(src, "admit.rvl")  # compiles — the receiver declared it
@@ -139,7 +139,7 @@ def test_declared_secret_extern_parameter_admits_the_crossing():
     """The same admission for an extern host call that declares a `Secret[T]`
     parameter — the confidential value crosses only where it is declared."""
     src = _agent(
-        "      let t = charge(u)\n      let x = vaultput(t)",
+        "      let t = emit charge(u)\n      let x = emit vaultput(t)",
         extra="extern emission fn vaultput(x: Secret[Str]) -> Int "
               "= @py { return 0 }\n")
     compile_source(src, "admit2.rvl")
@@ -149,7 +149,7 @@ def test_a_non_secret_position_on_a_secret_receiver_still_refuses():
     """Admission is per-position: a `Secret[T]` at param 0 does not admit a
     confidential value handed to param 1 (an ordinary `Str` receiver)."""
     _refuses(_agent(
-        "      let t = charge(u)\n      let x = twoarg(\"tag\", t)",
+        "      let t = emit charge(u)\n      let x = emit twoarg(\"tag\", t)",
         extra="extern emission fn twoarg(tag: Secret[Str], m: Str) -> Int "
               "= @py { return 0 }\n"))
 
@@ -163,7 +163,7 @@ def test_generic_round_trip_does_not_launder_confidential():
     the VALUE (the inferred `flows_to_return`), not the erased generic type, so the
     downstream log is still refused (the A2 no-launder-through-generic case)."""
     _refuses(_agent(
-        "      let t = charge(u)\n      let g = idf(t)\n      let x = logit(g)",
+        "      let t = emit charge(u)\n      let g = idf(t)\n      let x = emit logit(g)",
         extra="fn idf(x: Str) -> Str { return x }\n"))
 
 
@@ -171,8 +171,8 @@ def test_confidential_nested_in_a_record_is_not_laundered():
     """A confidential value nested in a record rides the value-graph joins and is
     caught at whichever crossing the container reaches (§7a / kind-5 analog)."""
     _refuses(_agent(
-        "      let t = charge(u)\n      let r = { tok: t, tag: \"x\" }\n"
-        "      let z = boxlog(r)",
+        "      let t = emit charge(u)\n      let r = { tok: t, tag: \"x\" }\n"
+        "      let z = emit boxlog(r)",
         extra="type Box = { tok: Str, tag: Str }\n"
               "extern emission[log] fn boxlog(b: Box) -> Int = @py { return 0 }\n"))
 
@@ -185,9 +185,9 @@ _END_DECL = (
     _PRELUDE
     + "service Ops { emission endorse[confidential] fn go(u: Str) -> Int }\n"
     + "component Agent provides ops: Ops {\n  provide ops {\n"
-    + "    fn go(u) {\n      let t = charge(u)\n"
+    + "    fn go(u) {\n      let t = emit charge(u)\n"
     + "      let c = endorse[confidential](t, reason = \"charge settled\")\n"
-    + "      let x = logit(c)\n      return 0\n    }\n  }\n}\n")
+    + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
 
 
 def test_endorse_confidential_downgrades_and_compiles_with_a_declared_slot():
@@ -216,9 +216,9 @@ def test_endorse_confidential_is_refused_without_the_declared_slot():
         _PRELUDE
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      let t = charge(u)\n"
+        + "    fn go(u) {\n      let t = emit charge(u)\n"
         + "      let c = endorse[confidential](t, reason = \"x\")\n"
-        + "      let z = logit(c)\n      return 0\n    }\n  }\n}\n")
+        + "      let z = emit logit(c)\n      return 0\n    }\n  }\n}\n")
     with pytest.raises(RevlError) as excinfo:
         compile_source(src, "undeclared.rvl")
     # an undeclared declassification is the general G9 admission refusal
@@ -246,8 +246,8 @@ def test_a8_bound_key_is_refused_at_a_secret_receiver():
         + "extern emission fn vaultput(x: Secret[Str]) -> Int = @py { return 0 }\n"
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      let s = complete(u)\n"
-        + "      let x = vaultput(s)\n      return 0\n    }\n  }\n}\n")
+        + "    fn go(u) {\n      let s = emit complete(u)\n"
+        + "      let x = emit vaultput(s)\n      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G-SECRET"  # the bound-key refusal, NOT G-SECRET-FLOW
 
 
@@ -261,7 +261,7 @@ def test_a8_bound_key_is_refused_at_a_secret_service_receiver_via_emit():
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent requires vault: Vault provides ops: Ops {\n"
         + "  provide ops {\n"
-        + "    fn go(u) {\n      let s = complete(u)\n"
+        + "    fn go(u) {\n      let s = emit complete(u)\n"
         + "      emit vault.store(s)\n      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G-SECRET"
 
@@ -275,9 +275,9 @@ def test_a8_endorse_secret_stays_refused_unconditionally():
         + "extern emission fn logit(m: Str) -> Int = @py { return 0 }\n"
         + "service Ops { emission endorse[secret] fn go(u: Str) -> Int }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      let s = complete(u)\n"
+        + "    fn go(u) {\n      let s = emit complete(u)\n"
         + "      let c = endorse[secret](s, reason = \"trust me\")\n"
-        + "      let x = logit(c)\n      return 0\n    }\n  }\n}\n")
+        + "      let x = emit logit(c)\n      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G-SECRET"
 
 
@@ -294,8 +294,8 @@ def test_confidential_is_never_admitted_by_the_bound_key_same_capability_rule():
         + "= @py { return a }\n"
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      let t = charge(u)\n"
-        + "      let r = complete(t)\n      return 0\n    }\n  }\n}\n")
+        + "    fn go(u) {\n      let t = emit charge(u)\n"
+        + "      let r = emit complete(t)\n      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G-SECRET-FLOW"
 
 
@@ -307,7 +307,7 @@ def test_confidential_is_never_admitted_by_the_bound_key_same_capability_rule():
 def test_g_secret_flow_is_a_registered_diagnostic():
     record = explain("G-SECRET-FLOW")
     assert record["ok"] and record["guarantee"] and record["fix"]
-    err = _refuses(_agent("      let t = charge(u)\n      let x = logit(t)"))
+    err = _refuses(_agent("      let t = emit charge(u)\n      let x = emit logit(t)"))
     assert classify(err)["code"] == "G-SECRET-FLOW"
 
 
@@ -318,7 +318,7 @@ def test_a_secret_free_confidential_free_program_is_byte_identical():
         "extern emission[net.send] fn send(m: Str) -> Int = @py { return 0 }\n"
         "service Ops { emission fn go(u: Str) -> Int }\n"
         "component A provides ops: Ops {\n  provide ops {\n"
-        "    fn go(u) {\n      let n = send(u)\n      return 0\n    }\n  }\n}\n")
+        "    fn go(u) {\n      let n = emit send(u)\n      return 0\n    }\n  }\n}\n")
     ir = compile_source(src, "free.rvl")
     comp = {c["name"]: c for c in ir["components"]}["A"]
     assert "taint" not in comp  # no taint surface touched
@@ -384,7 +384,7 @@ def test_secret_config_field_is_refused_at_a_disclosure_sink():
            "component Keeper provides vault: Vault {\n"
            "  config { api_key: Secret[Str] = \"k\" }\n"
            "  provide vault {\n"
-           "    fn lookup(name) {\n      let x = logit(config.api_key)\n"
+           "    fn lookup(name) {\n      let x = emit logit(config.api_key)\n"
            "      return x\n    }\n  }\n}\n")
     _refuses(src)
 

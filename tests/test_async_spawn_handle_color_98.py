@@ -55,7 +55,7 @@ def _program(callback_type: str, go_class: str = "async fn") -> str:
         "}\n"
         "component Worker provides wtask: WTask {\n"
         "  config { tag: Str }\n"
-        "  provide wtask { async fn run(prompt) = remote(prompt) }\n"
+        "  provide wtask { async fn run(prompt) = emit remote(prompt) }\n"
         "}\n"
         "component Fanout provides runner: Runner {\n"
         '  let w1 = effect spawn Worker with { tag: "1" } undo w1.dispose()\n'

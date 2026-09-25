@@ -70,7 +70,7 @@ SPELLINGS: dict[str, tuple[str, list[str], set[str]]] = {
     "DirectScoped": ("", ["emit pg_write(x)"], {"db"}),
     # the same crossing routed through a plain `fn`: the scope is what
     # propagates, so refactoring a body into helpers cannot change the rule.
-    "TransitiveScoped": ("", ["let a = wrapped(x)"], {"db"}),
+    "TransitiveScoped": ("", ["let a = emit wrapped(x)"], {"db"}),
     # an UNSCOPED emission extern: the extern IS the boundary, so it names
     # itself (docs/capabilities.md §2).
     "DirectBare": ("", ["emit send_mail(x)"], {"send_mail"}),

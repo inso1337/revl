@@ -838,7 +838,7 @@ def _task_ops(service, host: str, capability: str, redirect: str, *,
                 f"  = @py {{\n    _args = [{', '.join(names)}]\n"
                 f"{body_src}}}")
             provides.append(f"    fn {op}({', '.join(names)}) = "
-                            f"{extern}({', '.join(names)})")
+                            f"emit {extern}({', '.join(names)})")
     return externs, provides
 
 
@@ -961,8 +961,10 @@ def _remote_source(service, params: dict) -> tuple[str, str]:
             f"extern emission[{capability}] fn {extern}({sig}){arrow}\n"
             f"  = @py {{\n    _args = [{', '.join(names)}]\n"
             f"{body_src}}}")
+        # every remote extern is an emission, so the call carries its `emit`
+        # marker (issue #1437)
         provides.append(f"    fn {op}({', '.join(names)}) = "
-                        f"{extern}({', '.join(names)})")
+                        f"emit {extern}({', '.join(names)})")
 
     isolate = f"  isolate {key} in realm(\"{realm}\")\n" if realm else ""
     header = _remote_header(service, label, key, host, capability, on_failure,
@@ -1571,7 +1573,9 @@ def _host_source(service, params: dict) -> tuple[str, str]:
             f"extern emission fn {extern}({sig}){arrow} "
             f"= @ts ref {op} from \"{module}\"")
         call_args = ", ".join(names)
-        provides.append(f"    fn {op}({call_args}) = {extern}({call_args})")
+        # every host extern here is an emission, so the call carries its
+        # `emit` marker (issue #1437)
+        provides.append(f"    fn {op}({call_args}) = emit {extern}({call_args})")
 
     isolate = f"  isolate {key} in realm(\"{realm}\")\n" if realm else ""
     header = _host_header(service, label, key, realm, shim)

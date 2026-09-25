@@ -246,7 +246,10 @@ def test_a_plain_operation_backed_by_an_emission_is_rejected(tmp_path):
     importer would have to make in order to under-declare."""
     source = import_wit(NOTHING_ASSERTED, filename="probe.wit",
                         pure=["probe.read-only-looking"])
-    broken = source.replace("extern pure fn", "extern emission fn")
+    # the provider call is marked too, as an emission call must be (issue
+    # #1437); what is left to refuse is the plain declaration alone
+    broken = source.replace("extern pure fn", "extern emission fn").replace(
+        "= wit_probe_read_only_looking(", "= emit wit_probe_read_only_looking(")
     with pytest.raises(RevlError) as excinfo:
         _compile(broken, tmp_path, "broken.rvl")
     assert "declared plain, but this implementation reaches" in str(excinfo.value)

@@ -48,10 +48,10 @@ def _poly_program() -> str:
         "service ARun { emission async fn go(x: Str) -> Str }\n"
         "service SRun { emission fn go(x: Str) -> Str }\n"
         "component AsyncAgent provides arun: ARun {\n"
-        "  provide arun { async fn go(x) = engine_run(x) }\n"
+        "  provide arun { async fn go(x) = emit engine_run(x) }\n"
         "}\n"
         "component SyncAgent provides srun: SRun {\n"
-        "  provide srun { fn go(x) = engine_run(x) }\n"
+        "  provide srun { fn go(x) = emit engine_run(x) }\n"
         "}\n"
     )
 
@@ -71,10 +71,10 @@ def _baseline_program() -> str:
         "service ARun { emission async fn go(x: Str) -> Str }\n"
         "service SRun { emission fn go(x: Str) -> Str }\n"
         "component AsyncAgent provides arun: ARun {\n"
-        "  provide arun { async fn go(x) = engine_run(x) }\n"
+        "  provide arun { async fn go(x) = emit engine_run(x) }\n"
         "}\n"
         "component SyncAgent provides srun: SRun {\n"
-        "  provide srun { fn go(x) = engine_run_revl_sync(x) }\n"
+        "  provide srun { fn go(x) = emit engine_run_revl_sync(x) }\n"
         "}\n"
     )
 
@@ -179,7 +179,7 @@ def test_await_as_identifier_substring_is_not_refused():
         "extern emission fn|async ok(x: Str) -> Str\n"
         "  = @py { awaited = x\n  return awaited }\n"
         "service SRun { emission fn go(x: Str) -> Str }\n"
-        "component S provides srun: SRun { provide srun { fn go(x) = ok(x) } }\n"
+        "component S provides srun: SRun { provide srun { fn go(x) = emit ok(x) } }\n"
     )
     compile_source(ok, "ok.rvl")  # must not raise
 
@@ -205,7 +205,7 @@ def test_additive_a_plain_emission_extern_program_is_unchanged():
     plain = (
         "extern emission fn e(x: Str) -> Str = @py { return x } = @ts { return x }\n"
         "service SRun { emission fn go(x: Str) -> Str }\n"
-        "component S provides srun: SRun { provide srun { fn go(x) = e(x) } }\n"
+        "component S provides srun: SRun { provide srun { fn go(x) = emit e(x) } }\n"
     )
     ir = compile_source(plain, "plain.rvl")
     externs = _externs(ir)
@@ -229,11 +229,11 @@ def test_single_colour_instantiation_prunes_the_other_clone():
     )
     sync_only = (
         "extern emission fn|async e(x: Str) -> Str\n" + body + common
-        + "component S provides srun: SRun { provide srun { fn go(x) = e(x) } }\n"
+        + "component S provides srun: SRun { provide srun { fn go(x) = emit e(x) } }\n"
     )
     async_only = (
         "extern emission fn|async e(x: Str) -> Str\n" + body + common
-        + "component A provides arun: ARun { provide arun { async fn go(x) = e(x) } }\n"
+        + "component A provides arun: ARun { provide arun { async fn go(x) = emit e(x) } }\n"
     )
     sync_externs = _externs(compile_source(sync_only, "s.rvl"))
     assert set(sync_externs) == {"e_revl_sync"}
@@ -257,10 +257,10 @@ def _colour_erased_program() -> str:
         "service ARun { emission async fn go(x: Str) -> Str }\n"
         "service SRun { emission fn go(x: Str) -> Str }\n"
         "component AsyncAgent provides arun: ARun {\n"
-        "  provide arun { async fn go(x) = engine_run(x) }\n"
+        "  provide arun { async fn go(x) = emit engine_run(x) }\n"
         "}\n"
         "component SyncAgent provides srun: SRun {\n"
-        "  provide srun { fn go(x) = engine_run(x) }\n"
+        "  provide srun { fn go(x) = emit engine_run(x) }\n"
         "}\n"
     )
 

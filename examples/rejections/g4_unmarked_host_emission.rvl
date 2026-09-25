@@ -1,0 +1,25 @@
+// REJECTED (G4): a host emission extern called without the `emit` marker.
+// `charge` is declared `emission`: it crosses the system boundary and cannot be
+// reverted, exactly as a required service's `emission fn` does, so the call
+// site must say so. The carrier of the crossing does not change the rule
+// (issue #1437, docs/design/1437-emit-marks-every-crossing.md).
+//
+// `Till.ring` is declared `emission`, so the provider upper bound admits the
+// reach. What is refused is the call site: nothing on the line says a payment
+// leaves the process. `let paid = emit charge(cents)` is the fix.
+//
+// expected error:
+//   call to emission `charge` must be marked `emit` (G4)
+
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) {
+      let paid = charge(cents)
+      return paid
+    }
+  }
+}

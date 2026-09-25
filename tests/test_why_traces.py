@@ -54,7 +54,7 @@ component LyingCache provides cache: Cache {
     fn put(key, value) {
       effect store.insert(key, value)
       undo   store.remove(key)
-      let n = write_through(key)
+      let n = emit write_through(key)
     }
   }
 }
@@ -387,7 +387,7 @@ service Cache { fn put(key: Str) }
 component LyingCache provides cache: Cache {
   provide cache {
     fn put(key) {
-      let n = audit_write(key)
+      let n = emit audit_write(key)
     }
   }
 }

@@ -526,7 +526,10 @@ def test_a_plain_op_backed_by_emission_is_rejected():
     importer would have to make in order to under-declare."""
     source = import_cordis(PLAIN_PLUGIN, filename="probe.ts",
                            pure=["Probe.readOnlyLooking"])
-    broken = source.replace("extern pure fn", "extern emission fn")
+    # the provider call is marked too, as an emission call must be (issue
+    # #1437); what is left to refuse is the plain declaration alone
+    broken = source.replace("extern pure fn", "extern emission fn").replace(
+        "= cordis_probe_read_only_looking(", "= emit cordis_probe_read_only_looking(")
     with pytest.raises(RevlError) as excinfo:
         compile_source(broken, "broken.rvl")
     assert "declared plain, but this implementation reaches" in str(excinfo.value)

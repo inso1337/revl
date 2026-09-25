@@ -201,7 +201,7 @@ def test_genuinely_async_module_fn_keeps_the_async_loop():
            + "}\n"
            + "service ARun { emission async fn go(x: Str) -> Str }\n"
            + "component Agent provides arun: ARun {\n"
-           + "  provide arun { async fn go(x) = caller(x) }\n"
+           + "  provide arun { async fn go(x) = emit caller(x) }\n"
            + "}\n")
     ir = compile_source(src, "keep.rvl")
     fns = _functions(ir)

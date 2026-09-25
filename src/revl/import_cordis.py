@@ -1288,7 +1288,10 @@ class _Generator:
             f"  = @{self.backend} {{ {marker} call the Cordis service method "
             f"`{target}` here }}")
         args = ", ".join(n for n, _ in sig_parts)
-        provide = f"    fn {op}({args}) = {extern}({args})"
+        # an emission crossing carries its `emit` marker at the call site,
+        # like every other carrier (issue #1437)
+        mark = "emit " if cls == "emission" else ""
+        provide = f"    fn {op}({args}) = {mark}{extern}({args})"
         return lines, extern_decl, provide
 
     def _mark(self, method: _Method,

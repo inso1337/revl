@@ -86,7 +86,7 @@ def test_a_new_extern_is_detected_and_fails():
     extern emission fn write(msg: Str) -> Str = @py { return msg }
     service S { emission fn op(a: Str) -> Str }
     component Quiet provides s: S {
-      provide s { fn op(a) = write(a) }
+      provide s { fn op(a) = emit write(a) }
     }
     """
     prev = _audit(prev_src)

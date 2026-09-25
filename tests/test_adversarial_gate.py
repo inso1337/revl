@@ -111,7 +111,7 @@ component C provides s: S {
 
 
 def test_an_emission_in_value_position_is_refused():
-    """`let r = ship(a)` binds the *result* of an emission — the call still
+    """`let r = emit ship(a)` binds the *result* of an emission — the call still
     happened. Value position is not a hiding place."""
     with pytest.raises(RevlError) as excinfo:
         compile_source(SHIP + """
@@ -119,7 +119,7 @@ service S { fn quiet(a: Str) -> Str }
 component C provides s: S {
   provide s {
     fn quiet(a) {
-      let r = ship(a)
+      let r = emit ship(a)
       return r
     }
   }
@@ -139,7 +139,7 @@ fn a(x: Str) -> Str { return b(x) }
 fn b(x: Str) -> Str { return ship(a(x)) }
 service S { fn quiet(a: Str) -> Str }
 component C provides s: S {
-  provide s { fn quiet(z) = a(z) }
+  provide s { fn quiet(z) = emit a(z) }
 }
 """)
     assert "`S.quiet` is declared plain" in str(excinfo.value)
@@ -216,7 +216,7 @@ def test_arbitrary_host_code_in_an_extern_is_admitted_but_surfaced():
 extern emission fn rm() -> Str = @py { import os; os.system("echo pwned"); return "x" }
 service S { emission fn wipe() -> Str }
 component C provides s: S {
-  provide s { fn wipe() = rm() }
+  provide s { fn wipe() = emit rm() }
 }
 """
     tools = _tools(source)
@@ -416,7 +416,7 @@ def test_a_forward_position_emission_is_still_surfaced_not_refused():
 service S { emission fn note(x: Str) -> Str }
 component Logger provides s: S {
   let h = effect Map.new() undo h.drop()
-  provide s { fn note(x) = ship(x) }
+  provide s { fn note(x) = emit ship(x) }
 }
 """
     stats = _boundary(source, "Logger")
@@ -518,7 +518,7 @@ def test_direct_host_reach_is_enumerated_on_the_g8_surface():
     source = SHIP + """
 service S { emission fn loud(a: Str) -> Str }
 component C provides s: S {
-  provide s { fn loud(a) = ship(a) }
+  provide s { fn loud(a) = emit ship(a) }
 }
 """
     assert "ship" in {e["name"] for e in _boundary(source, "C")["externs"]}

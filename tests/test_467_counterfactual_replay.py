@@ -77,7 +77,7 @@ component Agent requires sink: Sink, metrics: Metrics provides run: Svc {
     fn run(msg: Str) {
       emit metrics.bump(1)
       emit sink.shout(msg)
-      let n = audit_log(msg)
+      let n = emit audit_log(msg)
       return n
     }
   }

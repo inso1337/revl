@@ -321,7 +321,10 @@ def test_a_plain_operation_backed_by_an_emission_is_rejected(tmp_path):
     declaration an upper bound, so the compiler — not this importer — refuses
     the mismatch that under-declaring would require."""
     source = import_openapi(_one("get"), filename="probe.json")
-    broken = source.replace("extern pure fn", "extern emission fn")
+    # the provider call is marked too, as an emission call must be (issue
+    # #1437); what is left to refuse is the plain declaration alone
+    broken = source.replace("extern pure fn", "extern emission fn").replace(
+        "= http_probe_get_thing(", "= emit http_probe_get_thing(")
     with pytest.raises(RevlError) as excinfo:
         _compile(broken, tmp_path, "broken.rvl")
     assert "declared plain, but this implementation reaches" in str(excinfo.value)

@@ -17,6 +17,6 @@ service Http { emission fn post(url: Str, body: Str) -> Str }
 
 component Poster provides http: Http {
   provide http {
-    fn post(url, body) = http_post(url, body)
+    fn post(url, body) = emit http_post(url, body)
   }
 }

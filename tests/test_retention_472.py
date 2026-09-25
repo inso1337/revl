@@ -58,7 +58,7 @@ service Ops {{ emission fn go(r: Str) -> Int }}
 component Store provides ops: Ops {{
   provide ops {{
     fn go(r) {{
-      let n = db_put(r)
+      let n = emit db_put(r)
       return n
     }}
   }}
@@ -74,7 +74,7 @@ component Store provides ops: Ops {{
   provide ops {{
     fn go(k) {{
       let row = load(k)
-      let n = sink(row)
+      let n = emit sink(row)
       return n
     }}
   }}
@@ -164,7 +164,7 @@ _LOG_WRITE = ('extern emission[log.write] fn log_write(row: Str) -> Int = @py '
               '{ return 0 }\n')
 _HELPER = 'fn write_row(row: Str) -> Int { return db_put(row) }\n'
 
-_PERSISTS = 'let n = db_put(row)\n      return n'
+_PERSISTS = 'let n = emit db_put(row)\n      return n'
 
 
 def _seam(*, externs: str = _DB_PUT, sig: str = 'row: Str', impl: str = 'row',
@@ -197,11 +197,11 @@ SEAM_PERSISTS = _seam()
 # a provider that only RECEIVES the value: no sink, so no refusal to make
 SEAM_PURE = _seam(externs='', store='return 0')
 SEAM_LOG = _seam(externs=_LOG_WRITE,
-                 store='let n = log_write(row)\n      return n')
+                 store='let n = emit log_write(row)\n      return n')
 # the sink one hop further out: the provider reaches it through a helper fn, so
 # the reach has to be carried interprocedurally or the seam loses it again
 SEAM_HELPER = _seam(externs=_DB_PUT + _HELPER,
-                    store='let n = write_row(row)\n      return n')
+                    store='let n = emit write_row(row)\n      return n')
 # the retained value is NOT the first argument: the reach is per-parameter, so a
 # seam that only guarded position 0 would admit this
 SEAM_INDEX = _seam(sig='tag: Str, row: Str', impl='tag, row', call='"x", row')
@@ -340,7 +340,7 @@ def test_a_retention_origin_is_not_an_authority_origin():
         '  provide ops {\n'
         '    fn go(k) {\n'
         '      let row = load(k)\n'
-        '      let n = run(row)\n'
+        '      let n = emit run(row)\n'
         '      return n\n'
         '    }\n'
         '  }\n'
@@ -361,7 +361,7 @@ def test_an_untrusted_and_retained_value_is_still_refused_at_an_authority_sink()
         '  provide ops {\n'
         '    fn go(u) {\n'
         '      let row = emit fetch(u)\n'
-        '      let n = run(row)\n'
+        '      let n = emit run(row)\n'
         '      return n\n'
         '    }\n'
         '  }\n'
@@ -720,7 +720,7 @@ def test_a_policy_survives_the_multi_file_merge(tmp_path):
         '  provide ops {\n'
         '    fn go(k) {\n'
         '      let row = load(k)\n'
-        '      let n = logit(row)\n'
+        '      let n = emit logit(row)\n'
         '      return n\n'
         '    }\n'
         '  }\n'

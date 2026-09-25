@@ -1159,7 +1159,7 @@ class _Generator:
             f"{extern}(message: {in_type}) -> Untrusted[{out_type}]\n"
             f"  = @{self.backend} {{{body}}}"
         )
-        provide = f"    {self.async_kw}fn {op}(message) = {extern}(message)"
+        provide = f"    {self.async_kw}fn {op}(message) = emit {extern}(message)"
         return lines, extern_decl, provide
 
     def _task_operation(self, op: str, skill_id: str, skill: dict,
@@ -1217,7 +1217,7 @@ class _Generator:
                 f"extern emission[{self.card.net_cap}] fn {extern}({sig}) "
                 f"-> Untrusted[{ret}]\n  = @py {{\n    _args = [{', '.join(names)}]\n"
                 f"{body}}}")
-            provides.append(f"    fn {name}({', '.join(names)}) = "
+            provides.append(f"    fn {name}({', '.join(names)}) = emit "
                            f"{extern}({', '.join(names)})")
         return lines, externs, provides
 

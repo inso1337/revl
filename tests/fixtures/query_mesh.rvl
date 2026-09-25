@@ -70,6 +70,6 @@ component Dashboard requires rep: Report {
 // through the service seam — the `fn` transitivity case
 component Announcer provides voice: Voice {
   provide voice {
-    fn say(line) = shout(line)
+    fn say(line) = emit shout(line)
   }
 }

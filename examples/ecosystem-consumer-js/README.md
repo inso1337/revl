@@ -108,7 +108,7 @@ The four candidates are worked examples, not decoration:
 | file | this gate | the py reference gate | why it is here |
 |---|---|---|---|
 | `undeclared_tool.rvl` | `REJECT`, `G1` | refuses | a component reaching `db` it never declared, refused locally in the tab with no server and no Python |
-| `unmarked_emission_tool.rvl` | `REJECT`, `G4` | refuses | a plain-declared method reaching an emission extern |
+| `unmarked_emission_tool.rvl` | `REJECT`, `G4` | refuses | an unmarked call to an emission extern in a provide method. Both gates refuse it with ``call to emission `audit_write` must be marked `emit` (G4)``: every emission crossing carries the marker at its call site (issue #1437). Marked, the same method is still refused under `G4`, by the provider upper bound (``` `Cache.put` is declared plain, but this implementation reaches `audit_write()` ```), which was this row's verdict before the marker was required on the extern carrier |
 | `double_tool.rvl` | `ESCALATE`, `no-objection` | **admits** | the cross-tier case: py ADMITS this, and this gate merely has nothing to refuse. Reading the second as the first is the mistake the contract exists to prevent |
 | `digit_tool.rvl` | `ESCALATE`, `no-objection` | admits | uses `.is_digit()`. This was the batch's `outside-frontier` row until roadmap item 391 ported that builtin into the self-host lowering, emptying both lexical rows of the generated frontier table. The remaining fail-closed trigger is the SIZE bound (`MAX_SOURCE_BYTES`), exercised by an oversized candidate the test writes beside these rather than a 256 KB file committed here |
 

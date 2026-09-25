@@ -407,7 +407,7 @@ fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 fn wrap(x: Str) -> Str { return indirect(ship, x) }
 service S { emission fn loud(a: Str) -> Str }
 component C provides s: S {
-  provide s { fn loud(a) = wrap(a) }
+  provide s { fn loud(a) = emit wrap(a) }
 }
 """
 
@@ -443,7 +443,7 @@ def test_the_audit_stays_clean_for_pure_higher_order_chains():
     fn chain2(x: Str) -> Str { return purefn(x) }
     service T { emission fn op(a: Str) -> Str }
     component D provides t: T {
-      provide t { fn op(a) = log(chain2(a)) }
+      provide t { fn op(a) = emit log(chain2(a)) }
     }
     """)
     externs = _boundary(ir)["D"]["externs"]

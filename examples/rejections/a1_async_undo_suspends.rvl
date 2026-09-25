@@ -22,6 +22,6 @@ service W { async fn heat() -> Int  fn cool() -> Int }
 service Db { fn go() -> Str }
 component A requires w: W provides db: Db {
   config { u: Str }
-  let c = effect await open_conn(config.u) undo w.heat()
+  let c = effect await emit open_conn(config.u) undo w.heat()
   provide db { fn go() { return c } }
 }

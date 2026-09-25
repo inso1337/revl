@@ -46,7 +46,7 @@ extern emission fn cordis_store_set(key: Str, value: Str)
 component StoreProvider provides store: Store {
   provide store {
     fn get(key) = cordis_store_get(key)
-    fn set(key, value) = cordis_store_set(key, value)
+    fn set(key, value) = emit cordis_store_set(key, value)
   }
 }
 ```
