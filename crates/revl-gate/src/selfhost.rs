@@ -559,6 +559,11 @@ pub struct MRole {
     rname: String,
     rres: String,
     rline: i64,
+    rprof: bool,
+    rdev: String,
+    rmem: i64,
+    rquant: String,
+    rpline: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -566,6 +571,7 @@ pub struct MArm {
     aorig: String,
     arole: String,
     aline: i64,
+    acands: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -6774,6 +6780,11 @@ fn atk(ts: &[Token], i: i64, k: &str) -> bool {
 fn atw(ts: &[Token], i: i64, w: &str) -> bool {
     let t = tkc(ts, i);
     return ((t.kind == "kw") && (t.text == w));
+}
+
+fn at_word(ts: &[Token], i: i64, w: &str) -> bool {
+    let t = tkc(ts, i);
+    return ((t.kind == "ident") && (t.text == w));
 }
 
 fn at_boot(ts: &[Token], i: i64) -> bool {
@@ -17061,6 +17072,10 @@ fn model_residences() -> Vec<String> {
     return vec![String::from("on_device"), String::from("off_device")];
 }
 
+fn model_device_classes() -> Vec<String> {
+    return vec![String::from("cpu"), String::from("gpu"), String::from("npu")];
+}
+
 fn model_origin_classes() -> Vec<String> {
     return vec![String::from("confidential"), String::from("fs"), String::from("input"), String::from("model"), String::from("net"), String::from("screen"), String::from("secret"), String::from("web")];
 }
@@ -17073,8 +17088,36 @@ fn mres_msg(res: &str, name: &str) -> String {
     return (((String::from("unknown residence `").revl_concat(&res)).revl_concat("` for model role `")).revl_concat(&name)).revl_concat("`");
 }
 
+fn mdevclass_msg(dev: &str, name: &str) -> String {
+    return (((String::from("unknown device class `").revl_concat(&dev)).revl_concat("` on model role `")).revl_concat(&name)).revl_concat("`");
+}
+
+fn mmemory_msg(name: &str, mem: i64) -> String {
+    return (((String::from("model role `").revl_concat(&name)).revl_concat("` declares `memory ")).revl_concat(&(mem).to_string())).revl_concat("`, which no placement can fail to meet");
+}
+
 fn mrole_twice_msg(name: &str, fline: i64, fres: &str, res: &str) -> String {
     return (((((((String::from("model role `").revl_concat(&name)).revl_concat("` is declared twice (first on line ")).revl_concat(&(fline).to_string())).revl_concat(", as `")).revl_concat(&fres)).revl_concat("`; here as `")).revl_concat(&res)).revl_concat("`)");
+}
+
+fn mstar_candidate_msg(orig: &str, act: &str, cname: &str) -> String {
+    return (((((String::from("`").revl_concat(&orig)).revl_concat(" -> *` in `route model on ")).revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") places the origin on any available role");
+}
+
+fn mdup_candidate_msg(name: &str, orig: &str, act: &str, cname: &str) -> String {
+    return (((((((String::from("model role `").revl_concat(&name)).revl_concat("` appears twice among the candidates for `")).revl_concat(&orig)).revl_concat("` in `route model on ")).revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(")");
+}
+
+fn mcouncil_in_set_msg(name: &str, n: i64, orig: &str, act: &str, cname: &str) -> String {
+    return (((((((((String::from("model council `").revl_concat(&name)).revl_concat("` is one of ")).revl_concat(&(n).to_string())).revl_concat(" candidates for `")).revl_concat(&orig)).revl_concat("` in `route model on ")).revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(")");
+}
+
+fn mresidence_split_msg(orig: &str, act: &str, cname: &str, hname: &str, hres: &str, hline: i64, oname: &str, ores: &str, oline: i64) -> String {
+    return (((((((((((((((((String::from("the candidates for `").revl_concat(&orig)).revl_concat("` in `route model on ")).revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") do not agree on residence: `")).revl_concat(&hname)).revl_concat("` is `")).revl_concat(&hres)).revl_concat("` (line ")).revl_concat(&(hline).to_string())).revl_concat(") and `")).revl_concat(&oname)).revl_concat("` is `")).revl_concat(&ores)).revl_concat("` (line ")).revl_concat(&(oline).to_string())).revl_concat(")");
+}
+
+fn munprofiled_msg(names: &str, orig: &str, act: &str, cname: &str) -> String {
+    return (((((((String::from("candidate(s) ").revl_concat(&names)).revl_concat(" for `")).revl_concat(&orig)).revl_concat("` in `route model on ")).revl_concat(&act)).revl_concat("` (")).revl_concat(&cname)).revl_concat(") declare no device profile, so the candidate set cannot be ordered");
 }
 
 fn maction_twice_msg(act: &str, cname: &str) -> String {
@@ -17137,11 +17180,31 @@ fn model_roles_of(ts: &[Token]) -> Vec<MRole> {
             depth = (depth).checked_sub(1i64).expect("revl: Int overflow");
         }
         if ((depth == 0i64) && at_model_role(ts, i)) {
-            out.push(MRole { rname: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, rres: tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text, rline: tkc(ts, i).line });
+            out.push(model_role_at(ts, i));
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
+}
+
+fn model_role_at(ts: &[Token], i: i64) -> MRole {
+    let name = tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text;
+    let res = tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text;
+    let line = tkc(ts, i).line;
+    let j = (i).checked_add(4i64).expect("revl: Int overflow");
+    let bare = MRole { rname: name.clone(), rres: res.clone(), rline: line, rprof: false, rdev: String::from(""), rmem: 0i64, rquant: String::from(""), rpline: line };
+    if (!(((((at_word(ts, j.clone(), "device") && atk(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "ident")) && at_word(ts, (j).checked_add(2i64).expect("revl: Int overflow"), "memory")) && atk(ts, (j).checked_add(3i64).expect("revl: Int overflow"), "int")) && at_word(ts, (j).checked_add(4i64).expect("revl: Int overflow"), "quant")) && atk(ts, (j).checked_add(5i64).expect("revl: Int overflow"), "ident"))) {
+        return bare;
+    }
+    let mem = match { let _s = (tkc(ts, (j).checked_add(3i64).expect("revl: Int overflow")).text); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
+    Some(v) => v,
+    None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
+    _ => unreachable!(),
+};
+    if (mem == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return bare;
+    }
+    return MRole { rname: name.clone(), rres: res.clone(), rline: line, rprof: true, rdev: tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text, rmem: mem.clone(), rquant: tkc(ts, (j).checked_add(5i64).expect("revl: Int overflow")).text, rpline: tkc(ts, j.clone()).line };
 }
 
 fn mrole_at(rs: &[MRole], n: &str, i: i64) -> i64 {
@@ -17164,6 +17227,14 @@ fn model_roles_refusal(rs: &[MRole]) -> Verd {
         let p = mrole_at(rs, &r.rname, 0i64);
         if (p != i) {
             return mverd(&mrole_twice_msg(&r.rname, (rs)[(p) as usize].rline.clone(), &(rs)[(p) as usize].rres, &r.rres), r.rline);
+        }
+        if r.rprof {
+            if (!contains__m2(&model_device_classes(), &r.rdev)) {
+                return mverd(&mdevclass_msg(&r.rdev, &r.rname), r.rpline);
+            }
+            if (r.rmem <= 0i64) {
+                return mverd(&mmemory_msg(&r.rname, r.rmem), r.rpline);
+            }
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
@@ -17272,11 +17343,29 @@ fn model_arms_in(ts: &[Token], lo: i64, hi: i64) -> MArmR {
             if (!atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "arrow")) {
                 return MArmR { xarms: out.clone(), xok: false };
             }
-            if (!atk(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "ident")) {
-                return MArmR { xarms: out.clone(), xok: false };
+            let line = tkc(ts, i).line;
+            let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+            let mut cands: Vec<String> = vec![];
+            let mut more = true;
+            while more {
+                if atk(ts, j.clone(), "*") {
+                    cands.push(String::from("*"));
+                } else {
+                    if atk(ts, j.clone(), "ident") {
+                        cands.push(tkc(ts, j.clone()).text);
+                    } else {
+                        return MArmR { xarms: out.clone(), xok: false };
+                    }
+                }
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+                if atk(ts, j.clone(), "|") {
+                    j = (j).checked_add(1i64).expect("revl: Int overflow");
+                } else {
+                    more = false;
+                }
             }
-            out.push(MArm { aorig: orig.clone(), arole: tkc(ts, (i).checked_add(2i64).expect("revl: Int overflow")).text, aline: tkc(ts, i).line });
-            i = (i).checked_add(3i64).expect("revl: Int overflow");
+            out.push(MArm { aorig: orig.clone(), arole: (cands)[(0i64) as usize].clone(), aline: line, acands: cands.clone() });
+            i = j.clone();
         }
     }
     return MArmR { xarms: out.clone(), xok: true };
@@ -17341,32 +17430,82 @@ fn model_arms_refusal(b: MBlock, cname: &str, rs: &[MRole], cs: &[CDecl]) -> Ver
         if (marm_origin_at(&b.barms, &a.aorig, 0i64) != i) {
             return mverd(&morigin_twice_msg(&a.aorig, &b.bact, cname), a.aline);
         }
-        let ri = mrole_at(rs, &a.arole, 0i64);
-        let ci = if (ri == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { ccl_at(cs, &a.arole, 0i64) } else { (0i64).checked_sub(1i64).expect("revl: Int overflow") };
+        let cv = model_candidates_refusal(b.clone(), a.clone(), cname, rs, cs);
+        if (cv.v != "") {
+            return cv;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn model_candidates_refusal(b: MBlock, a: MArm, cname: &str, rs: &[MRole], cs: &[CDecl]) -> Verd {
+    let mut k = 0i64;
+    let mut seen: Vec<String> = vec![];
+    let mut resolved: Vec<i64> = vec![];
+    while (k < a.acands.revl_length()) {
+        let name = (a.acands)[(k) as usize].clone();
+        if (name == "*") {
+            return mverd(&mstar_candidate_msg(&a.aorig, &b.bact, cname), a.aline);
+        }
+        if contains__m2(&seen, &name) {
+            return mverd(&mdup_candidate_msg(&name, &a.aorig, &b.bact, cname), a.aline);
+        }
+        seen.push(name.clone());
+        let ri = mrole_at(rs, &name, 0i64);
+        let ci = if (ri == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { ccl_at(cs, &name, 0i64) } else { (0i64).checked_sub(1i64).expect("revl: Int overflow") };
         if ((ri == (0i64).checked_sub(1i64).expect("revl: Int overflow")) && (ci == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
-            return mverd(&mundeclared_role_msg(&a.aorig, &a.arole, &b.bact, cname), a.aline);
+            return mverd(&mundeclared_role_msg(&a.aorig, &name, &b.bact, cname), a.aline);
         }
         if (a.aorig == "secret") {
             if (ci != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-                return mverd(&msecret_council_msg(&b.bact, cname, &a.arole), a.aline);
+                return mverd(&msecret_council_msg(&b.bact, cname, &name), a.aline);
             }
-            return mverd(&msecret_arm_msg(&b.bact, cname, &a.arole), a.aline);
+            return mverd(&msecret_arm_msg(&b.bact, cname, &name), a.aline);
         }
         if (ci != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            if (a.acands.revl_length() > 1i64) {
+                return mverd(&mcouncil_in_set_msg(&name, a.acands.revl_length(), &a.aorig, &b.bact, cname), a.aline);
+            }
             if contains__m2(&model_confidentiality_origins(), &a.aorig) {
                 let mi = ccl_off_member((cs)[(ci) as usize].clone(), rs, &a.aorig);
                 if (mi != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
                     let m = ((cs)[(ci) as usize].cmems.clone())[(mi) as usize].clone();
                     let mr = (rs)[(mrole_at(rs, &m.crole, 0i64)) as usize].clone();
-                    return mverd(&mcouncil_off_device_msg(&b.bact, cname, &a.aorig, &a.arole, &m.cfun, &m.crole, &mr.rres, mr.rline), a.aline);
+                    return mverd(&mcouncil_off_device_msg(&b.bact, cname, &a.aorig, &name, &m.cfun, &m.crole, &mr.rres, mr.rline), a.aline);
                 }
             }
-        } else {
-            if (contains__m2(&model_confidentiality_origins(), &a.aorig) && ((rs)[(ri) as usize].rres == "off_device")) {
-                return mverd(&moff_device_msg(&b.bact, cname, &a.aorig, &a.arole, &(rs)[(ri) as usize].rres, (rs)[(ri) as usize].rline.clone()), a.aline);
-            }
+            return no_verd();
         }
-        i = (i).checked_add(1i64).expect("revl: Int overflow");
+        if (contains__m2(&model_confidentiality_origins(), &a.aorig) && ((rs)[(ri) as usize].rres == "off_device")) {
+            return mverd(&moff_device_msg(&b.bact, cname, &a.aorig, &name, &(rs)[(ri) as usize].rres, (rs)[(ri) as usize].rline.clone()), a.aline);
+        }
+        resolved.push(ri);
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (resolved.revl_length() < 2i64) {
+        return no_verd();
+    }
+    let head = (rs)[((resolved)[(0i64) as usize].clone()) as usize].clone();
+    let mut m = 1i64;
+    while (m < resolved.revl_length()) {
+        let r = (rs)[((resolved)[(m) as usize].clone()) as usize].clone();
+        if (r.rres != head.rres) {
+            return mverd(&mresidence_split_msg(&a.aorig, &b.bact, cname, &head.rname, &head.rres, head.rline, &r.rname, &r.rres, r.rline), a.aline);
+        }
+        m = (m).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut bare = String::from("");
+    let mut n = 0i64;
+    while (n < resolved.revl_length()) {
+        let r = (rs)[((resolved)[(n) as usize].clone()) as usize].clone();
+        if (!r.rprof) {
+            bare = if (bare == "") { r.rname } else { (bare.revl_concat(", ")).revl_concat(&r.rname) };
+        }
+        n = (n).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (bare != "") {
+        return mverd(&munprofiled_msg(&bare, &a.aorig, &b.bact, cname), a.aline);
     }
     return no_verd();
 }
@@ -23995,6 +24134,10 @@ pub fn lower_to_ir_at(src: String, fname: String) -> String {
     return out.revl_concat("}");
 }
 
+fn mset(arms: &str) -> String {
+    return (String::from("model role fast on_device device gpu memory 6144 quant q4_k_m\nmodel role small on_device device cpu memory 512 quant int8\nmodel role slow off_device device cpu memory 512 quant int8\nmodel role bare on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { ").revl_concat(&arms)).revl_concat(" }\n  provide out { fn classify(text) = text }\n}");
+}
+
 pub fn str_lt(a: String, b: String) -> bool {
     let la = a.revl_length();
     let lb = b.revl_length();
@@ -28478,6 +28621,72 @@ fn a_model_placement_is_a_prelude_declaration() {
 fn _model__and__route__stay_ordinary_identifiers() {
     assert!((admit_src(String::from("service Model { fn c(x: Str) -> Str }\nservice M { fn go(x: Str) -> Str }\ncomponent C requires model: Model provides out: M {\n  provide out { fn go(x) = x }\n}")) == ""));
     assert!((admit_src(String::from("service M { fn go(model: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(model) = model }\n}")) == ""));
+}
+
+#[test]
+fn a_profiled_role_admits__and_the_profile_is_read_rather_than_stepped_over() {
+    let v = admit_src(String::from("model role fast on_device device gpu memory 6144 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> fast }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn the_device_vocabulary_is_closed__so_a_typo_is_a_refusal() {
+    let v = admit_src(String::from("model role fast on_device device gpu0 memory 6144 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown device class `gpu0` on model role `fast`"));
+}
+
+#[test]
+fn a_memory_floor_no_placement_can_fail_to_meet_is_refused() {
+    let v = admit_src(String::from("model role fast on_device device gpu memory 0 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|model role `fast` declares `memory 0`, which no placement can fail to meet"));
+}
+
+#[test]
+fn the_residence_rule_still_runs_ahead_of_the_profile_rules() {
+    let v = admit_src(String::from("model role fast on_devise device gpu0 memory 0 quant q4_k_m\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == "MODEL|unknown residence `on_devise` for model role `fast`"));
+}
+
+#[test]
+fn an_unprofiled_role_beside_a_profiled_one_is_not_refused_for_the_omission() {
+    let v = admit_src(String::from("model role fast on_device device gpu memory 6144 quant q4_k_m\nmodel role small on_device\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { * -> small }\n  provide out { fn classify(text) = text }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn the_profile_words_stay_ordinary_identifiers() {
+    assert!((admit_src(String::from("service M { fn go(device: Str, memory: Str, quant: Str) -> Str }\ncomponent C provides out: M {\n  provide out { fn go(device, memory, quant) = device }\n}")) == ""));
+}
+
+#[test]
+fn an_ordered_candidate_set_of_comparable_roles_admits() {
+    assert!((admit_src(mset("* -> fast | small")) == ""));
+}
+
+#[test]
+fn ____is_not_a_candidate__and_the_refusal_gives_the_reason() {
+    assert!((admit_src(mset("* -> fast | *")) == "MODEL|`* -> *` in `route model on classify` (Classifier) places the origin on any available role"));
+}
+
+#[test]
+fn a_candidate_named_twice_has_two_positions_and_no_preference() {
+    assert!((admit_src(mset("* -> fast | fast")) == "MODEL|model role `fast` appears twice among the candidates for `*` in `route model on classify` (Classifier)"));
+}
+
+#[test]
+fn residence_is_uniform_across_a_candidate_set() {
+    assert!((admit_src(mset("* -> fast | slow")) == "MODEL|the candidates for `*` in `route model on classify` (Classifier) do not agree on residence: `fast` is `on_device` (line 1) and `slow` is `off_device` (line 3)"));
+}
+
+#[test]
+fn every_candidate_of_a_set_declares_a_device_profile() {
+    assert!((admit_src(mset("* -> fast | bare")) == "MODEL|candidate(s) bare for `*` in `route model on classify` (Classifier) declare no device profile, so the candidate set cannot be ordered"));
+}
+
+#[test]
+fn item_512_s_rules_reach_the_tail_of_a_set__not_only_its_head() {
+    assert!((admit_src(mset("* -> fast | nope")) == "MODEL|`* -> nope` in `route model on classify` (Classifier) names no declared model role"));
+    assert!((admit_src(mset("confidential -> fast | slow")) == "MODEL|action `classify` (Classifier) routes the `confidential` origin to model role `slow`, which is declared `off_device` on line 3: a confidential input may not leave the device (G-MODEL-PLACE)"));
 }
 
 #[test]
