@@ -1,0 +1,22 @@
+// A component that declares a required `Stream[T]` coeffect. The cordis-rs
+// reference REFUSES this by name (item 130 §6b): a requirement on this tier
+// resolves against a SERVICE, and a `Stream[T]` is not one.
+//
+// It is therefore not a byte-agreement case and can never live in
+// tests/fixtures/emit_rust_corpus: there are no reference bytes to agree with.
+// It lives here instead, and the line-coverage gate drives both halves over it,
+// because the refusal is logic both halves carry and the byte corpus
+// structurally cannot reach:
+//
+//   backends/rust/emit.py::_refuse_required_stream   raises the EmitError
+//   selfhost/emit_rust.rvl::require_ty               emits the matching marker
+//
+// The parity assertion on the emitted text is
+// tests/test_selfhost_emit_rust.py::
+//   test_a_required_stream_coeffect_the_reference_refuses_is_named_here_too.
+event OrderCreated(key: order_id) { order_id: Str, quantity: Int }
+service Ship { emission fn dispatch(id: Str) }
+
+component Fulfiller requires feed: Stream[OrderCreated], ship: Ship {
+  on OrderCreated as e { emit ship.dispatch(e.order_id) }
+}
