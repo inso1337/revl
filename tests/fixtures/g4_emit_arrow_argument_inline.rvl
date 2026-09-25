@@ -1,0 +1,28 @@
+// ADMITTED: a marked crossing written inside an arrow that is passed as an
+// argument of an `emit` (the inline spelling).
+//
+// The arrow's body runs when `approve_args` CALLS it, not while
+// `gate.decide`'s arguments are evaluated, so the inner `emit` is not nested
+// in the outer marker's argument list. It is the same crossing the two
+// `g4_emit_arrow_argument_let_*.rvl` twins write one statement earlier, and
+// the rule (issue #1175) judges an argument as it would be judged there.
+// Before the fix the emit-argument position leaked into the arrow body and this
+// spelling was refused as a nested `emit` while both twins compiled.
+
+service Approvals { emission fn approve(ticket: Str, actor: Str) -> Str }
+service Gate { emission fn decide(ok: Bool, verdict: Str) -> Str }
+service Review { emission fn review(key: Str) -> Str }
+
+// Hands the ticket to whatever approver it is given. A plain module fn: it
+// reaches no emission of its own, so calling it needs no marker.
+fn approve_args(key: Str, approver: (Str, Str) -> Str) -> Str {
+  return approver(key, key)
+}
+
+component Reviewer requires approvals: Approvals, gate: Gate provides review: Review {
+  provide review {
+    fn review(key) {
+      return emit gate.decide(true, approve_args(key, (t: Str, a: Str) => emit approvals.approve(t, a)))
+    }
+  }
+}

@@ -9465,9 +9465,23 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 env.type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
         _b1_capture_check(expr, env.type_env, env.types, filename, expr.line)
+        # An arrow's body runs when the arrow is CALLED, not while the
+        # enclosing `emit`'s arguments are evaluated, so it is not in
+        # emit-argument position even when the arrow is written inside one.
+        # `(t, a) => emit approvals.approve(t, a)` passed as an argument is the
+        # same marked crossing it is when bound by `let` first and passed by
+        # name, and the rule (issue #1175) judges an argument as it would be
+        # one statement earlier. Without this the flag leaked into the body and
+        # refused the inline spelling as a nested `emit`.
+        saved_in_args = getattr(env, "_in_emit_args", False)
+        env._in_emit_args = False
+        try:
+            body = _lower_component_pure_expr(expr.body, env, inner, callables,
+                                              pure_only)
+        finally:
+            env._in_emit_args = saved_in_args
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
-                "body": _lower_component_pure_expr(expr.body, env, inner, callables,
-                                                   pure_only)}
+                "body": body}
         # item 75(a) §4/§5.3: the same complete-signature condition as the
         # pure-fn path. Stratum 3 does not *check* an arrow yet (slice 3), but
         # the grammar and the R3 fix land everywhere at once — there is one
