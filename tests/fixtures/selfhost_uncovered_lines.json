@@ -49,12 +49,12 @@
   ],
   "_budget": {
     "reference": {
-      "go": 3342,
-      "java": 983,
+      "go": 3352,
+      "java": 993,
       "py": 663,
-      "rust": 1189,
-      "ts": 522,
-      "wasm": 1552
+      "rust": 1199,
+      "ts": 541,
+      "wasm": 1562
     },
     "selfhost": {
       "go": 104,
@@ -1175,8 +1175,8 @@
           "<module>": 1,
           "_main": 17
         },
-        "Temporal backend delegation: `_emit_temporal` adjusts import paths, installs an `emit` proxy, imports `emit_temporal`, and delegates the document. Temporal IR is rejected from mixed v3 emission and is not implemented by the self-host TypeScript emitter": {
-          "_emit_temporal": 14
+        "Temporal backend delegation: `_emit_temporal` adjusts import paths, installs an `emit` proxy, imports `emit_temporal`, delegates the document, and then restores both process-global bindings (`sys.modules[\"emit\"]` and the backend directory on `sys.path`) that it borrowed. Temporal IR is rejected from mixed v3 emission and is not implemented by the self-host TypeScript emitter, so no byte-agreement document reaches any of this, the restoring half included. The restore is pinned instead by tests/test_emit_temporal_leaves_no_global_state.py": {
+          "_emit_temporal": 23
         },
         "Test-mode statement rendering only: `_v3_stmt`'s remaining structural/truthy assertion lines emit vitest `expect` calls when `test_mode=True`, plus the final unknown-step rejection. Runtime function assertions use the covered throwing form; in-file test harness generation is a separate declared boundary": {
           "_v3_stmt": 8
