@@ -93,7 +93,8 @@ a stranded PR that never changes, so on its own this check stayed green while
 five of eight baseline notes went stale. Each entry therefore carries a
 structured witness beside its prose, and `tools/landing_witness.py` re-checks
 it on every run: the merge's ADDED inventory, the byte-identity of every file
-claimed CARRIED, and the tests named for every file that has drifted since.
+claimed CARRIED at the commit that carried it (not at HEAD, so later edits
+cost nothing), and the tests named for a file that was carried modified.
 The recorded `merge` sha is also cross-checked against the one GitHub reports,
 so the witness is never measured against the wrong commit. An entry whose
 claim cannot be checked (REWORKED) is printed as UNCHECKED, never as verified.

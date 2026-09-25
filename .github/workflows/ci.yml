@@ -831,7 +831,9 @@ jobs:
       - run: git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
       # The same run re-measures each baseline entry's WITNESS (issue #1434):
       # the merge's added inventory, the byte-identity of every file claimed
-      # carried, and the tests named for every file that has drifted since.
+      # carried AT the commit that carried it (so a later edit to one of
+      # those files costs nothing), and the tests named for a file that was
+      # carried already modified.
       # `--pinned run` executes those tests rather than only collecting them,
       # so the job needs revl and pytest installed; a skipped pin fails, since
       # a skip is not a pass. Entries it cannot check (REWORKED) are printed

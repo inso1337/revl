@@ -21,19 +21,24 @@ module re-measures it on every run:
                `git diff --diff-filter=A <merge>^1 <merge>`. This is the #1320
                defect: a modified file listed as added, or an added file left
                out, fails.
-    identical  paths whose bytes in the tree under test equal the merge's copy.
-               A path that is absent, or has drifted without the entry saying
+    carried_at CARRIED only: the commit that brought the work in. It must be
+               an ancestor of the tree under test (HEAD), and the merge must
+               not be an ancestor of it. Every byte comparison below is made
+               AT THIS COMMIT, not at HEAD.
+    identical  paths whose bytes at `carried_at` equal the merge's copy. A
+               path absent there, or different there without the entry saying
                so, fails.
-    drifted    {path: [pytest node ids]} for a path that is present but has
-               legitimately changed since. Its witness is behavioural, and the
-               claim is falsifiable three ways: every node id must COLLECT (or,
-               with `--pinned run`, PASS; a skip is not a pass), must name a
-               test file this merge touched, and must name a test that already
+    drifted    {path: [pytest node ids]} for a path that was carried already
+               MODIFIED: present at `carried_at`, not byte-identical to the
+               merge's copy. Its witness is behavioural, and the claim is
+               falsifiable three ways: every node id must COLLECT (or, with
+               `--pinned run`, PASS; a skip is not a pass), must name a test
+               file this merge touched, and must name a test that already
                existed in the merge's copy of that file. A whole-file node id is
-               accepted only when that test file is itself byte-identical to the
-               merge's copy, so every test in it is the merge's own. A path
-               listed as drifted that is actually identical fails too: the
-               record has to be exact in both directions.
+               accepted only when that test file was itself byte-identical to
+               the merge's copy at `carried_at`, so every test in it was the
+               merge's own. A path listed as drifted that was actually
+               identical fails too: the record has to be exact both ways.
     absent     STRANDED only: the added files, each of which must be ABSENT.
     pinned_by  REWORKED only: tests that carry the outcome under another name.
                They must collect (or pass), and nothing else is claimed.
@@ -42,9 +47,14 @@ WHAT IT CAN AND CANNOT CHECK, stated per entry in the output rather than
 implied by a green line:
 
   * CARRIED is VERIFIED: every added file is accounted for as identical or as
-    drifted-and-pinned, and every path the note names that the merge touched
-    is in the witness, so the prose cannot claim a path the checker skips.
-  * STRANDED is VERIFIED when the merge added files: each must be absent.
+    drifted-and-pinned at `carried_at`, and every path the note names that the
+    merge touched is in the witness, so the prose cannot claim a path the
+    checker skips.
+  * STRANDED is VERIFIED when the merge added files: each must be absent from
+    the tree under test. That claim is about the present, so it is the one
+    byte-level check made against HEAD: if the files land, the entry is stale.
+  * A carried file later REMOVED from the tree is reported, not failed. The
+    work being reverted afterwards does not make "it was carried" false.
   * REWORKED is UNCHECKED. The outcome landed by a different mechanism under
     a different name, so there is no path to compare. What is checked is the
     inventory and that the named tests exist and pass; that they carry the
@@ -54,10 +64,15 @@ What no mode checks: that a drifted path's pinned tests actually exercise
 that path. The pins are constrained to the merge's own tests, which stops
 pinning a drift on an unrelated test, but relevance is still a judgement.
 
-THE TREE UNDER TEST is the working tree at `--root`, not `origin/main`. On a
-pull request CI checks out the PR's merge ref, so a PR that edits a carried
-file fails on its own run, with the instruction to record the drift, instead
-of turning `main` red after it lands.
+WHY `carried_at` AND NOT HEAD. "This work was carried to main" is a
+historical fact. A later edit to a carried file means the code moved on, not
+that the claim became false, and checking the bytes at HEAD would make every
+ordinary edit to one of those files fail a ledger about somebody else's
+merge. Every stale entry #1434 found was wrong on the day it was written, and
+a check pinned to the commit the note describes still catches that. What
+remains tied to HEAD: STRANDED's `absent` (a claim about now), the ancestry
+of `carried_at`, and the pinned tests, which run in the working tree at
+`--root` and so must still exist and pass.
 """
 from __future__ import annotations
 
@@ -71,12 +86,12 @@ from pathlib import Path
 from typing import Callable, NamedTuple
 
 VERDICTS = ("CARRIED", "REWORKED", "STRANDED")
-FIELDS = ("merge", "verdict", "added", "identical", "drifted", "absent",
-          "pinned_by", "note")
+FIELDS = ("merge", "verdict", "carried_at", "added", "identical", "drifted",
+          "absent", "pinned_by", "note")
 # Which optional fields each verdict may carry. A field a verdict does not
 # use is refused rather than ignored: an ignored field is a claim nobody reads.
 ALLOWED = {
-    "CARRIED": {"identical", "drifted"},
+    "CARRIED": {"carried_at", "identical", "drifted"},
     "REWORKED": {"pinned_by"},
     "STRANDED": {"absent"},
 }
@@ -92,6 +107,7 @@ class Entry(NamedTuple):
     num: str
     merge: str
     verdict: str
+    carried_at: str
     added: tuple[str, ...]
     identical: tuple[str, ...]
     drifted: dict[str, tuple[str, ...]]
@@ -169,19 +185,26 @@ def parse_entry(num: str, raw) -> tuple[Entry | None, list[str]]:
     if not isinstance(note, str) or len(note) < 40:
         errors.append("`note` must say, in prose, what was measured")
         note = note if isinstance(note, str) else ""
+    carried_at = raw.get("carried_at", "")
+    if verdict == "CARRIED" and (not isinstance(carried_at, str)
+                                 or not _SHA.match(carried_at)):
+        errors.append("a CARRIED entry needs `carried_at`, the full sha of "
+                      "the commit that brought the work in")
+        carried_at = ""
     if "added" not in raw:
         errors.append("`added` is required, even when empty: the inventory is "
                       "checked for every verdict")
     entry = Entry(
         num=num, merge=merge, verdict=verdict or "", note=note,
+        carried_at=carried_at if isinstance(carried_at, str) else "",
         added=_str_list(raw.get("added"), "`added`", errors),
         identical=_str_list(raw.get("identical"), "`identical`", errors),
         drifted=_drifted_field(raw.get("drifted"), "`drifted`", errors),
         absent=_str_list(raw.get("absent"), "`absent`", errors),
         pinned_by=_str_list(raw.get("pinned_by"), "`pinned_by`", errors))
     if verdict in ALLOWED:
-        stray = sorted(f for f in ("identical", "drifted", "absent",
-                                   "pinned_by")
+        stray = sorted(f for f in ("carried_at", "identical", "drifted",
+                                   "absent", "pinned_by")
                        if f in raw and f not in ALLOWED[verdict])
         if stray:
             errors.append(f"a {verdict} entry does not carry {stray}")
@@ -212,6 +235,11 @@ def merge_changes(root: Path, merge: str) -> dict[str, str]:
 def blob_at(root: Path, commit: str, path: str) -> bytes | None:
     proc = _git(root, "cat-file", "blob", f"{commit}:{path}")
     return proc.stdout if proc.returncode == 0 else None
+
+
+def is_ancestor(root: Path, older: str, newer: str) -> bool:
+    return _git(root, "merge-base", "--is-ancestor", older,
+                newer).returncode == 0
 
 
 def on_disk(root: Path, path: str) -> bytes | None:
@@ -375,13 +403,15 @@ def _identical(e: Entry, root: Path, changes: dict[str, str]) -> list[str]:
             out.append(f"`identical` names {p}, which this merge did not "
                        f"touch, so there is no merge copy to compare")
             continue
-        mine = on_disk(root, p)
-        if mine is None:
-            out.append(f"CARRIED claims {p}, and it is ABSENT from the tree")
-        elif mine != blob_at(root, e.merge, p):
-            out.append(f"{p} has DRIFTED from {e.merge[:12]}'s copy and the "
-                       f"entry does not say so. Move it to `drifted` with the "
-                       f"merge's own tests that still pin it")
+        then = blob_at(root, e.carried_at, p)
+        if then is None:
+            out.append(f"CARRIED claims {p}, and it is ABSENT at carried_at "
+                       f"{e.carried_at[:12]}")
+        elif then != blob_at(root, e.merge, p):
+            out.append(f"{p} at carried_at {e.carried_at[:12]} DIFFERS from "
+                       f"{e.merge[:12]}'s copy and the entry does not say so. "
+                       f"Move it to `drifted` with the merge's own tests that "
+                       f"still pin it")
     return out
 
 
@@ -396,9 +426,10 @@ def _pin_origin(e: Entry, root: Path, changes: dict[str, str],
     if merged is None:
         return f"pins {pin}, and {file} is not in {e.merge[:12]}"
     if not parts:
-        if on_disk(root, file) != merged:
-            return (f"pins the whole of {file}, which has drifted from the "
-                    f"merge's copy. Name the merge's tests one by one")
+        if blob_at(root, e.carried_at, file) != merged:
+            return (f"pins the whole of {file}, which was not the merge's "
+                    f"copy at carried_at {e.carried_at[:12]}. Name the "
+                    f"merge's tests one by one")
         return None
     if not defined_in(merged, parts):
         return (f"pins {pin}, which does not exist in {e.merge[:12]}'s copy "
@@ -410,14 +441,16 @@ def _drifted(e: Entry, root: Path, changes: dict[str, str],
              pins: PinResults) -> list[str]:
     out = []
     for p, ids in e.drifted.items():
-        mine = on_disk(root, p)
+        then = blob_at(root, e.carried_at, p)
         if p not in changes:
             out.append(f"`drifted` names {p}, which this merge did not touch")
-        elif mine is None:
-            out.append(f"`drifted` names {p}, and it is ABSENT from the tree. "
-                       f"A drift is a change, not a removal")
-        elif mine == blob_at(root, e.merge, p):
-            out.append(f"`drifted` names {p}, which is byte-IDENTICAL to "
+        elif then is None:
+            out.append(f"`drifted` names {p}, and it is ABSENT at carried_at "
+                       f"{e.carried_at[:12]}. A drift is a change, not a "
+                       f"removal")
+        elif then == blob_at(root, e.merge, p):
+            out.append(f"`drifted` names {p}, which at carried_at "
+                       f"{e.carried_at[:12]} is byte-IDENTICAL to "
                        f"{e.merge[:12]}'s copy. Record it as `identical`")
         for pin in ids:
             why = _pin_origin(e, root, changes, pin) or (
@@ -470,6 +503,20 @@ def check_prose(e: Entry, changes: dict[str, str]) -> list[str]:
     return out
 
 
+def _carried_at(e: Entry, root: Path) -> list[str]:
+    """The carrying commit has to be real history of the tree under test,
+    and must not simply contain the stranded merge itself."""
+    if not e.carried_at:
+        return []
+    if not is_ancestor(root, e.carried_at, "HEAD"):
+        return [f"carried_at {e.carried_at[:12]} is not an ancestor of the "
+                f"tree under test, so nothing was carried by it"]
+    if is_ancestor(root, e.merge, e.carried_at):
+        return [f"carried_at {e.carried_at[:12]} contains the merge "
+                f"{e.merge[:12]} itself, so comparing the two proves nothing"]
+    return []
+
+
 def _stranded(e: Entry, root: Path) -> list[str]:
     out = []
     if set(e.absent) != set(e.added):
@@ -483,21 +530,37 @@ def _stranded(e: Entry, root: Path) -> list[str]:
     return out
 
 
+def _check_carried(e: Entry, root: Path, changes: dict[str, str],
+                   pins: PinResults) -> tuple[list[str], str]:
+    ancestry = _carried_at(e, root)
+    if ancestry:
+        # a comparison at a commit that is not history of this tree would
+        # measure something, and it would not be this claim
+        return ancestry, ""
+    problems = (_identical(e, root, changes)
+                + _drifted(e, root, changes, pins) + _coverage(e))
+    drift_pins = tuple(dict.fromkeys(
+        p for ids in e.drifted.values() for p in ids))
+    what = (f"{len(e.added)} added file(s) accounted for; at carried_at "
+            f"{e.carried_at[:12]}, {len(e.identical)} byte-identical to "
+            f"{e.merge[:12]}")
+    if e.drifted:
+        what += (f", {len(e.drifted)} carried modified and pinned by "
+                 f"{pins.summary(drift_pins)}")
+    gone = [p for p in (*e.identical, *e.drifted) if on_disk(root, p) is None]
+    if gone:
+        what += (f". Since REMOVED from the tree (reported, not failed): "
+                 f"{', '.join(gone)}")
+    return problems, what
+
+
 def check_entry(e: Entry, root: Path, changes: dict[str, str],
                 pins: PinResults) -> tuple[list[str], str, bool]:
     """(problems, what was checked, whether the verdict itself was checked)."""
     problems = check_inventory(e, changes) + check_prose(e, changes)
     if e.verdict == "CARRIED":
-        problems += (_identical(e, root, changes)
-                     + _drifted(e, root, changes, pins) + _coverage(e))
-        drift_pins = tuple(dict.fromkeys(
-            p for ids in e.drifted.values() for p in ids))
-        what = (f"{len(e.added)} added file(s) accounted for; "
-                f"{len(e.identical)} byte-identical to {e.merge[:12]}")
-        if e.drifted:
-            what += (f", {len(e.drifted)} drifted and pinned by "
-                     f"{pins.summary(drift_pins)}")
-        return problems, what, True
+        more, what = _check_carried(e, root, changes, pins)
+        return problems + more, what, True
     if e.verdict == "STRANDED":
         problems += _stranded(e, root)
         return (problems, f"{len(e.absent)} added file(s) absent",
@@ -523,10 +586,11 @@ def audit(raw_entries: dict, root: Path, resolve: Callable[[str], bool],
             parsed.append(entry)
     ready: list[tuple[Entry, dict[str, str]]] = []
     for e in parsed:
-        if not resolve(e.merge):
+        missing = [c for c in (e.merge, e.carried_at) if c and not resolve(c)]
+        if missing:
             report.unresolved.append(
-                f"#{e.num}: merge commit {e.merge[:12]} could not be "
-                f"resolved, so its witness was NOT checked")
+                f"#{e.num}: {', '.join(c[:12] for c in missing)} could not "
+                f"be resolved, so its witness was NOT checked")
             continue
         try:
             ready.append((e, merge_changes(root, e.merge)))
