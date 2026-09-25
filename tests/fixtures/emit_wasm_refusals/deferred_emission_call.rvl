@@ -1,0 +1,29 @@
+// A call to a `deferred` emission. The frontend admits it. The wasm reference
+// REFUSES it by name: a deferred emission needs a session-owner runtime (the
+// deferral queue and the commit verb) and this tier has none. The refusal is
+// call-site keyed, so the `provide` block below has to actually emit it.
+//
+// This is not a byte-agreement case, so it cannot live in the tier's CORPUS.
+// The line-coverage gate drives the reference over it here, which is the only
+// way the RevlError-to-EmitError translation in
+//
+//   backends/wasm/emit.py::_refuse_deferred_emissions
+//
+// ever runs (issue #1431). The same wrapper's ModuleNotFoundError bootstrap is
+// NOT reached by this or any document: it runs only when emit.py is executed
+// as a script with revl not importable.
+//
+// The extern carries a body for every tier that has one. This tier carries no
+// externs at all, so without `deferred` the call would still be refused, as
+// not portable; the deferred refusal runs first and is the one reached here.
+//
+// selfhost/emit_wasm.rvl has no counterpart to this refusal: it does not read
+// the `deferred` modifier.
+extern emission deferred fn deliver(sink: Str, msg: Str)
+  = @py { return } = @ts { return; } = @rs { () } = @go { return } = @java { return; }
+service Ops { emission fn enqueue(sink: Str, msg: Str) }
+component Agent provides ops: Ops {
+  provide ops {
+    fn enqueue(sink, msg) { emit deliver(sink, msg) }
+  }
+}

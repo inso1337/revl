@@ -49,20 +49,20 @@
   ],
   "_budget": {
     "reference": {
-      "go": 3352,
-      "java": 993,
+      "go": 3348,
+      "java": 986,
       "py": 663,
-      "rust": 1199,
-      "ts": 541,
-      "wasm": 1562
+      "rust": 1195,
+      "ts": 537,
+      "wasm": 1558
     },
     "selfhost": {
-      "go": 104,
-      "java": 179,
+      "go": 91,
+      "java": 175,
       "py": 104,
       "rust": 286,
       "ts": 97,
-      "wasm": 65
+      "wasm": 63
     }
   },
   "reference": {
@@ -219,11 +219,9 @@
         "Remaining paths handle null/None, an already-discriminated Bool fallback, or reject an unsupported literal value; ordinary Bool, numeric and string literals are covered.": {
           "_go_v3_lit": 3
         },
-        "Remaining paths install src/ for standalone CLI imports or translate an ownerless/session-commit emission error. In-process successful module emission has imports available and no invalid runtime emission.": {
-          "_refuse_deferred_emissions": 10
-        },
-        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
-          "_refuse_validated_emissions": 10
+        "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/go/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_go_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper.": {
+          "_refuse_deferred_emissions": 8,
+          "_refuse_validated_emissions": 8
         },
         "Remaining raise rejects NaN/infinity literal IR; source numeric literals in successful frontend documents are finite.": {
           "_finite_float": 1
@@ -340,7 +338,7 @@
           "_v3_host_constructor": 13
         }
       },
-      "uncovered_statements": 3194
+      "uncovered_statements": 3190
     },
     "java": {
       "statements": 2793,
@@ -423,8 +421,8 @@
         "backends/java/emit.py::_dedup_colour_erased_poly_externs._rewrite: Recursive callee-name rewriting runs only after an erased polymorphic extern collision is found; extern emission is explicitly deferred.": {
           "_dedup_colour_erased_poly_externs._rewrite": 6
         },
-        "backends/java/emit.py::_dedup_colour_erased_poly_externs: Grouping duplicate monomorphised externs by erased Java signature and choosing/replacing canonical names requires extern declarations, explicitly deferred.": {
-          "_dedup_colour_erased_poly_externs": 14
+        "backends/java/emit.py::_dedup_colour_erased_poly_externs: the per-extern scan runs now, over the extern in tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), because `emit` calls it before the tier refusals. The 11 statements left collapse a `_revl_sync` clone into its async twin and rewrite its call sites, which needs a caller-decided-colour extern instantiated in both colours. No java corpus document declares one: java corpus externs are explicitly deferred.": {
+          "_dedup_colour_erased_poly_externs": 11
         },
         "backends/java/emit.py::_emit_checked_div_helpers: The returned checked-division helper text is demanded by Int checked division, whose Result-valued operation/runtime is explicitly deferred. Float division is covered and does not demand this helper.": {
           "_emit_checked_div_helpers": 1
@@ -585,11 +583,9 @@
         "backends/java/emit.py::_pin_value_map_locals: Writer-based type inference for unannotated VALUE Map.empty locals is explicitly deferred; it is not the covered host Map.new inference.": {
           "_pin_value_map_locals": 2
         },
-        "backends/java/emit.py::_refuse_deferred_emissions: Residual standalone-import bootstrap is not taken in installed-package tests; residual policy-error handling raises on deferred emissions. Neither yields successful API bytes.": {
-          "_refuse_deferred_emissions": 10
-        },
-        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
-          "_refuse_validated_emissions": 10
+        "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/java/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_java_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper.": {
+          "_refuse_deferred_emissions": 8,
+          "_refuse_validated_emissions": 8
         },
         "backends/java/emit.py::_refuse_fault_tests: The remaining fault-test branches raise before output; fault injection/refusal parity is outside the explicitly deferred in-file test slice.": {
           "_refuse_fault_tests": 2
@@ -685,7 +681,7 @@
           "emit": 2
         }
       },
-      "uncovered_statements": 983
+      "uncovered_statements": 976
     },
     "py": {
       "statements": 2563,
@@ -928,13 +924,13 @@
           "_revl_teardown_preamble": 1,
           "_uses_float_interp.walk": 5
         },
-        "Explicit invalid/deferred-input guards: accepted frontend IR contains no unresolved holes or ownerless deferred approvals; these walkers and refusal branches make such direct or stale IR fail loudly instead of generating Rust.": {
-          "_refuse_deferred_emissions": 10,
+        "Explicit invalid-input guards: accepted frontend IR contains no unresolved holes; `_refuse_holes` and its walker make such direct or stale IR fail loudly instead of generating Rust. `_refuse_deferred_emissions` used to be recorded here and is now recorded beside `_refuse_validated_emissions`, with the reason both carry (issue #1431).": {
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1
         },
-        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
-          "_refuse_validated_emissions": 10
+        "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/rust/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_rust_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper.": {
+          "_refuse_deferred_emissions": 8,
+          "_refuse_validated_emissions": 8
         },
         "Extern-only boundary: these statements build extern config bindings, reject missing @rs bodies, and emit color-erased extern declarations. The corpus covers ordinary native Rust extern bodies but not runtime config scaffolding or invalid declarations.": {
           "_emit_v3_externs": 11,
@@ -1087,7 +1083,7 @@
           "_stream_host_rust": 6
         }
       },
-      "uncovered_statements": 1190
+      "uncovered_statements": 1186
     },
     "ts": {
       "statements": 2208,
@@ -1111,15 +1107,15 @@
           "_v3_emission_call_node": 3,
           "_v3_match_expr": 1
         },
-        "Explicit refusal adapters: `_refuse_deferred_emissions` loads native session-commit validation and translates its RevlError; `_refuse_fault_tests` names and rejects fault tests; `_refuse_holes` walks, formats/truncates locations and rejects unresolved holes; `_refuse_missing_host_root` rejects host calls without a declared root. These inputs cannot produce positive oracle bytes": {
-          "_refuse_deferred_emissions": 10,
+        "Explicit refusal adapters: `_refuse_fault_tests` names and rejects fault tests; `_refuse_holes` walks, formats/truncates locations and rejects unresolved holes; `_refuse_missing_host_root` rejects host calls without a declared root. These inputs cannot produce positive oracle bytes": {
           "_refuse_fault_tests": 2,
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1,
           "_refuse_missing_host_root": 1
         },
-        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
-          "_refuse_validated_emissions": 10
+        "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/typescript/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper.": {
+          "_refuse_deferred_emissions": 8,
+          "_refuse_validated_emissions": 8
         },
         "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
           "_expr": 43,
@@ -1224,7 +1220,7 @@
           "_emit_v1": 7
         }
       },
-      "uncovered_statements": 522
+      "uncovered_statements": 518
     },
     "wasm": {
       "statements": 2887,
@@ -1267,11 +1263,9 @@
         "Remaining assembly paths detect in-file test name collisions, emit tests/externs/missing-body comments, and append demanded interpolation/indexOf/split/join helpers. Each is an explicit scaffold deferral, not absent ordinary pure-function emission.": {
           "_V3Emitter.emit": 12
         },
-        "Remaining branches add src/ for standalone imports or translate invalid ownerless/session-commit emissions to EmitError. In-process successful pure documents take neither exceptional path.": {
-          "_refuse_deferred_emissions": 10
-        },
-        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
-          "_refuse_validated_emissions": 10
+        "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/wasm/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper.": {
+          "_refuse_deferred_emissions": 8,
+          "_refuse_validated_emissions": 8
         },
         "Remaining branches are checked division, indexOf/split/join helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families. Item 458 adds four: the `Int.MIN / -1` arm of checked division, which answers Err(\"revl: Int overflow\") as a value where `i64.div_s` used to trap. Same deferred family as the rest of the arm; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py.": {
           "_V3Emitter._builtin_expr": 50,
@@ -1463,7 +1457,7 @@
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1552
+      "uncovered_statements": 1548
     }
   },
   "selfhost": {
@@ -1554,14 +1548,13 @@
         "Remaining recursive arm recognizes stdlib .concat accumulator chains; Go's ordinary builtin/stdlib scaffold remains explicitly deferred, whereas + chains are exercised.": {
           "concat_pieces": 8
         },
-        "Item 130 / issue #81: the loop that names each `components` entry this pure typed-core port does not carry, and the `carries_pure_declarations` guard that suppresses it exactly where naming it would break a byte agreement the reference itself produces. No emit_go_corpus document declares a component, and one that did could not close this: a components-only document is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED rather than cover these lines, and a document that also carries pure declarations reaches only the suppressing arm, where the reference routes past its own components too. Both arms are pinned instead by tests/test_selfhost_emit_go.py: test_a_components_only_document_names_every_component over stream_130.rvl, and test_an_incidental_component_on_the_pure_path_is_not_marked for the suppressing arm. Issue #1321 adds `component_is_observable` and `any_component_is_observable`, the port's mirror of the reference routing predicate: the suppressing arm now also requires that no component be OBSERVABLE, because where the reference CARRIES the component there is no byte agreement left for a marker to cost. They are uncovered for the same reason as the two above and pinned by the same file's test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_an_incidental_component_on_the_pure_path_is_not_marked.": {
-          "any_component_is_observable": 4,
-          "carries_pure_declarations": 5,
-          "component_is_observable": 1,
-          "uncarried_components": 7
+        "Item 130 / issue #81 / issue #1321: the marker the port emits for each `components` entry this pure typed-core port does not carry, and the guard that suppresses it. The naming arm is REACHED now, by both documents in tests/fixtures/emit_go_refusals/ (issue #1431): the reference refuses each by name and the port answers its component with `<<UNSUPPORTED-COMPONENT:Agent>>`. So `component_is_observable` is fully covered and the rest dropped 17 -> 4. Still unreached: the suppressing arm (`uncarried_components` returning no markers, and `any_component_is_observable` returning False) and the `functions` and `types` arms of `carries_pure_declarations`, which need a document holding a component beside pure functions or types. No emit_go_corpus document declares a component: a components-only one is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED. The suppressing arm is pinned instead by tests/test_selfhost_emit_go.py::test_an_incidental_component_on_the_pure_path_is_not_marked, and the naming arms by test_a_components_only_document_names_every_component and test_an_observable_component_on_the_pure_path_is_named_by_the_port.": {
+          "any_component_is_observable": 1,
+          "carries_pure_declarations": 2,
+          "uncarried_components": 1
         }
       },
-      "uncovered_statements": 99
+      "uncovered_statements": 86
     },
     "java": {
       "statements": 2209,
@@ -1593,9 +1586,6 @@
         },
         "selfhost/emit_java.rvl::covers_variant: Residual false returns require unknown variant, malformed case list or a missing case. The typed frontend supplies declared variants and rejects nonexhaustive matches (lower.py:1880).": {
           "covers_variant": 3
-        },
-        "selfhost/emit_java.rvl::emit_component: Residual <<DEFER-component-nonsimple>> is the gate's rejection marker for setup, nonhost binds, unsupported methods and routers/spawn. Those predate this triage; strict boundary tests assert representative markers.": {
-          "emit_component": 1
         },
         "selfhost/emit_java.rvl::emit_component_stmts: Setup emission is unreachable after the no-setup admission check. The remaining flat compensation branch is also unreachable: any compensate expression makes component_needs_frame true, selecting the frame branch.": {
           "emit_component_stmts": 4
@@ -1678,14 +1668,11 @@
         "selfhost/emit_java.rvl::method_body_lines: Only flat fx.track compensation remains. A provided-method compensation makes component_needs_frame true, so admitted emission necessarily selects the frame compensation branch.": {
           "method_body_lines": 1
         },
-        "selfhost/emit_java.rvl::method_simple_ok: Residual false returns reject multistep or nonreturn legacy methods, the documented simple-method admission boundary; valid bare void returns are now accepted and covered.": {
-          "method_simple_ok": 2
+        "selfhost/emit_java.rvl::method_simple_ok: the residual `return false` rejects a multi-step legacy method, the documented simple-method admission boundary. The single-step non-return arm is reached by tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), whose provide method is one `emit` step; valid bare void returns are accepted and covered.": {
+          "method_simple_ok": 1
         },
         "selfhost/emit_java.rvl::modern_supported: Only the false return remains, propagating body_step_supported's existing rejection of setup, nonhost binds and unsupported methods/steps.": {
           "modern_supported": 1
-        },
-        "selfhost/emit_java.rvl::needs_modern_subset: Residual final false corresponds to nonsimple legacy effect/bind components with no modern feature. This legacy path is explicitly deferred; modern configs/requirements/realms are covered.": {
-          "needs_modern_subset": 1
         },
         "selfhost/emit_java.rvl::newline: The emitted Python definition has zero Name-call sites; the newline constant is inlined into every production caller. Its retained wrapper is unreachable from emit_src.": {
           "newline": 1
@@ -1757,11 +1744,11 @@
         "selfhost/emit_java.rvl::v3_stmt: Only unsupported-step output remains; local destructuring is explicitly deferred and unknown IR steps are invalid. Supported pure-function control flow is covered.": {
           "v3_stmt": 1
         },
-        "selfhost/emit_java.rvl::witnessed_names: Remaining class=witnessed filtering and name insertion require extern declarations, explicitly deferred and reproduced by method_witnessed.rvl.": {
-          "witnessed_names": 2
+        "selfhost/emit_java.rvl::witnessed_names: the remaining statement inserts the name of a `witnessed`-class extern. The class filter runs now, over the extern in tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), which is `emission`-class. Java corpus externs are explicitly deferred; the insertion is reproduced by method_witnessed.rvl.": {
+          "witnessed_names": 1
         }
       },
-      "uncovered_statements": 179
+      "uncovered_statements": 175
     },
     "py": {
       "statements": 2105,
@@ -2111,9 +2098,6 @@
           "printable": 1,
           "wty": 3
         },
-        "Item 130 §4.6 / issue #81: the loop that names each `components` entry this module-only port does not carry. No emit_wasm_corpus document declares a component, and one that did could not join that corpus: the reference answers a component document with a SEPARATE module per component in its `{module: wat}` map, or refuses the document by name (a stream component is refused on this tier because a subscription suspends a fiber and this tier awaits only `Job.run(name)`), and neither is byte-comparable against the functions module this port emits. Pinned instead by tests/test_selfhost_emit_wasm.py: test_a_stream_document_the_reference_refuses_is_refused_by_name_here_too over backends/go/testdata/stream_130.rvl, and test_the_component_marker_is_text_only_the_port_emits.": {
-          "uncarried_components": 1
-        },
         "Only non-generic and unrecognized-generic negative layout lookups remain. Valid tagged declarations resolve their layouts; bare Some covers the empty-expected-type return.": {
           "tagged_layout": 2
         },
@@ -2157,7 +2141,7 @@
           "const_numeral": 3
         },
         "Remaining literal-pool loop visits in-file tests, whose harness emission is explicitly deferred by the oracle.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
-          "emit_wasm_src": 3
+          "emit_wasm_src": 2
         },
         "Remaining marker defers ?? tagged payload reads; constructing Opt values does not implement coalescing.": {
           "render_bin": 1
@@ -2190,7 +2174,7 @@
           "rstrip": 1
         }
       },
-      "uncovered_statements": 65
+      "uncovered_statements": 63
     }
   }
 }
