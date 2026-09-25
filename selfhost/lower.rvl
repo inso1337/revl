@@ -3370,13 +3370,84 @@ fn note_host_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
            ecaps: a.ecaps, areach: a.areach, aops: a.aops, avals: a.avals }
 }
 
+// ---- an `emit` through a spawn handle (issue #1261) ------------------------
+//
+// The same third arm at the other head shape. A spawn-handle provision call
+// (`emit w.<key>.<op>(…)`) is not a required-key crossing: the handle's
+// component is a separate activation, so from this method's side the crossing
+// has no key to name, and the reference notes `a host emission` for it too.
+// It also notes the unnameable capability `*`, because the step reaches no
+// emitting NAME it could have named instead (`_method_emissions`'s
+// `if not reached & env.emitting_fns`). A bare-name head does reach one, which
+// is why `note_host_emission` above contributes no capability.
+//
+// `handle_emit` recorded nothing at all, so a provide method whose only
+// crossing went through a handle carried an EMPTY reach and the G4 provider
+// bound had nothing to weigh. Two consequences, in order of weight:
+//
+//   * `Sup.run` declared `emission[net]`, spawning a `Worker` whose provision
+//     op is declared `emission[net]`, with `emit w.task.go()` in the body: the
+//     reference refuses it (the crossing is unnameable and no `emission[…]`
+//     list names `*`) and this gate raised no objection;
+//   * where the spawn-emission bound refused the same program on its own, the
+//     two engines rendered different text — the reference the body's own
+//     crossing, this gate the spawn statement's:
+//       reference:  … emits through an unnameable host boundary
+//                     (reaching `a host emission`)
+//       this gate:  … but it spawns `Worker`, which emits through `net`
+//
+// The gate's wording is not a nicer rendering of the same verdict, which is
+// why the port goes this way round rather than onto the reference: it is the
+// WEAKER one. It resolves the crossing through the spawn graph to the child's
+// own capability, and that resolution is what leaves the first program above
+// with nothing to object to. Adopting the wording would mean adopting the rule
+// that produced it. The spawn-emission bound arm is untouched and still renders
+// its own message where the body has no handle emit.
+//
+// The unit is the STEP, as it is for every other arm: `let r = emit
+// w.task.go()` binds an emit-marked VALUE, which the reference lowers through
+// its expression path rather than into an `emit` step, so it notes nothing —
+// hence the same `bind` guard `note_host_emission` carries.
+fn handle_head_ref(e: Expr, cx: Ctx) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        // `h.<key>.<op>(…)` — the direct spelling.
+        Field(inner) => match inner.target {
+          Var(h) => cx.handles.has(h),
+          _      => false,
+        },
+        // a local that ALIASES a provision (`let t = w.task`), which
+        // `alias_call` resolves to the same crossing.
+        Var(v) => cx.provAlias.has(v),
+        _      => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn note_handle_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
+  if (s.kind != "emit" || s.bind != "") { return a }
+  if (!handle_head_ref(s.e, cx)) { return a }
+  // `union_into`, not `push`: `note` dedups on its `seen` set, so a body with
+  // two handle emissions carries the label once.
+  return { msg: a.msg, tag: a.tag,
+           labels: union_into(a.labels, ["a host emission"]),
+           ecaps: union_into(a.ecaps, ["*"]),
+           areach: a.areach, aops: a.aops, avals: a.avals }
+}
+
 fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   let marked = s.kind == "emit" || s.kind == "compensate"
   let scx = ctx_acq(cx, stmt_acq_where(s.kind))
   // noted BEFORE the statement's own expression is walked: the reference sees
   // the step node before it collects that step's emitting calls, so the label
   // sits ahead of `pg_write()` and behind any earlier statement's evidence.
-  let na = note_host_emission(s, cx, a)
+  // The two head shapes are disjoint (a bare name, a handle provision path),
+  // so the pair notes the one label at most once either way.
+  let na = note_handle_emission(s, cx, note_host_emission(s, cx, a))
   let root = acq_root_of(s)
   if (root.hit) { return walk_exprs(root.args, 0, marked, scx, na) }
   // an `emit` step's marker covers its head call alone (issue #1175); a
@@ -3449,6 +3520,121 @@ fn nested_emit_msg() -> Str {
 fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
   return walk_stmts(ss, i + 1, cx, walk_one_stmt(ss[i], cx, a))
+}
+
+// ---- one statement's evidence, in the reference's order (issue #1261) ------
+//
+// `_method_emissions` (emission_analysis.py) notes a statement's evidence at
+// the STATEMENT NODE, not where a walk happens to reach it. Its `walk` runs
+// over the body LIST, so each statement dict is visited as a whole before any
+// recursion into it, and at that visit it notes, in this order:
+//
+//   1. the step's own crossing — `<key>.<op>` for a required-key `emit`, and
+//      the `a host emission` label for one that leaves the composition;
+//   2. `for name in sorted(calls & env.emitting_fns)` — every emitting NAME
+//      called ANYWHERE in the statement, SORTED, because `_calls_in(node, …)`
+//      collects the whole subtree at that one node;
+//   3. the same, sorted, for the names the statement passes as VALUES;
+//   4. only then the sub-nodes, whose own labels `note`'s `seen` set dedups
+//      against the three above, so a `<key>.<op>` reached deeper inside the
+//      same statement lands AFTER the sorted names.
+//
+// The walk above reaches those names in SOURCE order instead, so the two
+// engines refused the same program, with the same tag and the same offending
+// tokens, in a different reach order:
+//
+//   emit pg_write(r) compensate pg_undo(r)
+//     reference:  … (reaching `a host emission`, `pg_undo()`, `pg_write()`)
+//     this gate:  … (reaching `a host emission`, `pg_write()`, `pg_undo()`)
+//
+//   let r = zulu(row) + alpha(row)
+//     reference:  … (reaching `alpha()`, `zulu()`)
+//     this gate:  … (reaching `zulu()`, `alpha()`)
+//
+// Same set, same tag, both refusing — the divergence is on the MESSAGE half of
+// item 391's oracle agreement, which is the half `test_rejected_programs_agree`
+// compares.
+//
+// The two label SHAPES are recognised by their spelling because that is what
+// the reference partitions by: `note` is handed `f"{name}()"` at step 2 and
+// `f"{name} (passed as a function value)"` at step 3, and nothing else the
+// accumulator carries ends either way — a required-key crossing is
+// `<key>.<op>` and the host label is a sentence.
+fn is_fn_label(l: Str) -> Bool { return l.endsWith("()") }
+
+fn is_value_label(l: Str) -> Bool {
+  return l.endsWith(" (passed as a function value)")
+}
+
+fn ac_labels(a: Ac, ls: List[Str]) -> Ac {
+  return { msg: a.msg, tag: a.tag, labels: ls, ecaps: a.ecaps,
+           areach: a.areach, aops: a.aops, avals: a.avals }
+}
+
+// `grown`'s labels reordered into the reference's order. Everything up to
+// `before.length()` is an EARLIER statement's evidence and never moves; the
+// labels this statement added are repartitioned into (step, sorted names,
+// sorted values, the rest in walk order).
+//
+// `step` says the group began with an `emit`, whose own crossing the reference
+// notes ahead of the sorted names. It holds the FIRST new label back only when
+// that label is the step's own shape — neither a name nor a value — so an
+// `emit` whose head is itself an emitting name (`emit pg_write(row)`, whose
+// first new label is `pg_write()`) sorts from the front like any other.
+fn order_stmt_labels(before: List[Str], grown: List[Str],
+                     step: Bool) -> List[Str] {
+  var out = before
+  var fns: List[Str] = []
+  var vals: List[Str] = []
+  var rest: List[Str] = []
+  var i = before.length()
+  if (step && i < grown.length() && !is_fn_label(grown[i])
+      && !is_value_label(grown[i])) {
+    out = out.push(grown[i])
+    i += 1
+  }
+  while (i < grown.length()) {
+    let l = grown[i]
+    if (is_fn_label(l)) { fns = fns.push(l) }
+    else {
+      if (is_value_label(l)) { vals = vals.push(l) } else { rest = rest.push(l) }
+    }
+    i += 1
+  }
+  // `union_into` and not a raw append only because it is the concatenation this
+  // file already has; the three lists are disjoint and already deduped, so it
+  // appends every element exactly once.
+  return union_into(union_into(union_into(out, sort_strs(fns)),
+                               sort_strs(vals)), rest)
+}
+
+// One statement GROUP's walk. A group is one statement, except that an `emit`
+// step and its `compensate` slot are one: parser.rvl reads the compensation as
+// its own `Stmt` (see the `emit` branch of `stmt_run_at`) where the reference
+// keeps it under the emit step's own dict, so `_method_emissions` sees ONE node
+// for both halves and sorts the names across the pair.
+fn walk_span(ss: List[Stmt], i: Int, j: Int, cx: Ctx, a: Ac) -> Ac {
+  if (i >= j || a.msg != "") { return a }
+  return walk_span(ss, i + 1, j, cx, walk_one_stmt(ss[i], cx, a))
+}
+
+fn group_end(ss: List[Stmt], i: Int) -> Int {
+  if (ss[i].kind == "emit" && i + 1 < ss.length()
+      && ss[i + 1].kind == "compensate") { return i + 2 }
+  return i + 1
+}
+
+// `walk_stmts` for a PROVIDE-METHOD body — the one place the reference runs
+// `_method_emissions`, and so the only walk whose labels are ordered this way.
+// A component activation body computes its reach elsewhere on the reference and
+// keeps the plain walk.
+fn walk_method_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
+  if (i >= ss.length() || a.msg != "") { return a }
+  let j = group_end(ss, i)
+  let b = walk_span(ss, i, j, cx, a)
+  if (b.msg != "") { return b }
+  return walk_method_stmts(ss, j, cx,
+    ac_labels(b, order_stmt_labels(a.labels, b.labels, ss[i].kind == "emit")))
 }
 
 fn walk_exprs(xs: List[Expr], i: Int, marked: Bool, cx: Ctx, a: Ac) -> Ac {
@@ -5824,7 +6010,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // no statement line is a post-body aggregate, which the reference reaches
       // only after the whole body is lowered, so the rebind precedes it.
       let rb = mth_rebind(pm, union_into(pm.params, compLocals), 0)
-      let a = walk_stmts(pm.body, 0, mcx, empty_ac())
+      let a = walk_method_stmts(pm.body, 0, mcx, empty_ac())
       if (a.msg != "") {
         let rl = refusal_line(pm.body, 0, mcx, empty_ac())
         if (rb.v != "" && (rl == 0 || rb.line < rl)) { return rb }
