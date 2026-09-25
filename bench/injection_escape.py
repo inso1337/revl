@@ -62,6 +62,7 @@ and that cell is `not-run` with the blocker named.
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 import re
 import sys
@@ -74,7 +75,15 @@ RESULTS = BENCH / "results"
 
 sys.path.insert(0, str(BENCH))
 
-import run as bench_run  # noqa: E402  (the runners and compile_check already exist)
+# Loaded by path rather than with `import run`. Five files in this tree are
+# named `run.py`, and whichever one reaches `sys.modules` under the bare name
+# first answers every later import of it in that process. Running this file as
+# a script always won the race and always got the right one, which is why the
+# collision stayed invisible until the whole test suite ran in one process.
+_spec = importlib.util.spec_from_file_location("bench_run", BENCH / "run.py")
+bench_run = importlib.util.module_from_spec(_spec)
+sys.modules["bench_run"] = bench_run
+_spec.loader.exec_module(bench_run)
 
 SCHEMA = "INJECTION-ESCAPE-1"
 
