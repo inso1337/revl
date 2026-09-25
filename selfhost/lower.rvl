@@ -4028,6 +4028,12 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
 
 // The same context marked as being inside an arrow value: only the `aops`
 // accumulation is suppressed downstream (`_reached_async_req_ops` prunes arrows).
+//
+// An arrow's body runs when the arrow is CALLED, not while an enclosing
+// `emit`'s arguments are evaluated, so the body leaves the argument list:
+// `emitPos` "args" becomes "", as the reference clears `env._in_emit_args` for
+// the body. A marked crossing written in an inline arrow argument is then the
+// same crossing it is when the arrow is bound by `let` and passed by name.
 fn ctx_under_arrow(cx: Ctx) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
@@ -4037,7 +4043,8 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+           acqWhere: cx.acqWhere,
+           emitPos: cx.emitPos == "args" ? "" : cx.emitPos }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -21342,6 +21349,20 @@ test "an emission extern in an emit head's arguments needs its own marker (G4)" 
   assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern pure fn twice(n: Int) -> Int = @py { return n * 2 } component C { emit log_line(twice(1)) }""") == ""
   assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { emit log_line(charge(n)) return 1 } } }""") == "G4|call to emission `charge` must be marked `emit` (G4)"
   assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }""") == ""
+}
+
+// An arrow's body is not in the enclosing `emit`'s argument list: it runs when
+// the arrow is called. The inline spelling and its two `let` twins are the same
+// crossings in the same order and all three admit; before `ctx_under_arrow`
+// cleared the position, the inline one was refused as a nested `emit`. An
+// unmarked crossing in the same arrow body is still refused, for its marker.
+test "an arrow in an emit head's arguments leaves the argument position (G4)" {
+  let pre = "service Ap { emission fn approve(t: Str, a: Str) -> Str } service Gt { emission fn decide(ok: Bool, v: Str) -> Str } service Rv { emission fn review(k: Str) -> Str } fn approve_args(k: Str, f: (Str, Str) -> Str) -> Str { return f(k, k) } component C requires ap: Ap, gt: Gt provides rv: Rv { provide rv { fn review(k) { "
+  assert admit_src(pre.concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))) } } }")) == ""
+  assert admit_src(pre.concat("let f = (t: Str, a: Str) => emit ap.approve(t, a)   return emit gt.decide(true, approve_args(k, f)) } } }")) == ""
+  assert admit_src(pre.concat("let v = approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))   return emit gt.decide(true, v) } } }")) == ""
+  assert admit_src(pre.concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => ap.approve(t, a))) } } }")) == "G4|call to emission `ap.approve` must be marked `emit` (G4)"
+  assert admit_src(pre.concat("return emit gt.decide(true, emit ap.approve(k, k)) } } }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
 }
 
 // ---- config-is-data (item 378, G4): byte-exact parity with the reference's
