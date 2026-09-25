@@ -265,6 +265,88 @@ the half that is landable.
 | `audit --policy` runs the approval gate | closed | it was already refused at session load; this removes a disagreement between two surfaces, in the direction of the stricter one |
 | a raise cannot move a residue verdict | closed | otherwise an authority class would silently become a state class, which is what item 546 refuses by name |
 | the unconfirmed steps are NAMED, not refused | open, deliberately | mandating the confirmation would refuse item 521's flagship program rather than gate it (section 3) |
+| the plan walk descends EVERYTHING but a registered inverse | closed | a list of statement kinds is how seven spellings of a crossing came to be dropped (section 5.1); a generic walk fails toward naming a crossing, and the two keys it skips are named with a reason |
+| BOTH arms of a branch are reported | closed | the plan cannot know which arm runs. Reporting the arm a given run skips over-states the plan by one crossing; reporting neither leaves an irreversible actuation with no verdict at all |
+
+### 5.1 The walk that dropped a crossing, and what replaced it
+
+`method_plan` collected a step for a crossing written three ways -- `emit e`,
+`let x = e`, and a bare expression statement -- and read only the TOP node of
+each one's expression. Seven other spellings of the same crossing therefore
+reached no plan at all:
+
+| position | example |
+| --- | --- |
+| `return` | `return emit click(t)` |
+| an `if`'s `then` arm | `if (c) { let x = emit click(t) }` |
+| an `if`'s `else` arm | `if (c) { ... } else { emit click(t) }` |
+| a `while` body | `while (c) { let x = emit click(t) }` |
+| a `for` body | `for (s of xs) { let x = emit click(t) }` |
+| an assignment | `n = emit click(t)` |
+| nested in a larger expression | `let x = emit click(t) + 0` |
+
+A step that is not in the plan is not reported as uncovered -- it gets no
+`residue` verdict, no `confirmation` state, no `postcondition` verdict, no row
+in the erase report's `[4]` section and no entry in
+`unconfirmedIrreversibleSteps`, which is the enumeration issue #1293's derived
+note is keyed by. The plan instead reports that the method made no such
+crossing, which is the fail-open direction in the one namespace whose point is
+that an irreversible actuation is never silently uncovered. Tail position is
+where an actuation most naturally lands, since a provide method that returns
+what it clicked has nothing left to bind.
+
+The repair is a generic walk over the statement, in evaluation order, rather
+than a longer list of statement kinds -- a list only defers the problem, since
+every step kind the language grows is a new way to hide a crossing until
+someone remembers to extend it. `emission_analysis._calls_in` already makes
+that call for the same reason; the plan's walk differs only in keeping ORDER
+and the approval edge, which a set cannot. The two keys it does not descend
+are the registered inverses, `compensate` and `undo`: both are entries on the
+teardown accumulator that run on unwind rather than in the forward order the
+plan reports, and whether a crossing has an inverse is already carried per
+step. Counting them would claim an actuation the program never makes.
+
+`tests/test_ui_rung_reaches_every_obligation.py` measures all eleven positions
+(the seven above, plus the two that always worked as controls, plus the
+compensated and both-arms readings). Nine of the eleven fail on the walk this
+replaces; the two controls pass on both, so a walk that reported nothing would
+fail the file rather than satisfy it.
+
+#### Why a dropped crossing read BETTER than the truth
+
+`aggregate` is the weakest state PRESENT in the step set, which is item 546's
+rule 3. A step that is absent from the fold is therefore not a gap in the
+answer, it is a step that cannot drag the answer down: a program whose only
+uncompensated actuation sat in one of the seven positions above aggregated to
+`restored`, or to `untouched`, and its claim carried no "may not be reported as
+cleanly reverted". That is the same shape as the over-reported read this module
+exists to fix, in the other direction, and it is why this is a semantic change
+and not a listing change.
+
+Measured over every program in the tree that gets a plan at all. No `.rvl`
+file in the tree declares a computer-use verb, so the population is the
+programs embedded in the six item-521/522 suites plus the compiled fences of
+`docs/design/532-typed-computer-use.md`: 115 distinct compositions compiled,
+21 with a plan. 13 plans move, and 10 of the 13 change their aggregate, all 10
+from a state that reads clean (`untouched` or `restored`) to `uncompensated`.
+The item-525 flagship demo does not move -- it has no crossing in any of the
+seven positions -- and its erase report is byte-identical.
+
+#### The one neighbouring fold, and why only this one had the hole
+
+`revl erase-report` folds a realm's computer-use crossings twice. Section
+`[1]`'s `boundaryCrossings.uiResidue`, the per-crossing `uiResidue` tag,
+`residueSteps` and that section's own `compensateOrder` all read
+`query.Composition`'s reachability facts, which do not know where in a body a
+crossing was written. None of them ever had this hole, and none of them moves.
+Section `[4]`'s plan is the one that reads a method body statement by
+statement, and its residue verdict, its confirmation state, its postcondition
+verdict, its `compensateOrder` and its `unconfirmedIrreversibleSteps` were all
+blind together, because all five are computed from the one walk. So the same
+report answered the same question about the same click two ways, and the
+weaker answer was the one a reader would take as the transaction's own
+verdict. `test_the_two_computer_use_folds_agree_about_a_tail_crossing` pins the
+agreement as an equality so the two folds cannot drift apart again.
 
 ## 6. No new guarantee code
 
@@ -345,6 +427,12 @@ does not fire on it and steps 1-8 and 10 are unaffected.
 - **The gate still depends on the operator writing a rule.** Section 3.2. What
   landed removes the surface disagreement and names the unconfirmed steps; it
   does not manufacture an authority nobody invoked.
+- **The plan does not follow a callee.** It reads one method body. A crossing
+  reached through a module `fn` that body calls is not a step in its plan --
+  unchanged by the walk repaired in section 5.1, which is a syntactic fix
+  inside one body. `emission_analysis` owns the transitive question and the
+  G4/G8 gates read it there; whether the transaction plan should read it too
+  was not decided here.
 - **`revl audit --policy` was the only surface changed.** Other callers of
   `policy.evaluate` were left alone deliberately, and whether any of them
   should also run the approval gate was not investigated here.

@@ -640,6 +640,20 @@
     },
     {
       "sites": [
+        "src/revl/session_commit.py::OWNERLESS_TIERS",
+        "src/revl/validated_boundary.py::UNVALIDATING_TIERS"
+      ],
+      "tokens": [
+        "go",
+        "java",
+        "rust",
+        "typescript",
+        "wasm"
+      ],
+      "note": "NOT one vocabulary: two independent capability gaps that agree today because python is the only tier that has closed either. `OWNERLESS_TIERS` is the tiers with no SESSION OWNER at commit time (item 245: a deferral queue, an escrow, a commit verb to flush or drop it). `UNVALIDATING_TIERS` is the tiers with no RESPONSE-VALIDATION seam (items 257/513: check the completion against the derived schema, build the declared value from the validated payload, raise a typed validation fault, honour the decoding grammar and the `retry` budget). Neither predicate implies the other, and the tree already holds the asymmetry: the typescript runtime carries `_jsonSchemaError`, a faithful mirror of the python `_json_schema_error` over the same derived subset, so it is one of five parts away from leaving `UNVALIDATING_TIERS` and has nothing at all towards a session owner; `--target temporal` is the reverse, durable machinery on the typescript tier that says nothing about validating a completion. Importing one from the other would make a tier that grew a deferral queue silently claim it validates completions. Resolve this entry by DELETING it when a sixth tier closes one gap and not the other, which is the first moment the two lists stop agreeing, not by merging them."
+    },
+    {
+      "sites": [
         "tools/bench_selfhost.py::_canon_reference_tokens",
         "tools/fuzz_frontend.py::_canonical_reference_tokens"
       ],

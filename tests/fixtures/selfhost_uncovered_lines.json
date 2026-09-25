@@ -22,8 +22,49 @@
     "corpus document reaches. A count that FALLS also fails, asking you to record",
     "the improvement -- that is what makes the number monotone instead of merely",
     "bounded. Regenerate with `python3 tools/selfhost_line_coverage.py --write`,",
-    "but only after reading what moved: the usual right fix is a corpus document."
+    "but only after reading what moved: the usual right fix is a corpus document.",
+    "",
+    "IT IS A RATCHET AND NOT AN INVENTORY, and the evidence is in the file's own",
+    "history: 21 of the 88 changes to it LOWERED the mass, the 2026-09-05 corpus",
+    "triage took 2234 statements out of it across five commits, and #1178 took",
+    "306 more out on 2026-09-20. Issue #1419 read it as rising monotonically;",
+    "that number was the per-function counts PLUS the `statements` totals, and",
+    "`statements` is how big the emitters are, not how much of them is unreached.",
+    "",
+    "`_budget` is what the ratchet was missing. Nothing bounded the mass, so",
+    "`--write` plus a written reason was a complete answer to the gate firing,",
+    "and across 2026-09-16..24 that is the answer that got given. `_budget` is",
+    "per half and tier, the gate holds the recorded mass to it EXACTLY, and",
+    "`--write` does not write it. So recording costs an integer raised BY HAND",
+    "in the same diff, and an improvement lowers the ceiling for good instead of",
+    "leaving headroom for the next unreached region to spend. Target: zero.",
+    "",
+    "A count here that can only ever be RECORDED is a bug in the gate, not a",
+    "fact about the code. That was true of every refusal a tier states by name:",
+    "a corpus document is one the reference EMITS, a refusal path runs only",
+    "where it does not, so no corpus document could reach either half of one.",
+    "tests/fixtures/emit_<tier>_refusals/ is where those documents live now, and",
+    "both halves are driven over them. See tools/selfhost_line_coverage.py",
+    "refusal_documents() (issue #1419)."
   ],
+  "_budget": {
+    "reference": {
+      "go": 3352,
+      "java": 993,
+      "py": 663,
+      "rust": 1199,
+      "ts": 541,
+      "wasm": 1562
+    },
+    "selfhost": {
+      "go": 104,
+      "java": 179,
+      "py": 104,
+      "rust": 286,
+      "ts": 97,
+      "wasm": 65
+    }
+  },
   "reference": {
     "go": {
       "statements": 4431,
@@ -180,6 +221,9 @@
         },
         "Remaining paths install src/ for standalone CLI imports or translate an ownerless/session-commit emission error. In-process successful module emission has imports available and no invalid runtime emission.": {
           "_refuse_deferred_emissions": 10
+        },
+        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
+          "_refuse_validated_emissions": 10
         },
         "Remaining raise rejects NaN/infinity literal IR; source numeric literals in successful frontend documents are finite.": {
           "_finite_float": 1
@@ -544,6 +588,9 @@
         "backends/java/emit.py::_refuse_deferred_emissions: Residual standalone-import bootstrap is not taken in installed-package tests; residual policy-error handling raises on deferred emissions. Neither yields successful API bytes.": {
           "_refuse_deferred_emissions": 10
         },
+        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
+          "_refuse_validated_emissions": 10
+        },
         "backends/java/emit.py::_refuse_fault_tests: The remaining fault-test branches raise before output; fault injection/refusal parity is outside the explicitly deferred in-file test slice.": {
           "_refuse_fault_tests": 2
         },
@@ -886,6 +933,9 @@
           "_refuse_holes": 4,
           "_refuse_holes.walk": 1
         },
+        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
+          "_refuse_validated_emissions": 10
+        },
         "Extern-only boundary: these statements build extern config bindings, reject missing @rs bodies, and emit color-erased extern declarations. The corpus covers ordinary native Rust extern bodies but not runtime config scaffolding or invalid declarations.": {
           "_emit_v3_externs": 11,
           "_rust_extern_config_bind": 9
@@ -966,9 +1016,8 @@
           "_main": 11,
           "cargo_toml": 1
         },
-        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
+        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. item 130's required-`Stream[T]` coeffect refusal (`_refuse_required_stream`) used to be recorded here on the same grounds, and is not any more: a corpus document cannot reach it, but a REFUSAL document can, and tests/fixtures/emit_rust_refusals/required_stream_coeffect.rvl does (issue #1419).": {
           "_is_stream_next": 1,
-          "_refuse_required_stream": 1,
           "_refuse_unlowered_stream_surface": 2,
           "_stream_chain": 1,
           "_stream_stage_arrow": 1
@@ -1069,6 +1118,9 @@
           "_refuse_holes.walk": 1,
           "_refuse_missing_host_root": 1
         },
+        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
+          "_refuse_validated_emissions": 10
+        },
         "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
           "_expr": 43,
           "_fn_call": 2,
@@ -1123,8 +1175,8 @@
           "<module>": 1,
           "_main": 17
         },
-        "Temporal backend delegation: `_emit_temporal` adjusts import paths, installs an `emit` proxy, imports `emit_temporal`, and delegates the document. Temporal IR is rejected from mixed v3 emission and is not implemented by the self-host TypeScript emitter": {
-          "_emit_temporal": 14
+        "Temporal backend delegation: `_emit_temporal` adjusts import paths, installs an `emit` proxy, imports `emit_temporal`, delegates the document, and then restores both process-global bindings (`sys.modules[\"emit\"]` and the backend directory on `sys.path`) that it borrowed. Temporal IR is rejected from mixed v3 emission and is not implemented by the self-host TypeScript emitter, so no byte-agreement document reaches any of this, the restoring half included. The restore is pinned instead by tests/test_emit_temporal_leaves_no_global_state.py": {
+          "_emit_temporal": 23
         },
         "Test-mode statement rendering only: `_v3_stmt`'s remaining structural/truthy assertion lines emit vitest `expect` calls when `test_mode=True`, plus the final unknown-step rejection. Runtime function assertions use the covered throwing form; in-file test harness generation is a separate declared boundary": {
           "_v3_stmt": 8
@@ -1217,6 +1269,9 @@
         },
         "Remaining branches add src/ for standalone imports or translate invalid ownerless/session-commit emissions to EmitError. In-process successful pure documents take neither exceptional path.": {
           "_refuse_deferred_emissions": 10
+        },
+        "Issue #1373 added `_refuse_validated_emissions` to this tier's reference emitter: the tier REFUSES a `validated` emission rather than dropping the modifier and both derived keys, which used to produce output byte-identical to the same crossing written without them. The 10 statements split 8 + 2, the same split issue #1431 measured on the identically shaped `_refuse_deferred_emissions`. The 8 are the `ModuleNotFoundError` standalone-import bootstrap, reachable only by running `python3 backends/<tier>/emit.py` as a script with `revl` not importable: that is an INVOCATION MODE, not an input, so no document of any kind can reach it and these 8 stay recorded permanently. The 2 are the RevlError-to-EmitError translation, which runs only on a refusal; PR #1430's `tests/fixtures/emit_<tier>_refusals/` drives the gate over documents a tier refuses by name and retires exactly those 2 per tier. This entry is the INTERIM form and should drop to 8 when that lands (issue #1431). The sibling `_refuse_deferred_emissions` adapter has the identical shape and the identical count of 10, recorded above. No corpus document declares a `validated` crossing (measured 2026-09-24: 0 of 1069 `.rvl` sources declare one, every occurrence of the word being a comment or a keyword table, and 0 of 54 `.ir.json` documents carry `response_schema` or `response_grammar`), and adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_tier_refusal_1373.py, which pairs every refusal with a control that still emits.": {
+          "_refuse_validated_emissions": 10
         },
         "Remaining branches are checked division, indexOf/split/join helper demand, Map operations rejected by this backend, and wrong/void receiver or unsupported-method refusals. Covered length/concat/push and arithmetic conversions must not be conflated with these precise deferred families. Item 458 adds four: the `Int.MIN / -1` arm of checked division, which answers Err(\"revl: Int overflow\") as a value where `i64.div_s` used to trap. Same deferred family as the rest of the arm; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py.": {
           "_V3Emitter._builtin_expr": 50,
@@ -1903,7 +1958,7 @@
           "render_builtin": 2,
           "render_call": 1,
           "render_component_call": 1,
-          "render_inner": 5,
+          "render_inner": 2,
           "render_interp": 2,
           "render_un": 2,
           "render_var": 2,
