@@ -45,7 +45,7 @@ to the diagnostic; see docs/why-traces.md.
 | G-SECRET | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) |
 | G-SECRET-FLOW | a Secret[T] value never reaches a disclosure sink (a log, a serialization, an LLM prompt, an MCP return, an unapproved realm or an undeclared receiver); it crosses only at a declared Secret[T] receiver and downgrades only at a declared endorse[confidential] | lower (taint flow) |
 | G-RETAIN | a Retained[T, P] value past P's retention deadline never reaches a persistence sink (a db/fs/store/kv/blob/archive/index/cache/queue/wal crossing), unless P declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) |
-| G-MODEL-PLACE | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration) |
+| G-MODEL-PLACE | a model role declared `off_device` never receives a confidentiality origin, an action reaches only the roles its `route model` block names, and a role reaches no capability the component routing through it holds | checker (declaration) |
 | G-COUNCIL-SPLIT | a model council never resolves disagreement toward allow: its aggregation is written down, is total over the DECLARED members, and names no value rather than admitting when the members disagree or one of them is silent | checker (declaration) |
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
@@ -716,6 +716,39 @@ The block is a permission checked at admission, not a runtime selection, so it
 writes no IR: an admitted program is byte-identical to the same program without
 it. Scheduling inside the boundary it draws is roadmap item 515, and the flow
 rule that refuses a confidential VALUE reaching an unrouted role is item 514.
+
+### The reach half (item 519)
+
+A role may also declare how far a call to it can itself reach:
+
+```revl
+model role local on_device reaches [model.complete]
+```
+
+A model is an authority surrogate: it picks which capability the component
+consulting it reaches for. So a component that routes an action through a role
+has an effective ceiling of what it HOLDS together with what the role REACHES,
+and a role reaching past its component is refused with both sets named:
+
+    `Classifier` routes `classify` (*) through model role `local`, which
+    reaches `shell.exec`, but `Classifier` holds only `model.complete` - a
+    component's effective ceiling is the pair's, so a model may not reach past
+    the component that consults it (G-MODEL-PLACE)
+
+The fold is `cap_order.covers`, the same one item 66 runs over a spawn edge, so
+a valuation is really compared: a role reaching bare `fs.write` under a
+component holding `fs.write(path="/tmp")` is refused, because a dropped
+parameter widens.
+
+Omitting the clause leaves the reach UNDECLARED, and undeclared is not empty.
+It resolves to the unnameable `*`, which no held set covers, so a component
+that consults a model it has said nothing about is refused rather than
+admitted. `reaches [*]` is the honest spelling of the unbounded role and is
+refused the same way; `reaches []` declares a role that reaches nothing and is
+admitted, with what it does not reach recorded as the attenuation. The question
+is only asked of a component that holds a boundary which could be a model call,
+because a role can only steer an action that reaches a boundary. See
+`docs/design/541-model-in-attenuation.md`.
 
 ## G-COUNCIL-SPLIT — a council never answers for members that disagreed
 
