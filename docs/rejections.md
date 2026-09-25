@@ -239,6 +239,30 @@ component C requires a: A, b: B provides relay: Relay {
 A plain (non-emission) call in argument position needs no marker and is
 admitted as before.
 
+An arrow written in the argument list is not in it. Its body runs when the
+arrow is called, not while the arguments are evaluated, so a crossing inside
+it is judged as it would be in the same arrow bound by `let` first: marked, it
+is admitted, and unmarked, it draws the missing-marker refusal
+(tests/fixtures/g4_emit_arrow_argument_inline.rvl and its two `let` twins):
+
+```revl
+service Approvals { emission fn approve(ticket: Str, actor: Str) -> Str }
+service Gate { emission fn decide(ok: Bool, verdict: Str) -> Str }
+service Review { emission fn review(key: Str) -> Str }
+
+fn approve_args(key: Str, approver: (Str, Str) -> Str) -> Str {
+  return approver(key, key)
+}
+
+component Reviewer requires approvals: Approvals, gate: Gate provides review: Review {
+  provide review {
+    fn review(key) {
+      return emit gate.decide(true, approve_args(key, (t: Str, a: Str) => emit approvals.approve(t, a)))
+    }
+  }
+}
+```
+
 The carrier of the nested crossing does not change the answer. A host
 emission extern in the same position is a crossing too, and it draws the same
 refusal (g4_nested_host_emission_activation.rvl):
