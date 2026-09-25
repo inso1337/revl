@@ -19,6 +19,7 @@ direction for a gate to point. What is pinned instead:
 from __future__ import annotations
 
 import ast
+import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -29,6 +30,25 @@ ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "bench"
 sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(ROOT / "tools"))
+
+
+def _load_by_path(name: str, path: Path):
+    """Import a file as a uniquely named module.
+
+    `bench/run.py` cannot be reached with `import run`. This tree holds five
+    files by that name, and `tests/test_71_codegen_perf_findings.py` imports
+    `bench/codegen/python/run.py` under the bare name `run`. It sorts first, so
+    in a whole-suite run its module is already in `sys.modules` and a later
+    `import run` here is answered from the cache with the wrong file. Running
+    this module alone hides that completely: the collision needs the other test
+    in the same process, which is why it reached `main` green from a targeted
+    run and failed the root suite.
+    """
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
 
 import check_eval_report  # noqa: E402
 import framework_bench  # noqa: E402
@@ -397,7 +417,7 @@ def test_a_missing_pin_is_absent_from_the_report_rather_than_assumed(tmp_path):
 
 import framework_unload_survey as survey  # noqa: E402
 import injection_escape  # noqa: E402
-import run as bench_run  # noqa: E402
+bench_run = _load_by_path("bench_run", BENCH / "run.py")
 
 
 @pytest.fixture(scope="module")
@@ -1022,3 +1042,33 @@ def test_the_committed_report_headline_agrees_with_a_fresh_recompute():
     assert committed["headline"]["n"] == section["total_corpus"]
     assert committed["headline"]["per_tier"] == {
         tier: body["residual"] for tier, body in section["tiers"].items()}
+
+
+def test_the_bench_runner_is_the_one_in_bench_and_not_a_namesake():
+    """Five files in this tree are named `run.py` and only one is the runner
+    these modules mean. `tests/test_71_codegen_perf_findings.py` imports
+    `bench/codegen/python/run.py` under the bare name `run` and sorts first, so
+    a whole-suite run put its module in `sys.modules` before this file was
+    collected and every `import run` here was answered from the cache. Three
+    tests reached `main` green from a targeted run and failed the root suite on
+    `AttributeError`. Both this module and `bench/injection_escape.py` now load
+    the file by path, and this is the assertion that says which file."""
+    assert Path(bench_run.__file__).resolve() == (BENCH / "run.py").resolve()
+    assert Path(injection_escape.bench_run.__file__).resolve() == (
+        (BENCH / "run.py").resolve())
+    for attr in ("DEFAULT_LOCAL_MAX_TOKENS", "REASONING_KEYS", "scoring_compiler"):
+        assert hasattr(bench_run, attr), attr
+
+
+def test_no_bench_module_reaches_its_runner_through_a_bare_import():
+    """The import that broke, refused by name rather than by its symptom. A
+    bare `import run` is correct only until something else registers that name,
+    and what registers it is a different test file, so nothing in this module's
+    own source shows the bug."""
+    offenders = []
+    for path in sorted(BENCH.glob("*.py")):
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            stripped = line.strip()
+            if stripped.startswith(("import run", "from run import")):
+                offenders.append(f"{path.name}:{lineno}: {stripped}")
+    assert not offenders, offenders
