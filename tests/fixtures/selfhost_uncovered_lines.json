@@ -22,8 +22,49 @@
     "corpus document reaches. A count that FALLS also fails, asking you to record",
     "the improvement -- that is what makes the number monotone instead of merely",
     "bounded. Regenerate with `python3 tools/selfhost_line_coverage.py --write`,",
-    "but only after reading what moved: the usual right fix is a corpus document."
+    "but only after reading what moved: the usual right fix is a corpus document.",
+    "",
+    "IT IS A RATCHET AND NOT AN INVENTORY, and the evidence is in the file's own",
+    "history: 21 of the 88 changes to it LOWERED the mass, the 2026-09-05 corpus",
+    "triage took 2234 statements out of it across five commits, and #1178 took",
+    "306 more out on 2026-09-20. Issue #1419 read it as rising monotonically;",
+    "that number was the per-function counts PLUS the `statements` totals, and",
+    "`statements` is how big the emitters are, not how much of them is unreached.",
+    "",
+    "`_budget` is what the ratchet was missing. Nothing bounded the mass, so",
+    "`--write` plus a written reason was a complete answer to the gate firing,",
+    "and across 2026-09-16..24 that is the answer that got given. `_budget` is",
+    "per half and tier, the gate holds the recorded mass to it EXACTLY, and",
+    "`--write` does not write it. So recording costs an integer raised BY HAND",
+    "in the same diff, and an improvement lowers the ceiling for good instead of",
+    "leaving headroom for the next unreached region to spend. Target: zero.",
+    "",
+    "A count here that can only ever be RECORDED is a bug in the gate, not a",
+    "fact about the code. That was true of every refusal a tier states by name:",
+    "a corpus document is one the reference EMITS, a refusal path runs only",
+    "where it does not, so no corpus document could reach either half of one.",
+    "tests/fixtures/emit_<tier>_refusals/ is where those documents live now, and",
+    "both halves are driven over them. See tools/selfhost_line_coverage.py",
+    "refusal_documents() (issue #1419)."
   ],
+  "_budget": {
+    "reference": {
+      "go": 3342,
+      "java": 983,
+      "py": 663,
+      "rust": 1189,
+      "ts": 522,
+      "wasm": 1552
+    },
+    "selfhost": {
+      "go": 104,
+      "java": 179,
+      "py": 104,
+      "rust": 286,
+      "ts": 97,
+      "wasm": 65
+    }
+  },
   "reference": {
     "go": {
       "statements": 4431,
@@ -966,9 +1007,8 @@
           "_main": 11,
           "cargo_toml": 1
         },
-        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
+        "Stream runtime boundary: these paths recognize subscribe/merge/next, select the stream head, track subscription binds, and reject unlowered stream policy/stage forms. Since item 130 Slice 5 the same boundary carries the typed-event half: `_uses_stream_event` asks whether any component iterates a typed event (the document predicate that pulls the contract, and with it the stream host runtime, even when the subscription arrives as a required service) and `_stream_event_host_rust` materializes the `EventContract` schema-and-dedup preamble. Both are reached only by a document holding an `on <Event> as <e> in <sub>` handler, which no corpus document does. The self-host Rust emitter has no stream runtime representation. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. item 130's required-`Stream[T]` coeffect refusal (`_refuse_required_stream`) used to be recorded here on the same grounds, and is not any more: a corpus document cannot reach it, but a REFUSAL document can, and tests/fixtures/emit_rust_refusals/required_stream_coeffect.rvl does (issue #1419).": {
           "_is_stream_next": 1,
-          "_refuse_required_stream": 1,
           "_refuse_unlowered_stream_surface": 2,
           "_stream_chain": 1,
           "_stream_stage_arrow": 1
@@ -1903,7 +1943,7 @@
           "render_builtin": 2,
           "render_call": 1,
           "render_component_call": 1,
-          "render_inner": 5,
+          "render_inner": 2,
           "render_interp": 2,
           "render_un": 2,
           "render_var": 2,
