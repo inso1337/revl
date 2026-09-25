@@ -5232,7 +5232,8 @@ def _emit_temporal(ir: dict) -> str:
     import types
 
     here = os.path.dirname(os.path.abspath(__file__))
-    if here not in _sys.path:
+    added_path = here not in _sys.path
+    if added_path:
         _sys.path.insert(0, here)
     # Point the canonical name `emit` at THIS module's namespace so the sink's
     # `from emit import ...` shares one `EmitError` class and one renderer set.
@@ -5242,12 +5243,28 @@ def _emit_temporal(ir: dict) -> str:
     # module whose namespace is this one — unless a real `emit` module already
     # carries this exact `EmitError` (the standalone/test load), which we keep.
     existing = _sys.modules.get("emit")
-    if existing is None or getattr(existing, "EmitError", None) is not EmitError:
+    swapped = existing is None or getattr(existing, "EmitError", None) is not EmitError
+    if swapped:
         proxy = types.ModuleType("emit")
         proxy.__dict__.update(globals())
         _sys.modules["emit"] = proxy
-    emit_temporal = importlib.import_module("emit_temporal")
-    return emit_temporal.emit_temporal(ir)
+    # Both bindings are PROCESS-GLOBAL, and they must not outlive this call.
+    # Left in place, the next bare `import emit` anywhere in the process gets
+    # this typescript proxy instead of whatever `emit` it asked for: run.py
+    # reaches the py backend exactly that way, so a long-lived process that
+    # rendered a temporal target and then ran a py composition executed
+    # typescript output as python. Restore both on the way out.
+    try:
+        emit_temporal = importlib.import_module("emit_temporal")
+        return emit_temporal.emit_temporal(ir)
+    finally:
+        if swapped:
+            if existing is None:
+                _sys.modules.pop("emit", None)
+            else:
+                _sys.modules["emit"] = existing
+        if added_path and here in _sys.path:
+            _sys.path.remove(here)
 
 
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
