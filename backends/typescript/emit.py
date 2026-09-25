@@ -5176,6 +5176,45 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         refuse_approval_on_ownerless_tier(ir, "typescript")
     except RevlError as exc:
         raise EmitError(exc.message) from None
+def _refuse_validated_emissions(ir: dict) -> None:
+    """Items 257/513 tier gate (issue #1373): a `validated` emission is a CHECKED
+    boundary. The crossing validates the completion against the schema derived
+    from its return type, builds the declared value from the validated payload,
+    raises a typed validation fault when it does not conform, and honours the
+    stated decoding grammar and the `retry` budget. This tier has none of that
+    seam, and it used to DROP the modifier and both derived keys silently:
+    byte-identical output with and without `validated`, no marker, nothing for a
+    byte oracle to catch. So it refuses by name instead, through EmitError, this
+    tier's existing refusal channel.
+
+    The scan and the single canonical wording live in `revl.validated_boundary`,
+    shared by all five tiers so five backends do not invent five messages.
+    DECLARATION-keyed, not call-site keyed (`_refuse_deferred_emissions` above is
+    the other shape): the tier emits the crossing whether or not this document
+    also calls it, so an uncalled declaration still reaches the output as an
+    unchecked boundary."""
+    try:
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    try:
+        refuse_validated_on_unvalidating_tier(ir, "typescript")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
+
 
 
 def _emit_temporal(ir: dict) -> str:
@@ -5193,7 +5232,8 @@ def _emit_temporal(ir: dict) -> str:
     import types
 
     here = os.path.dirname(os.path.abspath(__file__))
-    if here not in _sys.path:
+    added_path = here not in _sys.path
+    if added_path:
         _sys.path.insert(0, here)
     # Point the canonical name `emit` at THIS module's namespace so the sink's
     # `from emit import ...` shares one `EmitError` class and one renderer set.
@@ -5203,12 +5243,28 @@ def _emit_temporal(ir: dict) -> str:
     # module whose namespace is this one — unless a real `emit` module already
     # carries this exact `EmitError` (the standalone/test load), which we keep.
     existing = _sys.modules.get("emit")
-    if existing is None or getattr(existing, "EmitError", None) is not EmitError:
+    swapped = existing is None or getattr(existing, "EmitError", None) is not EmitError
+    if swapped:
         proxy = types.ModuleType("emit")
         proxy.__dict__.update(globals())
         _sys.modules["emit"] = proxy
-    emit_temporal = importlib.import_module("emit_temporal")
-    return emit_temporal.emit_temporal(ir)
+    # Both bindings are PROCESS-GLOBAL, and they must not outlive this call.
+    # Left in place, the next bare `import emit` anywhere in the process gets
+    # this typescript proxy instead of whatever `emit` it asked for: run.py
+    # reaches the py backend exactly that way, so a long-lived process that
+    # rendered a temporal target and then ran a py composition executed
+    # typescript output as python. Restore both on the way out.
+    try:
+        emit_temporal = importlib.import_module("emit_temporal")
+        return emit_temporal.emit_temporal(ir)
+    finally:
+        if swapped:
+            if existing is None:
+                _sys.modules.pop("emit", None)
+            else:
+                _sys.modules["emit"] = existing
+        if added_path and here in _sys.path:
+            _sys.path.remove(here)
 
 
 def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
@@ -5234,6 +5290,7 @@ def emit(ir: dict, *, runtime_import: str = "../runtime.ts",
             f"(default) or `temporal` (roadmap item 253)")
     _refuse_holes(ir)
     _refuse_deferred_emissions(ir)
+    _refuse_validated_emissions(ir)
 
     _refuse_fault_tests(ir)
 

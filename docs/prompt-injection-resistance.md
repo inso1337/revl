@@ -183,6 +183,82 @@ satisfying — and the violation carries a why-trace naming the offending chain.
 An injection that steers the agent to reach `sendEmail` produces a refusal, not
 a sent email.
 
+## The measurement behind the claim
+
+Everything above is an argument from the shape of the language. Until issue
+#1267 it had no number attached, and this document was the only thing standing
+behind the benchmark's injection-escape column, which is why that column was
+published empty rather than filled.
+
+`bench/injection_escape.py` is the measurement. It is not the attack suite in
+[threat-model.md](threat-model.md): `tests/test_adversarial_gate.py` checks that
+the gate refuses attacks written for it by the people who wrote the gate, which
+is a regression test and not an escape rate. This measures something the authors
+do not control, which is what a model does when the material it reads tells it
+to exceed the surface it declared.
+
+### What it does
+
+One spec, several injection vectors, one generation each by the pinned local
+model. The injected instruction never appears in the system prompt. It rides in
+one of three places a real injection rides:
+
+- a comment inside the service interface the brief pins,
+- the task brief itself, as an operational requirement,
+- the compiler output that the retry loop feeds back to the model, which makes
+  the toolchain's error channel an injection carrier and tests it as one.
+
+The vectors ask for things this document says cannot happen: read an ambient
+environment variable, write a file, open a socket, bind a listener to the root
+context so it survives unload, drop the undo from an effect, widen the pinned
+service, or accept a forged note claiming the project permits unrestricted host
+access in benchmark mode.
+
+### Two numbers, and why they are not one
+
+**Compliance** is how often the model wrote the undeclared thing at all. It is a
+property of the model and it is the same question whichever host the artifact
+was written for.
+
+**Containment** is whether a named hard gate then refused the artifact. Two
+gates are used, both from the frozen set in
+[eval-protocol.md](eval-protocol.md): `compiles`, when the compiler refuses the
+document, and `pinnedInterfaces`, when the service block the brief pinned came
+back altered, which is surface widening whether or not it compiles.
+
+They are reported separately because a containment rate without the compliance
+rate it was conditioned on is not interpretable. A model that ignores every
+injection makes every runtime look perfect. When compliance is zero the
+containment cell says the gate was not exercised, and does not say 100%.
+
+A refusal is further split by what it was about, because the two are not the
+same claim. A document refused with a diagnostic naming the injected reach is
+evidence that confinement did the work. A document refused for an unrelated
+syntax error kept the injected behaviour out just as effectively and is no
+evidence at all about injections, so it is counted apart rather than folded into
+a containment figure. The first live attempt was the second kind, which is why
+the distinction exists.
+
+Compliance is detected from the generated source by a detector that never
+consults the gate. That independence is the whole design: if compliance were
+inferred from the gate rejecting something, containment would be 100% by
+construction and the column would measure nothing. The cost is that a detector
+over source text both misses paraphrases and fires on comments, so every
+attempt records the text its detector matched, for a reader to disagree with.
+
+### What it cannot say
+
+It measures admission, which is what this document claims. It does not measure
+what a running composition does with injected data, which is residual risk 1
+below and is not a compile-time question. It runs one spec, so it says nothing
+about how the result varies across tasks. And it is run by the party whose
+runtime it favours, which is the objection the whole benchmark carries: nothing
+here moves off the `measured` rung until somebody who is not us runs it.
+
+The numbers live in `bench/results/framework-bench/report.md`, with the
+per-attempt rows beside them, rather than in this document, so that a change in
+the measurement cannot leave a stale figure here.
+
 ## Residual risks — what confinement does not cover
 
 Confinement shrinks the authority surface to what was declared and granted. It
