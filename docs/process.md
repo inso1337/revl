@@ -107,6 +107,18 @@ that set grow silently:
   generated scaffolding; optimizer-inlined helpers can retain unentered
   definitions even when their inlined behavior runs. Run the tool for current
   counts; historical percentages are not a coverage target.
+  Three responses to a finding, in order of preference. A corpus document that
+  reaches the statements. A document in `tests/fixtures/emit_<tier>_refusals/`
+  when the only thing that reaches them is one the tier's reference REFUSES, so
+  no corpus document ever can: a corpus document is one the reference emits, and
+  both halves of a named refusal run only where it does not. Deleting the
+  statements when nothing reaches them at all. Recording the count is the last
+  resort, and it costs a raise to `_budget` in the ledger, per half and tier,
+  which `--write` does not write and the gate holds the recorded mass to
+  exactly. Issue #1419 is why: the ledger does fall (21 of the 88 changes to it
+  lowered the mass, and the 2026-09-05 triage took 2234 out in five commits),
+  but nothing bounded it, so `--write` plus a written reason was a complete
+  answer to the gate firing.
 * `tools/selfhost_coverage.py --check` is the cheap construct-level check over
   dispatch arms, exercised by `tests/test_selfhost_coverage.py`. It names
   constructs rather than functions, but reaching a dispatch arm does not mean

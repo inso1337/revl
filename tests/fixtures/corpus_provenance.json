@@ -826,6 +826,7 @@
    "tests/fixtures/emit_rust_corpus/transforms.rvl",
    "tests/fixtures/emit_rust_corpus/v1_components.rvl",
    "tests/fixtures/emit_rust_corpus/variants.rvl",
+   "tests/fixtures/emit_rust_refusals/required_stream_coeffect.rvl",
    "tests/fixtures/emit_ts_corpus/arith.rvl",
    "tests/fixtures/emit_ts_corpus/async_arrow_emission.rvl",
    "tests/fixtures/emit_ts_corpus/async_effects.rvl",

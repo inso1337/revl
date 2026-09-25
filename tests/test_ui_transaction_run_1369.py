@@ -298,3 +298,140 @@ def test_the_report_still_refuses_to_call_the_result_clean() -> None:
     rendered = erase_report.render(report)
     assert "rolled back" not in rendered
     assert "no_residue" not in rendered
+
+
+# ---------------------------------------- the unit over a tail-position step
+#
+# WHY THIS SECTION EXISTS. Slice 3's oracle above compiles a transaction whose
+# every crossing is BOUND (`emit f(...)` as a statement, or `let x = emit
+# f(...)`). That was not a stylistic choice: `method_plan`'s walk read three
+# statement shapes and only the top node of each one's expression, so an
+# actuation written anywhere else was not a step in the plan at all, and the
+# transaction unit was therefore a unit over a step set with a hole in it.
+#
+# Tail position is the case that matters here, because a `provide` method that
+# returns what it clicked has nothing left to bind, so it is where an actuation
+# most naturally lands. The run below is the item's first exit clause applied
+# to exactly that shape, and it is a measurement rather than an addition: on
+# the walk this replaces, `compensation_run` keyed on the tail step raised
+# `LookupError: no computer-use step named 'actuate' in this transaction:
+# ['type_amount', 'type_memo']`. The transaction could not be told which step
+# failed, because the step it failed at was not in the transaction.
+#
+# The fail-open direction is the same one issue #1327 names. A run keyed by
+# INDEX rather than by label did not raise at all on the old walk: it ran over
+# the two compensatable steps, every one of them restored, and reported an
+# aggregate of `restored` for a transaction holding an uncompensated click.
+#
+# WHICH OF THE FOUR ARE MEASUREMENTS, stated so the section is not read as
+# four. Two of them read the PLAN and fail on the walk this replaces:
+# `test_the_transaction_unit_sees_a_tail_position_actuation` and
+# `test_a_tail_position_failure_the_transaction_cannot_detect_is_named`. The
+# other two call `compensation_run` directly with the step list written out
+# above, so they pass on both walks by construction. They are the controls
+# that say what the run over the complete step set is entitled to claim, and
+# what the run over the incomplete one claimed instead.
+
+#: The five-step oracle's opening three steps, with the `ui.click` moved into
+#: return position and nothing else changed.
+TAIL_TRANSACTION = UI_TARGET + DECLARATIONS + """
+service Ops { emission fn run(region: Str) -> Int }
+component Agent provides ops: Ops {
+  isolate ops in realm("billing")
+  provide ops {
+    fn run(region) {
+      let pane1 = emit read_pane(region)
+      let amount = emit locate(pane1, "Amount")
+      emit type_amount(amount, "10")
+      let pane2 = emit read_pane(region)
+      let memo = emit locate(pane2, "Memo")
+      emit type_memo(memo, "m")
+      let pane3 = emit read_pane(region)
+      let approve = emit locate(pane3, "Approve")
+      return emit actuate(approve)
+    }
+  }
+}
+"""
+
+#: What that transaction's three actuating steps are, in `compensation_run`'s
+#: shape. Asserted equal to what the plan reads off the lowered program by
+#: `test_the_transaction_unit_sees_a_tail_position_actuation`, which is the
+#: assertion that fails on the walk this replaces.
+TAIL_STEPS = [
+    ("type_amount", "ui.text", True),
+    ("type_memo", "ui.text", True),
+    ("actuate", "ui.click", False),
+]
+
+
+def _tail_plan() -> dict:
+    return uitx.plans(compile_source(TAIL_TRANSACTION, "tail_1369.rvl"))[0]
+
+
+def test_the_transaction_unit_sees_a_tail_position_actuation() -> None:
+    """The step set the run is computed over holds the tail crossing. Before
+    the walk that reads every position, the plan named `type_amount` and
+    `type_memo` and stopped, so the click was not a step of the transaction it
+    is a step of."""
+    plan = _tail_plan()
+    assert _actuations(plan) == [label for label, _t, _c in TAIL_STEPS]
+
+
+def test_the_run_over_a_tail_position_failure_is_the_exit_clause() -> None:
+    """Item 522's first exit clause, on the shape that used to have no step:
+    the failure is at the tail actuation, the two compensations before it run
+    in reverse, and the failing step itself reports `uncompensated` rather than
+    a clean teardown."""
+    run = uitx.compensation_run(TAIL_STEPS, "actuate")
+    assert run["failedStep"] == "actuate"
+    assert run["ran"] == ["type_memo", "type_amount"]
+    assert run["neverExecuted"] == []
+    outcomes = {entry["step"]: entry["outcome"] for entry in run["outcomes"]}
+    assert outcomes == {
+        "type_amount": uitx.RESTORED,
+        "type_memo": uitx.RESTORED,
+        "actuate": uitx.UNCOMPENSATED,
+    }
+    assert run["aggregate"] == uitx.UNCOMPENSATED
+
+
+def test_the_tail_step_is_what_drags_that_run_down() -> None:
+    """The non-vacuity, and the reason a dropped step read BETTER than the
+    truth. `aggregate` is the weakest state present, so the run over the two
+    steps the old walk could see reports `restored`: an inverse ran and put the
+    state back. The same transaction with its actual third step reports
+    `uncompensated`, and the claim gains the sentence that matters."""
+    without = uitx.compensation_run(TAIL_STEPS[:2], "type_memo")
+    assert without["aggregate"] == uitx.RESTORED
+    with_tail = uitx.compensation_run(TAIL_STEPS, "actuate")
+    assert with_tail["aggregate"] == uitx.UNCOMPENSATED
+    # and the sentence the claim gains with it. The run the old walk could see
+    # stops after counting the compensations; the real one has to say that
+    # residue no inverse describes remains, and refuse the clean word.
+    assert without["claim"] == (
+        "the transaction stopped at `type_memo`; 2 registered compensations "
+        "run, LIFO")
+    assert with_tail["claim"] == (
+        "the transaction stopped at `actuate`; 2 registered compensations "
+        "run, LIFO. Residue no inverse describes remains at `actuate`. This "
+        "transaction may not be reported as cleanly reverted")
+
+
+def test_a_tail_position_failure_the_transaction_cannot_detect_is_named() -> \
+        None:
+    """WHERE THIS SLICE STOPS, stated as an assertion rather than left to the
+    reader. A LIFO run is started by an unmet postcondition, and a tail-
+    position actuation has nothing after it that could check it, so its failure
+    is one this transaction never learns about. The step is now IN the plan and
+    carries every verdict, and it is named in `undetectableFailureSteps`
+    instead of being given a run nothing would trigger. Being invisible to the
+    plan and being named as undetectable are different answers, and only the
+    second one is honest."""
+    plan = _tail_plan()
+    assert "actuate" in plan["undetectableFailureSteps"]
+    assert plan["compensationRuns"] == []
+    actuate = [s for s in plan["steps"] if s["extern"] == "actuate"]
+    assert len(actuate) == 1
+    assert actuate[0]["residue"] == uitx.UNCOMPENSATED
+    assert actuate[0]["postcondition"] in uitx.NO_POSTCONDITION
