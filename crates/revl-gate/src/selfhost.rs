@@ -9298,7 +9298,7 @@ fn ctx_arrows(cx: Ctx__m2, m: std::collections::HashMap<String, ArrowN>) -> Ctx_
 }
 
 fn ctx_under_arrow(cx: Ctx__m2) -> Ctx__m2 {
-    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: true, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone() };
+    return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: true, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: if (cx.emitPos == "args") { String::from("") } else { cx.emitPos } };
 }
 
 fn field_check(target: Expr, marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
@@ -27128,6 +27128,16 @@ fn an_emission_extern_in_an_emit_head_s_arguments_needs_its_own_marker__g4_() {
     assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern pure fn twice(n: Int) -> Int = @py { return n * 2 } component C { emit log_line(twice(1)) }")) == ""));
     assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { emit log_line(charge(n)) return 1 } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"));
     assert!((admit_src(String::from("extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }")) == ""));
+}
+
+#[test]
+fn an_arrow_in_an_emit_head_s_arguments_leaves_the_argument_position__g4_() {
+    let pre = String::from("service Ap { emission fn approve(t: Str, a: Str) -> Str } service Gt { emission fn decide(ok: Bool, v: Str) -> Str } service Rv { emission fn review(k: Str) -> Str } fn approve_args(k: Str, f: (Str, Str) -> Str) -> Str { return f(k, k) } component C requires ap: Ap, gt: Gt provides rv: Rv { provide rv { fn review(k) { ");
+    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))) } } }")) == ""));
+    assert!((admit_src(pre.revl_concat("let f = (t: Str, a: Str) => emit ap.approve(t, a)   return emit gt.decide(true, approve_args(k, f)) } } }")) == ""));
+    assert!((admit_src(pre.revl_concat("let v = approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))   return emit gt.decide(true, v) } } }")) == ""));
+    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => ap.approve(t, a))) } } }")) == "G4|call to emission `ap.approve` must be marked `emit` (G4)"));
+    assert!((admit_src(pre.revl_concat("return emit gt.decide(true, emit ap.approve(k, k)) } } }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"));
 }
 
 #[test]
