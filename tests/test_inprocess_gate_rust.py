@@ -13,9 +13,16 @@ The py harness proves an IDENTITY: `revl.gate.admit` IS the reference admission
 path (`compile_source` + `refuse_admission`), so its in-process verdict IS the
 reference verdict. The rust crate cannot claim that and does not: it is the
 SELF-HOST front end compiled to rust, it decides the composition/guarantee layer
-(`G1`..`G4`, `A1`, `PRELUDE`, `BAD`) and runs no type layer, so it has no
-admission arm at all (`Refused` / `NoObjection` / `OutsideFrontier`, with
-`"admitted": false` on the wire for every one).
+(`G1`..`G4`, `A1`, `PRELUDE`, `BAD`) and runs no type layer, so its VERDICT
+surface has no admission arm at all (`Refused` / `NoObjection` /
+`OutsideFrontier`, with `"admitted": false` on the wire for every one).
+
+It does have a separate ADMISSION surface (`issue_admission` /
+`issue_admission_into`), a different type for a different question, whose one
+admitting arm is confined to `ADMITTED_LAYER` - the region where the covered
+layer is the WHOLE question. The harness asks it about every candidate on both
+questions, and `test_every_rust_admission_is_a_py_admission` holds every green
+it issues to the reference's own answer for the identical bytes.
 
 It does now answer TWO questions (issue #346): `admit(source)` asks the
 standalone one, and `admit_into(source, manifest)` folds the G2/G3 legs over the
@@ -429,6 +436,128 @@ def test_the_hole_draft_is_the_named_gap_not_a_silent_one(report):
         "never read as an admission")
 
 
+def test_every_rust_admission_is_a_py_admission(report):
+    """THE security clause for the ADMISSION surface, stated positively and with
+    zero tolerance.
+
+    `revl_gate::Verdict` has no admitting arm and never will - that is
+    `test_no_candidate_reads_as_an_admission` above, and
+    `tests/test_gate_crate_drift.py::test_the_verdict_surface_still_issues_no_
+    admission` pins it in the code. `revl_gate::issue_admission` /
+    `issue_admission_into` are the separate type that DOES have one, and the
+    harness now asks them about every candidate, on both questions. So the
+    crate can hand a host a green, and this is the check that the green is a
+    real one.
+
+    The rule is the reference's, per question, with nothing rounded off: where
+    the crate ADMITS `source`, `revl.gate.admit` must admit the identical bytes;
+    where the crate ADMITS `source` INTO the held manifest,
+    `revl.gate.admit_into` must admit the identical bytes against the same
+    composition. The wires are compared too, because
+    `Admission::to_json` claims to write the bytes `revl.gate`'s own
+    `Verdict.to_json` writes for a py admission, and a claim about bytes is
+    checked by comparing bytes.
+
+    Not vacuous: `test_the_rust_gate_issues_a_real_admission_into_the_held_
+    manifest` requires a real admission on both questions, so this cannot pass
+    by the crate admitting nothing. And the batch carries candidates the rust
+    gate raises no objection to while py REFUSES them (the hole draft,
+    `incomplete_provide`, `syntax_error`), so an admission surface that read a
+    no-objection as a green would red here rather than somewhere downstream.
+    """
+    import inprocess_gate_harness as py_harness  # noqa: PLC0415
+
+    base = py_harness.base_manifest()
+    false_admissions = []
+    wire_drift = []
+    for candidate in report["candidates"]:
+        admission = candidate["admission"]
+        if admission["admitted"]:
+            py = py_gate.admit(candidate["source"])
+            if py.admitted is not True:
+                false_admissions.append(
+                    (candidate["name"], "standalone", admission["basis"], py.code))
+            elif admission["wire"] != py.to_json():
+                wire_drift.append((candidate["name"], "standalone",
+                                   admission["wire"], py.to_json()))
+        arm = candidate["into"]
+        if arm is None or not arm["admission"]["admitted"]:
+            continue
+        py = py_gate.admit_into(candidate["source"], base)
+        if py.admitted is not True:
+            false_admissions.append(
+                (candidate["name"], "into", arm["admission"]["basis"], py.code))
+        elif arm["admission"]["wire"] != py.to_json():
+            wire_drift.append((candidate["name"], "into",
+                               arm["admission"]["wire"], py.to_json()))
+
+    assert not false_admissions, (
+        "the rust gate ISSUED AN ADMISSION for bytes the py gate does not "
+        "admit - the defect class the whole admission-gate arc exists to "
+        "prevent:\n  "
+        + "\n  ".join(f"{n} ({q}): basis {b!r}, py code {c!r}"
+                      for n, q, b, c in false_admissions))
+    assert not wire_drift, (
+        "the rust admission wire is not byte-identical to the py admission "
+        "wire, so a seam comparing the two tiers compares two spellings of the "
+        "same yes:\n  "
+        + "\n  ".join(f"{n} ({q}):\n    rust {r!r}\n    py   {p!r}"
+                      for n, q, r, p in wire_drift))
+
+
+def test_the_rust_gate_issues_a_real_admission_into_the_held_manifest(report):
+    """The positive half, and what keeps the check above from being satisfied by
+    a gate that admits nothing.
+
+    A rust embedder CAN read a green out of this crate, on the realistic agent
+    shape - a candidate proposed against a composition that is already running -
+    and the green is the reference's own answer. Measured here rather than
+    argued from the crate's docs.
+
+    This is also the control that bounds issue #346's remaining price. Without
+    it, `test_the_manifest_gap_is_priced_not_hidden` recording that `cache_layer`
+    gets no admission would not say whether the surface withholds because of
+    what `cache_layer` is, or because the crate never admits into a manifest at
+    all. With it the price is one shape, not the whole question.
+    """
+    import inprocess_gate_harness as py_harness  # noqa: PLC0415
+
+    base = py_harness.base_manifest()
+    admitted_into = [c for c in report["candidates"]
+                     if c["into"] is not None and c["into"]["admission"]["admitted"]]
+    assert admitted_into, (
+        "no candidate was ADMITTED into the held manifest by "
+        "`revl_gate::issue_admission_into`. If the admission surface really "
+        "stopped admitting, that is a regression in the crate; if the batch "
+        "stopped carrying a candidate inside `ADMITTED_LAYER`, restore one - do "
+        "NOT weaken this test, it is what stops the checks around it from "
+        "passing vacuously: "
+        + repr([c["name"] for c in report["candidates"] if c["into"]]))
+
+    for candidate in admitted_into:
+        admission = candidate["into"]["admission"]
+        assert admission["verdict"] == "admitted"
+        assert '"admitted":true' in admission["wire"], (
+            f"{candidate['name']}: an issued admission must say so on the wire")
+        assert "admission surface" in (admission["basis"] or ""), (
+            f"{candidate['name']}: an issued admission must name the surface it "
+            f"was issued under, got {admission['basis']!r}")
+        py = py_gate.admit_into(candidate["source"], base)
+        assert py.admitted is True, (
+            f"{candidate['name']}: the public `revl.gate.admit_into` verb must "
+            "admit the identical bytes into the same composition")
+        assert admission["wire"] == py.to_json(), (
+            f"{candidate['name']}: rust {admission['wire']!r} != "
+            f"py {py.to_json()!r}")
+
+    # The verdict surface is untouched by any of this: the same candidate's
+    # `admit_into` answer is still a no-objection with `"admitted": false`, which
+    # is why the admission lives in a second type instead of a fourth arm.
+    for candidate in admitted_into:
+        assert candidate["into"]["verdict"] == "no_objection"
+        assert '"admitted":false' in candidate["into"]["wire"]
+
+
 def test_the_manifest_gap_is_priced_not_hidden(report):
     """Which half of the manifest gap CLOSED (issue #346), and which is still
     open. Both are held to the py gate's own answers here; neither may be
@@ -455,15 +584,38 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
       twin `cache_layer` - the same shape calling an operation `Store` does
       declare - is not. Telling those two apart is the resolution; a gate
       reading only the wire's service NAMES answers the same thing about both.
-    * **STILL OPEN - issuing the admission.** py's `admit_into` ADMITS
-      `cache_layer`; the rust `Verdict` has no `Admitted` arm at all, so the
-      most it can say is a no-objection. That is docs/design/457 T6, and this
-      test keeps the distance visible instead of papering over it.
+    * **STILL OPEN - issuing the admission FOR THIS SHAPE.** py's `admit_into`
+      ADMITS `cache_layer`; the rust ADMISSION surface WITHHOLDS it, because
+      `ADMITTED_LAYER` is interface declarations only and `cache_layer` carries
+      a component with a provide-method body. That is docs/design/457 T6, which
+      its own dependency order puts after T0-T5, the self-host type layer.
 
-    No half may be made to lie: the manifest arm is a refusal arm, so it
-    reports `"admitted": false` throughout. When the `Admitted` arm lands, the
-    open half becomes an agreement and this test should be TIGHTENED - never
-    deleted, and never relaxed into a tautology.
+    The price is now BOUNDED rather than total, and the bound is measured on
+    this same wire: `fresh_interface` is admitted INTO the held manifest by
+    `revl_gate::issue_admission_into`, byte-identically to
+    `revl.gate.admit_into` (`test_the_rust_gate_issues_a_real_admission_into_
+    the_held_manifest`). So the open clause is not "rust cannot issue an
+    admission" - it can, on this manifest, through this call - but "rust cannot
+    issue one for a component with a provide-method body". That is the whole
+    remaining distance on issue #346's exit test, and it is what stops this
+    price from being one a later change could quietly WIDEN: widening it means
+    `fresh_interface` stops being admitted, which reds.
+
+    What shrinks it further: `ADMITTED_LAYER` growing to span a provide-method
+    body. Every step of that is a type-layer obligation the crate does not carry
+    today - the provide method's return against the service it implements, the
+    delegated call's arity and argument types against the RUNNING declaration
+    (whose return type the item-186 wire does not even carry yet), and the
+    family scan of docs/design/457 section 3.6 that turns "the fold raised no
+    objection" into "no reference family applies". Until those land, growing the
+    surface to cover `cache_layer` would be the admitted-but-untyped
+    wave-through issue #346 exists to forbid, so the clause below stays a price.
+
+    No half may be made to lie: the VERDICT surface is a refusal surface, so it
+    reports `"admitted": false` throughout, on both arms, and the admission
+    lives in a second type rather than a fourth arm. When the surface grows to
+    span `cache_layer`, the open half becomes an agreement and this test should
+    be TIGHTENED - never deleted, and never relaxed into a tautology.
     """
     import inprocess_gate_harness as py_harness  # noqa: PLC0415
     from revl.manifest import manifest_wire  # noqa: PLC0415
@@ -476,10 +628,11 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
     into_arms = {c["name"]: c for c in report["candidates"]
                  if c["into"] is not None}
     assert set(into_arms) == {"cache_layer", "calls_missing_method",
-                              "ambient_provision_conflict"}, (
+                              "ambient_provision_conflict", "fresh_interface"}, (
         "the manifest arm's batch changed - one candidate must close the ambient "
-        "half, one must close the requires-resolution half, and one must price "
-        f"the open admission half: {sorted(into_arms)}")
+        "half, one must close the requires-resolution half, one must price the "
+        "open admission half, and one must BOUND that price by being really "
+        f"admitted into the same manifest: {sorted(into_arms)}")
 
     # ---------------------------------------------------------- the closed half
     ambient = into_arms["ambient_provision_conflict"]
@@ -559,20 +712,40 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
         f"  rust: {missing['into']['message']!r}\n  py:   {miss_message!r}")
     assert '"admitted":false' in missing["into"]["wire"]
 
+    # -------------------------------------------- the BOUND on the open half
+    # Measured first, so the clause after it is a price on one SHAPE and not a
+    # price on the whole question. `fresh_interface` goes into the same held
+    # manifest through the same call and comes back ADMITTED, with the bytes
+    # `revl.gate.admit_into` writes. A reading of the open clause as "the rust
+    # tier cannot hand an agent a green" is therefore false, and this assert is
+    # what makes it false rather than a footnote.
+    fresh = into_arms["fresh_interface"]
+    assert fresh["into"]["admission"]["admitted"] is True, (
+        "the control candidate must be ADMITTED into the held manifest - "
+        "without it the open clause below cannot be told apart from a gate that "
+        "admits nothing into any manifest")
+    fresh_py = py_gate.admit_into(fresh["source"], base)
+    assert fresh_py.admitted is True
+    assert fresh["into"]["admission"]["wire"] == fresh_py.to_json(), (
+        "the admitted control's wire is not the py wire, verbatim:\n"
+        f"  rust: {fresh['into']['admission']['wire']!r}\n"
+        f"  py:   {fresh_py.to_json()!r}")
+
     # ---------------------------------------------------------- the open half
-    # What is STILL open is only the last step: py's `admit_into` ISSUES an
-    # admission for `cache_layer`, and the rust `Verdict` has no `Admitted` arm
-    # to issue one with. Closing that is docs/design/457 T6.
+    # What is STILL open is the last step FOR THIS SHAPE: py's `admit_into`
+    # ISSUES an admission for `cache_layer`, and the rust admission surface
+    # withholds it, because `ADMITTED_LAYER` is interface declarations only and
+    # `cache_layer` carries a component with a provide-method body. Closing that
+    # is docs/design/457 T6, after T0-T5.
     public = py_gate.admit_into(cache_layer["source"], base)
     assert public.admitted is True, (
         "the py gate must still ADMIT this candidate INTO the running "
         "composition by resolving its `requires` against the live provider; "
-        "issuing that admission is what rust still cannot do")
+        "issuing that admission is what rust still cannot do for this shape")
     assert cache_layer["into"]["verdict"] == "no_objection", (
-        "rust has no admission arm on the VERDICT surface, so the only honest "
-        "answer on the manifest arm is a no-objection - if this became a "
-        "refusal, that is a false alarm and a defect "
-        f"({cache_layer['into']['verdict']})")
+        "the VERDICT surface has no admission arm, so the only honest answer on "
+        "the manifest arm is a no-objection - if this became a refusal, that is "
+        f"a false alarm and a defect ({cache_layer['into']['verdict']})")
     # ... and the contrast with `calls_missing_method` above is what makes the
     # no-objection a RESOLVED one rather than an unasked question: the same
     # shape, the same manifest, two different verdicts.
@@ -581,6 +754,21 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
     assert '"admitted":false' in cache_layer["into"]["wire"], (
         "the still-open half may never read as an admission either")
     assert '"admitted":false' in cache_layer["wire"]
+    # The price itself, on the ADMISSION surface rather than in prose. This is
+    # the assertion that shrinks when `ADMITTED_LAYER` grows, and the one that
+    # reds the day it does - which is the signal to reopen issue #346's exit
+    # test, not to relax this line.
+    assert cache_layer["into"]["admission"]["admitted"] is False, (
+        "`revl_gate::issue_admission_into` now ADMITS `cache_layer` into the "
+        "held manifest. If that is real, issue #346's exit test is met: turn "
+        "this clause into an agreement against `revl.gate.admit_into` and "
+        "update the crate docs, bench/inprocess_gate_rust and "
+        "bench/results/inprocess-gate-rust.md. Do NOT delete it.")
+    assert cache_layer["into"]["admission"]["verdict"] == "no_objection", (
+        "the withholding must be the verdict surface's own no-objection: a "
+        "withheld REFUSAL here would be a false alarm, not a price")
+    assert cache_layer["into"]["admission"]["basis"] is None, (
+        "a withheld answer carries no certificate")
 
 
 # ------------------------------------------------- the two harnesses' bytes
