@@ -241,16 +241,23 @@ def decide(p=None, obs=None, **kwargs):
 def test_the_route_table_this_gate_reads_is_item_512s_unchanged():
     """The CONTROL. This item adds no placement channel and changes no
     compiler behaviour, so `model_route.check()` on the program above returns
-    exactly what it returns on a tree without `shadow_promotion.py` at all.
-    A red here is the harness, not the gate."""
-    assert route_table() == {
-        "Classifier": {
-            "classify": {
-                "confidential": {"role": "local", "residence": "on_device"},
-                "*": {"role": "cloud", "residence": "off_device"},
-            }
-        }
-    }
+    what it returns on a tree without `shadow_promotion.py` at all.
+    A red here is the harness, not the gate.
+
+    Asserted per key rather than as one dict literal. The PLACEMENT is what
+    this gate reads and it is pinned exactly; the record around it is
+    deliberately extensible, and items 515 and 519 added `candidates` and
+    `line` to it. A literal comparison would make every later slice of the
+    placement surface look like a change in this gate, which is the opposite
+    of what a control is for."""
+    table = route_table()
+    assert set(table) == {"Classifier"}
+    arms = table["Classifier"]["classify"]
+    assert set(arms) == {"confidential", "*"}
+    assert arms["confidential"]["role"] == "local"
+    assert arms["confidential"]["residence"] == "on_device"
+    assert arms["*"]["role"] == "cloud"
+    assert arms["*"]["residence"] == "off_device"
 
 
 def test_the_module_registers_no_guarantee_code():

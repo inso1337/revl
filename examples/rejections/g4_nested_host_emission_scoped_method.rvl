@@ -1,0 +1,22 @@
+// REJECTED — G4: the two axes together, a capability-scoped host emission
+// extern nested in an `emit`'s arguments inside a provide method body. Each
+// of the four combinations of carrier position and extern scope is a separate
+// spelling, and this is the one that shares nothing with the shipped
+// required-service fixtures.
+//
+// expected error:
+//   call to emission `charge` must be marked `emit` (G4)
+
+extern emission[net] fn log_line(n: Int) -> Int = @py { return 1 }
+extern emission[net] fn charge(cents: Int) -> Int = @py { return 1 }
+
+service Till { emission[net] fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) {
+      emit log_line(charge(cents))
+      return 1
+    }
+  }
+}

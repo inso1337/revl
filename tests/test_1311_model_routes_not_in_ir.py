@@ -227,10 +227,23 @@ def test_the_only_producer_of_the_route_table_takes_a_parsed_program():
 
     program = Parser(ROUTED, "routed.rvl").parse()
     table = MR.check(program)
-    assert table == {"Classifier": {"classify": {
-        "confidential": {"role": "local", "residence": "on_device"},
-        "*": {"role": "cloud", "residence": "off_device"},
-    }}}
+    assert set(table) == {"Classifier"}
+    arms = table["Classifier"]["classify"]
+    assert set(arms) == {"confidential", "*"}
+    # The PLACEMENT, which is what a consumer with no source is handed. Asserted
+    # per key rather than as one dict literal, because the placement is
+    # deliberately extensible: items 515 and 519 added `candidates` and `line`
+    # beside these two, and a later slice may add another. What must not drift
+    # is the head placement itself, which is what item 514's flow walk reads.
+    assert arms["confidential"]["role"] == "local"
+    assert arms["confidential"]["residence"] == "on_device"
+    assert arms["*"]["role"] == "cloud"
+    assert arms["*"]["residence"] == "off_device"
+    # item 515: the ordered candidate set. An arm written with a single role
+    # carries a one-tuple whose only member is the head, so nothing written
+    # against item 512 reads differently.
+    assert arms["confidential"]["candidates"] == ("local",)
+    assert arms["*"]["candidates"] == ("cloud",)
     assert "route_table" in shadow_promotion.ShadowPlan.__dataclass_fields__
 
 

@@ -87,6 +87,62 @@ from `check()` to the consumer that needs it, which is how item 517's decision
 object and item 518's `ShadowPlan.route_table` already read it. Section 4.1 of
 `docs/design/531-model-placement.md` is the contract, including what would
 justify an IR section later and why neither has landed.
+
+WHAT ITEM 515 ADDS HERE
+-----------------------
+`docs/design/539-model-portfolio.md` is the portfolio's design. Two things of
+its slice 1 live in this file, because both are rules over the same
+declaration:
+
+    model role fast  on_device device gpu memory 6144 quant q4_k_m
+    model role small on_device device cpu memory  512 quant int8
+
+    route model on classify { confidential -> fast | small }
+
+An optional `device` clause states the resource a placement DEMANDS - a class
+from a closed vocabulary, a resident-memory floor, an opaque quantisation tag
+(`revl.model_profile`). An arm may name an ORDERED CANDIDATE SET, which is the
+scheduling surface, and the set is closed: `*` on the right of an arrow is
+refused by name, so a scheduler cannot pick a role no arm names. Within a set,
+residence is uniform, so no fallback carries work across the line item 514's
+ceiling drew, and every candidate is profiled, so no candidate is the
+unrankable one a fallback lands on. A `model council` is a placement and not a
+candidate: it may stand alone on the right of an arrow, and it may not appear
+in a set of two or more, because a council already aggregates its members by a
+declared rule and a scheduler picking among candidates is a second, undeclared
+aggregation over the same call.
+
+What revl still does NOT know is whether the declared device exists. The
+profile is a claim about hardware, checked against arms and ceilings and
+against nothing else.
+
+WHAT ITEM 519 ADDS HERE
+-----------------------
+`docs/design/541-model-in-attenuation.md` is the design. A second optional
+clause states the capability tokens a call to the role can itself reach, which
+is what puts the role in the capability attenuation product:
+
+    model role fast on_device device gpu memory 6144 quant q4_k_m
+                              reaches [net, fs.read]
+
+Omitting it leaves the reach UNDECLARED, which is `UNDECLARED_REACH` and not
+an empty set. The fold itself is `revl.lower`'s, beside the spawn-edge fold it
+reuses; what lives here is the reading of silence.
+
+THE TWO CLAUSES AFTER A RESIDENCE
+---------------------------------
+`device ...` is written first and `reaches [...]` second, each independently
+omittable, and the parser refuses the other order rather than accepting two
+spellings of one declaration. The order follows the reading: `device` refines
+the residence in front of it, since both answer where the call runs, and the
+bracketed capability list reads last, where `requires` and `emission` have
+already taught a reader to expect one.
+
+They also fail in opposite directions, which is why neither defaults to the
+other. An omitted `device` clause is a role making no resource claim, refused
+only where a claim is needed (an ordered candidate set has to be rankable). An
+omitted `reaches` clause is a reach nobody wrote down, refused wherever it is
+read.
 """
 
 from __future__ import annotations
@@ -94,6 +150,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .errors import RevlError
+from .model_profile import DEVICE_CLASSES, DeviceProfile
 from .taint import ORIGIN_CLASSES
 
 # Where a call to a role executes. A CLOSED vocabulary, checked at compile time
@@ -142,20 +199,76 @@ MODEL_SCOPE = "model"
 
 _ORIGIN_VOCABULARY = ", ".join(sorted(ORIGIN_CLASSES) + ["*"])
 _RESIDENCE_VOCABULARY = ", ".join(RESIDENCES)
+_DEVICE_VOCABULARY = ", ".join(DEVICE_CLASSES)
+
+
+# The reach of a role that declares none. UNDECLARED IS NOT EMPTY: a model is
+# an authority surrogate, so the question "how far does this role reach" always
+# has an answer, and the answer a declaration does not give is the unnameable
+# `*` - the one token no `requires` key can name and that `cap_order.covers`
+# therefore covers with nothing (item 519).
+#
+# This is the whole failure direction of the item. Reading an undeclared reach
+# as EMPTY would make an unknown model inert in the product, which is the
+# fail-open shape: the component that consults a model it has said nothing
+# about is exactly the one whose effective ceiling is unknown, and an unknown
+# ceiling is refused here rather than assumed to be zero. It is the same choice
+# `_spawn_emission_surface` already makes for a service method that declares
+# `emission` with no capability list, where `None` becomes `*` and not `set()`.
+UNDECLARED_REACH = ("*",)
 
 _COUNCIL_DESIGN = "docs/design/543-model-council.md"
 
 
 @dataclass(frozen=True)
 class Role:
-    """A validated `model role` declaration."""
+    """A validated `model role` declaration.
+
+    A role carries two independently optional clauses, and both default to
+    `None`, so `Role(name, residence, line)` is still the whole declaration
+    for a role written against item 512 alone.
+
+    `profile` is the item-515 device clause, or `None` for a role declared
+    without one. It is the resource the placement DEMANDS; what a member is
+    actually loaded onto is the provider's published profile and reaches revl
+    only inside an opaque `placement_digest` (`revl.model_profile`).
+
+    `reach` is the `reaches [...]` clause of item 519, as declared: a tuple of
+    capability tokens, `("*",)` for `reaches [*]`, `()` for `reaches []`, and
+    `None` when the clause was omitted. Read it through `reach_tokens` rather
+    than directly, which is what resolves `None` to `UNDECLARED_REACH`.
+
+    The two mean different things when omitted, and deliberately so. An
+    omitted `device` clause is a role that makes no resource claim, which is
+    refused only where a claim is needed (an ordered candidate set); an
+    omitted `reaches` clause is a role whose reach is UNDECLARED, which is the
+    unnameable `*` and is refused wherever it is read.
+    """
     name: str
     residence: str
     line: int
+    profile: DeviceProfile | None = None
+    reach: tuple | None = None
 
     @property
     def off_device(self) -> bool:
         return self.residence == "off_device"
+
+    @property
+    def reach_declared(self) -> bool:
+        """Whether the role wrote a `reaches [...]` clause at all.
+
+        The diagnostic reads this so it can say `declares no reach` instead of
+        claiming the author wrote `reaches [*]`, which they did not."""
+        return self.reach is not None
+
+    @property
+    def reach_tokens(self) -> tuple:
+        """The capability tokens a call to this role can reach.
+
+        `UNDECLARED_REACH` when the clause is absent. Every consumer goes
+        through here, so the fail-closed reading of silence is decided once."""
+        return UNDECLARED_REACH if self.reach is None else self.reach
 
 
 def roles(program, filename: str | None = None) -> dict[str, Role]:
@@ -192,8 +305,58 @@ def roles(program, filename: str | None = None) -> dict[str, Role]:
                      "its own role name",
                 code=CODE, category=CATEGORY,
             )
-        table[decl.name] = Role(decl.name, decl.residence, decl.line)
+        table[decl.name] = Role(decl.name, decl.residence, decl.line,
+                                _profile(decl, filename),
+                                getattr(decl, "reach", None))
     return table
+
+
+def _profile(decl, filename: str) -> DeviceProfile | None:
+    """Validate the optional item-515 `device` clause on one role.
+
+    Two refusals, both closed, and one deliberate non-refusal.
+
+    The device class is checked against `DEVICE_CLASSES`, so `device gpu0` is
+    a refusal and not a placement that matches any device. The memory floor
+    must be positive, because `memory 0` reads as "no requirement" while
+    looking like a declared one, and a floor nothing can fail to meet is the
+    fail-open shape.
+
+    The quantisation tag is NOT checked against a vocabulary. Quantisation
+    tags are an open world the compiler must not learn (item 538: a
+    quantisation is "a property of a host and nothing under the compiler
+    should learn what one is"), so the tag is carried, compared for equality,
+    and fed to the provider's digest. A closed list here would be wrong within
+    a release.
+    """
+    clause = getattr(decl, "profile", None)
+    if clause is None:
+        return None
+    if clause.device not in DEVICE_CLASSES:
+        raise RevlError(
+            filename, clause.line,
+            f"unknown device class `{clause.device}` on model role "
+            f"`{decl.name}`",
+            hint=f"a device class is checked at compile time so a typo is a "
+                 f"refusal rather than a placement that matches any device; "
+                 f"the vocabulary is: {_DEVICE_VOCABULARY} "
+                 f"(docs/design/539-model-portfolio.md)",
+            code=CODE, category=CATEGORY,
+        )
+    if clause.memory_mib <= 0:
+        raise RevlError(
+            filename, clause.line,
+            f"model role `{decl.name}` declares `memory {clause.memory_mib}`, "
+            f"which no placement can fail to meet",
+            hint="a memory floor is the resident MiB the member needs, so a "
+                 "floor of zero or less is a requirement that reads as "
+                 "declared and rules nothing out. State the real floor, or "
+                 "drop the `device` clause if the placement has no resource "
+                 "requirement to declare",
+            code=CODE, category=CATEGORY,
+        )
+    return DeviceProfile(clause.device, clause.memory_mib, clause.quant,
+                         clause.line)
 
 
 def _action_names(component) -> set[str]:
@@ -331,13 +494,76 @@ def off_device_members(placement, origin: str | None = None) -> tuple:
                  if m.get("residence") == "off_device")
 
 
+def _check_candidate_set(where, comp, stmt, arm, resolved) -> None:
+    """The two rules that exist only because an arm may name more than one
+    role (roadmap item 515).
+
+    A one-candidate arm is a placement. A multi-candidate arm is a placement
+    plus a scheduling decision, and these are the two ways that decision can
+    undo something already decided.
+
+    **Residence is uniform across the set.** Item 514's origin ceiling refuses
+    a value whose origin reaches an `off_device` role, and it reads one
+    residence per origin. A set whose head is `on_device` and whose fallback
+    is `off_device` would let a scheduler move a workload across the line the
+    ceiling already drew, at a moment no admission check is watching. This is
+    the repo's recurring shape in its scheduling form: state keyed to a
+    placement that outlived the placement meant to bound it.
+
+    **Every candidate declares a device profile.** The scheduler ranks the set
+    by the profile; a candidate with no `device` clause is unrankable, and an
+    unrankable candidate is the one a fallback lands on when the profiled ones
+    are unavailable, which is the fail-open answer to "the declared device is
+    not there". Fail-closed means the whole set is comparable or the program
+    does not compile. A single-candidate arm needs no profile, which is why
+    nothing written against item 512 stops compiling.
+    """
+    head = resolved[0]
+    for role in resolved[1:]:
+        if role.residence != head.residence:
+            raise RevlError(
+                where, arm.line,
+                f"the candidates for `{arm.origin}` in `route model on "
+                f"{stmt.action}` ({comp.name}) do not agree on residence: "
+                f"`{head.name}` is `{head.residence}` (line {head.line}) and "
+                f"`{role.name}` is `{role.residence}` (line {role.line})",
+                hint="a candidate set is what a scheduler may fall back to, so "
+                     "a set spanning both residences lets a fallback carry the "
+                     "work off the device after admission decided it stays. "
+                     "Split the arm's roles into one set per residence, and "
+                     "route the origin to the one it is allowed to reach",
+                code=CODE, category=CATEGORY,
+            )
+    unprofiled = [r.name for r in resolved if r.profile is None]
+    if unprofiled:
+        raise RevlError(
+            where, arm.line,
+            f"candidate(s) {', '.join(unprofiled)} for `{arm.origin}` in "
+            f"`route model on {stmt.action}` ({comp.name}) declare no device "
+            f"profile, so the candidate set cannot be ordered",
+            hint="an arm naming one role is a placement; an arm naming several "
+                 "is a placement plus a scheduling decision, and the declared "
+                 "device profile is what that decision is made on. A candidate "
+                 "with no `device` clause is not comparable to one that has "
+                 "it, and an incomparable candidate is the one a fallback "
+                 "lands on when the profiled ones are unavailable. Give every "
+                 "candidate a `device <class> memory <MiB> quant <tag>` "
+                 "clause, or route the origin to a single role "
+                 "(docs/design/539-model-portfolio.md)",
+            code=CODE, category=CATEGORY,
+        )
+
+
 def check(program, filename: str | None = None,
           councils: dict | None = None) -> dict[str, dict[str, dict]]:
     """Check every `route model` block in the program against its role table.
 
-    Returns `{component: {action: {origin: role}}}` for the blocks that passed,
-    which is what item 514's flow walk will read. A program with no block gets
-    `{}`.
+    Returns `{component: {action: {origin: {role, residence, candidates,
+    line}}}}` for the blocks that passed. `role` and `residence` are the arm's
+    HEAD and are what item 514's flow walk reads; `candidates` is the item-515
+    ordered set, a one-tuple for an arm written with a single role; `line` is
+    the arm's line, which item 519's attenuation refusal points at. A program
+    with no block gets `{}`.
 
     `councils` is `revl.model_council.check()`'s validated table, which an arm
     may name where it names a role (item 516 slice 2). It is threaded in
@@ -416,84 +642,176 @@ def check(program, filename: str | None = None,
                              "on match order; name each origin once",
                         code=CODE, category=CATEGORY,
                     )
-                role = table.get(arm.role)
-                council = councils.get(arm.role) if role is None else None
-                if role is None and council is None:
-                    known = ", ".join(sorted(table)) or "none"
-                    raise RevlError(
-                        where, arm.line,
-                        f"`{arm.origin} -> {arm.role}` in `route model on "
-                        f"{stmt.action}` ({comp.name}) names no declared model "
-                        f"role",
-                        hint=f"a role is a declared placement, not a host "
-                             f"detail: an undeclared name has no residence, so "
-                             f"the placement cannot be checked and is refused "
-                             f"rather than assumed. Declare it — `model role "
-                             f"{arm.role} on_device` or `model role {arm.role} "
-                             f"off_device`. Declared roles: {known}",
-                        code=CODE, category=CATEGORY,
-                    )
-                if arm.origin == "secret":
-                    noun = "council" if council is not None else "role"
-                    raise RevlError(
-                        where, arm.line,
-                        f"action `{stmt.action}` ({comp.name}) routes the "
-                        f"`secret` origin to model {noun} `{arm.role}`: a "
-                        f"capability-bound secret never reaches a model prompt, "
-                        f"on the device or off it (G-SECRET-FLOW)",
-                        hint="a `secret NAME for CAP` value is a host-scope "
-                             "local handed to CAP's own provider call; an LLM "
-                             "prompt is a disclosure sink for it at every "
-                             "residence, so there is no role this arm could name. "
-                             "Drop the arm",
-                        code="G-SECRET-FLOW", category=CATEGORY,
-                    )
-                if council is not None:
-                    placement = _council_placement(council, table)
-                    # The council's own ceiling, which is the one number this
-                    # slice reads from `model_council.check()` (design note 543
-                    # section 6). It is the MOST permissive of its members',
-                    # because giving an input to a council gives it to every
-                    # member - and the refusal names the member that made the
-                    # join `off_device`, not the council, because the members
-                    # are placed separately and that IS the construct.
-                    off = off_device_members(placement, arm.origin)
-                    # A SCOPED council (item 516 slice 4) never reaches the
-                    # refusal below for `confidential`, and that is the
-                    # point rather than an accident: `model_council` refuses
-                    # a member declared `reads confidential` on an
-                    # `off_device` role, so every member that RECEIVES the
-                    # origin is already on the device and `off` is empty. The
-                    # members that stay off the device are the ones the
-                    # declaration withholds it from.
-                    if arm.origin in CONFIDENTIALITY_ORIGINS and off:
-                        message, hint = _council_ceiling_refusal(
-                            stmt.action, comp.name, arm.origin, arm.role, off)
+                # item 515: an arm is an ORDERED CANDIDATE SET, and every
+                # rule below runs on every member of it. An arm whose head
+                # stays on the device and whose fallback does not is precisely
+                # the fail-open shape a scheduler introduces, so the head gets
+                # no special treatment beyond being first.
+                candidates = list(getattr(arm, "candidates", None)
+                                  or (arm.role,))
+                seen: list[str] = []
+                resolved: list[Role] = []
+                council_placement = None
+                for name in candidates:
+                    if name == "*":
                         raise RevlError(
-                            where, arm.line, message, hint=hint,
+                            where, arm.line,
+                            f"`{arm.origin} -> *` in `route model on "
+                            f"{stmt.action}` ({comp.name}) places the origin "
+                            f"on any available role",
+                            hint="a route names the roles an action may reach, "
+                                 "and `*` on the right names none of them: a "
+                                 "placement that may pick a role no arm names "
+                                 "is the shape that puts a workload on "
+                                 "whatever hardware happened to be free. Name "
+                                 "the candidates in the order the scheduler "
+                                 "should try them — `confidential -> fast | "
+                                 "small` (docs/design/539-model-portfolio.md)",
                             code=CODE, category=CATEGORY,
                         )
-                    arms[arm.origin] = placement
+                    if name in seen:
+                        raise RevlError(
+                            where, arm.line,
+                            f"model role `{name}` appears twice among the "
+                            f"candidates for `{arm.origin}` in `route model on "
+                            f"{stmt.action}` ({comp.name})",
+                            hint="the candidate set is ordered, so a repeated "
+                                 "name has two positions and no defined "
+                                 "preference; name each candidate once",
+                            code=CODE, category=CATEGORY,
+                        )
+                    seen.append(name)
+                    role = table.get(name)
+                    council = councils.get(name) if role is None else None
+                    if role is None and council is None:
+                        known = ", ".join(sorted(table)) or "none"
+                        raise RevlError(
+                            where, arm.line,
+                            f"`{arm.origin} -> {name}` in `route model on "
+                            f"{stmt.action}` ({comp.name}) names no declared "
+                            f"model role",
+                            hint=f"a role is a declared placement, not a host "
+                                 f"detail: an undeclared name has no "
+                                 f"residence, so the placement cannot be "
+                                 f"checked and is refused rather than "
+                                 f"assumed. Declare it — `model role {name} "
+                                 f"on_device` or `model role {name} "
+                                 f"off_device`. Declared roles: {known}",
+                            code=CODE, category=CATEGORY,
+                        )
+                    if arm.origin == "secret":
+                        noun = "council" if council is not None else "role"
+                        raise RevlError(
+                            where, arm.line,
+                            f"action `{stmt.action}` ({comp.name}) routes the "
+                            f"`secret` origin to model {noun} `{name}`: a "
+                            f"capability-bound secret never reaches a model "
+                            f"prompt, on the device or off it (G-SECRET-FLOW)",
+                            hint="a `secret NAME for CAP` value is a host-scope "
+                                 "local handed to CAP's own provider call; an "
+                                 "LLM prompt is a disclosure sink for it at "
+                                 "every residence, so there is no role this "
+                                 "arm could name. Drop the arm",
+                            code="G-SECRET-FLOW", category=CATEGORY,
+                        )
+                    if council is not None:
+                        # A COUNCIL IS A PLACEMENT, NOT A CANDIDATE (items 515
+                        # and 516). A council already aggregates its members
+                        # by a declared, total rule that names no value when
+                        # they disagree (G-COUNCIL-SPLIT). A scheduler
+                        # choosing among candidates is a second aggregation
+                        # over the same call, written nowhere and decided at
+                        # run time, so the two constructs do not nest.
+                        if len(candidates) > 1:
+                            raise RevlError(
+                                where, arm.line,
+                                f"model council `{name}` is one of "
+                                f"{len(candidates)} candidates for "
+                                f"`{arm.origin}` in `route model on "
+                                f"{stmt.action}` ({comp.name})",
+                                hint="a council is a placement whose "
+                                     "aggregation is declared and total; a "
+                                     "candidate set is a scheduling decision "
+                                     "made at run time. Nesting one in the "
+                                     "other leaves two aggregations over one "
+                                     "call and no written rule for which "
+                                     "applies. Route the origin to the "
+                                     "council alone, or name only roles in "
+                                     "the candidate set "
+                                     "(docs/design/539-model-portfolio.md)",
+                                code=CODE, category=CATEGORY,
+                            )
+                        council_placement = _council_placement(council, table)
+                        # The council's own ceiling, which is the one number
+                        # this slice reads from `model_council.check()` (design
+                        # note 543 section 6). It is the MOST permissive of its
+                        # members', because giving an input to a council gives
+                        # it to every member - and the refusal names the member
+                        # that made the join `off_device`, not the council,
+                        # because the members are placed separately and that IS
+                        # the construct.
+                        off = off_device_members(council_placement, arm.origin)
+                        # A SCOPED council (item 516 slice 4) never reaches the
+                        # refusal below for `confidential`, and that is the
+                        # point rather than an accident: `model_council`
+                        # refuses a member declared `reads confidential` on an
+                        # `off_device` role, so every member that RECEIVES the
+                        # origin is already on the device and `off` is empty.
+                        # The members that stay off the device are the ones the
+                        # declaration withholds it from.
+                        if arm.origin in CONFIDENTIALITY_ORIGINS and off:
+                            message, hint = _council_ceiling_refusal(
+                                stmt.action, comp.name, arm.origin, name, off)
+                            raise RevlError(
+                                where, arm.line, message, hint=hint,
+                                code=CODE, category=CATEGORY,
+                            )
+                        break
+                    if (arm.origin in CONFIDENTIALITY_ORIGINS
+                            and role.off_device):
+                        raise RevlError(
+                            where, arm.line,
+                            f"action `{stmt.action}` ({comp.name}) routes the "
+                            f"`{arm.origin}` origin to model role `{name}`, "
+                            f"which is declared `{role.residence}` on line "
+                            f"{role.line}: a {arm.origin} input may not leave "
+                            f"the device (G-MODEL-PLACE)",
+                            hint=f"route `{arm.origin}` to a role declared "
+                                 f"`on_device`, or declare `{name}` "
+                                 f"`on_device` if this placement really does "
+                                 f"stay on the device. Dropping the arm also "
+                                 f"works: `*` never covers a confidentiality "
+                                 f"origin, so an unnamed `{arm.origin}` is not "
+                                 f"placed at all "
+                                 f"(docs/design/531-model-placement.md)",
+                            code=CODE, category=CATEGORY,
+                        )
+                    resolved.append(role)
+                if council_placement is not None:
+                    # `candidates` and `line` are additive and uniform across
+                    # every placement shape (item 519). For a council they are
+                    # the MEMBER roles, because those are the roles the arm
+                    # actually reaches: a council asks every member, so the
+                    # attenuation fold has to read all of them and not the
+                    # council's own name, which is not a role.
+                    council_placement["candidates"] = tuple(
+                        council_placement["member_roles"])
+                    council_placement["line"] = arm.line
+                    arms[arm.origin] = council_placement
                     continue
-                if arm.origin in CONFIDENTIALITY_ORIGINS and role.off_device:
-                    raise RevlError(
-                        where, arm.line,
-                        f"action `{stmt.action}` ({comp.name}) routes the "
-                        f"`{arm.origin}` origin to model role `{arm.role}`, "
-                        f"which is declared `{role.residence}` on line "
-                        f"{role.line}: a {arm.origin} input may not leave the "
-                        f"device (G-MODEL-PLACE)",
-                        hint=f"route `{arm.origin}` to a role declared "
-                             f"`on_device`, or declare `{arm.role}` "
-                             f"`on_device` if this placement really does stay "
-                             f"on the device. Dropping the arm also works: `*` "
-                             f"never covers a confidentiality origin, so an "
-                             f"unnamed `{arm.origin}` is not placed at all "
-                             f"(docs/design/531-model-placement.md)",
-                        code=CODE, category=CATEGORY,
-                    )
-                arms[arm.origin] = {"role": role.name,
-                                    "residence": role.residence}
+                head = resolved[0]
+                if len(resolved) > 1:
+                    _check_candidate_set(where, comp, stmt, arm, resolved)
+                # `candidates` and `line` are additive (items 515 and 519): the
+                # attenuation refusal points at the ARM that routes through the
+                # role, not at the component head. A consumer reading
+                # `role`/`residence` is unaffected.
+                arms[arm.origin] = {
+                    "role": head.name,
+                    "residence": head.residence,
+                    "candidates": tuple(r.name for r in resolved),
+                    "line": arm.line,
+                }
             actions[stmt.action] = arms
         if actions:
             placed[comp.name] = actions
