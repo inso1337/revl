@@ -1,0 +1,17 @@
+// REJECTED — G4: mixed carriers, the marked head a required service and the
+// unmarked nested crossing a host emission extern. The marker belongs to the
+// head call `pay.settle`, so `charge(cents)` in its argument list is judged
+// where the `emit` stands and is refused there. Which side of the boundary
+// each call reaches does not enter into it; what the rule counts is crossings
+// per marker.
+//
+// expected error:
+//   call to emission `charge` must be marked `emit` (G4)
+
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+service Pay { emission fn settle(cents: Int) -> Int }
+
+component Checkout requires pay: Pay {
+  emit pay.settle(charge(199))
+}

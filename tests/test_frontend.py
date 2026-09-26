@@ -309,6 +309,20 @@ REJECTIONS = {
     # the position the `emit` sits in, and a marker written there is refused.
     "g4_nested_unmarked_emission.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     "g4_nested_emit_expression.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    # issue #1427: the same rule, on the spellings the two fixtures above do
+    # not reach. Both of them nest a REQUIRED SERVICE crossing in an ACTIVATION
+    # body with an UNSCOPED declaration, so three axes went unmeasured: the
+    # host emission extern carrier, a provide-method body, and a
+    # capability-scoped extern. The head's carrier is an axis too, and the
+    # extern carrier was the one that admitted.
+    "g4_nested_host_emission_activation.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_method.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_scoped.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_scoped_method.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_in_service_emit.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_service_emission_in_host_emit.rvl": "call to emission `ledger.fetch` must be marked `emit` (G4)",
+    "g4_nested_emit_expression_host.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    "g4_nested_unmarked_emission_method.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     # --- the indirection cluster ------------------------------------------
     # One shape recurs across all of these: an obligation is carried through an
     # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function
@@ -559,6 +573,36 @@ def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
     assert expected in str(excinfo.value)
+
+
+@pytest.mark.parametrize("filename", [
+    "g4_emit_arrow_argument_inline.rvl",
+    "g4_emit_arrow_argument_let_arrow.rvl",
+    "g4_emit_arrow_argument_let_value.rvl",
+])
+def test_a_marked_crossing_in_an_arrow_argument_is_admitted(filename):
+    """An arrow's body runs when the arrow is called, not while the enclosing
+    `emit`'s arguments are evaluated. The inline spelling was refused as a
+    nested `emit` because the emit-argument position leaked into the arrow
+    body; its two `let` twins, the same crossings in the same order, compiled.
+    All three are admitted."""
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / filename)])
+    assert ir is not None
+
+
+def test_an_unmarked_crossing_in_an_arrow_argument_is_still_refused():
+    """The refusing twin: clearing the argument position for the arrow body
+    does not exempt the body. An unmarked emission there is refused for its
+    missing marker, as it is in an arrow bound by `let`."""
+    from revl import compile_source
+
+    src = (ROOT / "tests" / "fixtures" / "g4_emit_arrow_argument_inline.rvl"
+           ).read_text(encoding="utf-8").replace(
+        "=> emit approvals.approve(t, a)", "=> approvals.approve(t, a)")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "arrow_unmarked.rvl")
+    assert "call to emission `approvals.approve` must be marked `emit` (G4)" \
+        in str(excinfo.value)
 
 
 def test_a1_async_op_via_ternary_in_async_method_ok():

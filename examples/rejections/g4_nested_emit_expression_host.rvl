@@ -1,0 +1,20 @@
+// REJECTED — G4: the nested crossing MARKED where it stands, on the host
+// emission extern carrier. `g4_nested_emit_expression.rvl` is the
+// required-service spelling of this, and the refusal is the same: `compensate`
+// binds per `emit` and every per-step check reads the step's head, so a
+// crossing marked inside an argument list has no step of its own to bind to.
+//
+// Refusing both spellings of the inner call is the point. Adding the marker is
+// the first thing an author tries after
+// `g4_nested_host_emission_activation.rvl`, and it is not the fix; hoisting
+// the crossing into its own step is.
+//
+// expected error:
+//   `emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)
+
+extern emission fn log_line(n: Int) -> Int = @py { return 1 }
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+component Checkout {
+  emit log_line(emit charge(199))
+}

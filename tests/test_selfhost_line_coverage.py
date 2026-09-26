@@ -20,7 +20,9 @@ emitter is precisely the event that opens a fresh uncovered region:
 Both halves are also driven over `tests/fixtures/emit_<tier>_refusals/`, the
 documents a tier's reference REFUSES BY NAME (issue #1419). A refusal is logic
 both halves carry and no `CORPUS` document can reach, because a corpus document
-is one the reference emits: `tests/fixtures/emit_rust_refusals/`.
+is one the reference emits. Five tiers have one: `emit_ts_refusals/`,
+`emit_go_refusals/`, `emit_java_refusals/`, `emit_rust_refusals/` and
+`emit_wasm_refusals/`.
 """
 
 import importlib.util
@@ -203,8 +205,8 @@ def test_the_rust_required_stream_refusal_is_reached_rather_than_recorded(lines)
             f"{half}/{tier} records `{name}` again. It is reached by "
             f"tests/fixtures/emit_rust_refusals/, so recording it is recording "
             f"something that is not true (issue #1419)")
-    assert [p.name for p in lines.refusal_documents("rust")] == [
-        "required_stream_coeffect.rvl"]
+    assert "required_stream_coeffect.rvl" in [
+        p.name for p in lines.refusal_documents("rust")]
 
 
 def test_the_budget_fires_in_both_directions(lines, monkeypatch, tmp_path):
