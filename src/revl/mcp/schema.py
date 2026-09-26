@@ -348,9 +348,10 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
     tools: list[dict] = []
 
     for component in ir.get("components") or []:
+        provided = provided_methods(component)
         for key, service_name in (component.get("provides") or {}).items():
             service = services.get(service_name) or {}
-            bodies = _provide_methods(component, key)
+            bodies = provided.get(key) or {}
             for op_name, op in (service.get("methods") or {}).items():
                 observed = _method_effects(bodies.get(op_name) or [], component,
                                            services, externs, reach)
@@ -452,13 +453,20 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
     }
 
 
-def _provide_methods(component: dict, key: str) -> dict[str, list]:
-    """The lowered method bodies a component installs at `key`."""
+def provided_methods(component: dict) -> dict[str, dict[str, list]]:
+    """The lowered method bodies a component installs, per provide key:
+    `{key: {method_name: body}}`. The first `provide` step for a key wins.
+
+    This is the one reader of the lowered `provide` step's shape.
+    `revl.shadow_runtime.declared_actions` takes its action names from it
+    rather than walking the same steps again."""
+    blocks: dict[str, dict[str, list]] = {}
     for step in component.get("body") or []:
-        if step.get("step") == "provide" and step.get("name") == key:
-            return {m.get("name"): m.get("body") or []
-                    for m in step.get("methods") or []}
-    return {}
+        if step.get("step") == "provide":
+            blocks.setdefault(step.get("name"), {
+                m.get("name"): m.get("body") or []
+                for m in step.get("methods") or []})
+    return blocks
 
 
 def _called_fns(node, found: set) -> None:
