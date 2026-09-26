@@ -135,6 +135,29 @@ compile — enforcement fails closed and checks the swap against *every* active
 lease, rather than against none of them. A swap that cannot be scoped is
 exactly the swap a lease exists to stop.
 
+The same rule covers the verbs that reach a replacement in two steps. An
+operator refused a swap could otherwise unload the component and boot its own
+under the same name, so under `leases enforced`:
+
+- `revl_unload` is refused while another operator leases any component it would
+  take down. The composition keeps serving.
+- `revl_load`, and `revl_restore` (a load from a snapshot), are refused when the
+  composition they would boot contains a component another operator leases. A
+  load always boots into an empty session, so this is the rule for a **cold
+  load of a leased name**, and it is a refusal. A lease is a claim on a name,
+  and it is visible before boot so that an agent can claim a name before it
+  boots. If the boot were not fenced, that claim would mean nothing: another
+  operator's code would take the name, and the holder's first move would be to
+  replace it. The same holds in the gap after the holder unloads its own
+  component to reload it.
+
+The holder is exempt on every one of these paths, exactly as for a swap, so it
+may unload and reload what it holds freely. All of them share one decision,
+`leases.check(session, verb, arguments)`; `check_swap` is its `swap` case.
+Commit, abort and the E-Stop also end a composition and are not lease-checked:
+they settle or halt the session rather than put new code under a name, and an
+E-Stop is never fenced.
+
 Generation replay is outside that claim: `revl_undo` and `revl_rollback`
 re-admit a retained generation and reach `Session.swap` with neither this check
 nor the quarantine gate, under the operator's `undo` authority instead.
@@ -214,13 +237,15 @@ real claim could have asked for. A non-finite `expiry` is either clamped
 
 - `src/revl/mcp/leases.py` — the `Lease`/`LeaseBook` model (pure bookkeeping
   over the clock), the holder-identity resolution, the advisory (`advise` /
-  `advise_plan`) and enforcement (`check_swap`) decisions. Reuses item 55's
-  target derivation (`operator._targets`) read-only to scope a swap to the
-  components it replaces.
+  `advise_plan`) and enforcement (`check`, and `check_swap` for a swap)
+  decisions, and `FENCED`, the verbs the enforced book fences. Reuses item
+  55's target derivation (`operator._targets`) read-only to scope an action to
+  the components it replaces, boots or takes down.
 - `src/revl/mcp/session.py` — the `LeaseBook` lives on the session; `state()`
   surfaces the active set.
 - `src/revl/mcp/server.py` — the `revl_lease` verb, the advisory hook in
-  `revl_plan`, and the enforcement hook in `revl_swap`.
+  `revl_plan`, and the enforcement hooks in `revl_swap`, `revl_load`,
+  `revl_unload` and `revl_restore`.
 - `src/revl/policy.py` — the `leases enforced` flag (item 33) that promotes the
   advisory to a refusal.
 - `src/revl/mcp/persist.py` — snapshot/restore reflection.

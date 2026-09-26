@@ -342,3 +342,105 @@ def test_a_refused_swap_cannot_wind_the_session_clock_back(monkeypatch):
         assert session.call("counter", "next", {})["result"] == 7
     finally:
         session.unload()
+
+
+# ------------------------------------- the ticket names the candidate's code
+
+#: A running composition that carries one agent-authored host body, `alpha`.
+RUNNING_HOST_CODE = (
+    "extern pure fn alpha(x: Str) -> Str = @py {\n"
+    "    return x\n"
+    "}\n" + GOOD)
+
+_ANNOUNCE = (
+    "extern emission fn announce(sink: Str, msg: Str) = @py {\n"
+    "    return\n"
+    "}\n")
+_BOOT_EMIT = 'emit announce("s", "boot")\n  provide counter {'
+
+
+def _entry(name: str, classification: str) -> dict:
+    return {"extern": name, "classification": classification, "backends": ["py"]}
+
+
+def _running_host_code() -> None:
+    server.set_authoring_trust(host_code=True)
+    assert _call("revl_load", {"source": RUNNING_HOST_CODE})["ok"] is True
+    assert _next()["result"] == 7
+    server.SESSION.approval_policy = "auto"
+
+
+def test_a_swap_ticket_names_the_candidates_host_code_not_the_running_one():
+    """The ticket's `unreviewedHostCode` is what a yes lets run. While a
+    composition runs, it used to name the RUNNING composition's host code
+    (`alpha`) and omit the candidate's new emission (`announce`) and pure
+    body (`beta`), so the operator approved code they were never shown."""
+    _running_host_code()
+    candidate = (_ANNOUNCE
+                 + "extern pure fn beta(x: Str) -> Str = @py {\n"
+                   "    return x\n"
+                   "}\n"
+                 + GOOD.replace("provide counter {", _BOOT_EMIT))
+
+    asked = _call("revl_swap", {"source": candidate})
+    assert asked.get("approvalRequired") is True, asked
+    ticket = asked["ticket"]
+    assert ticket["unreviewedHostCode"] == [
+        _entry("announce", "emission"), _entry("beta", "pure")]
+    assert ticket["newHostCode"] == [
+        _entry("announce", "emission"), _entry("beta", "pure")]
+    assert ticket["runningHostCode"] == [_entry("alpha", "pure")]
+    assert "`runningHostCode` is what runs now" in \
+        ticket["unreviewedHostCodeWarning"]
+    assert ticket["hash"] in server.SESSION._tickets   # the fields ride a copy
+    assert _next()["result"] == 7
+
+
+def test_new_host_code_is_what_the_running_composition_does_not_run_already():
+    """`newHostCode` compares by content: a body carried over byte for byte is
+    not new, and one that keeps its name but changes its text is."""
+    _running_host_code()
+    changed_alpha = RUNNING_HOST_CODE.replace("    return x\n",
+                                              "    return x + x\n")
+    kept = _ANNOUNCE + RUNNING_HOST_CODE.replace("provide counter {", _BOOT_EMIT)
+    changed = _ANNOUNCE + changed_alpha.replace("provide counter {", _BOOT_EMIT)
+
+    ticket = _call("revl_swap", {"source": kept})["ticket"]
+    assert ticket["unreviewedHostCode"] == [
+        _entry("alpha", "pure"), _entry("announce", "emission")]
+    assert ticket["newHostCode"] == [_entry("announce", "emission")]
+
+    ticket = _call("revl_swap", {"source": changed})["ticket"]
+    assert ticket["newHostCode"] == [
+        _entry("alpha", "pure"), _entry("announce", "emission")]
+
+
+def test_an_edit_ticket_names_the_edited_host_code():
+    """`revl_edit` swaps through the same `Session.swap`, and its ticket
+    reaches the server's catch-all rather than `_tool_swap`, so the candidate
+    has to travel on the ticket itself."""
+    _running_host_code()
+    asked = _call("revl_edit", {"edits": [
+        {"anchor": "service Counter {", "replacement": _ANNOUNCE + "service Counter {"},
+        {"anchor": "provide counter {", "replacement": _BOOT_EMIT},
+    ]})
+    assert asked.get("approvalRequired") is True, asked
+    ticket = asked["ticket"]
+    assert ticket["unreviewedHostCode"] == [
+        _entry("alpha", "pure"), _entry("announce", "emission")]
+    assert ticket["newHostCode"] == [_entry("announce", "emission")]
+    assert ticket["runningHostCode"] == [_entry("alpha", "pure")]
+    assert _next()["result"] == 7
+
+
+def test_a_ticket_with_nothing_running_lists_no_running_code():
+    """A first load replaces nothing, so its ticket carries the candidate's
+    host code and neither of the replacement lists."""
+    server.set_authoring_trust(host_code=True)
+    server.SESSION.approval_policy = "auto"
+    candidate = _ANNOUNCE + GOOD.replace("provide counter {", _BOOT_EMIT)
+    asked = _call("revl_load", {"source": candidate, "record": True})
+    assert asked.get("approvalRequired") is True, asked
+    ticket = asked["ticket"]
+    assert ticket["unreviewedHostCode"] == [_entry("announce", "emission")]
+    assert "newHostCode" not in ticket and "runningHostCode" not in ticket

@@ -140,6 +140,11 @@ class ApprovalRequired(Exception):
     def __init__(self, ticket: dict) -> None:
         super().__init__("approval required for a class-(c) crossing")
         self.ticket = ticket
+        # The composition a `load` or `swap` was booting when this was raised,
+        # set by `Session` on the way out. `None` for a call on the running
+        # composition. The server reads it so a swap's ticket names the host
+        # code of the composition the yes admits, not of the one it replaces.
+        self.candidate: dict | None = None
 
 
 def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:

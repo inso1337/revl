@@ -392,7 +392,9 @@ NAME - the multi-agent workspace primitive. A lease is NOT a lock: the running
 component keeps serving every call. It governs who may REPLACE it while you
 iterate. By default a swap that would replace someone else's leased component is
 WARNED at plan/swap but proceeds; under a boundary policy that declares `leases
-enforced` (item 33) that swap is REFUSED at admission. Leases expire on their
+enforced` (item 33) that swap is REFUSED at admission, and so is an unload that
+would take the component down or a load or restore that would boot one under the
+leased name. Leases expire on their
 TTL, so a walked-away agent never wedges the workspace
 ([component-leases.md](component-leases.md)).
 
