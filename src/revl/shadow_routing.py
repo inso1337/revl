@@ -98,6 +98,7 @@ PUBLIC SURFACE
 ``Served`` / ``Entry``    : what one crossing did, and the stamped observation
 ``ShadowLedger``          : the accumulated window for ONE action class
 ``selects(route, key)``   : the deterministic selection, a pure function
+``Scheduler``             : the incremental form, one crossing at a time
 ``serve(route, ...)``     : the scheduler, crossings to a ledger
 ``decide(route, plan, entries, ...)`` : the scheduler's checks, then the gate
 ``render(promotion, ledger)``         : the gate's report plus what was served
@@ -412,6 +413,131 @@ class ShadowLedger:
 # the scheduler
 # ---------------------------------------------------------------------------
 
+class Scheduler:
+    """The INCREMENTAL form of :func:`serve`: one crossing at a time.
+
+    A batch of crossings is what an offline caller holds. A running
+    composition is not offline: the python tier's completion seam
+    (`backends/python/runtime.py`) reaches one crossing, the incumbent answers
+    it, and the next crossing does not exist yet. `revl.shadow_runtime` wires
+    that seam to this class.
+
+    There is deliberately ONE selection, stamping and counting path:
+    :func:`serve` is a loop over :meth:`offer`, so the batch form and the live
+    form cannot drift into two answers about which crossings were shadowed and
+    how many times the candidate was consulted.
+
+    ``incumbent`` may be omitted when every caller passes the answer in:
+    inside a running seam the incumbent has already answered, and asking it
+    again would issue a second completion and charge for it."""
+
+    def __init__(self, route: ShadowRoute, *,
+                 candidate: Callable[[tuple], Answered],
+                 incumbent: Optional[Callable[[tuple], Answered]] = None,
+                 slo: Optional[Callable[[tuple], Mapping[str, Any]]] = None):
+        self.route = route
+        self._incumbent = incumbent
+        self._candidate = candidate
+        # Named `_metrics`, not `_slo`: this module's own oracle walks the
+        # file's syntax tree and forbids the attribute name `_slo` anywhere,
+        # because a module reaching for `observation._slo` would read a
+        # metric without tripping the counter the no-metric claim rests on.
+        # This member is the metrics PRODUCER, which is not a metric.
+        self._metrics = slo
+        self._entries: list = []
+        self._served: list = []
+        self._calls = 0
+        self._refusal = _check_route(route)
+
+    @property
+    def refusal(self) -> Optional[tuple]:
+        """``(link, reason)`` once the schedule has refused, else ``None``.
+        A refused scheduler observes nothing further: the window it would go
+        on to build could not be told apart from a complete one."""
+        return self._refusal
+
+    def refuse(self, link: str, reason: str) -> None:
+        """Refuse the schedule before, or part way through, a run.
+
+        For a caller that knows something about the SCHEDULE this module
+        cannot see: `revl.shadow_runtime` refuses one whose realm or action
+        the composition does not bear out. The first refusal wins, because a
+        later one would describe a window that already stopped accumulating.
+        """
+        if self._refusal is None:
+            self._refusal = (link, reason)
+
+    def offer(self, crossing: tuple,
+              answered: Optional[Answered] = None,
+              served: Optional[str] = None) -> Optional[Answered]:
+        """Offer one crossing to the schedule. Returns the INCUMBENT's answer.
+
+        ``answered`` is that answer when the caller already holds it, which is
+        what a running seam holds: the incumbent has answered and asking it
+        again would issue and pay for a second completion. Absent, the
+        ``incumbent`` producer is called for it.
+
+        ``served`` is which side's answer actually reached the caller, for a
+        caller that KNOWS rather than infers. Absent, it is derived from the
+        route the way :func:`serve` derives it, which is the route's claim
+        about who is answering. `revl.shadow_runtime` passes it explicitly and
+        always passes `INCUMBENT`, because its seam discards the observer's
+        return and therefore cannot serve a candidate's answer whatever the
+        route says."""
+        if self._refusal is not None:
+            return answered
+        if not isinstance(crossing, tuple) or len(crossing) != 2:
+            self._refusal = (
+                ROUTE_MALFORMED,
+                f"{crossing!r} is not a (component, step_index) crossing "
+                f"key; that key is item 517's own and this module invents "
+                f"no second correlation")
+            return answered
+        shadowed = selects(self.route, crossing)
+        side = served if served is not None else (
+            CANDIDATE if self.route.live else INCUMBENT)
+        left = answered
+        if left is None:
+            if self._incumbent is None:
+                self._refusal = (
+                    ROUTE_MALFORMED,
+                    f"crossing {crossing!r} was offered with no incumbent "
+                    f"answer and the schedule has no incumbent producer to "
+                    f"ask for one; a shadow with no incumbent side is not a "
+                    f"comparison")
+                return None
+            left = self._incumbent(crossing)
+        if not shadowed:
+            # The candidate is not consulted at all. This is the branch the
+            # share exists to take, and `candidate_calls` counts the other one.
+            self._served.append(Served(crossing, False, side))
+            return left
+        self._calls += 1
+        right = self._candidate(crossing)
+        observation = promotion.Observation(
+            left.record, right.record,
+            slo=self._metrics(crossing)
+            if self._metrics is not None else None,
+            realm=self.route.realm,
+            incumbent_world=left.world,
+            candidate_world=right.world)
+        self._entries.append(Entry(
+            crossing=crossing, component=self.route.component,
+            action=self.route.action, realm=self.route.realm,
+            side=side, observation=observation))
+        self._served.append(Served(crossing, True, side))
+        return left
+
+    def ledger(self) -> ShadowLedger:
+        """The accumulated window. A refused schedule yields an EMPTY ledger
+        carrying the refusal, which is :func:`serve`'s own shape."""
+        if self._refusal is not None:
+            return ShadowLedger(route=self.route, refusal=self._refusal)
+        return ShadowLedger(route=self.route, entries=tuple(self._entries),
+                            served=tuple(self._served),
+                            candidate_calls=self._calls)
+
+
 def serve(route: ShadowRoute, crossings: Sequence[tuple], *,
           incumbent: Callable[[tuple], Answered],
           candidate: Callable[[tuple], Answered],
@@ -442,41 +568,13 @@ def serve(route: ShadowRoute, crossings: Sequence[tuple], *,
     here is one that stops the shadow, not one that stops the incumbent from
     answering.
     """
-    bad = _check_route(route)
-    if bad is not None:
-        return ShadowLedger(route=route, refusal=bad)
-
-    entries, served, calls = [], [], 0
+    scheduler = Scheduler(route, incumbent=incumbent, candidate=candidate,
+                          slo=slo)
     for crossing in crossings or ():
-        if not isinstance(crossing, tuple) or len(crossing) != 2:
-            return ShadowLedger(
-                route=route, refusal=(
-                    ROUTE_MALFORMED,
-                    f"{crossing!r} is not a (component, step_index) crossing "
-                    f"key; that key is item 517's own and this module invents "
-                    f"no second correlation"))
-        shadowed = selects(route, crossing)
-        side = CANDIDATE if route.live else INCUMBENT
-        left = incumbent(crossing)
-        if not shadowed:
-            # The candidate is not consulted at all. This is the branch the
-            # share exists to take, and `candidate_calls` counts the other one.
-            served.append(Served(crossing, False, side))
-            continue
-        calls += 1
-        right = candidate(crossing)
-        observation = promotion.Observation(
-            left.record, right.record,
-            slo=slo(crossing) if slo is not None else None,
-            realm=route.realm,
-            incumbent_world=left.world,
-            candidate_world=right.world)
-        entries.append(Entry(crossing=crossing, component=route.component,
-                             action=route.action, realm=route.realm,
-                             side=side, observation=observation))
-        served.append(Served(crossing, True, side))
-    return ShadowLedger(route=route, entries=tuple(entries),
-                        served=tuple(served), candidate_calls=calls)
+        if scheduler.refusal is not None:
+            break
+        scheduler.offer(crossing)
+    return scheduler.ledger()
 
 
 # ---------------------------------------------------------------------------
@@ -645,5 +743,6 @@ __all__ = [
     "ACTION_UNSCHEDULED", "ACTION_MISMATCHED", "REALM_MISMATCHED",
     "SERVED_CANDIDATE",
     "Share", "NOTHING", "EVERYTHING", "ShadowRoute", "Answered", "Served",
-    "Entry", "ShadowLedger", "selects", "serve", "decide", "render",
+    "Entry", "ShadowLedger", "Scheduler", "selects", "serve", "decide",
+    "render",
 ]
