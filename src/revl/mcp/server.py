@@ -888,9 +888,13 @@ def _tool_swap(arguments: dict) -> dict:
     if not inline:
         return _swap_server_side(replacing)
 
+    # issue #1446: like `revl_load` (#1444), a swap that does not succeed
+    # changes nothing, so the candidate's host bodies are recorded only once it
+    # is running. Compiled without `_compile`'s side effect for that reason.
+    source, files, modules = _candidate_of(arguments)
     try:
-        _compile(*_candidate_of(arguments),
-                 manifest=SESSION.ir, replacing=replacing)
+        compile_under_authoring(source, files, modules=modules,
+                                manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = False
@@ -901,7 +905,7 @@ def _tool_swap(arguments: dict) -> dict:
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
     try:
-        full = _compile(*_candidate_of(arguments))
+        full = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -910,10 +914,17 @@ def _tool_swap(arguments: dict) -> dict:
                             "composition, but is not a complete composition on "
                             "its own — pass the full source set to swap")
         return rejected
+    authored = _authored_host_bodies(full, source, modules)
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
+    except ApprovalRequired as exc:
+        # the same fallback `_approval_required` applies on its own: the
+        # running composition's host bodies, else the candidate's
+        return _approval_required(exc, host_bodies=_LIVE_HOST_BODIES or authored)
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = authored
     return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
 
 
