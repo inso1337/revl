@@ -316,7 +316,9 @@ HISTORY_LIMIT = 64
 
 # Issue #1444: the session fields a `load` that does not succeed leaves as they
 # are, instead of putting back. Everything else on the session is restored,
-# including fields that do not exist yet: see `_LoadCheckpoint`.
+# including fields that do not exist yet: see `_LoadCheckpoint`. A `swap` that
+# fails before its teardown is put back the same way, with the same exceptions
+# and for the same reasons (issue #1446).
 #
 # Each entry is here because rolling it back would be WRONG, not merely
 # unnecessary. They are all things that only ever move one way, and a failed
@@ -368,7 +370,11 @@ class _LoadCheckpoint:
 
     Two module-level bindings `load` makes are process state rather than
     session state, so they are captured here too: the `admit` and `reflect`
-    bridges."""
+    bridges.
+
+    `swap` takes one too, for the part of a swap that runs before the teardown
+    (issue #1446). Past the teardown the running generation is gone, and it is
+    `_abort_swap` that brings it back."""
 
     def __init__(self, session: "Session") -> None:
         from . import admit_bridge, reflect_bridge  # noqa: PLC0415
@@ -396,6 +402,20 @@ class _LoadCheckpoint:
             bridge.bind(bound)
 
 
+@dataclasses.dataclass(frozen=True)
+class _SwapPlan:
+    """What `Session._plan_swap` settled before the teardown, for `_cut_over`:
+    the running IR, the successor's class map and rendered source, and the
+    instance and hand-off state captured while the running generation was
+    still live."""
+    old_ir: dict
+    new_map: dict
+    source: str
+    pre: dict
+    handoff_pre: dict
+    pre_resolved: set
+
+
 def _container_copy(value):
     if isinstance(value, dict):
         return dict(value)
@@ -414,6 +434,12 @@ def _refill(container, contents) -> None:
     else:
         container.clear()
         container.update(contents)
+
+
+def _emitter_refused(refusal: BaseException) -> "SessionError":
+    """The py emitter's refusal, as the `SessionError` the transport reports
+    as `category: "session"` (issue #1406)."""
+    return SessionError(f"the py emitter refused this composition: {refusal}")
 
 
 def _backend():
@@ -1394,7 +1420,8 @@ class Session:
         if error is not None:
             raise SessionError(str(error).split("\n")[0])
 
-    def _emit_or_refuse(self, driver, ir: dict):
+    def _emit_or_refuse(self, driver, ir: dict,
+                        source: str | None = None):
         """`driver._emit_module(ir)`, with the py tier's REFUSAL turned into a
         `SessionError` (issue #1406).
 
@@ -1411,22 +1438,42 @@ class Session:
         `refusals(driver.emit)` is that emitter module's own `EmitError` and
         nothing wider. An emitter FAULT stays uncaught and still reaches the
         transport's generic handler, which is where a compiler bug belongs.
-        """
-        try:
-            return driver._emit_module(ir)
-        except refusals(driver.emit) as refusal:
-            raise SessionError(
-                f"the py emitter refused this composition: {refusal}") from refusal
 
-    def _prepare_module(self, ir: dict):
+        `source`, when given, is `ir` already rendered by `_render_or_refuse`.
+        """
+        rendered = {} if source is None else {"source": source}
+        try:
+            return driver._emit_module(ir, **rendered)
+        except refusals(driver.emit) as refusal:
+            raise _emitter_refused(refusal) from refusal
+
+    def _render_or_refuse(self, driver, ir: dict) -> str:
+        """Render `ir` with the py emitter and nothing else, with the same
+        refusal mapping as `_emit_or_refuse`.
+
+        Rendering is where every emitter refusal is raised, and it does not
+        touch the running generation: no generation number, no trace reset, no
+        module registered or executed. That is what lets `swap` run it BEFORE it tears the running generation
+        down, so a refused successor leaves that generation serving (issue
+        #1446)."""
+        try:
+            return driver.emit.emit(ir)
+        except refusals(driver.emit) as refusal:
+            raise _emitter_refused(refusal) from refusal
+
+    def _prepare_module(self, ir: dict, source: str | None = None):
         """Emit the module and, when recording, instrument it before load.
 
         Instrumentation has to happen between emit and `plugin`, because it
         replaces each component's `apply` — the fiber's context chain is fixed
         at plugin time and there is no way in afterwards.
+
+        `source` is `ir` already rendered, from a swap that rendered it before
+        teardown.
         """
         driver = self._driver
-        module = self._emit_or_refuse(driver, ir)
+        module = (self._emit_or_refuse(driver, ir) if source is None
+                  else self._emit_or_refuse(driver, ir, source))
         if self.recorder is not None:
             filename, source = driver.emitted
             self.recorder.register_source(filename, source)
@@ -1467,9 +1514,32 @@ class Session:
           silently migrated by candidate-written template name + host class alone.
 
         Composition-level (static) state is unaffected either way; this only
-        reconciles the dynamic instance layer the static swap never saw."""
+        reconciles the dynamic instance layer the static swap never saw.
+
+        A swap that does not succeed leaves the running composition serving
+        (issue #1446). Everything that can refuse the successor runs before the
+        teardown, in `_plan_swap`: the gates, and rendering the successor, which
+        is where an emitter refusal is raised. A refusal or fault there puts the
+        whole session back from a checkpoint, exactly as a failed `load` does
+        (`_LoadCheckpoint`, with the same `_SURVIVES_A_FAILED_LOAD`), and the
+        running generation was never touched. Past the teardown the running
+        generation is gone, so `_cut_over` rolls back ANY failure by rebooting
+        it (`_abort_swap`), not only a failed activation."""
         driver = self._require()
         self._refuse_if_halted("swap")   # item 443
+        checkpoint = _LoadCheckpoint(self)
+        try:
+            plan = self._plan_swap(driver, ir, migrate)
+        except BaseException:
+            checkpoint.restore(self)
+            raise
+        return self._cut_over(driver, ir, origin, plan)
+
+    def _plan_swap(self, driver, ir: dict, migrate: str) -> "_SwapPlan":
+        """Everything `swap` does before the teardown: every gate, rendering
+        the successor, and capturing the state that crosses. The running
+        generation is still live and serving throughout, and nothing here may
+        change it, so a raise from here leaves it exactly as it was."""
         self._enforce_sandbox(ir)
         self._enforce_evidence(ir)
         # item 246: classify the candidate and gate its activation reach BEFORE
@@ -1497,6 +1567,12 @@ class Session:
         # untouched (STATE_UNDISCLOSED), never silently carried. Fail-closed.
         if migrate == "declared":
             self._enforce_declared_disclosure(old_ir, ir)
+        # issue #1446: render the successor while the running generation is still
+        # up. The emitter's refusal is raised here, so a document the py tier
+        # cannot lower is refused with gen N untouched and serving. It used to be
+        # raised from `_prepare_module` after `_dispose_all`, which left the
+        # session pointing at the refused composition with nothing providing.
+        source = self._render_or_refuse(driver, ir)
         # capture BEFORE teardown — while the old instances are still live and
         # their state still exists (Q2). Empty unless something spawned, so a
         # non-instance swap is byte-identical to before. The item-10 instance
@@ -1523,6 +1599,16 @@ class Session:
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
         pre_resolved = set(driver.resolved_keys())
+        return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
+                         handoff_pre=handoff_pre, pre_resolved=pre_resolved)
+
+    def _cut_over(self, driver, ir: dict, origin: dict | None,
+                  plan: "_SwapPlan") -> dict:
+        """Tear the running generation down and boot the successor in its place.
+        From the teardown on, a failure of any kind reboots the predecessor
+        (`_abort_swap`) so the running system keeps serving."""
+        old_ir, new_map = plan.old_ir, plan.new_map
+        pre, handoff_pre = plan.pre, plan.handoff_pre
         saved_previous, saved_previous_origin = self.previous, self.previous_origin
         self.previous = self.ir
         self.previous_origin = self.origin
@@ -1553,7 +1639,7 @@ class Session:
         # aborted (it was made permanent — the swap-owner-scoping data-loss bug).
         self._install_session_owner(ir)
         try:
-            self._run(driver._load(ir, self._prepare_module(ir)))
+            self._run(driver._load(ir, self._prepare_module(ir, plan.source)))
             # item 334 (EDGE 1): the POST-ACTIVATION HEALTH GATE. `driver._load`
             # returns WITHOUT raising for the two most likely candidate faults —
             # item 372 makes a mid-body FAILED activation "honest and observable"
@@ -1564,16 +1650,22 @@ class Session:
             # opposite of the revert guarantee. So assert the successor activated
             # CLEANLY and, if not, raise into the `_activation_error` branch below,
             # which routes to `_abort_swap` (revert to gen N, keep serving gen N).
-            self._assert_successor_activated(ir, pre_resolved)
-        except _activation_error() as exc:
+            self._assert_successor_activated(ir, plan.pre_resolved)
+        except BaseException as exc:
             # item 372: the successor's activation did not complete — roll the
             # whole swap back to the predecessor (which activated cleanly) so the
             # running system keeps serving, and surface the loud diagnostic
             # rather than leaving a half-loaded generation reporting loaded.
             # `_abort_swap` reinstalls the owner around the predecessor reload.
+            # Issue #1446: the same for any other failure past the teardown (a
+            # fault while plugging the module or booting it). Only the item-372
+            # activation failure is an answer; anything else is still re-raised
+            # as the fault it is, after the rollback.
             self._abort_swap(old_ir, pre, saved_previous, saved_previous_origin,
                              handoff_pre)
             self._record_generation()
+            if not isinstance(exc, _activation_error()):
+                raise
             raise SessionError(
                 f"swap rejected: {exc}. The running composition is untouched "
                 f"(rolled back to the previous generation)."
