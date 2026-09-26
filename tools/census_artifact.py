@@ -51,6 +51,11 @@ digest instead: `compiler_commit` names a sha256 over `src/revl/**/*.py` and
 than a commit sha, because a commit that moved neither does not move them and an
 outsider can recompute both from a checkout.
 
+Every file name that goes into a digest is REPO-RELATIVE. An absolute name makes
+the digest depend on the directory the clone happens to sit in, which is the one
+way a content digest can stop being recomputable by the person it was published
+for; `tests/test_census_artifact.py` holds that property from a second checkout.
+
 USAGE
 -----
     python3 tools/census_artifact.py                     # render to stdout
@@ -143,13 +148,45 @@ def _load(rel: str, name: str):
     return module
 
 
+def _plural(count: int, one: str, many: str) -> str:
+    """`f"{count} {one|many}"`. The artifact is read by people, and a generated
+    report that says "6 id(s)" reads like a report nobody read."""
+    return f"{count} {one if count == 1 else many}"
+
+
+def _repo_relative(path) -> str:
+    """`path` as a forward-slash name relative to the checkout root.
+
+    Raises rather than falling back, because a silent fallback to an absolute
+    name is exactly the defect this function exists to remove.
+    """
+    resolved = Path(path).resolve()
+    try:
+        return resolved.relative_to(ROOT).as_posix()
+    except ValueError:
+        raise SystemExit(
+            f"census_artifact: {resolved} is outside the checkout at {ROOT}; "
+            f"every digested file has to be in the tree, or the digest is not "
+            f"recomputable by anyone else") from None
+
+
 def _digest(paths) -> str:
     """sha256 over the named files, in the order given, each length-prefixed so
-    concatenation cannot be forged by moving a byte across a boundary."""
+    concatenation cannot be forged by moving a byte across a boundary.
+
+    The name that goes into the hash is the path RELATIVE TO THE CHECKOUT, and
+    always with forward slashes. It used to be the absolute path, which made
+    every digest a function of WHERE the clone sits: two byte-identical
+    checkouts at two different directories produced two different checker
+    versions, `--check` reported drift that was not there, and the recorded
+    crate reproduction read as stale for no reason but the directory name. An
+    artifact whose identity an outsider cannot recompute is not an artifact,
+    so the name is repo-relative and the digest is a property of the contents.
+    """
     h = hashlib.sha256()
     for path in paths:
         blob = Path(path).read_bytes()
-        h.update(f"{path}:{len(blob)}\n".encode())
+        h.update(f"{_repo_relative(path)}:{len(blob)}\n".encode())
         h.update(blob)
     return h.hexdigest()
 
@@ -247,8 +284,20 @@ def measure(census, engine_name: str) -> dict:
               in zip(cases, engine.verdicts(src for _, src in cases))
               if verdict[0] == "admitted"]
 
+    # The corpus is reached by rglob plus three inline program lists, and the
+    # inline lists are keyed by a human-written name, so the same name can
+    # appear twice. A program counted twice inflates every n the report states.
+    # Both numbers are published: `n` is programs RUN, `n_distinct` is distinct
+    # case ids, and the repeated ids are named so the gap is checkable rather
+    # than asserted.
+    seen: dict[str, int] = {}
+    for case_id, _ in cases:
+        seen[case_id] = seen.get(case_id, 0) + 1
+    repeated = sorted(cid for cid, count in seen.items() if count > 1)
+
     return {"cases": cases, "buckets": buckets, "details": details,
-            "issued_admissions": sorted(issued), "engine": engine_name}
+            "issued_admissions": sorted(issued), "engine": engine_name,
+            "n_distinct": len(seen), "repeated_case_ids": repeated}
 
 
 def reference_faults(details: dict, buckets: dict, cases) -> list[str]:
@@ -313,15 +362,54 @@ def allowance(census, buckets: dict[str, list[str]]) -> dict:
     names have to be edited in a diff somebody reads, which is the whole
     discipline `tests/test_gate_reference_census.py::
     test_the_open_bypass_surface_is_exactly_the_named_list` enforces.
+
+    TWO LISTS, NOT ONE. `families` is what THIS RUN measured. `baselined` is
+    what `tools/gate_reference_census_baseline.json` records. They are
+    published side by side because publishing only the first lets a NON-EMPTY
+    baseline read as an empty allowance: a baselined member that stopped
+    diverging leaves the measured list empty while the committed file still
+    grants tolerance for it. `tools/gate_reference_census.py --check` fails in
+    that direction, but a reader holding only this artifact cannot see it, and
+    an artifact a reader has to take on trust is the thing this file exists not
+    to be. So the divergence between the two lists is computed here, named, and
+    rendered; `agrees_with_committed_baseline` is false whenever they differ in
+    either direction.
     """
     families = {}
     for name, ids in sorted(buckets.items()):
         if name.split("/", 1)[0] == census.HARD:
             families[name] = sorted(ids)
+
+    committed = json.loads(census.BASELINE.read_text(encoding="utf-8"))
+    baselined = {name: sorted(ids)
+                 for name, ids in sorted(committed.get("buckets", {}).items())
+                 if name.split("/", 1)[0] == census.HARD}
+
+    def _flat(table):
+        return {(name, case) for name, ids in table.items() for case in ids}
+
+    measured_set, baselined_set = _flat(families), _flat(baselined)
     return {
         "bucket_prefix": census.HARD,
         "families": families,
         "total": sum(len(v) for v in families.values()),
+        # Repo-relative when it is the committed baseline, which it is in every
+        # run that writes the artifact. A test points it elsewhere to drive the
+        # disagreement arms, and a crash there would be a test harness detail
+        # published as a tool defect.
+        "baseline_file": (
+            census.BASELINE.relative_to(ROOT).as_posix()
+            if census.BASELINE.is_relative_to(ROOT) else census.BASELINE.name),
+        "baselined": baselined,
+        "baselined_total": sum(len(v) for v in baselined.values()),
+        # Baselined and no longer diverging: the direction that would let a
+        # non-empty baseline be published as an empty allowance.
+        "baselined_but_not_measured": sorted(
+            f"{name}: {case}" for name, case in baselined_set - measured_set),
+        # Measured and not baselined: a NEW bypass.
+        "measured_but_not_baselined": sorted(
+            f"{name}: {case}" for name, case in measured_set - baselined_set),
+        "agrees_with_committed_baseline": measured_set == baselined_set,
         "capped_by_name_in": "tests/test_gate_reference_census.py",
     }
 
@@ -390,6 +478,8 @@ def build_report(census, provenance, measured: dict,
     rung = "demonstrated" if reproduced_ok else "measured"
 
     n = sum(len(v) for v in buckets.values())
+    n_distinct = measured["n_distinct"]
+    repeated = measured["repeated_case_ids"]
     alw = allowance(census, buckets)
     prov_rows = provenance_rows(provenance)
     census_row = next((r for r in prov_rows if r["corpus"] == "census"), None)
@@ -397,7 +487,10 @@ def build_report(census, provenance, measured: dict,
     claims = [
         {
             "text": (
-                f"Over {n} programs, the gate issued no admission the reference "
+                f"Over {n_distinct} distinct programs ({n} runs; "
+                f"{_plural(len(repeated), 'case id appears', 'case ids appear')}"
+                f" more than once and are named "
+                f"in the report), the gate issued no admission the reference "
                 f"refuses: the `{census.ADMISSION}` bucket is empty, and it is "
                 f"in NEVER_BASELINED, so `--record` cannot write one into the "
                 f"baseline and `--check` fails on any member however the "
@@ -408,12 +501,18 @@ def build_report(census, provenance, measured: dict,
         },
         {
             "text": (
-                f"The gate's standing false-admit allowance is "
-                f"{alw['total']} programs, every one of them named in this "
-                f"report: "
-                + "; ".join(f"{k} ({len(v)})"
-                            for k, v in sorted(alw["families"].items()))
-                + ". It is baselined, capped by name in "
+                (f"The gate's standing false-admit allowance is empty: this "
+                 f"run measured no `false-admit` member, and "
+                 f"{alw['baseline_file']} records none."
+                 if not alw["total"] and not alw["baselined_total"] else
+                 f"The gate's standing false-admit allowance is "
+                 f"{alw['total']} programs, every one of them named in this "
+                 f"report ("
+                 + "; ".join(f"{k} ({len(v)})"
+                             for k, v in sorted(alw["families"].items()))
+                 + f"), against {alw['baselined_total']} recorded in "
+                   f"{alw['baseline_file']}.")
+                + " The allowance is capped by name in "
                   "tests/test_gate_reference_census.py, and `--check` fails "
                   "in both directions, so it can only shrink in a diff "
                   "somebody reads."),
@@ -513,6 +612,14 @@ def build_report(census, provenance, measured: dict,
             "run": run_id,
             "engine": measured["engine"],
             "n": n,
+            "n_distinct": n_distinct,
+            "repeated_case_ids": repeated,
+            "n_note": (
+                f"`n` is programs RUN. `n_distinct` is distinct case ids: "
+                f"{_plural(len(repeated), 'case id reaches', 'case ids reach')}"
+                f" the corpus twice, once from each of two entries that spell "
+                f"the same name, so every bucket count and `n` itself carry "
+                f"them twice. The distinct number is the one to quote."),
             "corpus_dirs": list(census.CORPUS_DIRS),
             "buckets": _bucket_table(buckets),
             "tracked_bucket_prefixes": list(census.TRACKED),
@@ -562,6 +669,18 @@ def build_report(census, provenance, measured: dict,
                 "measurement exactly as re-recording the baseline would defeat "
                 "the census. Neither is detected by a tool; both are edits in a "
                 "diff somebody reads.",
+                (f"The corpus holds "
+                 f"{_plural(len(repeated), 'case id that appears', 'case ids that appear')}"
+                 f" twice, so `n` ({n}) counts "
+                 f"{_plural(n - n_distinct, 'program', 'programs')} twice and "
+                 f"`n_distinct` ({n_distinct}) is the honest size. "
+                 f"The repeats are named in the report. They are not "
+                 f"deduplicated here: dropping one would move bucket counts "
+                 f"and the recorded baseline, which is a change to the census "
+                 f"rather than to the way it is reported."
+                 if repeated else
+                 "Every case id in this run's corpus is distinct, so `n` and "
+                 "`n_distinct` are the same number."),
             ],
         },
     }
@@ -596,19 +715,32 @@ def render_markdown(report: dict) -> str:
     w("same corpus and classifies every disagreement. Agreement means the same")
     w("TAG and the same MESSAGE, not merely the same verdict.")
     w("")
-    w(f"Programs in this run: **{c['n']}**.")
+    w(f"Distinct programs: **{c['n_distinct']}**. Programs run: **{c['n']}**.")
     w(f"Checker version: `{c['checker_version']}`.")
     w(f"Engine: `{c['engine']}`.")
     w(f"Run: `{c['run']}`.")
     w("")
+    if c["repeated_case_ids"]:
+        w("The two numbers differ because "
+          + _plural(len(c["repeated_case_ids"]), "case id reaches",
+                    "case ids reach"))
+        w("the corpus twice, from two entries that spell the same")
+        w("name. They are run twice and counted twice, in `n` and in every")
+        w("bucket below. The number to quote is the distinct one. The repeats,")
+        w("named so the gap is checkable rather than asserted:")
+        w("")
+        for case_id in c["repeated_case_ids"]:
+            w(f"- `{case_id}`")
+        w("")
     w("Neither identity is a commit or a clock. `run` is a sha256 over the corpus")
     w("this run read; the checker version is a sha256 over the files that decide")
-    w("what the census does. Both are recomputable from a checkout.")
+    w("what the census does. Every file name inside a digest is relative to the")
+    w("checkout root, so both are recomputable from any clone, at any path.")
     w("")
     w("## The claim, and why it is not the corpus size")
     w("")
     w("The interesting property is not that the two agree over "
-      f"{c['n']} programs.")
+      f"{c['n_distinct']} programs.")
     w("It is that the bucket that matters **cannot be written**.")
     w("")
     w(f"`{fa['bucket']}` is an issued admission for a program the reference")
@@ -664,19 +796,51 @@ def render_markdown(report: dict) -> str:
     w("")
     w("`false-admit` is the other direction: the reference refuses under a")
     w("guarantee the gate claims to decide, and the gate raises no objection. It")
-    w("is a bypass, it is baselined, and it is **not** zero. Published as it")
-    w("stands, with every residual named.")
+    w("is a bypass, it is baselined, and it is published as it stands, with")
+    w("every residual named.")
     w("")
-    w(f"Total: **{alw['total']}**. Capped by name in `{alw['capped_by_name_in']}`.")
+    w("Two numbers, not one. The first is what this run MEASURED. The second")
+    w(f"is what `{alw['baseline_file']}`")
+    w("RECORDS. Publishing only the first would let a non-empty baseline read")
+    w("as an empty allowance, because a baselined")
+    w("member that stopped diverging leaves the measured list empty while the")
+    w("committed file still grants it tolerance. So both are here, and so is")
+    w("every name on which they differ.")
     w("")
-    if alw["total"]:
-        w("| bucket | program |")
-        w("|---|---|")
-        for family, ids in sorted(alw["families"].items()):
-            for case_id in ids:
-                w(f"| `{family}` | `{case_id}` |")
+    w(f"Measured this run: **{alw['total']}**. "
+      f"Recorded in the baseline: **{alw['baselined_total']}**. "
+      f"Capped by name in `{alw['capped_by_name_in']}`.")
+    w("")
+    if alw["total"] or alw["baselined_total"]:
+        w("| bucket | program | measured this run | in the baseline |")
+        w("|---|---|---|---|")
+        rows = sorted({(family, case)
+                       for table in (alw["families"], alw["baselined"])
+                       for family, ids in table.items() for case in ids})
+        for family, case_id in rows:
+            here = case_id in alw["families"].get(family, [])
+            there = case_id in alw["baselined"].get(family, [])
+            w(f"| `{family}` | `{case_id}` | {'yes' if here else 'NO'} "
+              f"| {'yes' if there else 'NO'} |")
     else:
-        w("No member. The allowance is empty this run.")
+        w("No member on either side: the run measured none and the committed")
+        w("baseline records none. The allowance is empty, not merely unreported.")
+    w("")
+    if alw["agrees_with_committed_baseline"]:
+        w("The two agree.")
+    else:
+        w("**The two do NOT agree, and this report is the wrong place to learn")
+        w("that.** Every name below is a disagreement between what this run")
+        w("measured and what the committed baseline records:")
+        w("")
+        for entry in alw["baselined_but_not_measured"]:
+            w(f"- `{entry}` is baselined and no longer diverges. The baseline")
+            w("  still grants it tolerance it does not need.")
+        for entry in alw["measured_but_not_baselined"]:
+            w(f"- `{entry}` diverges and is not baselined. It is a new bypass.")
+        w("")
+        w("`python3 tools/gate_reference_census.py --check` fails on each of")
+        w("them.")
     w("")
     w("A count would let this list churn unread. Names have to be edited, and")
     w("`--check` fails in BOTH directions: on a new member, and on a baselined")
@@ -767,6 +931,41 @@ def render_markdown(report: dict) -> str:
     w("Those three need nothing but python and take seconds. The crate engine,")
     w("`tools/gate_reference_census.py --engine crate --check`, additionally")
     w("needs cargo, builds the shipped gate, and is the slow half.")
+    w("")
+    w("### Checking the numbers in this file rather than trusting them")
+    w("")
+    w("`--check` re-runs the census and compares every number here against it,")
+    w("so a passing `--check` in your own clone is the whole verification: the")
+    w("table is yours, not ours. It exits 1 and names each field that moved.")
+    w("Nothing in the digests depends on where you cloned to, so the values")
+    w("below are the values you should get.")
+    w("")
+    w("| number here | what recomputes it |")
+    w("|---|---|")
+    w(f"| distinct programs, {c['n_distinct']} | distinct case ids from "
+      "`load_corpus` in `tools/gate_reference_census.py` |")
+    w(f"| programs run, {c['n']} | the length of the same list, repeats "
+      "included |")
+    w(f"| run `{c['run']}` | sha256 over every `(case id, source)` the run "
+      "read, ids repo-relative |")
+    w(f"| checker version `{c['checker_version']}` | sha256 over the "
+      f"{len(c['checker_sources'])} files in `census.checker_sources`, each "
+      "listed there with its own sha256 |")
+    w(f"| `{c['compiler_tree_digest']}` | sha256 over `" + REFERENCE_GLOB
+      + "` |")
+    w("| every bucket count | `tools/gate_reference_census.py --json out.json` "
+      "|")
+    w(f"| the false-admit allowance | `{alw['baseline_file']}`, which is in "
+      "the tree |")
+    w(f"| the provenance columns | `tools/corpus_provenance.py` over "
+      f"`{c['provenance']['manifest']}` |")
+    w("")
+    w("The corpus is the repository. There is no download, no server and no")
+    w("hosted copy to go stale against this one: the programs the census runs")
+    w("are the `.rvl` files in the directories named above plus the inline")
+    w("program lists in `tests/test_selfhost_lower.py` and")
+    w("`tools/gate_reference_census.py`, and `--json` writes out the per-case")
+    w("classification if you want to audit an individual verdict.")
     w("")
     w("## What this does not establish")
     w("")
