@@ -7,10 +7,19 @@
     "Every entry was merged into a base branch other than `main`. Two things",
     "produce that: a base branch that had already been squash-merged, which",
     "strands the work; and a stacked PR whose parent branch was later squashed",
-    "to main, which carries the work under a different commit. The checker",
-    "cannot tell those apart from ancestry alone - a squash breaks the link in",
-    "both cases - so each note below records what was MEASURED on main, and",
-    "says so when the claim is second-hand instead.",
+    "to main, which carries the work under a different commit. Ancestry cannot",
+    "tell those apart, so each entry records a VERDICT and a WITNESS, and",
+    "tools/landing_witness.py re-measures the witness on every run (issue",
+    "#1434): `added` must equal the merge's own added set. A CARRIED entry",
+    "names `carried_at`, the commit that brought the work in, which must be",
+    "an ancestor of the tree under test; `identical` paths must be",
+    "byte-identical to the merge's copy AT THAT COMMIT, and `drifted` paths",
+    "(carried already modified) name the merge's own tests that pin them,",
+    "which must collect and pass. Later edits cost nothing: carrying is a",
+    "historical fact. `absent` paths (STRANDED) must be absent now. A REWORKED",
+    "entry has no file witness and is reported as UNCHECKED, not as verified.",
+    "The `note` is prose; its first verdict word must match `verdict`, and every",
+    "path it names that the merge touched must be in the witness.",
     "",
     "This ratchet SHRINKS ONLY. An entry whose merge commit becomes reachable",
     "from main has been merged properly after all, and the checker FAILS until",
@@ -18,13 +27,163 @@
     "green: a new stranding is a defect to fix."
   ],
   "unreachable": {
-    "1236": "stacked on agent/146-lower-component-methods. CARRIED: tools/tier_guarantees.py and tests/test_tier_guarantee_matrix.py, both added by this merge, are on main.",
-    "1296": "merged into agent/1196-ui-transaction-phases, already squashed to main. Work reported carried by PR #1325 (issue #1342); not independently verified here - it added no files, so there is no cheap witness.",
-    "1305": "merged into agent/1198-private-peer-pool. STRANDED: src/revl/pool_receipt.py and docs/design/566-pool-execution-receipts.md, both added by this merge, are absent from main.",
-    "1308": "merged into agent/81-stream-tiers. STRANDED: `document_holds_stream`, added by this merge to selfhost/emit_go.rvl, is absent from main's copy of that file.",
-    "1309": "merged into agent/1192-shadow-routing. STRANDED: src/revl/shadow_runtime.py and tests/test_shadow_runtime_518.py, both added by this merge, are absent from main.",
-    "1318": "merged into agent/1307-heldout-fence-red, already squashed to main. REWORKED: main carries test_census_change_selects_the_construct_reach_ledger via PR #1322, which is this PR's finding under a different name. The test names this merge added are not on main.",
-    "1319": "merged into agent/1311-model-routes-in-ir, already squashed to main. CARRIED: tests/test_ruleset_modules_completeness.py, added by this merge, is on main via PR #1346.",
-    "1320": "merged into agent/1195-ui-taint-classes, already squashed to main. STRANDED: src/revl/ui_action.py, docs/design/565-ui-target-binding.md and three test modules, all added by this merge, are absent from main. Work reported carried by PR #1325."
+    "1236": {
+      "merge": "b4e9fea7dfd926e970c80631e6a66ecdb111f4a0",
+      "verdict": "CARRIED",
+      "carried_at": "d9816ee55cc73168e205ad47f31a1b605b13d218",
+      "added": [
+        "tests/test_tier_guarantee_matrix.py",
+        "tools/tier_guarantees.py"
+      ],
+      "identical": [
+        "tests/test_tier_guarantee_matrix.py",
+        "tools/tier_guarantees.py"
+      ],
+      "note": "stacked on agent/146-lower-component-methods. CARRIED: tools/tier_guarantees.py and tests/test_tier_guarantee_matrix.py, the two files this merge added, reached main under commit d9816ee5 (PR #1218), where both are BYTE-IDENTICAL to this merge's copies. The earlier note said only that both files are on main, which was true and could not be checked."
+    },
+    "1296": {
+      "merge": "41b41d3a3007f0dba7ffb6fd60f1e9434d978e5b",
+      "verdict": "CARRIED",
+      "carried_at": "9fa58b1f632c9e1bebfc88e161db774b60ff3d85",
+      "added": [],
+      "identical": [
+        "docs/erase-report.md",
+        "src/revl/erase_report.py",
+        "tests/test_erase_report.py"
+      ],
+      "note": "merged into agent/1196-ui-transaction-phases, already squashed to main. CARRIED by PR #1325 (commit 9fa58b1f), measured rather than reported. The earlier note said there was no cheap witness because the merge added no files. That was wrong about the method, not about the facts: it added none, but it MODIFIED three, src/revl/erase_report.py, docs/erase-report.md and tests/test_erase_report.py, and all three are BYTE-IDENTICAL to this merge's copies at 9fa58b1f, including the 80 lines of tests it added to the last. A modified file is a witness, so 'no files added' is not by itself a reason to stop looking."
+    },
+    "1305": {
+      "merge": "d9227f130749e622f747e5a23bb112a21b5b158f",
+      "verdict": "CARRIED",
+      "carried_at": "32db56d9ca68786a053a35d7f54eb08f6c83d454",
+      "added": [
+        "docs/design/543-model-council.md",
+        "docs/design/547-evolvable-layer-state.md",
+        "docs/design/555-asymmetric-peer-identity.md",
+        "docs/design/566-pool-execution-receipts.md",
+        "src/revl/layer_state.py",
+        "src/revl/model_council.py",
+        "src/revl/peer_identity.py",
+        "src/revl/pool_receipt.py",
+        "tests/test_layer_state_546.py",
+        "tests/test_model_council_516.py",
+        "tests/test_peer_identity_differential.py",
+        "tests/test_peer_pool_identity.py",
+        "tests/test_pool_receipts_524.py"
+      ],
+      "identical": [
+        "docs/design/547-evolvable-layer-state.md",
+        "docs/design/555-asymmetric-peer-identity.md",
+        "docs/design/566-pool-execution-receipts.md",
+        "src/revl/layer_state.py",
+        "src/revl/peer_identity.py",
+        "src/revl/pool_receipt.py",
+        "tests/test_layer_state_546.py",
+        "tests/test_peer_identity_differential.py",
+        "tests/test_peer_pool_identity.py",
+        "tests/test_pool_receipts_524.py"
+      ],
+      "drifted": {
+        "docs/design/543-model-council.md": [
+          "tests/test_model_council_516.py::test_the_flagship_council_compiles",
+          "tests/test_model_council_516.py::test_an_aggregation_that_admits_on_a_tie_is_refused",
+          "tests/test_model_council_516.py::test_the_council_ceiling_is_the_most_permissive_member",
+          "tests/test_model_council_516.py::test_the_defaults_are_the_fail_closed_readings"
+        ],
+        "src/revl/model_council.py": [
+          "tests/test_model_council_516.py::test_the_flagship_council_compiles",
+          "tests/test_model_council_516.py::test_an_aggregation_that_admits_on_a_tie_is_refused",
+          "tests/test_model_council_516.py::test_the_council_ceiling_is_the_most_permissive_member",
+          "tests/test_model_council_516.py::test_the_defaults_are_the_fail_closed_readings"
+        ],
+        "tests/test_model_council_516.py": [
+          "tests/test_model_council_516.py::test_the_flagship_council_compiles",
+          "tests/test_model_council_516.py::test_an_aggregation_that_admits_on_a_tie_is_refused",
+          "tests/test_model_council_516.py::test_the_council_ceiling_is_the_most_permissive_member",
+          "tests/test_model_council_516.py::test_the_defaults_are_the_fail_closed_readings"
+        ]
+      },
+      "note": "merged into agent/1198-private-peer-pool. CARRIED: src/revl/pool_receipt.py, docs/design/566-pool-execution-receipts.md and tests/test_pool_receipts_524.py reached main under commit 32db56d9 (PR #1363, the same title) and are BYTE-IDENTICAL there to this merge's copies. The note said STRANDED until PR #1432; that claim is retired. The inventory was also short: this merge ADDED thirteen files, not three, because its base carried items 516, 546 and 555 as well. All thirteen are present at 32db56d9; ten are byte-identical, and the three item 516 files (model_council.py, its design note and its test module) had already moved on by then, so they are pinned by four of the council tests this merge carried."
+    },
+    "1308": {
+      "merge": "ec2e3f3d9ea54d41679e29b9901b34952688774f",
+      "verdict": "REWORKED",
+      "added": [],
+      "pinned_by": [
+        "tests/test_selfhost_emit_go.py::test_a_source_only_stream_acquisition_is_named_too",
+        "tests/test_selfhost_emit_go.py::test_a_bracket_subscription_alone_is_named_too"
+      ],
+      "note": "merged into agent/81-stream-tiers. REWORKED: `document_holds_stream`, added by this merge to selfhost/emit_go.rvl, is still absent from main and is deliberately not restored. Reading `subscribe` / `stream-iter` there would move those discriminants out of the go tier's `unported` baseline in tests/fixtures/selfhost_blind_spots.json on the strength of a refusal predicate. Main reaches the same outcome by the cheaper route issue #1321 took: the marker's suppression now also requires that no component be OBSERVABLE, and `component_is_observable` reads the LENGTH of a component's `body`, so a stream component is named without any stream spelling being read. Measured on 773c6e3f6 with this merge's two single-arm cases re-authored against that rule: a source-only `Stream.source()` acquisition and a subscription with no loop are both named, one marker per components entry, each holding the reference to emitting `stc-go` where the port emits its marker. Those two cases are on main in tests/test_selfhost_emit_go.py."
+    },
+    "1309": {
+      "merge": "412bb8e8aa7e0386aa08990b686a5ed3f76cb956",
+      "verdict": "CARRIED",
+      "carried_at": "e2f42c8d5391d9c34e6b5e336d579a2ab833d570",
+      "added": [
+        "src/revl/shadow_runtime.py",
+        "tests/test_shadow_runtime_518.py"
+      ],
+      "identical": [
+        "docs/design/558-shadow-scheduling.md",
+        "src/revl/shadow_routing.py",
+        "src/revl/shadow_runtime.py",
+        "tests/test_shadow_runtime_518.py"
+      ],
+      "drifted": {
+        "backends/python/runtime.py": [
+          "tests/test_shadow_runtime_518.py"
+        ]
+      },
+      "note": "merged into agent/1192-shadow-routing. CARRIED: src/revl/shadow_runtime.py and tests/test_shadow_runtime_518.py, both added by this merge, are on main, cherry-picked from it in commit e2f42c8d with `git cherry-pick -x` (the provenance line names 412bb8e8), and are BYTE-IDENTICAL to its copies, as are src/revl/shadow_routing.py and docs/design/558-shadow-scheduling.md from the same pick. backends/python/runtime.py is not: the one conflict was in `revl_reset_run_trace_state`, where item 517's sealer reset and item 518's shadow reset were added to the same tail and both are kept, so its `revl_attach_shadow` seam is pinned by the whole of tests/test_shadow_runtime_518.py instead."
+    },
+    "1318": {
+      "merge": "dcf7a8f18fcbd60b0273983cc9fb1858060c2746",
+      "verdict": "REWORKED",
+      "added": [],
+      "pinned_by": [
+        "tests/test_affected_tests.py::test_census_change_selects_the_construct_reach_ledger"
+      ],
+      "note": "merged into agent/1307-heldout-fence-red, already squashed to main. REWORKED: main carries test_census_change_selects_the_construct_reach_ledger via PR #1322, which is this PR's finding under a different name. The test names this merge added are not on main."
+    },
+    "1319": {
+      "merge": "5721a8579c19631464c8f9a963abda95d2d3e3c9",
+      "verdict": "CARRIED",
+      "carried_at": "9649f21c6b00f6dd348af7250b7e1b57b6b89a89",
+      "added": [
+        "tests/test_ruleset_modules_completeness.py"
+      ],
+      "identical": [
+        "tests/test_ruleset_modules_completeness.py"
+      ],
+      "note": "merged into agent/1311-model-routes-in-ir, already squashed to main. CARRIED: tests/test_ruleset_modules_completeness.py, added by this merge, is on main via PR #1346."
+    },
+    "1320": {
+      "merge": "e90804c10f2b8d7ec981b38b233674912434965b",
+      "verdict": "CARRIED",
+      "carried_at": "9fa58b1f632c9e1bebfc88e161db774b60ff3d85",
+      "added": [
+        "docs/design/565-ui-target-binding.md",
+        "src/revl/ui_action.py",
+        "tests/test_ui_action_receipt_521.py",
+        "tests/test_ui_ladder_rungs_521.py",
+        "tests/test_ui_target_binding_521.py"
+      ],
+      "identical": [
+        "docs/design/565-ui-target-binding.md",
+        "src/revl/ui_action.py",
+        "src/revl/ui_family.py",
+        "tests/test_ui_action_receipt_521.py",
+        "tests/test_ui_ladder_rungs_521.py",
+        "tests/test_ui_taint_classes_521.py",
+        "tests/test_ui_target_binding_521.py"
+      ],
+      "drifted": {
+        "src/revl/lower.py": [
+          "tests/test_ui_target_binding_521.py"
+        ]
+      },
+      "note": "merged into agent/1195-ui-taint-classes, already squashed to main. CARRIED, and the credit to PR #1325 is verified rather than repeated: all five files this merge ADDED (src/revl/ui_action.py, docs/design/565-ui-target-binding.md, tests/test_ui_action_receipt_521.py, tests/test_ui_ladder_rungs_521.py and tests/test_ui_target_binding_521.py) were brought to main by commit 9fa58b1f, which is PR #1325, and at that commit all five are BYTE-IDENTICAL to this merge's copies. So are two of the files it MODIFIED, src/revl/ui_family.py (428 lines changed here) and tests/test_ui_taint_classes_521.py. The earlier note said STRANDED and listed the inventory wrongly: test_ui_taint_classes_521.py was modified by this merge, not added, and the fifth added file went unnamed, so a reader checking the three names it gave would have been checking the wrong set. src/revl/lower.py was carried already modified and is pinned by the whole of test_ui_target_binding_521.py, which is unchanged from this merge and pins its lowering additions. The gate crate's generated files, its builder and its admission test differ as well and are not claimed."
+    }
   }
 }
