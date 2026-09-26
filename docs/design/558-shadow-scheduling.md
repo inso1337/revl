@@ -539,3 +539,121 @@ this seam does not perform one.
 6. **The share's statistical behaviour is still not a claim.** `1/4` selected
    7 of 20 above. What is asserted is that the selection is deterministic,
    order-independent and exact at both ends.
+
+## 17. The register: a promotion that lands, and a revert that runs
+
+Sections 1 to 16 end in a verdict. Measured on the base of this section (PR
+#1432's head, `ebe1c8c8`), a live drive of the oracle composition:
+
+```
+clean shadow window:        PROMOTE, 20/20, candidate consulted 20 times
+route after the PROMOTE:    live = False; nothing moved it
+live, divergence at step 5: REVERT divergence-attributed
+                            restoration = {"restored": ["route-arm"], ...}
+share 0/1:                  REFUSE evidence-missing, 0 shadowed
+```
+
+The `REVERT` reported `restored: route-arm` about an arm no code had moved,
+because no code had ever promoted it: the test built the route with
+`live=True` by hand. That is the gap the exit names. A promotion has to LAND,
+and the induced divergence has to revert THAT promotion.
+
+`src/revl/shadow_register.py`, oracle `tests/test_shadow_register_518.py`.
+
+### 17.1. What it holds
+
+A `PromotionRegister` declares every action class `(component, action)` it
+governs and the role each starts on. Per class it keeps the arm in use and a
+LIFO stack of `Arm` records, one per landed promotion. There is no default
+arm: a class the register does not declare cannot be landed, observed or
+reverted (`class-undeclared`).
+
+`register.route(class, realm=, share=, candidate_role=)` derives the
+`ShadowRoute` a window is scheduled under. On the base arm it is a shadow of
+the named candidate. On a promoted class it is LIVE with the promotion's own
+two roles, so the gate applies the first-divergence rule. With a different
+candidate named on a promoted class it is a shadow against the arm now in
+use, which is how a second promotion stacks on the first. The `live` flag is
+the register's statement and no longer the caller's.
+
+### 17.2. Three operations, each decided by the gate
+
+* `land(ir, ledger, plan)` runs `shadow_runtime.decide` over the window and,
+  on `PROMOTE`, pushes an `Arm`. The caller supplies evidence and never a
+  verdict: neither `land` nor `observe` has a parameter for one, and a test
+  asserts the signatures. The `Arm` carries the comparison: the verdict whole
+  (tally, threshold, preconditions, `slo_reads`), the schedule's counts, and
+  the legs compared on each crossing (`records`, `recorded-world`).
+* `observe(ir, ledger, plan)` decides a window taken after the promotion.
+  On `REVERT` it performs the revert; on anything else the promotion stands.
+* `revert(verdict)` accepts only a `REVERT` carrying an attributed divergence,
+  and only for the promotion on top of the class's stack.
+
+`land` also refuses a live window, a window whose incumbent is not the arm in
+use (a window taken before a promotion cannot land after it), and a window a
+revert superseded.
+
+### 17.3. What a revert does
+
+| layer | what happens | how it is checked |
+| --- | --- | --- |
+| `route-arm` | the top `Arm` is popped | the class's state after the revert is compared with its state before the promotion landed; `restored_exactly` is that comparison |
+| `agreement-ledger` | the promoting window is superseded | `land` refuses it afterwards (`window-superseded`); a different window still lands |
+| `placement-history` | not performed | reported under `not_performed` with the compensation the plan declared |
+| every other class | untouched | snapshotted before and after; `survivors` and `breached` are the two sets |
+
+The exit, as the oracle runs it on the python tier's seam: land `summarize`
+on twenty agreeing pairs, drive a live window whose successor answers
+differently at step 5, and read the register.
+
+```
+reverted Classifier.summarize: successor -> incumbent
+diverged at Classifier in realm `tenant_a` step 5: chosen_digest ... -> ...
+restored: route-arm (exactly: yes)
+compensated only: agreement-ledger via supersede-window (window ...)
+not performed by this register: placement-history (neither, declared
+  compensation replay-placement-log)
+other action classes unchanged: Classifier.classify
+```
+
+The relocated-step generation reverts the same way and names the replay step
+and the `slot` field.
+
+### 17.4. Zero evidence
+
+Four shapes, each a test:
+
+| shape | register | report |
+| --- | --- | --- |
+| a shadow window at share `0/1` | not landed, `evidence-missing` | `no evidence (0 pairs; REFUSE, evidence-missing)` |
+| a class no window was decided for | base arm | `no evidence (no window decided)` |
+| a live window at share `0/1` after a promotion | promotion stands, nothing confirmed | the `observe` row carries 0 pairs and no agreement |
+| a `PROMOTE` over a tally that paired nothing (forced) | not landed, `evidence-empty` | `no evidence (0 pairs; PROMOTE)` |
+
+`Tally.agreement` returns `0.0` for an empty tally. The register does not
+read it for one: its rows carry `agreement: None` whenever nothing was
+paired, so a report prints neither 0% nor 100% for a window that compared
+nothing.
+
+### 17.5. Per action class
+
+There is no operation that promotes a role across a component's actions.
+The oracle shows a `summarize` window of twenty agreeing pairs offered as
+`classify`'s evidence refused (`route-mismatched`), `classify`'s own window
+refused at share `0/1` (`evidence-missing`) and at full share
+(`sample-too-small`, one crossing against a plan asking for four), and
+`summarize` promoted while `classify` stays on `incumbent`.
+
+### 17.6. What this does not do
+
+1. **No tier consults the register to pick the model that answers.** Item
+   512's route is a permission and item 515 owns scheduling inside it, and
+   section 15's seam discards the observer's return. The register is the
+   declared arm and the rule the gate applies. It is not a cutover.
+2. **No CLI and no item 520 adapter.** `revl promote` and the `shadow` stage
+   record for the evolution controller are still unbuilt.
+3. **Section 16 items 1, 2, 4 and 5 are unchanged.** Five tiers are unwired,
+   no cordis activation drives the component, a window is one activation, and
+   the static walk's premise stands.
+4. **No self-host port is needed.** Nothing here is parsed, checked, lowered
+   or emitted: no language surface, no IR key and no emitter changed.
