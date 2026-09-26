@@ -93,6 +93,7 @@ from pathlib import Path
 from ._paths import stdlib_root
 from .errors import RevlError
 from .hostfile import _contained  # same canonical containment jail hostref uses
+from .refusal import refusal_class
 
 # Reuse the item-297 reproduce vocabulary and projections verbatim, no new
 # status scheme, no new surface derivation.
@@ -220,21 +221,11 @@ def _emitter(backend: str):
     return _EMITTERS[backend]
 
 
-def _refusal_class(module) -> type | None:
-    """The `EmitError` class carried on an emitter MODULE object, or None for a
-    module that defines none.
-
-    Each backend defines its own `class EmitError(ValueError)` inside its
-    dynamically loaded `emit.py`, so there is no class in `src/` to name in an
-    `except` clause and no shared base narrower than `ValueError` (issue #1393).
-    The class has to be read off the module that raised, and it has to be read
-    off THAT module object: loading `emit.py` twice produces two distinct
-    classes, and an `except` against one does not catch an instance of the
-    other."""
-    cls = getattr(module, "EmitError", None)
-    if isinstance(cls, type) and issubclass(cls, BaseException):
-        return cls
-    return None
+# The three-way emitter outcome (absent / refused / faulted) is decided the same
+# way by every entry point that loads an emitter, so it is decided in one place
+# (issue #1406). `_refusal_class` stays as the name this module's tests reach
+# for; `refusal_class` is the same function.
+_refusal_class = refusal_class
 
 
 def _emit_files(backend: str, norm_ir: dict) -> tuple[dict[str, str] | None, str | None]:

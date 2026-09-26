@@ -75,7 +75,12 @@ def _src(sink: str, component: str = "Biller", tainted: bool = False) -> str:
             ' = @py { return "x" }\n'
             "service Gw { emission fn send(host: Str, body: Str) }\n"
             f"component {component} provides gw: Gw {{\n"
-            "  provide gw { fn send(host, body) { emit gwsend(host, fetch(body)) } }\n"
+            # the fetch is a crossing of its own, so it is marked and bound
+            # first: one `emit` marks one crossing (issue #1427)
+            "  provide gw { fn send(host, body) {\n"
+            "    let page = emit fetch(body)\n"
+            "    emit gwsend(host, page)\n"
+            "  } }\n"
             "}\n"
         )
     else:

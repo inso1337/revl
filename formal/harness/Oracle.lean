@@ -1381,11 +1381,16 @@ admitted. A marker written inside the argument list (`emitnested`) is a
 violation whatever the method declares: the marker admits one crossing,
 so the inner one is hoisted into its own step first.
 
+A HOST emission (a named call to an `emission` extern, or to a fn that
+reaches one) has no service to resolve. The exporter writes its row on the
+pseudo-service `@host` and only for a callee that IS an emission, so a row
+there is judged as a call to an emission method (revl issues 1427, 1437).
+
 PRIVATE RESTATEMENT (see the header): the G4 model is indexed by
 statement syntax, and the export carries call facts. -/
 def g4OK (ems : List (String × String)) (calls : List URow) : Bool :=
   !calls.any fun u =>
-    let em := ems.any fun e => e.1 == u.svc && e.2 == u.meth
+    let em := u.svc == "@host" || ems.any fun e => e.1 == u.svc && e.2 == u.meth
     u.ctx == "emitnested" || ((u.ctx == "emit") != em)
 
 /-- The host acquisition verb table — the model's copy of the checker's

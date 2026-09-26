@@ -1,0 +1,27 @@
+// A `validated` service operation, emitted through a requirement. The frontend
+// admits it. The java reference REFUSES it by name (issue #1373): a validated
+// crossing needs the response-validation seam and this tier has none. The same
+// document without `validated` emits, so the modifier is the only reason for
+// the refusal.
+//
+// It is a service operation and not an extern on purpose: the self-host gate
+// (selfhost/lower.rvl) does not parse `validated` on an extern yet, so an extern
+// carrier here would be a false-reject in tools/gate_reference_census.py.
+//
+// This is not a byte-agreement case, so it cannot live in the tier's CORPUS.
+// The line-coverage gate drives the reference over it here, which is the only
+// way the RevlError-to-EmitError translation in
+//
+//   backends/java/emit.py::_refuse_validated_emissions
+//
+// ever runs (issue #1431). The same wrapper's ModuleNotFoundError bootstrap is
+// NOT reached by this or any document: it runs only when emit.py is executed
+// as a script with revl not importable. The refusal's text is asserted by
+// tests/test_validated_tier_refusal_1373.py.
+//
+// selfhost/emit_java.rvl has no counterpart to this refusal: it does not
+// read the `validated` modifier.
+service Model { emission validated fn complete(h: Str) -> Str }
+component Agent requires model: Model {
+  emit model.complete("p")
+}
