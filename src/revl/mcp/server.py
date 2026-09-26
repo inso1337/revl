@@ -605,12 +605,18 @@ def _compile(source: str | None, files: list[str] | None,
     keyword-with-default it used to be is how three verbs dropped it."""
     ir = compile_under_authoring(source, files, manifest=manifest,
                                  modules=modules, replacing=replacing)
-    over_the_transport = source is not None or bool(modules)
     global _AUTHORED_HOST_BODIES
-    _AUTHORED_HOST_BODIES = (_host_bodies(ir)
-                             if over_the_transport and AUTHORING.host_code
-                             else [])
+    _AUTHORED_HOST_BODIES = _authored_host_bodies(ir, source, modules)
     return ir
+
+
+def _authored_host_bodies(ir: dict, source: str | None,
+                          modules: dict | None) -> list:
+    """The agent-authored host bodies `ir` carries: empty unless the candidate
+    came over the transport under an open authoring trust."""
+    over_the_transport = source is not None or bool(modules)
+    return (_host_bodies(ir) if over_the_transport and AUTHORING.host_code
+            else [])
 
 
 def _summary(ir: dict) -> dict:
@@ -799,17 +805,28 @@ def _remember_live_host_bodies() -> None:
 
 
 def _tool_load(arguments: dict) -> dict:
-    """Boot a composition in memory (nothing is written to disk)."""
+    """Boot a composition in memory (nothing is written to disk).
+
+    Issue #1444: a load that does not succeed changes nothing, here or in the
+    session. So this compiles without `_compile`'s side effect and records the
+    candidate's host bodies only once the load has booted. A ticket the load
+    itself raises still names them, because nothing is live yet to name."""
+    source, files, modules = _candidate_of(arguments)
     try:
-        ir = _compile(*_candidate_of(arguments))
+        ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         return report(error)
+    authored = _authored_host_bodies(ir, source, modules)
     try:
         state = SESSION.load(ir, arguments.get("config"),
                              record=bool(arguments.get("record")),
                              origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
+    except ApprovalRequired as exc:
+        return _approval_required(exc, host_bodies=authored)
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = authored
     return {"ok": True, **_summary(ir), **state}
 
 
@@ -1054,7 +1071,8 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     return {"ok": True, **result}
 
 
-def _approval_required(exc: ApprovalRequired) -> dict:
+def _approval_required(exc: ApprovalRequired,
+                       host_bodies: list | None = None) -> dict:
     """Shape a class-(c) refusal into the ticket two-step response (item 246).
     The call/load/swap did NOT fire: the ticket names what a yes would mean, and
     `revl_approve(hash)` mints the standing approval that lets the identical
@@ -1069,9 +1087,14 @@ def _approval_required(exc: ApprovalRequired) -> dict:
     carries `unreviewedHostCode` naming them and a warning saying the declared
     capabilities are not a bound on what a yes lets run. The ticket `hash` is
     untouched (the fields land on a COPY, after the hash the outstanding-ticket
-    table is keyed by), so approve/consume is byte-identical."""
+    table is keyed by), so approve/consume is byte-identical.
+
+    `host_bodies` is the candidate's own, from a verb that has not recorded
+    them: `revl_load`, which records them only once the load succeeds (issue
+    #1444)."""
     ticket = exc.ticket
-    bodies = _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES
+    bodies = (host_bodies if host_bodies is not None
+              else _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES)
     if bodies:
         ticket = dict(ticket)
         ticket["unreviewedHostCode"] = bodies
