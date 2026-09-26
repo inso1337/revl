@@ -138,6 +138,7 @@ from typing import Any, Callable, Mapping, Optional, Sequence
 
 from . import shadow_promotion as promotion
 from . import shadow_routing as routing
+from .mcp.schema import provided_methods
 from .placement import slice_partition, slice_realms
 
 RUNTIME_KIND = "revl.shadow-runtime"
@@ -276,13 +277,8 @@ def declared_actions(ir: Mapping[str, Any], component: str) -> frozenset:
     comp = _component_entry(ir, component)
     if comp is None:
         return frozenset()
-    names = set()
-    for node in comp.get("body") or []:
-        if isinstance(node, Mapping) and node.get("step") == "provide":
-            for method in node.get("methods") or []:
-                if isinstance(method, Mapping) and method.get("name"):
-                    names.add(method["name"])
-    return frozenset(names)
+    return frozenset(name for methods in provided_methods(comp).values()
+                     for name in methods if name)
 
 
 def _action_of(origin: Any) -> Optional[str]:
