@@ -1247,6 +1247,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "fmt":
         return _run_fmt(args)
     if args.command == "run":
+        if getattr(args, "pool", None):
+            # item 524: the composition runs on a pool MEMBER, not here. The
+            # branch is taken before any local runtime is touched, so nothing
+            # boots on the operator's machine on the way to dispatching it.
+            from .pool_dispatch import run_pool_command  # noqa: PLC0415 — lazy
+            return run_pool_command(args)
         return run_command(args)
     if args.command == "dev":
         from .dev import dev_command  # noqa: PLC0415 — process orchestration is optional

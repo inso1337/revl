@@ -884,6 +884,49 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `--once` - bring the composition up, then tear down LIFO and exit (with
   `--placement`, run probes across processes first; with a non-py backend,
   boot the tier's process, prove no residue, exit).
+- `--pool private` - run the composition on a PRIVATE PEER POOL member instead
+  of this machine (roadmap item 524). The artifact is pinned by hash, the peer
+  re-hashes what it runs, and the result comes back with a signed execution
+  receipt that is verified before anything is recorded as delivered. `private`
+  is the only value: a public or swarm pool needs a different threat model and
+  is absent rather than unimplemented. See
+  [design/567-pool-dispatch.md](design/567-pool-dispatch.md) and the
+  [`revl pool`](#revl-pool) verbs.
+  - `--pool-dir DIR` - the operator's pool directory (charter, roster,
+    identities, delivery ledger).
+  - `--peer ID` - the admitted member to run on. A peer that is not in the
+    roster is refused on `not-a-member`.
+  - `--peer-addr HOST:PORT` - where that member's `revl pool serve` is
+    listening. The address is how to REACH the peer; its identity is the key it
+    signs with, so an address nobody vouched for reaches a peer whose receipts
+    then fail to verify.
+  - `--dispatch-identity PATH` - the operator's PRIVATE identity file, which
+    signs the task. The peer holds only its public half.
+  - `--attest-identity PATH` - the private identity file that attests the
+    returned receipt. Its fingerprint must be in the charter's attest authority
+    (`pool init --attest-identity`) or the receipt is checked and counts for
+    nothing.
+  - `--pool-runner {run-once-py, test-py}` - what the peer does with the
+    artifact. `run-once-py` (default) boots the composition and proves teardown
+    leaves no residue, which needs a cordis-py runtime ON THE PEER; `test-py`
+    runs the artifact's own declared tests and needs only the revl frontend. A
+    runner the peer does not implement is refused on `unknown-runner`, never
+    defaulted.
+  - `--pool-timeout SECONDS` - how long to wait for the peer (default 300). A
+    timeout leaves the task OUTSTANDING in the ledger, because a task whose
+    fate is unknown is neither delivered nor dropped.
+
+  Every other `revl run` flag is honoured by the LOCAL runner and cannot cross
+  to a pool member, so `--pool private` refuses it by name on
+  `unsupported-with-pool` rather than accepting it and ignoring it. What the
+  peer does with the artifact is `--pool-runner` and nothing else.
+
+  Only a composition whose audited G8 boundary is EMPTY is dispatched. That is
+  `EffectClass.pure` and nothing weaker is claimed: an extern whose declared
+  class is `pure` still runs host code, so reading a declared class as an
+  effect class would be fail-open on the one arrow that sends work to a machine
+  nobody trusts. A composition that crosses is refused on
+  `effect-class-unproven`, naming what the audit saw.
 
 Under `--placement` the conductor waits for each child's own `[<name>] DOWN`
 line - the runner's statement that its LIFO unwind covered every registered
@@ -1174,9 +1217,18 @@ of [revl-attest.md](revl-attest.md) for the trust boundary.
 Stand up and operate a private peer pool (roadmap item 524): several
 independent operators running work for each other without trusting each other's
 machines. The verbs declare a pool, admit a peer that proves its identity and
-its artifact, read the roster, and withdraw a peer. See
+its artifact, read the roster, run work on a member and read the delivery
+ledger, and withdraw a peer. See
 [design/550-private-peer-pool.md](design/550-private-peer-pool.md) for the trust
-progression and the failure direction of every step in it.
+progression and the failure direction of every step in it, and
+[design/567-pool-dispatch.md](design/567-pool-dispatch.md) for the task
+envelope, the one-result ledger and the channel.
+
+Work reaches a member through [`revl run --pool private`](#revl-run) on the
+operator's side and `pool serve` on the peer's. The peer re-hashes the artifact
+it is about to run, signs an execution receipt over the result, and the
+operator verifies the result by hash and the receipt by signature before the
+ledger records it as delivered.
 
 The pool is a signed charter plus an append-only roster, and a directory of the
 peers' public keys. A peer's identity is a key, not an address, and its join
@@ -1213,6 +1265,13 @@ for the key lifecycle and what the signature binds.
   - `--revoke-identity PATH` - a public identity file whose fingerprint may
     also revoke. Repeatable. Give this when withdrawals should be signed with a
     key pair.
+  - `--attest-identity PATH` - a public identity file whose fingerprint may
+    attest an execution receipt. Repeatable. The public half is pinned in the
+    pool's directory at the same time, because naming a fingerprint says who
+    may attest and the directory is what holds the key a verdict is checked
+    against. An execution receipt is an ASYMMETRIC record, so a pool with no
+    `--attest-identity` can count no receipt at all and no member can rise
+    above the entry tier.
   - `--key PATH` - the operator signing key (falls back to
     `REVL_ATTEST_KEY_FILE` / `REVL_ATTEST_KEY`).
 - `keygen` - the peer side: draw a key pair on this machine. The private half is
@@ -1258,6 +1317,38 @@ for the key lifecycle and what the signature binds.
   - `--identity-key PATH` - sign the withdrawal receipt with an operator key
     pair, so any holder of the matching public key can check who removed whom.
     Its fingerprint must be in the charter's revoke authority.
+- `serve` - the PEER side: listen for signed tasks, run the artifact the task
+  pins BY HASH, and answer with a signed execution receipt. It holds its own
+  private identity and the operator's PUBLIC one, so there is no secret here
+  that could admit anybody, which is what makes running it on a machine the
+  operator does not trust coherent. Every refusal names a link
+  (`task-signature`, `charter-identity`, `artifact-digest`, `replayed-task`,
+  ...) and is answered on the connection rather than dropped.
+  - `--charter PATH` - the charter this peer joined. A task must pin its
+    digest, so a charter re-signed with different terms invalidates every task
+    minted under the old ones.
+  - `--identity-key PATH` - this peer's private identity file from `pool
+    keygen`. It signs the receipt and names the peer a task must address.
+  - `--operator-public PATH` - the operator's public identity, pinned out of
+    band. A task that does not verify under it is refused before any member of
+    it is read as meaningful.
+  - `--host HOST` / `--port PORT` - bind address (default loopback) and port
+    (0 asks the OS for a free one, which is printed).
+  - `--allow-remote` - permit a non-loopback bind. The channel has NO transport
+    security: every record on it is signed, so nothing can be forged
+    undetected, and nothing on it is secret - the artifact source crosses in
+    the clear. A confidential cross-machine channel is roadmap item 118's mTLS
+    work, which this is a caller of rather than a second copy of.
+  - `--workdir DIR` - where artifacts are written and run (default: a fresh
+    temporary directory removed on exit).
+  - `--timeout SECONDS` - how long one artifact may run (default 300).
+  - `--once` - serve one task and exit.
+- `ledger` - the delivery ledger: every task dispatched, its state
+  (`dispatched`, `delivered`, `orphaned`, `refused`), and the append-only event
+  log. A refused SECOND delivery for a task is an appended event carrying both
+  result digests, which is the visible half of "delivered twice must be
+  impossible or visible". Needs no key, for the same reason `status` does not.
+  - `--dir DIR`, `--json`
 
 ### `revl erase-report`
 
