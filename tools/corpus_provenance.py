@@ -71,21 +71,21 @@ nothing in the filesystem forces an entry to exist. That is what `--check`
 is for, and it is why the failure direction below is the load-bearing part of
 this design.
 
-THE FAILURE DIRECTION: UNDECLARED IS NOT HAND-WRITTEN
------------------------------------------------------
-A provenance field that defaults to "hand-written" when unknown is the
+THE FAILURE DIRECTION: UNDECLARED IS NOT PRE-LOOP
+-------------------------------------------------
+A provenance field that defaults to "pre-loop" when unknown is the
 fail-open shape, and it makes the whole measurement a lie: dropping an
 undeclared document into a globbed corpus would then RAISE the measured
 independence. So an undeclared document resolves to `UNDECLARED`, which is
-counted as model-authored at every threshold, and `--check` names it as an
+counted as loop-authored at every threshold, and `--check` names it as an
 error in its own right. Adding a corpus document therefore costs one line in a
 manifest, and forgetting it makes the tree LOOK WORSE rather than better. That
 is the only arrangement under which the number can be trusted.
 
 Note that the resolution is not "the current generation". `current_generation`
 is 0 today, so resolving an unknown to it would be indistinguishable from
-resolving it to hand-written, and the fail-closed property would silently not
-hold until the loop had run once. `UNDECLARED` is model-authored regardless of
+resolving it to pre-loop, and the fail-closed property would silently not
+hold until the loop had run once. `UNDECLARED` is loop-authored regardless of
 what generation the tree is on.
 
 GENERATION ZERO IS A DECLARATION, NOT A MEASUREMENT
@@ -272,8 +272,9 @@ def enumerate_corpora() -> dict[str, list[str]]:
         # The evidence behind "the gate agrees with the reference": every input
         # `tools/gate_reference_census.py --check` runs, file-backed or not.
         "census": census_cases,
-        # The hand-written boundary programs, which are the inputs written to
-        # sit ON a guarantee edge and so the densest evidence in the tree.
+        # The boundary programs: the inputs written to sit ON a guarantee
+        # edge, and so the densest evidence in the tree. "Written to" is about
+        # their purpose, not their author; see GENERATION IS NOT AUTHORSHIP.
         "selfhost_oracle": oracle,
     }
     # Each globbed byte-agreement projection, per tier. A floor here is tighter
@@ -294,7 +295,7 @@ class Provenance:
         self.current_generation = int(data.get("current_generation", 0))
         self.floors = {k: int(v) for k, v in (data.get("floors") or {}).items()}
         # The orthogonal axis (issue #1397): who TYPED the document, as opposed
-        # to which loop generation produced it. Absent means model-authored,
+        # to which loop generation produced it. Absent means loop-authored,
         # the same fail-closed direction as an absent generation.
         self.human_authored: set[str] = set(data.get("human_authored") or ())
         self._by_case: dict[str, int] = {}
@@ -448,11 +449,18 @@ def bucket_report(buckets: dict[str, list[str]], prov: Provenance,
 
     The census's buckets are the shape of the agreement itself, so this is the
     answer to the question the item asks: of the programs behind
-    `agree-refuse/G4`, how many did the engine write about itself.
+    `agree-refuse/G4`, how many a generation of the loop wrote about itself.
+
+    The header says LOOP-authored, not model-authored. It said the second until
+    issue #1397, and that was the wrong word for what `generations` holds: a
+    document at generation 0 is pre-loop, which is not a claim that a person
+    typed it. The authorship question has its own axis, `human_authored`, and
+    `report` prints it as a separate table. A caller printing this table beside
+    a census total should not be able to read it as an authorship figure.
     """
     total_ids = [cid for ids in buckets.values() for cid in ids]
     model_all, _, unknown_all = prov.split(total_ids, since)
-    lines = [f"provenance: model-authored at or after generation {since}", ""]
+    lines = [f"provenance: loop-authored at or after generation {since}", ""]
     for name in sorted(buckets, key=lambda k: (-len(buckets[k]), k)):
         ids = buckets[name]
         model, _, _ = prov.split(ids, since)
@@ -490,8 +498,8 @@ def check(corpora: dict[str, list[str]], prov: Provenance,
             problems.append(
                 f"UNDECLARED provenance in {name}: {case_id} -- add it to a "
                 f"generation in tests/fixtures/corpus_provenance.json. An "
-                f"unknown provenance counts as model-authored; it is never "
-                f"read as hand-written.")
+                f"unknown provenance counts as loop-authored; it is never "
+                f"read as pre-loop.")
         floor = prov.floors.get(name)
         if floor is None:
             problems.append(
@@ -503,7 +511,7 @@ def check(corpora: dict[str, list[str]], prov: Provenance,
             problems.append(
                 f"BELOW FLOOR {name}: {share / 10:.1f}% independent of "
                 f"generation {since} and up, floor is {floor}% "
-                f"({len(model)} of {len(ids)} programs are model-authored).")
+                f"({len(model)} of {len(ids)} programs are loop-authored).")
     for name in sorted(prov.declared() - live):
         problems.append(
             f"STALE provenance entry: {name} is in no scoring corpus -- "
@@ -549,14 +557,14 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--generation", type=int,
                     help="the generation --write assigns; required with --write")
     ap.add_argument("--since", type=int, default=FLOOR_SINCE,
-                    help="count a document as model-authored at or after this "
+                    help="count a document as loop-authored at or after this "
                          "generation (reporting only; the gate uses "
                          f"{FLOOR_SINCE})")
     args = ap.parse_args(argv)
 
     if args.since < 1:
-        ap.error("--since must be at least 1: generation 0 is the hand-written "
-                 "stock, and counting it as model-authored makes the fraction "
+        ap.error("--since must be at least 1: generation 0 is the PRE-LOOP "
+                 "stock, and counting it as loop-authored makes the fraction "
                  "meaningless")
     if args.write and args.generation is None:
         ap.error("--write requires --generation N. There is no default: the "
