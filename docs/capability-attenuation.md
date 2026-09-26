@@ -25,9 +25,11 @@ Four rules bound capability, each at a different scope:
 | **item 33** (composition policy) | the **composition** — which boundaries the assembled graph may cross |
 | **item 55** (operator authority) | the **operators** — who may act on the running system |
 | **item 66** (this) | the **lineage** — a spawned child holds no more than its spawner |
+| **item 519** (this) | the **surrogate** — a model role reaches no further than the component that consults it |
 
 Attenuation is the last of the four. G4 says *a component may not exceed its
-declaration*; item 66 says *a child may not exceed its parent*.
+declaration*; item 66 says *a child may not exceed its parent*; item 519 says
+*a model may not reach past the component it steers*.
 
 ## What a component holds, what a child reaches
 
@@ -126,6 +128,53 @@ only `kv_a` — a spawn may narrow a child's capabilities, never widen them
 ```
 
 (`examples/rejections/g4_spawn_widens_capability.rvl`.)
+
+## The model role in the product (item 519)
+
+A spawn is not the only edge that can amplify. A **model is an authority
+surrogate**: it picks which capability the component consulting it reaches for.
+Until item 519 the product accounted for services, realms, taints and budgets
+but not for the model, so a component holding `net` whose decisions run through
+a role able to reach `shell` was accounted as if the role were inert. Its
+*effective* ceiling is the pair's, not its own.
+
+A `model role` (item 512, `docs/design/531-model-placement.md`) therefore
+carries a declared **reachable-capability set**:
+
+```revl
+model role local on_device  reaches [model.complete]
+model role cloud off_device reaches [model.complete, net.request]
+```
+
+and the rule is item 66's with a model-route edge in place of a spawn edge:
+
+```
+reach(role)  ⊆  held(component)         → admit (the role attenuates, or matches)
+reach(role)  ⊄  held(component)         → REFUSE (the surrogate widens)
+```
+
+The refusal names both sets:
+
+```
+`Classifier` routes `classify` (*) through model role `local`, which reaches
+`shell.exec`, but `Classifier` holds only `model.complete` — a component's
+effective ceiling is the pair's, so a model may not reach past the component
+that consults it (G-MODEL-PLACE)
+```
+
+**Undeclared is not empty.** A role with no `reaches` clause reaches the
+unnameable `*`, which no held set covers, so it is refused. Reading silence as
+"reaches nothing" would make a model nobody has described contribute nothing to
+the product, and a model nobody has described is exactly the one whose reach is
+unknown. It is the same choice `_spawn_emission_surface` already makes for a
+service method that declares `emission` with no capability list.
+
+The question is asked only of a component that holds a boundary which could be
+a model call, because a role can only steer an action that reaches a boundary.
+An admitted composition records the product per edge under
+`manifest.model_reach`, including `attenuated` — what the component holds that
+the role does not reach. The section is role-only: a composition that declares
+no `model role` has no `model_reach` key.
 
 ## The audit chain (G8)
 
