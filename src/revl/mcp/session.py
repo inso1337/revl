@@ -402,6 +402,17 @@ class _LoadCheckpoint:
             bridge.bind(bound)
 
 
+def _name_the_candidate(exc: BaseException, ir: dict) -> None:
+    """Record on a ticket raised while `ir` was booting that the ticket is
+    about `ir`. A yes to it admits `ir`'s host code, and the server has to show
+    the operator that code, not the running composition's. Every path that
+    boots a composition (load, swap, and so edit, repair, restore, rollback and
+    undo) goes through `load` or `swap`, so this covers them all. The innermost
+    boot names it: a ticket that already names a candidate keeps it."""
+    if isinstance(exc, ApprovalRequired) and exc.candidate is None:
+        exc.candidate = ir
+
+
 @dataclasses.dataclass(frozen=True)
 class _SwapPlan:
     """What `Session._plan_swap` settled before the teardown, for `_cut_over`:
@@ -925,8 +936,9 @@ class Session:
         checkpoint = _LoadCheckpoint(self)
         try:
             return self._boot(ir, config, record, origin)
-        except BaseException:
+        except BaseException as exc:
             checkpoint.restore(self)
+            _name_the_candidate(exc, ir)
             raise
 
     def _boot(self, ir: dict, config: dict | None, record: bool,
@@ -1530,10 +1542,15 @@ class Session:
         checkpoint = _LoadCheckpoint(self)
         try:
             plan = self._plan_swap(driver, ir, migrate)
-        except BaseException:
+        except BaseException as exc:
             checkpoint.restore(self)
+            _name_the_candidate(exc, ir)
             raise
-        return self._cut_over(driver, ir, origin, plan)
+        try:
+            return self._cut_over(driver, ir, origin, plan)
+        except ApprovalRequired as exc:
+            _name_the_candidate(exc, ir)
+            raise
 
     def _plan_swap(self, driver, ir: dict, migrate: str) -> "_SwapPlan":
         """Everything `swap` does before the teardown: every gate, rendering

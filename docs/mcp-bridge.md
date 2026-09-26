@@ -226,7 +226,7 @@ trusted`.
 | flag | what the operator is deciding |
 |---|---|
 | `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code, nor place a component into a named realm |
-| `--author-trust trusted` | the agent MAY author host code, and name its own realms. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do |
+| `--author-trust trusted` | the agent MAY author host code, and name its own realms. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do. On a ticket raised by a load, swap or edit, `unreviewedHostCode` is the host code of the composition the yes admits. A ticket that would replace a running composition also carries `runningHostCode` (what runs now) and `newHostCode` (the candidate's bodies the running composition does not already run byte for byte) |
 | `--provider MODULE.rvl` | operator-written host code the untrusted agent may compose the SERVICES of — item 334's granted-providers map. Reaching its externs directly is still refused |
 | `--grant SERVICE` | turn on the item-329 reach allowlist. With no grants the allowlist is off: there is no honest default for which of a running system's services an agent may reach |
 | `--root DIR` | a directory the agent's path arguments may name. Defaults to the directory the server was started in |
