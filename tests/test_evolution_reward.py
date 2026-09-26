@@ -1182,3 +1182,128 @@ def test_formal_is_the_control_for_the_conformance_fixture(
 def test_formal_verifies_on_this_tree(reward, real_candidate):
     verdict = reward.probe_formal(real_candidate)
     assert verdict.verified is True, verdict.reason
+
+
+# --------------------------------------------------------------------------
+# progress (issue #1224, roadmap item 545): the one component that rises when
+# the system gets better. Scored for real on a tree built by the progress
+# suite's own builder; every OTHER component is a stub, so what is under test
+# is the composition, not the other nine probes.
+# --------------------------------------------------------------------------
+
+def _progress_builder():
+    """`tests/test_evolution_progress.py`'s tree builder, loaded by path under
+    a private name and not registered: two test modules must not share one
+    importable name for a helper, and a bare `import` would bind whichever
+    copy was found first."""
+    spec = importlib.util.spec_from_file_location(
+        "_evolution_reward_progress_builder",
+        ROOT / "tests" / "test_evolution_progress.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def progress_repo(tmp_path):
+    builder = _progress_builder()
+    tree = tmp_path / "progress"
+    builder.build_tree(tree)
+    _git(tree.parent, "init", "-q", str(tree))
+    _git(tree, "config", "user.email", "t@example.com")
+    _git(tree, "config", "user.name", "t")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", "base")
+    return tree, builder
+
+
+def _all_but_progress(reward, failing=()):
+    table = {n: (lambda c, n=n: reward.failed(n, "stub") if n in failing
+                 else reward.verified(n, "stub"))
+             for n in reward.COMPONENTS}
+    table["progress"] = reward.probe_progress
+    return table
+
+
+def test_progress_is_a_registered_component(reward):
+    assert "progress" in reward.COMPONENTS
+    assert reward.PROBES["progress"] is reward.probe_progress
+
+
+def test_the_empty_diff_is_not_retained_when_everything_else_verifies(
+        reward, progress_repo):
+    """Item 545's property, on the scorer itself. Nine preservation components
+    say yes, and the candidate that changed nothing is still not retained,
+    because it improved nothing. Before `progress` was registered this exact
+    scorecard was a retention."""
+    tree, _builder = progress_repo
+    card = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward))
+    assert card.retained is False
+    assert card.blockers == ("progress",)
+    progress = [v for v in card.verdicts if v.component == "progress"][0]
+    assert "did not advance" in progress.reason
+
+
+def test_a_real_improvement_with_everything_else_verified_is_retained(
+        reward, progress_repo):
+    """The satisfying side: the same scorer retains a candidate whose reach
+    ledger genuinely shrank, so the conjunction is satisfiable."""
+    tree, builder = progress_repo
+    builder.build_tree(tree, gaps=("kind=a",))
+    card = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward))
+    assert card.retained is True, card.render()
+
+
+def test_an_improvement_does_not_buy_back_any_failed_component(
+        reward, progress_repo):
+    """Property 2: progress is added to preservation, never traded against it.
+    With a real improvement on the tree, failing ANY one other component is
+    still a non-retention, and it is that component that blocks."""
+    tree, builder = progress_repo
+    builder.build_tree(tree, gaps=("kind=a",))
+    candidate = _candidate(reward, tree, base="HEAD")
+    for victim in reward.COMPONENTS:
+        if victim == "progress":
+            continue
+        card = reward.score(candidate,
+                            probes=_all_but_progress(reward, failing={victim}))
+        assert card.retained is False, victim
+        assert card.blockers == (victim,)
+
+
+def test_the_scorecard_carries_the_ledger_promote_reads(reward, progress_repo):
+    """The reopening comment on issue #1224: the scorecard carries the counter
+    ledger, so a generation is judged from reward scorecards directly."""
+    tree, builder = progress_repo
+    flat = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward)).as_dict()
+    builder.build_tree(tree, gaps=("kind=a",))
+    moved = reward.score(_candidate(reward, tree, base="HEAD"),
+                         probes=_all_but_progress(reward)).as_dict()
+    assert [d["direction"] for d in moved["progress"]["deltas"]].count(
+        "improved") == 1
+    assert moved["progress"]["base"] == _git(tree, "rev-parse", "HEAD").stdout.strip()
+    evolution_progress = reward._progress_module()
+    assert evolution_progress.promote([flat]).promoted is False
+    result = evolution_progress.promote([flat, moved])
+    assert result.promoted is True
+    assert result.witnesses == (str(tree),)
+
+
+def test_the_progress_probe_leaves_the_interpreter_as_it_found_it(
+        reward, progress_repo):
+    """The probe imports `evolution_progress` from this checkout. It may ADD
+    that one module; it must not replace any module already loaded, and it
+    must hand `sys.path` back unchanged, or every later bare import in the
+    session resolves against a directory nobody asked for."""
+    tree, _builder = progress_repo
+    path_before = list(sys.path)
+    modules_before = dict(sys.modules)
+    reward.probe_progress(_candidate(reward, tree, base="HEAD"))
+    assert sys.path == path_before
+    replaced = [k for k, v in modules_before.items() if sys.modules.get(k) is not v]
+    assert not replaced, replaced
+    added = set(sys.modules) - set(modules_before)
+    assert added <= {"evolution_progress"}, added

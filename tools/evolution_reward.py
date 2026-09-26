@@ -88,9 +88,26 @@ owns. None of them is a new gate, and none of them reads a candidate's prose:
                           because a component that was not scored was not
                           verified
 
+    progress              tools/evolution_progress.py: the monotone repository
+                          counters, read on both sides of the candidate's own
+                          merge base; verified only when none regressed AND at
+                          least one improved
+
 No component is a placeholder any more. See
-`docs/design/534-evolution-reward.md` for the slice plan and
-`docs/design/535-held-out-scoring.md` for the ninth component's.
+`docs/design/534-evolution-reward.md` for the slice plan,
+`docs/design/535-held-out-scoring.md` for `held-out`'s, and
+`docs/design/546-evolution-progress-term.md` for `progress`'s.
+
+THE EMPTY DIFF IS NOT RETAINED
+------------------------------
+Every component above `progress` is a preservation check, and a reward made of
+preservation checks alone is maximised by the empty diff (issue #1224, roadmap
+item 545). `progress` is the one component that requires the candidate to have
+IMPROVED something a repository counter measures. It is a conjunct like the
+others, so it adds a requirement and trades nothing: a candidate that improves a
+counter and fails `tests` is not retained. The cost is that a real improvement
+no counter measures is not retained either; the design doc lists what the
+counters cannot see.
 
 THE TOOL ITEM 536 NAMED FOR `conformance` HAS NEVER EXISTED
 -----------------------------------------------------------
@@ -139,7 +156,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Item 536's eight components in the order it lists them, then the ninth.
+# Item 536's eight components in the order it lists them, then `held-out`
+# (item 537), then `progress` (item 545).
 #
 # `held-out` is not one of item 536's: it comes from item 537 (issue #1207) and
 # it is the only component whose subject the candidate could not read. The other
@@ -162,6 +180,10 @@ COMPONENTS = (
     "scope",
     "documentation",
     "held-out",
+    # issue #1224 / item 545: the one component that rises when the system gets
+    # better. Last because it is the most expensive to explain when it fails,
+    # not because it is weighed differently: the rule is still `all()`.
+    "progress",
 )
 
 # Programs in a promotion draw. Larger than the suite's 60: a promotion is paid
@@ -1092,6 +1114,45 @@ def probe_formal(candidate: Candidate) -> Verdict:
         evidence + [f"{FORMAL_AXIOMS}@{_sha256(candidate.tree / FORMAL_AXIOMS)}"])
 
 
+# ------------------------------------------------ progress, from the counters
+
+def _progress_module():
+    """`tools/evolution_progress.py` from THIS checkout, never the candidate's.
+
+    A function-local import, because that module imports `Verdict` from this
+    one at module level and the two would otherwise import each other. The
+    scorer's own `tools/` directory is put on `sys.path` for the import and
+    taken off again in a `finally`, so the process is left as it was found.
+    `evolution_progress` itself only ever adds that same directory.
+    """
+    tools = str(ROOT / "tools")
+    added = tools not in sys.path
+    if added:
+        sys.path.insert(0, tools)
+    try:
+        import evolution_progress  # noqa: PLC0415
+    finally:
+        if added and tools in sys.path:
+            sys.path.remove(tools)
+    return evolution_progress
+
+
+def probe_progress(candidate: Candidate) -> Verdict:
+    """Did the candidate IMPROVE something, and break no counter doing it.
+
+    Reads the three repository counters of `tools/evolution_progress.py` on
+    the candidate's tree and on its own base, which is the merge base of its
+    `HEAD` and `candidate.base` rather than `candidate.base` itself: a
+    candidate is neither credited for trunk work it merged in nor charged for
+    trunk work that landed after it forked. Verified only when every counter
+    was read on both sides, none regressed, and at least one strictly improved.
+
+    The measuring code is the scorer's, never the candidate's: the module is
+    imported from this checkout, and it reads the candidate's tree as data.
+    """
+    return _progress_module().probe(candidate.tree, candidate.base)
+
+
 # The registry. A component with no probe FAILS (see `score`); it is never
 # absent from the scorecard and never defaults to pass.
 PROBES = {
@@ -1104,6 +1165,7 @@ PROBES = {
     "scope": probe_scope,
     "documentation": probe_documentation,
     "held-out": probe_held_out,
+    "progress": probe_progress,
 }
 
 
@@ -1118,9 +1180,10 @@ class Scorecard:
     def retained(self) -> bool:
         """The retention rule, stated once: every component verified.
 
-        Not a threshold, not a majority, not a weighted sum. `all()` over the
-        eight, and `all()` of an incomplete list is not reachable because
-        `score()` always emits one verdict per component in `COMPONENTS`.
+        Not a threshold, not a majority, not a weighted sum. `all()` over
+        `COMPONENTS`, and `all()` of an incomplete list is not reachable
+        because `score()` always emits one verdict per component. Since
+        `progress` is one of them, the empty diff is not retained.
         """
         by_name = {v.component: v for v in self.verdicts}
         return all(
@@ -1131,7 +1194,8 @@ class Scorecard:
         return tuple(v.component for v in self.verdicts if not v.verified)
 
     def as_dict(self) -> dict:
-        return {
+        blob = {
+            "candidate": str(self.candidate.tree),
             "retained": self.retained,
             "blockers": list(self.blockers),
             "components": [v.as_dict() for v in self.verdicts],
@@ -1139,6 +1203,16 @@ class Scorecard:
             "base": self.candidate.base,
             "scope": list(self.candidate.scope),
         }
+        # The counter ledger the `progress` verdict was decided on, in the
+        # shape `evolution_progress.promote` reads, so a generation is judged
+        # from these scorecards directly and re-reads measured directions
+        # rather than trusting `retained`. Absent only when no progress probe
+        # produced a ledger (a stub, or a probe that raised), and `promote`
+        # reads an absent block as no advance.
+        for verdict in self.verdicts:
+            if verdict.component == "progress" and hasattr(verdict, "ledger"):
+                blob["progress"] = verdict.ledger()
+        return blob
 
     def render(self) -> str:
         lines = [f"evolution reward over {self.candidate.tree}",

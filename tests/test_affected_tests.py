@@ -606,6 +606,15 @@ def test_census_change_selects_the_construct_reach_ledger():
         )
 
 
+def test_a_tier_oracle_corpus_change_selects_the_progress_counters():
+    """Issue #1224. The native-chain progress counter reads every tier oracle's
+    `CORPUS_DIR` and `CORPUS` by AST, so a change to one of those files can red
+    tests/test_evolution_progress.py without either file naming the other."""
+    for tier in ("py", "wasm"):
+        r = sel(f"tests/test_selfhost_emit_{tier}.py")
+        assert "tests/test_evolution_progress.py" in r["pytest"], tier
+
+
 def test_provenance_change_keeps_its_own_coupling_only():
     """The other half of the merge. `corpus_provenance.py` is not what the
     `gate_census` row imports, so widening the census rule must not hand the

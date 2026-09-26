@@ -18,10 +18,12 @@ Sources studied, all at `52fb8ef3`: `tools/gate_reference_census.py` (`bucket`,
 ## 0. The decision in one paragraph
 
 The reward is a **conjunction, not a scalar**, and retention is that same
-conjunction. Nine components each answer `verified` or `failed` (item 536's
-eight, plus the `held-out` component design doc 535 owns), every answer is read
-off an artifact the repository owns, and a trajectory is retained only when all
-nine say `verified`. No weight, no threshold, no partial credit, and no
+conjunction. Ten components each answer `verified` or `failed` (item 536's
+eight, plus the `held-out` component design doc 535 owns and the `progress`
+component design doc 546 owns), every answer is read off an artifact the
+repository owns, and a trajectory is retained only when all ten say `verified`.
+`progress` is the one that requires an IMPROVEMENT, so the empty diff is not
+retained. No weight, no threshold, no partial credit, and no
 number exported anywhere a threshold could later be attached to it. The scorer is
 `tools/evolution_reward.py`; the candidate hands it a tree, a base ref and a
 declared scope, and every other key in the candidate's record is dropped by name
@@ -62,6 +64,7 @@ reported success.
 | `scope` | the changed-file set | `git diff --name-only <base>` plus untracked files, against the declared globs | **1** |
 | `documentation` | the citation gate and the generated blocks | `tools/docgen.py --check` and `tools/check_roadmap_claims.py --check` exit status | **1** |
 | `held-out` | a draw the candidate could not read | `tools/heldout_scoring.py --diff-base`, where a REFUSAL is a fail | **1b** |
+| `progress` | the census allowance, the native-chain residual, the reach ledger | `tools/evolution_progress.py`, against the merge base of the candidate's `HEAD` and `base`: none regressed and at least one improved | **5** |
 
 Four notes on the table.
 
@@ -372,19 +375,6 @@ Parser: `test_the_committed_block_parser_reads_the_real_one` holds the base-side
 parser against the real generated block rather than against the fixture that
 mimics it.
 
-**Not folded in here: the progress conjunct.** Issue #1224 / item 545 found that
-all eight of item 536's components are PRESERVATION checks, so the reward's
-maximum is attained by the empty diff and a loop trained against it learns
-caution rather than capability. `tools/evolution_progress.py` landed with three
-monotone repository counters, each a `value` over a `universe` so that deleting
-the measured surface does not read as progress. It is NOT registered in
-`PROBES`: its verdict shape would slot in without adaptation, but adding a tenth
-conjunct changes the retention rule for every caller, and issue #1206 owns the
-eight rather than the roster. Recorded here so the dangling edge is visible: the
-tool exists, nothing folds it in, and whoever owns item 545 decides whether it
-should be a conjunct or stay a generation-level existential in
-`evolution_progress.promote`.
-
 **Slice 4: the negative promotion bar.** Item 536 states seven entries that green
 tests alone must not carry: no new false admits, no widened capability reach at
 the G8 boundary, no weakened refusal, no reduced formal coverage, no unexplained
@@ -394,6 +384,19 @@ cover the first, the third (a weakened refusal now shows as a weakened
 capability reach at the G8 boundary, an unbounded resource path, a hidden host
 fallback -- need their own reads and are not folded into an existing component,
 because a component that fails for two unrelated reasons cannot be acted on.
+
+**Slice 5: the progress conjunct (issue #1224, item 545).** All eight of item
+536's components are PRESERVATION checks, so a reward made of them alone is
+maximised by the empty diff and a loop trained against it learns caution rather
+than capability. `progress` is registered in `COMPONENTS` and `PROBES` and
+verifies only when a monotone repository counter strictly improved and none
+regressed, measured against the candidate's own merge base. The scorecard
+carries the counter ledger under `progress`, which is what
+`evolution_progress.promote` reads. The rules that keep the counters from being
+padded, and the improvements they cannot see, are design doc 546's sections 4
+and 6.
+Oracle: `tests/test_evolution_progress.py` and the `progress` block of
+`tests/test_evolution_reward.py`.
 
 ## 9. What this design does not verify
 
@@ -423,7 +426,10 @@ because a component that fails for two unrelated reasons cannot be acted on.
   complementary rather than redundant.
 * Nothing here has been run against a trajectory produced by a model. The
   scorer's input is a tree, and every test supplies one directly.
-* Nothing here reads `tools/evolution_progress.py`. Every registered component
-  is a preservation check plus `held-out`, so the reward still cannot tell a
-  candidate that advanced something from one that changed nothing safely. That
-  is issue #1224 / item 545's question and it is open, not answered here.
+* `progress` rejects a real improvement that no repository counter measures:
+  a refactor, a new feature, a performance fix, a documentation correction.
+  That is the price of a reward whose maximum is not the empty diff, and design
+  doc 546 section 6 lists what the counters cannot see.
+* Only `progress` resolves the merge base. The other nine components read
+  `candidate.base` verbatim, which against a moving ref errs toward failing
+  (`scope` would count the trunk's own changes), never toward crediting.

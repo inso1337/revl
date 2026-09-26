@@ -219,6 +219,11 @@ PROGRESS_COUNTER_SOURCES = {
     "tools/selfhost_coverage.py",       # reference_constructs / TIERS
     "tools/gate_reference_census.py",   # CORPUS_DIRS / _SKIP_DIRS
 }
+# The native-chain counter's surface: every tier oracle's CORPUS_DIR and CORPUS
+# literals. Globbed, not spelled, so the tier roster is not restated here.
+PROGRESS_COUNTER_SOURCES |= {
+    f"tests/{p.name}" for p in
+    (Path(__file__).resolve().parents[1] / "tests").glob("test_selfhost_emit_*.py")}
 
 # The held-out scorer's fence (roadmap item 537). Every file it names is read
 # by `tests/test_heldout_scoring.py`, which asserts that every repo path those
