@@ -1,0 +1,24 @@
+// REJECTED — G4: the required-service nested crossing of
+// `g4_nested_unmarked_emission.rvl`, moved from an activation body into a
+// provide method body. Both shipped nested fixtures sit in an activation
+// body, so nothing measured that the rule reaches a provide method, which is
+// the position an author is in when the inner value is one they need.
+//
+// The fix is on the next line of the same method: `let row = emit b.fetch()`
+// binds the value, `emit a.send(row)` crosses once more.
+//
+// expected error:
+//   call to emission `b.fetch` must be marked `emit` (G4)
+
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+service Relay { emission fn once() -> Int }
+
+component C requires a: A, b: B provides relay: Relay {
+  provide relay {
+    fn once() {
+      emit a.send(b.fetch())
+      return 1
+    }
+  }
+}

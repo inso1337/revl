@@ -4104,7 +4104,20 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     na = { msg: "", tag: "", labels: na.labels, ecaps: na.ecaps,
            areach: union_into(na.areach, [name]), aops: na.aops, avals: na.avals }
   }
-  return walk_args(args, marked, cx, na)
+  let wa = walk_args(args, marked, cx, na)
+  if (wa.msg != "") { return wa }
+  // issue #1427: the marker demand reaches the HOST EXTERN carrier too, in the
+  // one position the `req` and handle carriers are already held in. `emitPos ==
+  // "args"` is a marked head's argument list, and `marked` is false there for a
+  // body statement and true for a teardown slot (`args_marked`), so this is the
+  // same admission the other two carriers read. Raised AFTER the arguments are
+  // walked because the reference lowers a call's arguments before it builds the
+  // call node, so an inner refusal wins.
+  if (cx.emitPos == "args" && !marked && contains(cx.emittingNames, name)) {
+    return ac_refuse(wa, "G4", "call to emission `".concat(name)
+      .concat("` must be marked `emit` (G4)"))
+  }
+  return wa
 }
 
 // A bare `Var` in VALUE position (never a call/access head — those are routed
@@ -4210,6 +4223,12 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
 
 // The same context marked as being inside an arrow value: only the `aops`
 // accumulation is suppressed downstream (`_reached_async_req_ops` prunes arrows).
+//
+// An arrow's body runs when the arrow is CALLED, not while an enclosing
+// `emit`'s arguments are evaluated, so the body leaves the argument list:
+// `emitPos` "args" becomes "", as the reference clears `env._in_emit_args` for
+// the body. A marked crossing written in an inline arrow argument is then the
+// same crossing it is when the arrow is bound by `let` and passed by name.
 fn ctx_under_arrow(cx: Ctx) -> Ctx {
   return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
            caps: cx.caps, colored: cx.colored,
@@ -4219,7 +4238,8 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+           acqWhere: cx.acqWhere,
+           emitPos: cx.emitPos == "args" ? "" : cx.emitPos }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -21704,6 +21724,36 @@ test "an emission in an emit head's arguments needs its own marker (G4)" {
   assert admit_src("""service A { emission fn send(q: Str) -> Str } service B { emission fn fetch() -> Str } service K { emission fn f() -> Str } component C requires a: A, b: B provides k: K { provide k { fn f() { let r = emit b.fetch() return emit a.send(r) } } }""") == ""
 }
 
+// issue #1427: the same rule on the HOST EMISSION EXTERN carrier. Both of the
+// fixtures the block above was written for nest a required-service crossing,
+// so "one marker admits one crossing" was only ever measured on that carrier.
+// The head's carrier does not decide how its arguments are judged, and a pure
+// extern in the same position stays admitted: what the rule counts is
+// crossings per marker, not calls.
+test "an emission extern in an emit head's arguments needs its own marker (G4)" {
+  assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(charge(1)) }""") == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } component C { emit log_line(emit charge(1)) }""") == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
+  assert admit_src("""extern emission fn charge(c: Int) -> Int = @py { return 1 } service A { emission fn send(n: Int) -> Int } component C requires a: A { emit a.send(charge(1)) }""") == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } service B { emission fn fetch() -> Int } component C requires b: B { emit log_line(b.fetch()) }""") == "G4|call to emission `b.fetch` must be marked `emit` (G4)"
+  assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern pure fn twice(n: Int) -> Int = @py { return n * 2 } component C { emit log_line(twice(1)) }""") == ""
+  assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { emit log_line(charge(n)) return 1 } } }""") == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }""") == ""
+}
+
+// An arrow's body is not in the enclosing `emit`'s argument list: it runs when
+// the arrow is called. The inline spelling and its two `let` twins are the same
+// crossings in the same order and all three admit; before `ctx_under_arrow`
+// cleared the position, the inline one was refused as a nested `emit`. An
+// unmarked crossing in the same arrow body is still refused, for its marker.
+test "an arrow in an emit head's arguments leaves the argument position (G4)" {
+  let pre = "service Ap { emission fn approve(t: Str, a: Str) -> Str } service Gt { emission fn decide(ok: Bool, v: Str) -> Str } service Rv { emission fn review(k: Str) -> Str } fn approve_args(k: Str, f: (Str, Str) -> Str) -> Str { return f(k, k) } component C requires ap: Ap, gt: Gt provides rv: Rv { provide rv { fn review(k) { "
+  assert admit_src(pre.concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))) } } }")) == ""
+  assert admit_src(pre.concat("let f = (t: Str, a: Str) => emit ap.approve(t, a)   return emit gt.decide(true, approve_args(k, f)) } } }")) == ""
+  assert admit_src(pre.concat("let v = approve_args(k, (t: Str, a: Str) => emit ap.approve(t, a))   return emit gt.decide(true, v) } } }")) == ""
+  assert admit_src(pre.concat("return emit gt.decide(true, approve_args(k, (t: Str, a: Str) => ap.approve(t, a))) } } }")) == "G4|call to emission `ap.approve` must be marked `emit` (G4)"
+  assert admit_src(pre.concat("return emit gt.decide(true, emit ap.approve(k, k)) } } }")) == "G4|`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"
+}
+
 // ---- config-is-data (item 378, G4): byte-exact parity with the reference's
 // typecheck.check_config_field_is_data over a component's and an extern's config.
 
@@ -23639,12 +23689,17 @@ test "an `every … in` body is not pruned the way a timer body is (A1)" {
   // is NOT one of the three the reference's prune returns on — it walks the
   // body — so reading the iteration through the timer branch's blind `{`-scan
   // would have admitted this.
+  //
+  // The reach is written as its own `emit` step rather than nested in another
+  // `emit`'s arguments (issue #1427): an unmarked extern crossing there is a
+  // G4 refusal raised before the A1 fence is consulted, which would report a
+  // verdict that says nothing about the prune this pair exists to measure.
   let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
 service Sink { emission fn write(v: Str) }
 component C requires sink: Sink {
   let src = effect Stream.source() undo src.close()
   let sub = subscribe src undo sub.close()
-  every o in sub { emit sink.write(hf(o)) }
+  every o in sub { emit hf(o) }
 }""")
   assert v == "A1|component `C` reaches async extern `hf` in a setup/activation body, which cannot suspend a fiber (A1)"
 }
@@ -23656,7 +23711,7 @@ test "the timer body's prune survives the iteration branch" {
   let v = admit_src("""extern emission async fn hf(p: Str) -> Str = @py { return p }
 service Sink { emission fn write(v: Str) }
 component C requires sink: Sink {
-  every 15s { emit sink.write(hf("x")) }
+  every 15s { emit hf("x") }
 }""")
   assert v == ""
 }
