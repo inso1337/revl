@@ -120,9 +120,13 @@ component Probe {
   let probe = effect Map.new() undo probe.drop()
 }
 """ if extra else ""
+    # Each role declares its reach and `Model` names its tokens because item
+    # 519 (G-MODEL-PLACE) refuses a role with no `reaches [...]` under a
+    # component that consults a model. A bare `emission` would be a boundary
+    # no `reaches` list can spell, so the roles could not be declared at all.
     return f"""
-model role incumbent off_device
-model role successor off_device
+model role incumbent off_device reaches [model.complete]
+model role successor off_device reaches [model.complete]
 
 service Answer {{
   emission fn classify(text: Str) -> Str
@@ -130,8 +134,8 @@ service Answer {{
 }}
 
 service Model {{
-  emission fn complete(prompt: Str) -> Str
-  emission fn cancel(prompt: Str)
+  emission[model.complete] fn complete(prompt: Str) -> Str
+  emission[model.cancel] fn cancel(prompt: Str)
 }}
 
 component Classifier requires model: Model provides out: Answer {{
