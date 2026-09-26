@@ -41,6 +41,7 @@ import sys
 import types
 
 from ._paths import backends_root
+from .refusal import is_refusal
 
 BACKENDS = backends_root()
 
@@ -510,6 +511,27 @@ def _load_py_tier():
     return emit, runtime_mod, Context, FiberState
 
 
+def _driver_failure(emit, error: BaseException, driver: str) -> str:
+    """The one sentence a driver prints for a failure it caught.
+
+    An emitter REFUSAL is an ANSWER and is named as one, carrying the tier's own
+    diagnostic. The py emitter refuses a document it cannot lower rather than
+    emitting less than it was given (issue #1382 and the #1381 family), and
+    reporting that as "the prop-test driver raised EmitError: ..." under a "1
+    broke" summary claims the property was checked and found false when it was
+    never evaluated (issue #1406). Anything else IS a driver crash and keeps its
+    exception type in the text, which is what tells a reader it is a bug rather
+    than a tier limit.
+
+    `is_refusal` reads the class off the emitter MODULE this run was handed:
+    `EmitError` is defined inside `backends/python/emit.py`, inherits from
+    `ValueError`, and two loads of that file give two unrelated classes.
+    """
+    if is_refusal(emit, error):
+        return f"the py emitter refused this document: {error}"
+    return f"the {driver} driver raised {type(error).__name__}: {error}"
+
+
 def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
     """Run *units* against the py reference tier; ``(failures, total)``.
 
@@ -528,8 +550,8 @@ def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
             outcome = asyncio.run(_drive(ir, unit, emit, runtime_mod, Context, FiberState))
         except Exception as error:  # noqa: BLE001 — a driver crash is a test failure
             failures += 1
-            printer(f"FAIL {unit['name']}: the fault-test driver raised "
-                    f"{type(error).__name__}: {error}")
+            printer(f"FAIL {unit['name']}: "
+                    + _driver_failure(emit, error, "fault-test"))
             continue
         problems = _judge(unit, outcome, FiberState)
         head = f"{unit['name']} [{unit['component']} dies at {where}]"
@@ -802,8 +824,7 @@ def run_sweep(ir: dict, out=None, only: str | None = None) -> tuple[int, dict]:
                                              Context, FiberState, exclude=excluded))
             except Exception as error:  # noqa: BLE001 — a driver crash is a failure
                 results.append((unit,
-                                [f"the fault-test driver raised "
-                                 f"{type(error).__name__}: {error}"], []))
+                                [_driver_failure(emit, error, "fault-test")], []))
                 continue
             results.append((unit, _judge(unit, outcome, FiberState),
                             _notes(outcome)))
@@ -1743,8 +1764,7 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
                 ok, detail = asyncio.run(_drive_roundtrip(
                     ir, component, configs, emit, runtime_mod, Context, FiberState))
             except Exception as error:  # noqa: BLE001 — a driver crash is a failure
-                ok, detail = False, (f"the round-trip driver raised "
-                                     f"{type(error).__name__}: {error}")
+                ok, detail = False, _driver_failure(emit, error, "round-trip")
             round_results.append((ok, detail, config))
             if not ok:
                 break  # a shrinking-free counterexample: report the first failing config
@@ -2472,9 +2492,9 @@ def run_prop_units(ir: dict, units: list, out=None,
         try:
             status, detail = _run_prop_unit(ir, unit, index, emit, rng, random_rounds)
         except Exception as error:  # noqa: BLE001 — a driver crash is a failure
-            status, detail = "fail", {"rounds": 0,
-                                      "error": f"the prop-test driver raised "
-                                               f"{type(error).__name__}: {error}"}
+            status, detail = "fail", {
+                "rounds": 0,
+                "error": _driver_failure(emit, error, "prop-test")}
         results.append((unit, status, detail))
 
         if status == "pass":
