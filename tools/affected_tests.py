@@ -1215,6 +1215,20 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
             continue
+        # issue #1233: the roadmap claim gate's covering test is named for the
+        # DOCUMENT it reads, so the generic tools/*.py rule below looks for a
+        # `test_check_roadmap_claims.py` that does not exist and falls back to
+        # FULL; its two JSON side files are non-python under tools/ and fall
+        # back the same way. All three are cheap to select exactly.
+        # `check_vision_claims.py` imports this module for its Tree, its Claim,
+        # its SOURCE_EXT and its retrospective window, so its test comes along.
+        if f in ("tools/check_roadmap_claims.py",
+                 "tools/roadmap_claim_allowlist.json",
+                 "tools/roadmap_claim_ratchet.json"):
+            pytest_nodes.add("tests/test_roadmap_claims_gate.py")
+            pytest_nodes.add("tests/test_check_vision_claims.py")
+            reasons.append(f)
+            continue
         if f.startswith("tools/") and f.endswith(".py"):
             stem = Path(f).stem
             hits = {
@@ -1326,6 +1340,14 @@ def select(changed, root) -> dict:
             # are: `docgen --check` has no home outside the `frontend` job,
             # and a docs-only diff skips that job.
             pytest_nodes.add("tests/test_docgen_check_runs_on_a_docs_only_diff.py")
+            # issue #1233: the roadmap's own citation gate. Its module holds
+            # the REAL document against the REAL tree, and it is the thing that
+            # makes the claim ratchet shrink: correcting a recorded stale
+            # citation leaves the ratchet entry matching nothing, and that test
+            # is what says so. Without this line the commit that pays the debt
+            # is exactly the commit that does not run the check.
+            if f == "docs/v2.0-roadmap.md":
+                pytest_nodes.add("tests/test_roadmap_claims_gate.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
 
