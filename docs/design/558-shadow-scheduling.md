@@ -646,10 +646,16 @@ refused at share `0/1` (`evidence-missing`) and at full share
 
 ### 17.6. What this does not do
 
-1. **No tier consults the register to pick the model that answers.** Item
-   512's route is a permission and item 515 owns scheduling inside it, and
-   section 15's seam discards the observer's return. The register is the
-   declared arm and the rule the gate applies. It is not a cutover.
+1. **No tier consults the register to pick the role that answers.** Section
+   15's seam discards the observer's return, so a promotion does not change
+   which model answers a call. The register is the declared arm and the rule
+   the gate applies, and it is not a cutover. That is why item 518 stays
+   open after this section. What is left for 518: a tier reads the register
+   and answers a promoted class with the promoted role, the python seam
+   serves the observer's answer for a class the register holds as promoted
+   instead of discarding it, and the other five tiers get the same seam.
+   Provisioning the model behind a role (device profile, load and unload,
+   one shared provision) is item 515's, not 518's.
 2. **No CLI and no item 520 adapter.** `revl promote` and the `shadow` stage
    record for the evolution controller are still unbuilt.
 3. **Section 16 items 1, 2, 4 and 5 are unchanged.** Five tiers are unwired,

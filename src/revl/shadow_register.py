@@ -74,7 +74,8 @@ is a permission and item 515 owns scheduling inside it
 (`revl.model_route`), and the python seam discards the observer's return, so
 the incumbent's completion is the one the body receives before and after a
 promotion lands. The register is the declared arm and the gate's rule. It is
-not a cutover.
+not a cutover, and until a tier routes by it a promotion does not change which
+model answers a call; that is the part of item 518 still open.
 
 NO NEW GUARANTEE CODE
 ---------------------
