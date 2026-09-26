@@ -511,6 +511,67 @@ def test_the_stream_diversion_with_top_level_declarations_is_named_now(emitted,
                             f"<<UNSUPPORTED-COMPONENT:{names[0]}>>")
 
 
+def test_a_source_only_stream_acquisition_is_named_too(emitted, reference,
+                                                      tmp_path):
+    """The stream shape `stream_event_130.rvl` does not reach, held against the
+    same rule.
+
+    That fixture carries every stream discriminant at once, so the case above
+    passes on the loop step alone and says nothing about a document that holds a
+    stream without one. A source-only program is the one that is easiest to
+    leave out and the hardest to notice missing: `Stream.source()` with nothing
+    reading it carries no subscription flag and no loop step, yet it opens a
+    live host listener with a `Close` inverse on the teardown stack, which is
+    what makes the component non-incidental and what sends the document to the
+    reference's live path.
+
+    The port names it for a reason that does not mention streams at all: the
+    acquisition is a `body` step, so `component_is_observable` is true, so the
+    suppression does not fire. That is the whole point of keying the marker on
+    the length of `body` rather than on a step discriminant. This case is the
+    evidence that the cheaper predicate actually covers the shape the expensive
+    one was proposed for, and it is the case that reds first if the suppression
+    is ever widened back toward reading `subscribe` / `stream-iter`.
+    """
+    path = tmp_path / "source_only.rvl"
+    path.write_text("type Reading = { value: Int }\n"
+                    "component Source {\n"
+                    "  let src = effect Stream.source() undo src.close()\n"
+                    "}\n")
+    ir = compile_files([str(path)])
+    assert ir["types"], "the top-level declaration is what arms the suppression"
+    steps = ir["components"][0]["body"]
+    assert not any(step.get("subscribe") or step.get("step") == "stream-iter"
+                   for step in steps), (
+        "the case is only about the acquisition while the document carries "
+        "neither of the other two stream discriminants"
+    )
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert_boundary_witness(want, got, "stc-go",
+                            "<<UNSUPPORTED-COMPONENT:Source>>")
+
+
+def test_a_bracket_subscription_alone_is_named_too(emitted, reference,
+                                                   tmp_path):
+    """The subscription without a loop, for the same reason as the case above:
+    a subscription nothing reads is still a bracket with an inverse, the
+    reference still diverts it off the pure typed-core path, and the port still
+    names it off the length of `body`."""
+    path = tmp_path / "subscribe_only.rvl"
+    path.write_text("type Reading = { value: Int }\n"
+                    "component Parked {\n"
+                    "  let src = effect Stream.source() undo src.close()\n"
+                    "  let sub = subscribe src undo sub.close()\n"
+                    "}\n")
+    ir = compile_files([str(path)])
+    steps = ir["components"][0]["body"]
+    assert any(step.get("subscribe") for step in steps)
+    assert not any(step.get("step") == "stream-iter" for step in steps)
+    want, got = reference.emit(ir), emitted["emit_go_src"](ir)
+    assert_boundary_witness(want, got, "stc-go",
+                            "<<UNSUPPORTED-COMPONENT:Parked>>")
+
+
 def test_a_required_stream_coeffect_is_named_by_the_port(emitted, reference,
                                                          tmp_path):
     """item 130 6b (issue #81): the reference refuses this document by name, and
