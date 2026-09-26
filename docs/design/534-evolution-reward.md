@@ -18,9 +18,10 @@ Sources studied, all at `52fb8ef3`: `tools/gate_reference_census.py` (`bucket`,
 ## 0. The decision in one paragraph
 
 The reward is a **conjunction, not a scalar**, and retention is that same
-conjunction. Eight components each answer `verified` or `failed`, every answer is
-read off an artifact the repository owns, and a trajectory is retained only when
-all eight say `verified`. No weight, no threshold, no partial credit, and no
+conjunction. Nine components each answer `verified` or `failed` (item 536's
+eight, plus the `held-out` component design doc 535 owns), every answer is read
+off an artifact the repository owns, and a trajectory is retained only when all
+nine say `verified`. No weight, no threshold, no partial credit, and no
 number exported anywhere a threshold could later be attached to it. The scorer is
 `tools/evolution_reward.py`; the candidate hands it a tree, a base ref and a
 declared scope, and every other key in the candidate's record is dropped by name
@@ -30,9 +31,9 @@ the candidate's narrative was present and was not consulted.
 ## 1. The gap, measured
 
 All eight components already had machinery at `52fb8ef3`. Seven of the eight name
-a tool that exists and runs. One does not: **`tools/gate_verdict_parity.py`, which
-item 536 and issue #1206 both cite for the conformance component, does not exist
-anywhere in the tree.** `grep -rn gate_verdict_parity` over the repository returns
+a tool that exists and runs. One did not: **`tools/gate_verdict_parity.py`, which
+item 536 and issue #1206 both cited for the conformance component, has never
+existed anywhere in this tree.** `grep -rn gate_verdict_parity` over the repository returns
 exactly one hit, the roadmap sentence itself. That is recorded here rather than
 worked around, and section 5 says what it does to the component.
 
@@ -52,16 +53,52 @@ reported success.
 
 | component | the artifact | how it is read | slice |
 |---|---|---|---|
-| `compiles` | the gate crate and the six-tier matrix | `cargo test --offline --lib` exit status, plus the per-tier emit suites | 2 |
-| `tests` | the affected suite | `tools/affected_tests.py` selection, then that selection's pytest exit status | 2 |
+| `compiles` | the gate crate and the six-tier matrix | `cargo check --offline` on `crates/revl-gate`, plus `tools/conformance.py --json` with zero REAL gaps on all six tiers | **2** |
+| `tests` | the affected suite | `tools/affected_tests.py` selection, then that selection run, with a non-zero collected count | **2** |
 | `no-new-false-admits` | the census buckets and `tools/gate_reference_census_baseline.json` | `gate_reference_census.py --check` exit status, AND a subset read of the baseline against `base` | **1** |
-| `conformance` | verdict parity across tiers | blocked: the tool item 536 names does not exist | 3 |
+| `conformance` | the two divergence registers | `tools/tier_guarantees.py --json`, ratcheted against the committed matrix at `base` | **3** |
 | `artifact-stability` | every generated artifact | `tools/regen_goldens.py --all --check` exit status, which contains the crate and wasm digest checks | **1** |
-| `formal` | the `formal/` ledger | the ledger's own coverage numbers, compared against `base` | 3 |
+| `formal` | the `formal/` ledger | the two pure-python ledger gates, plus a coverage read against `base` | **3** |
 | `scope` | the changed-file set | `git diff --name-only <base>` plus untracked files, against the declared globs | **1** |
 | `documentation` | the citation gate and the generated blocks | `tools/docgen.py --check` and `tools/check_roadmap_claims.py --check` exit status | **1** |
+| `held-out` | a draw the candidate could not read | `tools/heldout_scoring.py --diff-base`, where a REFUSAL is a fail | **1b** |
 
-Two notes on the table.
+Four notes on the table.
+
+`compiles` reads the crate through `cargo`, not through a digest. The drift
+gates compare BYTES: `tools/build_gate_crate.py --check` is happy with a
+regenerated crate that does not compile, and that has happened here. No cargo on
+the machine is a FAILURE, which is the 7-of-8 case section 3 argues from, stated
+as code rather than as a hypothetical. It covers `crates/revl-gate` only:
+`crates/revl-gate-wasm` needs a `wasm32-wasip2` target and `crates/revl-lsp`
+needs its dependencies fetched, and a component that can never verify is one
+nobody reads. Section 9 records that as an uncovered edge.
+
+`compiles` also distinguishes a REAL gap from a deliberate tier limit, which is
+`tools/conformance.py`'s own split, keyed on whether the emitter raised its own
+`EmitError` or simply crashed. Measured at `fc0d84ce`: 61 construct cases over
+six tiers, twelve deliberate limits (ten on wasm, one on java, one on go) and
+zero real gaps. So the bar is zero real gaps, not zero refusals; a count of
+refusals would have made every deliberate limit a blocker.
+
+The matrix cannot shrink its way to green either, in both of the directions it
+could shrink: a tier dropped from ONE case row fails against the union over
+rows, and a tier dropped from EVERY row, which no per-row comparison sees,
+fails against a floor on the size of that union. The six tier NAMES are not
+spelled in `tools/evolution_reward.py`. They are a closed vocabulary already
+declared in eight places and recorded as an unresolved mirror in
+`tests/fixtures/vocabulary_mirror_ledger.json`, so issue #1285's gate reds on a
+ninth copy, and it is right to: what this component decides is that no tier
+stopped being walked, not which tiers exist.
+
+`tests` requires a COUNT, not an exit status. `tools/affected_tests.py` falls
+safe to FULL on an unmapped path, so the selection is read rather than guessed,
+and the run must report `N passed` with N above zero. It also adds the per-tier
+emit suite for every backend the selector names, because those live outside
+`tests/` and `pytest tests/` does not contain them. The two tiers whose suites
+need their own toolchain (`python`'s cordis venv, `typescript`'s vitest) FAIL
+the component rather than being skipped, which is where `tools/pre_merge.sh`
+differs: it skips them, and a skip inside a reward is a pass nobody earned.
 
 `artifact-stability` is one invocation, not three. `tools/regen_goldens.py --all
 --check` covers the six backend golden trees and both gate crates, so
@@ -170,7 +207,7 @@ to trust. The subset read can, because it looks at `base`.
 stub census tool that exits 0 throughout, so the only thing that can fail the
 component is the grown allowance itself.
 
-## 5. The conformance component, and why it fails today
+## 5. The conformance component, and the tool that never existed
 
 Item 536 maps conformance and cross-tier divergence to
 `tools/gate_verdict_parity.py`. That file does not exist. Three responses were
@@ -184,12 +221,43 @@ available and two of them are wrong:
   that the tool is still absent, so the test reds on the day it arrives and the
   probe has to be written.
 
-The third is what is implemented.
-`test_the_conformance_component_names_the_tool_that_does_not_exist` is the
-tripwire. The nearest existing machinery is the census's own two-engine
-agreement (`tests/test_gate_crate_admit.py::test_the_two_engines_agree`) and
-`tools/conformance.py`; slice 3 decides which of those is the parity read item
-536 meant, rather than guessing here.
+The third is what slice 1 implemented, and the tripwire did its job: the
+roadmap sentence was corrected, and issue #1233 / item 547 now carries the
+general finding that the citation gate judges only `path:line` citations, so a
+bare backticked path naming a tool that never existed was never resolved against
+the tree.
+
+**Slice 3's decision: do not build it.** Item 536 now names what actually
+records cross-tier divergence here -- the `--check-tier-parity` records plus
+`tests/test_cross_tier_execution.py`'s `DIVERGENCES` -- and `probe_conformance`
+reads exactly those. Building a ninth tool to wrap two registers that already
+exist would add a gate rather than read one, which section 7 forbids, and the
+new tool would then need its own oracle for a question two registers already
+answer.
+
+Both registers are read through `tools/tier_guarantees.py`, which is their only
+consumer and is TOTAL over them: a `--check-tier-parity` subject with no
+guarantee mapping and a `DIVERGENCES` entry with no code mapping each raise
+`MatrixError` rather than being dropped. So a register that grows without a
+decision exits that tool non-zero and fails the component, which is what keeps
+the path armed while `DIVERGENCES` is empty.
+
+The read itself is a ratchet, in the same shape as the census subset read and
+for the same reason. The candidate's matrix is MEASURED (`--json`, about seven
+seconds); the base's is the committed `GUARANTEE-TIER-MATRIX` block in
+`docs/conformance.md`, read with `git show`, which is how the base side is had
+without checking out a second tree. No `(guarantee, tier)` cell may be weaker
+than at `base`, weaker being `tier_guarantees`'s own strongest-first order
+`proved > divergence > no reproducer > unimplemented`. So `proved ->
+divergence` fails, which is item 536's "no weakened refusal"; `unimplemented ->
+divergence` passes, because a partial port arriving is the work and punishing
+it would make the component hostile to the self-host lane. A row DELETED at
+head fails as well, since deleting the row is the other way to stop being a
+divergence and a subset check would miss it.
+
+`gate_verdict_parity.py` stays named in `tools/evolution_reward.py`'s docstring.
+The decision not to build it is a finding about item 536, and erasing the name
+would erase the finding.
 
 ## 6. Interfaces assumed from the sibling lanes
 
@@ -254,39 +322,108 @@ and asserts the `documentation` component fails on the real tree.
 the same fault leaves every generated artifact byte-identical, so the scorer
 locates the fault rather than reddening globally.
 
-**Slice 2: `compiles` and `tests`.** The two expensive components, and the two
-whose absence makes today's scorecard unretainable.
-Oracle: a candidate tree with a deliberately broken emitter must fail `compiles`
-and leave `documentation` verified, which is the same control shape as slice 1.
-Fixture: the affected-selector output has to be read rather than assumed, because
-`tools/affected_tests.py` falls back to FULL on an unmapped path, and a `tests`
-component that silently ran zero tests is the fail-open shape again. The probe
-must assert a non-zero collected count, not merely a zero exit status.
+**Slice 1b (landed, design doc 535).** `held-out`, the ninth component and the
+only one whose subject is not in the tree the candidate was handed.
+Oracle: `tests/test_evolution_reward.py`, 7 tests.
 
-**Slice 3: `conformance` and `formal`.** Conformance first decides what the
-parity read is, since section 5's tool does not exist. Formal reads the ledger's
-coverage against `base` and fails on a reduction, which is one of item 536's
-seven negative bar entries.
-Oracle: a fixture whose formal coverage drops must fail `formal` alone.
+**Slice 2 (landed).** `compiles` and `tests`.
+Oracle: `tests/test_evolution_reward.py`, 16 tests.
+Fixtures: `crate_repo`, a real minimal cargo crate at `crates/revl-gate` with no
+dependencies, so `--offline` needs no registry and the check is about a second
+against twenty for the real gate crate -- a real crate rather than a mocked
+`cargo`, because the claim is that rustc accepted this source and a stubbed
+compiler would test the stub; and `suite_repo`, a real pytest run over real test
+files.
+Non-vacuity: `test_compiles_fails_on_source_that_does_not_compile` breaks
+`lib.rs` and gets a real rustc refusal;
+`test_compiles_fails_on_a_real_emitter_gap_and_passes_a_deliberate_limit` is the
+discrimination the component turns on, asserted in both directions;
+`test_tests_fails_on_a_selected_suite_that_genuinely_fails` runs a real failing
+assertion; `test_a_suite_that_collected_nothing_is_not_a_pass` builds the
+fail-open shape on purpose -- an all-skipped file, which exits 0 with no `passed`
+count -- and requires the component to fail on it.
+`test_compiles_fails_when_one_case_row_drops_a_tier` and
+`test_compiles_fails_when_a_tier_stops_being_walked_everywhere` are the two
+shrink directions, and `test_the_tier_roster_is_not_re_declared_here` holds the
+module to reading the roster rather than spelling it.
+`compiles` is also verified against the real tree
+(`test_compiles_verifies_on_this_tree`, about twenty seconds for the real
+`cargo check` and the real six-tier walk). `tests` is not: running the real
+affected selection inside a test of that selection would be the suite running
+itself, so its real-tree exercise is the pre-merge gate rather than a case here.
+
+**Slice 3 (landed).** `conformance` and `formal`.
+Oracle: `tests/test_evolution_reward.py`, 15 tests.
+Fixtures: `matrix_repo`, a git repository whose committed `docs/conformance.md`
+carries a base matrix in the real generated shape, plus a stub
+`tools/tier_guarantees.py`; `formal_repo`, a two-theorem ledger with both gates.
+Non-vacuity: `test_a_guarantee_lost_on_one_tier_fails_conformance` (a cell goes
+`proved -> divergence`), `test_a_row_deleted_at_head_fails_conformance`,
+`test_a_register_that_grew_without_a_decision_fails_conformance` (the
+`MatrixError` exit), `test_a_removed_theorem_fails_formal` and
+`test_a_theorem_downgraded_to_contentless_fails_formal`.
+Direction: `test_a_cell_getting_stronger_is_the_work_and_passes` and
+`test_an_added_theorem_is_the_work_and_passes_formal` hold the other side, so
+the ratchets are ratchets and not a freeze.
+Control: `test_formal_is_the_control_for_the_conformance_fixture` -- `formal`
+gives the identical verdict on both sides of the conformance fault, so the
+conformance red is located rather than global.
+Parser: `test_the_committed_block_parser_reads_the_real_one` holds the base-side
+parser against the real generated block rather than against the fixture that
+mimics it.
+
+**Not folded in here: the progress conjunct.** Issue #1224 / item 545 found that
+all eight of item 536's components are PRESERVATION checks, so the reward's
+maximum is attained by the empty diff and a loop trained against it learns
+caution rather than capability. `tools/evolution_progress.py` landed with three
+monotone repository counters, each a `value` over a `universe` so that deleting
+the measured surface does not read as progress. It is NOT registered in
+`PROBES`: its verdict shape would slot in without adaptation, but adding a tenth
+conjunct changes the retention rule for every caller, and issue #1206 owns the
+eight rather than the roster. Recorded here so the dangling edge is visible: the
+tool exists, nothing folds it in, and whoever owns item 545 decides whether it
+should be a conjunct or stay a generation-level existential in
+`evolution_progress.promote`.
 
 **Slice 4: the negative promotion bar.** Item 536 states seven entries that green
 tests alone must not carry: no new false admits, no widened capability reach at
 the G8 boundary, no weakened refusal, no reduced formal coverage, no unexplained
 golden change, no unbounded resource path, no hidden host fallback. Slices 1 to 3
-cover the first, the fourth and the fifth. The other three need their own reads
-and are not folded into an existing component, because a component that fails for
-two unrelated reasons cannot be acted on.
+cover the first, the third (a weakened refusal now shows as a weakened
+`(guarantee, tier)` cell), the fourth and the fifth. The other three -- widened
+capability reach at the G8 boundary, an unbounded resource path, a hidden host
+fallback -- need their own reads and are not folded into an existing component,
+because a component that fails for two unrelated reasons cannot be acted on.
 
 ## 9. What this design does not verify
 
 * It does not check that a component's tool is itself correct. The reward is only
   as strong as the gates it reads, and it says which gate it read in every
   verdict's `evidence` so that dependence is visible.
-* `compiles` and `tests` have no probe, so nothing here has been demonstrated
-  against a candidate that fails to build. Slice 2 owns that.
+* `compiles` covers `crates/revl-gate` and no other crate.
+  `crates/revl-gate-wasm` and `crates/revl-lsp` are held by their BYTES
+  (`artifact-stability`) and by CI, not by this component: requiring a
+  `wasm32-wasip2` target and a fetched dependency graph would make the component
+  unverifiable rather than strict.
+* `tests` runs the pytest selection and the per-backend emit suites it can run.
+  It does NOT run the `ruff` or `site-wheel` gates the selector can also name.
+  Those are named in the evidence and left to CI; `conformance`, `formal` and
+  `documentation` are the components that cover the other three gate keys.
+* `formal` reads the LEDGER, not the proofs. Whether the Lean development still
+  builds is `make formal`'s question and needs a toolchain; what is held here is
+  that no registered theorem disappeared and none was downgraded to
+  `contentless`, plus the two gates over the ledger that are pure python.
+* `conformance`'s base side is the committed matrix at `base`, so it inherits
+  that block's freshness from CI's `tools/conformance.py --check-readme` rather
+  than re-deriving it. A base commit whose block was stale would move the
+  ratchet's floor, which is why the candidate side is measured and not read.
 * The census subset read compares the candidate's baseline against `base`. It
   cannot see a baseline that was already wrong at `base`; that is what
   `tests/test_gate_reference_census.py`'s named cap is for, and the two are
   complementary rather than redundant.
 * Nothing here has been run against a trajectory produced by a model. The
   scorer's input is a tree, and every test supplies one directly.
+* Nothing here reads `tools/evolution_progress.py`. Every registered component
+  is a preservation check plus `held-out`, so the reward still cannot tell a
+  candidate that advanced something from one that changed nothing safely. That
+  is issue #1224 / item 545's question and it is open, not answered here.
