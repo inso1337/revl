@@ -1441,7 +1441,14 @@ class _Driver:
             if sys.modules.get(name) is gen.module:
                 del sys.modules[name]
 
-    def _emit_module(self, ir: dict) -> types.ModuleType:
+    def _emit_module(self, ir: dict,
+                     source: str | None = None) -> types.ModuleType:
+        # `source` is the emitter's output for `ir` when the caller has already
+        # rendered it. A session swap renders the successor BEFORE it tears the
+        # running generation down, so an emitter refusal leaves that generation
+        # untouched (issue #1446), and hands the same text in here rather than
+        # emitting twice. Everything below still runs at the generation boundary.
+        #
         # item 541: a generation supersedes the ones already disposed (a
         # swap/reload runs `_dispose_all` before re-emitting; an aborted/
         # committed turn disposed its fibers). Reclaim their modules now, before
@@ -1464,7 +1471,8 @@ class _Driver:
         reset = getattr(self.runtime, "revl_reset_run_trace_state", None)
         if reset is not None:
             reset()
-        source = self.emit.emit(ir)
+        if source is None:
+            source = self.emit.emit(ir)
         module = types.ModuleType(f"{self._gen_prefix}{self.generation}")
         filename = f"<revl-run gen{self.generation}>"
         # kept so a replay recorder can quote the emitted line a step came
