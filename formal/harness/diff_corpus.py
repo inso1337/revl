@@ -389,6 +389,19 @@ def _bound_index(services_by_name: dict) -> dict[tuple[str, str], tuple[str, tup
     return out
 
 
+#: The pseudo-service a HOST emission's `U` row names (see `_record`). The
+#: oracle's `g4OK` reads a `U` row on it as a call to an emission, because the
+#: exporter writes one only for a callee `_fn_emitting` put in the set.
+HOST_SERVICE = "@host"
+
+#: The marker contexts a host emission is judged in. The checker holds the
+#: extern carrier to the marker inside an `emit` head's argument list (issue
+#: #1427), and a marker written there is refused whatever it marks; the head
+#: itself is the marked crossing. A host emission in a `plain` position is not
+#: judged by the marker rule, so it gets no row.
+HOST_MARKER_CONTEXTS = ("emit", "emitarg", "emitnested")
+
+
 def _fn_emitting(prog) -> set[str]:
     """Least fixed point of named functions/externs whose body (transitively)
     reaches an emission extern — the `env.emitting_fns` analog. A call to
@@ -874,6 +887,14 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
             out.append((*route, ctx))
         for a in node.args:
             walk_calls(a, out, ctx)
+        return
+    if isinstance(node, ExprArrow) and ctx == "emitarg":
+        # An arrow's body runs when the arrow is CALLED, not while the
+        # enclosing emit's arguments are evaluated: it leaves the argument
+        # list (`lower.py` clears `_in_emit_args` for the body), so a marked
+        # crossing written inline there is the same crossing it is when the
+        # arrow is bound by `let` and passed by name.
+        walk_calls(node.body, out, "plain")
         return
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
@@ -1554,6 +1575,20 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 for root, chain, ctx in local_calls:
                     res = _resolve_emission(root, chain, require_map, handles,
                                             psvc, aliases)
+                    if res is None and not chain and root in emitting \
+                            and ctx in HOST_MARKER_CONTEXTS:
+                        # A HOST emission: a named call to an `emission`
+                        # extern or to a fn reaching one. It has no service
+                        # to resolve, so the row names the pseudo-service
+                        # `@host`, which the oracle's `g4OK` reads as an
+                        # emission; `_fn_emitting` never admits a witnessed,
+                        # acquire or pure extern, so every such row IS one.
+                        calls.append((root, HOST_SERVICE, root, ctx))
+                        tsv.append("\t".join(
+                            ["U", rel, c.name, ctx, root, HOST_SERVICE, root]))
+                        if ctx != "emit":
+                            saw_raw = True
+                        continue
                     if res is None:
                         continue  # host/local/provide receiver: not a crossing
                     svc, meth = res
@@ -2695,10 +2730,14 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         # checker's marker covers the head call alone (issue #1175), so only
         # the `emit` context legalizes an emission, and a marker written
         # inside the argument list (`emitnested`) is a violation outright.
+        # A row on the `@host` pseudo-service is a host emission (see
+        # `_record`): it is an emission by construction, as `Oracle.g4OK`
+        # reads it.
         raw = any(
             u[2] == compn
             and (u[3] == "emitnested"
-                 or ((u[3] == "emit") != ((u[5], u[6]) in ems)))
+                 or ((u[3] == "emit")
+                     != (u[5] == HOST_SERVICE or (u[5], u[6]) in ems)))
             for u in urows if u[1] == rel
         )
         # HA row: [HA, file, comp, verb, position]. The same G4 guarantee over

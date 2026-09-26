@@ -1,0 +1,21 @@
+// ADMITTED: the arrow bound by `let` first and passed to the `emit`'s
+// argument by name. The twin of g4_emit_arrow_argument_inline.rvl.
+
+service Approvals { emission fn approve(ticket: Str, actor: Str) -> Str }
+service Gate { emission fn decide(ok: Bool, verdict: Str) -> Str }
+service Review { emission fn review(key: Str) -> Str }
+
+// Hands the ticket to whatever approver it is given. A plain module fn: it
+// reaches no emission of its own, so calling it needs no marker.
+fn approve_args(key: Str, approver: (Str, Str) -> Str) -> Str {
+  return approver(key, key)
+}
+
+component Reviewer requires approvals: Approvals, gate: Gate provides review: Review {
+  provide review {
+    fn review(key) {
+      let approver = (t: Str, a: Str) => emit approvals.approve(t, a)
+      return emit gate.decide(true, approve_args(key, approver))
+    }
+  }
+}

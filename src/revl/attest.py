@@ -406,6 +406,13 @@ def named_guarantees() -> list[str]:
 #: inputs and not cited codes, exactly as `retention` is:
 #: :func:`discharged_guarantees` is unchanged by adding them.
 #:
+#: `model_profile` joined with item 515 on the same rule. Its `DEVICE_CLASSES`
+#: is the closed vocabulary `model_route` checks a role's `device` clause
+#: against, and an unknown class is a refusal. Measured: dropping `gpu` from
+#: the table turns the item-515 portfolio program in
+#: `tests/test_model_portfolio_515.py` from admitted to refused. A pure table
+#: read by a member, the `cap_order` and `ui_family` shape, citing no `(Gn)`.
+#:
 #: WHY THIS IS STILL A LIST. Membership is reachability plus effect, and neither
 #: is a property of the bytes of this file: a module refuses only when the
 #: frontend reaches it on some program, which only a run settles. An import-time
@@ -424,7 +431,7 @@ RULESET_MODULES = ("parser", "lower", "compiler", "admission", "activation",
                    "model_route", "model_council", "model_answer",
                    "typecheck", "lexer", "composition", "hostref", "hostfile",
                    "cap_order", "ui_family", "resources", "kernel_boundary",
-                   "cardinality", "decode_grammar")
+                   "cardinality", "decode_grammar", "model_profile")
 
 #: The sibling modules a rule module imports that are NOT rules, each with the
 #: reason it is not one. This is the argued half of the membership question and
@@ -467,6 +474,11 @@ NOT_A_RULE = {
     "sandbox_runtime": "the child-process sandbox `placement` launches.",
     "synthesize": "`revl synthesize`, a generator rather than a checker.",
     "tee_attestation": "TEE quote verification at run time.",
+    "refusal": "tells a backend emitter's EmitError apart from its fault "
+               "after the frontend has admitted the document; `placement` "
+               "reads it only on the emit path. Measured: making "
+               "`refusal_class` answer None moves no verdict over the 230 "
+               "programs under `examples/`.",
 }
 
 #: The modules SCANNED for the G-codes the ruleset cites. `diagnostics` is

