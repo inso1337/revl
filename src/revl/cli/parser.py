@@ -1321,6 +1321,54 @@ def build_parser() -> argparse.ArgumentParser:
                           "(cordis-rs / cordis4j on a JVM / cordis-wasm on wasmtime), "
                           "prove no residue, exit)")
 
+    run.add_argument(
+        "--pool", default=None, choices=["private"],
+        help="run the composition on a PRIVATE PEER POOL member instead of "
+             "this machine (item 524). The artifact is pinned by hash, the "
+             "peer re-hashes what it runs, and the result comes back with a "
+             "signed execution receipt that is checked before it is recorded "
+             "as delivered. `private` is the only value: a public or swarm "
+             "pool needs a different threat model and is absent rather than "
+             "unimplemented. Needs --pool-dir, --peer, --peer-addr, "
+             "--dispatch-identity and --attest-identity "
+             "(docs/design/550-private-peer-pool.md)")
+    run.add_argument("--pool-dir", default=None, metavar="DIR",
+                     help="with --pool private: the operator's pool directory "
+                          "(charter, roster, identities, delivery ledger)")
+    run.add_argument("--peer", default=None, metavar="ID",
+                     help="with --pool private: the admitted member to run on. "
+                          "A peer that is not in the roster is refused on "
+                          "`not-a-member`")
+    run.add_argument("--peer-addr", default=None, metavar="HOST:PORT",
+                     help="with --pool private: where that member's `revl pool "
+                          "serve` is listening. The address is how to REACH "
+                          "the peer; its identity is the key it signs with")
+    run.add_argument("--dispatch-identity", default=None, metavar="PATH",
+                     help="with --pool private: the operator's PRIVATE "
+                          "identity file that signs the task. The peer holds "
+                          "only its public half")
+    run.add_argument("--attest-identity", default=None, metavar="PATH",
+                     help="with --pool private: the PRIVATE identity file that "
+                          "attests the returned receipt. Its fingerprint must "
+                          "be in the charter's attest authority (`pool init "
+                          "--attest-identity`) or the receipt is checked and "
+                          "counts for nothing")
+    run.add_argument("--pool-runner", default="run-once-py",
+                     choices=["run-once-py", "test-py"],
+                     help="with --pool private: what the peer does with the "
+                          "artifact. `run-once-py` boots the composition and "
+                          "proves teardown leaves no residue (needs a "
+                          "cordis-py runtime ON THE PEER); `test-py` runs the "
+                          "artifact's own declared tests, which needs only the "
+                          "revl frontend. An unlisted runner is refused by the "
+                          "peer, never defaulted")
+    run.add_argument("--pool-timeout", type=float, default=300.0,
+                     metavar="SECONDS",
+                     help="with --pool private: how long to wait for the peer "
+                          "(default: 300). A timeout leaves the task "
+                          "OUTSTANDING in the ledger, because a task whose "
+                          "fate is unknown is neither delivered nor dropped")
+
     dev = sub.add_parser(
         "dev",
         help="run the exemplary web app with its Vite frontend and ambient WebUI host")
@@ -1696,6 +1744,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="a public identity file whose fingerprint may also revoke. "
              "Repeatable. Give this when withdrawals should be signed with a "
              "key pair, so a third party can check who removed whom")
+    pool_init.add_argument(
+        "--attest-identity", action="append", metavar="PATH",
+        help="a public identity file whose fingerprint may attest an "
+             "execution receipt. Repeatable. An execution receipt is an "
+             "ASYMMETRIC record, so without at least one of these no receipt "
+             "a peer signs can ever count as evidence and no member can rise "
+             "above the entry tier")
 
     pool_keygen = pool_sub.add_parser(
         "keygen",
@@ -1839,6 +1894,52 @@ def build_parser() -> argparse.ArgumentParser:
              "then signed with it, so any holder of the matching public key "
              "can check who removed whom. Its fingerprint must be in the "
              "charter's revoke authority (see `pool init --revoke-identity`)")
+
+    pool_serve = pool_sub.add_parser(
+        "serve",
+        help="the PEER side: listen for signed tasks, run the artifact the "
+             "task pins BY HASH, and answer with a signed execution receipt. "
+             "Holds no secret that could admit anybody")
+    pool_serve.add_argument("--charter", required=True, metavar="PATH",
+                            help="the charter this peer joined, as it was "
+                                 "handed to it. The task must pin its digest")
+    pool_serve.add_argument("--identity-key", required=True, metavar="PATH",
+                            help="this peer's PRIVATE identity file "
+                                 "(`pool keygen --out`). It signs the receipt "
+                                 "and names the peer the task must address")
+    pool_serve.add_argument("--operator-public", required=True, metavar="PATH",
+                            help="the operator's PUBLIC identity file, pinned "
+                                 "out of band. A task that does not verify "
+                                 "under it is refused on `task-signature`")
+    pool_serve.add_argument("--host", default="127.0.0.1", metavar="HOST",
+                            help="bind address (default: loopback)")
+    pool_serve.add_argument("--port", type=int, default=0, metavar="PORT",
+                            help="bind port; 0 asks the OS for a free one and "
+                                 "the chosen port is printed")
+    pool_serve.add_argument(
+        "--allow-remote", action="store_true",
+        help="permit a non-loopback bind. The channel has NO transport "
+             "security: every record on it is signed, so nothing can be "
+             "forged undetected, and nothing on it is secret — the artifact "
+             "source crosses in the clear")
+    pool_serve.add_argument("--workdir", default=None, metavar="DIR",
+                            help="where artifacts are written and run "
+                                 "(default: a fresh temporary directory that "
+                                 "is removed on exit)")
+    pool_serve.add_argument("--timeout", type=float, default=300.0,
+                            metavar="SECONDS",
+                            help="how long one artifact may run (default: 300)")
+    pool_serve.add_argument("--once", action="store_true",
+                            help="serve one task and exit")
+
+    pool_ledger = pool_sub.add_parser(
+        "ledger",
+        help="the delivery ledger: every task dispatched, its state, and the "
+             "append-only event log including every refused second delivery")
+    pool_ledger.add_argument("--dir", required=True, metavar="DIR",
+                             help="the pool directory")
+    pool_ledger.add_argument("--json", action="store_true",
+                             help="the whole ledger as JSON")
 
     attest_cmd = sub.add_parser(
         "attest",

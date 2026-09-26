@@ -2,12 +2,14 @@
 
 Status: slice 1 landed; the receipt slice landed on top of it
 ([566-pool-execution-receipts.md](566-pool-execution-receipts.md)), which is
-where promotion evidence is now recounted rather than believed. The pool
-declaration, the join admission gate, the tier ladder, promotion on attested
-evidence and withdrawal are in
-`src/revl/peer_pool.py` with `revl pool init | request | join | status |
-withdraw`. Dispatching work to a member over a wire is not here and is named
-under "What is left" with how to measure it.
+where promotion evidence is now recounted rather than believed, and the dispatch
+slice on top of that ([567-pool-dispatch.md](567-pool-dispatch.md)), which is
+where a task reaches a member and a result is recorded as delivered once. The
+pool declaration, the join admission gate, the tier ladder, promotion on
+attested evidence and withdrawal are in `src/revl/peer_pool.py` with `revl pool
+init | request | join | status | withdraw`; the dispatcher is in
+`src/revl/pool_dispatch.py` with `revl pool serve | ledger` and `revl run --pool
+private`.
 
 Related and read before designing this: `docs/design/480-verifiable-private-peer-pool.md`
 (the three kernels this sits on), `src/revl/peer_offer.py`,
@@ -238,12 +240,14 @@ advertised ceiling does not cover the entry grant.
 
 ## Scope: what this slice is, and what it is not
 
-This is the pool declaration plus the gate for joining it. Nothing here opens a
-socket. Running work on a member, moving bytes over a wire and delivering a
-result are the machine boundary of roadmap item 118, and this module is
-deliberately their caller's data model rather than a second implementation of
-them. (This paragraph said "the #421 network seam" until item 524's receipt
-slice; that reference was wrong, and
+This is the pool declaration plus the gate for joining it. `peer_pool` opens no
+socket and still does not: running work on a member, moving bytes over a channel
+and recording a delivery live in `pool_dispatch`
+([567-pool-dispatch.md](567-pool-dispatch.md)), which is this module's caller.
+The split is the same one it always was - this file is the data model and the
+gate - and what changed is that the caller now exists. A CONFIDENTIAL
+cross-machine channel is still roadmap item 118's. (This paragraph said "the
+#421 network seam" until item 524's receipt slice; that reference was wrong, and
 [566-pool-execution-receipts.md](566-pool-execution-receipts.md) says what the
 prerequisite actually is.)
 
@@ -267,6 +271,18 @@ band:
     revl pool withdraw --dir ./pool --peer alpha --reason "attestation drift" \
       --key operator.key
 
+Running work on the member, once it is admitted ([567](567-pool-dispatch.md)):
+
+    # on the peer
+    revl pool serve --charter ./charter.json --identity-key alpha.key \
+      --operator-public operator.pub --port 0
+
+    # on the operator
+    revl run --pool private --pool-dir ./pool --peer alpha \
+      --peer-addr 127.0.0.1:<port> --dispatch-identity operator.key \
+      --attest-identity attestor.key --pool-runner test-py work.rvl
+    revl pool ledger --dir ./pool
+
 `pool status` needs no key. That is deliberate: an operator inspects membership
 without touching the secret that admits, so the roster is safe to put in a
 dashboard or a health check.
@@ -278,23 +294,24 @@ other admits, the result verified by hash and receipt, and a peer leaving
 mid-task leaving the ledger in a stated state. This slice lands the first and
 last of those. What remains:
 
-1. **Dispatch over the wire.** Handing an admitted member a unit of work needs
-   a machine boundary. It does NOT need "the #421 network seam", which was a
-   wrong reference: roadmap item 421 is a capability and codegen audit. The
-   genuine prerequisite is roadmap item 118 (`revl deploy`, issue #79), whose
-   cross-machine channel, pinned host key, bundle staging, far-side
-   `deploy-admit` runner and signed COMMIT receipt are all built; what is
-   missing is the dispatcher that turns a unit of work into a request.
-   `deploy.VIA_PEER` exists to be refused by name, with reason
-   `peer-pool-unavailable`. Measured by: two processes on two hosts, one `pool
-   join`, one task dispatched, the result returned. Today the pool can be stood
-   up and joined across two machines by copying three files.
-2. **One-result delivery with a ledger.** `Roster.outstanding` is the shape a
-   delivery ledger plugs into, and it is populated by the caller rather than by
-   this module, because the thing that dispatches work is the thing that knows
-   what is outstanding. Measured by: a delivered-twice attempt is refused or
-   recorded, never silently absorbed. `tee_attestation`'s admission ledger is
-   the existing consumer to extend rather than duplicate.
+1. **Dispatch over the wire.** DONE, under item 524's dispatch slice, for one
+   machine boundary: `revl pool serve` on the peer and `revl run --pool
+   private` on the operator, over a loopback channel carrying signed task
+   envelopes. See [567-pool-dispatch.md](567-pool-dispatch.md). What is still
+   open is the CONFIDENTIAL cross-machine channel, which remains roadmap item
+   118's mTLS work (`revl deploy`, issue #79) rather than a second copy of it:
+   the channel here authenticates every record and encrypts none of them, so
+   the artifact source crosses in the clear and a non-loopback bind is refused
+   unless the operator asks for it. `deploy.VIA_PEER` still refuses by name
+   with reason `peer-pool-unavailable`; wiring `revl deploy` to this dispatcher
+   is its own piece of work.
+2. **One-result delivery with a ledger.** DONE, under the same slice.
+   `pool_dispatch.DeliveryLedger` is the populator `Roster.outstanding` never
+   had, the dispatch is written down BEFORE the task leaves so an unanswered
+   task is outstanding rather than absent, and a second delivery is both
+   impossible (no edge back to `dispatched`) and visible (the attempt is
+   appended to the event log with both result digests). Read it with `revl pool
+   ledger`.
 3. **Signed execution receipts feeding the evidence count.** DONE, under item
    524's receipt slice. `Membership.evidence` is derived from
    `evidence_digests`, `promote` recounts from `(receipt, attestation)` pairs
@@ -307,11 +324,25 @@ last of those. What remains:
    [design/555-asymmetric-peer-identity.md](555-asymmetric-peer-identity.md) for
    the key lifecycle, what the signature binds member by member, and what the
    non-repudiation claim rests on.
-5. **`run --pool private`.** Running a composition against the pool is the
-   product surface the item names and it depends on 1 and 2. Measured by: a
-   program with a `pure` component runs on a `probation` member end to end.
-6. **Liveness and health in `pool status`.** The roster shows membership, not
-   reachability. `src/revl/liveness.py` is the existing machinery to read from.
+5. **`run --pool private`.** DONE, under the same slice, for the case its own
+   measure names: a boundary-free composition runs on a `probation` member end
+   to end and the result comes back verified by hash and receipt. The limit is
+   stated rather than hidden: ONLY a boundary-free composition is dispatched,
+   because an extern declared `pure` still runs host code and reading a
+   declared class as an effect class would be fail-open on this arrow. The
+   `replayable` and `durable` tiers therefore admit nothing through the
+   dispatcher until a classifier for a composition WITH a boundary exists.
+6. **Liveness and health in `pool status`.** STILL OPEN. `pool status` now
+   shows what each member OWES (`outstanding=N`, read from the delivery
+   ledger), which is what an operator deciding whether to withdraw a peer needs
+   beside what it holds. Reachability is still not shown, and
+   `src/revl/liveness.py` is the existing machinery to read from.
+7. **Promotion has no CLI verb.** `promote` recounts evidence from
+   `(receipt, attestation)` pairs and the ledger now stores those pairs for
+   every delivered task, so the input exists. The verb needs charter tiers
+   above `probation` that `pool init` can write, and it needs point 5's
+   classifier before a promoted member could be sent anything its new tier
+   allows and its old one did not.
 
 ## Adversarial review
 
@@ -392,6 +423,7 @@ parametrized hostile-input test over ten malformed records.
 * The roster is a JSON file with no concurrency control. Two operators admitting
   at once on a shared directory would race. A single-writer operator is the
   assumed deployment and a durable multi-writer roster is not designed here.
-* `Roster.outstanding` is populated by whatever dispatches work. With no
-  dispatcher wired in, a withdrawal today reports an empty `orphaned` set on a
-  real deployment, which is honest but not yet load-bearing.
+* `Roster.outstanding` is populated by whatever dispatches work. That is now
+  `pool_dispatch`, so a withdrawal reports the tasks the peer really owed; with
+  no dispatcher in the picture it still reports an empty `orphaned` set, which
+  is honest and correct rather than a gap.

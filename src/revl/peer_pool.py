@@ -1692,6 +1692,17 @@ def identity_census(roster: Roster) -> dict:
     }
 
 
+def _outstanding_note(roster: Roster, peer_id: str) -> str:
+    """What this member owes, if anything.
+
+    Shown on the member's own row rather than in a separate block, because an
+    operator deciding whether to withdraw a peer needs the two facts together:
+    what it holds, and what withdrawing it would orphan. The count is the
+    delivery ledger's, read into the roster by whatever dispatched the work."""
+    owed = roster.outstanding.get(peer_id) or ()
+    return f" outstanding={len(owed)}" if owed else ""
+
+
 def render_status(charter_record: Mapping[str, Any], roster: Roster,
                   directory: Optional[IdentityDirectory] = None) -> str:
     """The operator view: who is in, at what tier, holding what, the authority
@@ -1729,7 +1740,8 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster,
             f"evidence={member.evidence} "
             f"identity={member.identity}"
             f"{'/' + member.key_id if member.key_id else ''} "
-            f"caps={', '.join(sorted(member.caps)) or '(none)'}")
+            f"caps={', '.join(sorted(member.caps)) or '(none)'}"
+            f"{_outstanding_note(roster, peer_id)}")
     if roster.revoked:
         lines.append(f"  withdrawn {', '.join(sorted(roster.revoked))}")
     if directory is not None and directory.keys:
@@ -1772,6 +1784,18 @@ def pool_command(args) -> int:
         else:
             print(render_status(charter_record, roster, identities))
         return 0
+
+    # `serve` is the PEER side and `ledger` is a read, so neither resolves the
+    # operator's admitting key: a peer that held it could admit itself, and a
+    # ledger nobody can read without the admitting secret is not a product
+    # surface. Both live in `pool_dispatch` (item 524's dispatch slice).
+    if verb == "serve":
+        from .pool_dispatch import serve_command  # noqa: PLC0415 (lazy)
+        return serve_command(args)
+
+    if verb == "ledger":
+        from .pool_dispatch import ledger_command  # noqa: PLC0415 (lazy)
+        return ledger_command(args)
 
     # `keygen` is the PEER's first step and touches no pool: it draws a key pair
     # on the machine that will hold it. The private half is written 0600 and is
@@ -1855,7 +1879,15 @@ def pool_command(args) -> int:
             revoke_key_ids=(key_id(key),) + tuple(
                 peer_identity.load_public_identity(path).key_id
                 for path in (args.revoke_identity or ())),
-            attest_key_ids=(key_id(key),),
+            # The shared key's fingerprint, plus any identity fingerprints the
+            # operator pinned. An execution receipt is an ASYMMETRIC record
+            # (`pool_receipt`), so without at least one `--attest-identity` no
+            # receipt can ever count and the ladder above the entry tier is
+            # unreachable. That is deliberate rather than a default: evidence
+            # the verifier could have manufactured is not evidence.
+            attest_key_ids=(key_id(key),) + tuple(
+                peer_identity.load_public_identity(path).key_id
+                for path in (getattr(args, "attest_identity", None) or ())),
             artifact_digests=tuple(args.artifact or ()),
             trust_floor=args.trust_floor,
             identity_mode=args.identity)
@@ -1864,6 +1896,14 @@ def pool_command(args) -> int:
         roster = Roster(charter.pool_id, canonical_digest(record))
         save_roster(args.dir, roster)
         identities = load_directory(args.dir)
+        # An attesting key named in the charter is pinned in the DIRECTORY too.
+        # Naming a fingerprint says who may attest; the directory is what holds
+        # the public half a verdict is checked against, and without both an
+        # attestation is refused on `attestation-signature` for a key the
+        # charter itself authorised. The operator introduces it here, which
+        # keeps the rule that no record introduces the key it is checked under.
+        for path in (getattr(args, "attest_identity", None) or ()):
+            identities.register(peer_identity.load_public_identity(path))
         save_directory(args.dir, identities)
         print(render_status(record, roster, identities))
         return 0
@@ -1928,6 +1968,13 @@ def pool_command(args) -> int:
                         peer_keys=peer_keys, directory=identities,
                         admitting_key_id=key_id(key), roster=roster)
     elif verb == "withdraw":
+        # The delivery ledger is what KNOWS a peer's outstanding work (item
+        # 524's dispatch slice). Reading it here is what turns `orphaned` from
+        # a shape with no populator into the set a real deployment reports; the
+        # gate itself is unchanged and still takes the roster it is handed.
+        from .pool_dispatch import load_ledger, save_ledger  # noqa: PLC0415
+        ledger = load_ledger(args.dir)
+        roster.outstanding = ledger.outstanding()
         receipt = withdraw(charter_record, args.peer, args.reason,
                            charter_key=key, roster=roster,
                            directory=identities,
@@ -1940,6 +1987,11 @@ def pool_command(args) -> int:
     print(json.dumps(receipt, indent=2, sort_keys=True))
     if receipt["verdict"] == REFUSE:
         return 1
+    if verb == "withdraw":
+        # Only now, and only for the tasks the receipt actually named: the
+        # ledger records what the withdrawal decided rather than deciding it.
+        ledger.orphan(args.peer, reason=args.reason)
+        save_ledger(args.dir, ledger)
     save_roster(args.dir, roster)
     save_directory(args.dir, identities)
     return 0
