@@ -1001,6 +1001,89 @@ component Bookkeeper provides ledger: Ledger {
 """,
      "`Ledger.post` is declared `emission[db]`, but this implementation emits "
      "through `pg_write` (reaching `pg_write()`)"),
+    # ---- the reach order inside one statement (issue #1261) ---------------
+    # `_method_emissions` notes a statement's evidence at the STATEMENT node:
+    # the step's own crossing, then every emitting NAME the whole statement
+    # calls, SORTED (`for name in sorted(calls & env.emitting_fns)`), then the
+    # names passed as values. `check_stmts` accumulated those names in SOURCE
+    # order, so this slice refused the same program as the reference with the
+    # same tag and the same offending tokens in a different reach order:
+    #   reference:   … (reaching `audit_log()`, `pg_write()`)
+    #   this slice:  … (reaching `pg_write()`, `audit_log()`)
+    # Both refuse; the divergence was on the message alone, and no document in
+    # this corpus reached two emitting names from one statement, so nothing
+    # measured it.
+    #
+    # `pg_write` ahead of `audit_log` in the source on purpose: the two orders
+    # are each other's reverse, so a document written the other way round would
+    # agree whether or not anything sorted.
+    ("two host externs in one statement sort by name", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = pg_write(row) + audit_log(row)
+      return r
+    }
+  }
+}
+""",
+     "`Ledger.post` is declared `emission[db]`, but this implementation emits "
+     "through `audit_log`, `pg_write` (reaching `audit_log()`, `pg_write()`)"),
+    # The plain-declaration half, rendered by the other `g4_verdict` arm.
+    ("two host externs in one statement sort by name, plain half", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = pg_write(row) + audit_log(row)
+      return r
+    }
+  }
+}
+""",
+     "`Ledger.post` is declared plain, but this implementation reaches "
+     "`audit_log()`, `pg_write()`"),
+    # One statement, two branches: the reference collects the subtree at the
+    # statement node, so a conditional sorts the same way.
+    ("a conditional reaching two host externs sorts them", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = row == "x" ? pg_write(row) : audit_log(row)
+      return r
+    }
+  }
+}
+""",
+     "`Ledger.post` is declared `emission[db]`, but this implementation emits "
+     "through `audit_log`, `pg_write` (reaching `audit_log()`, `pg_write()`)"),
+    # Control: the same two externs in TWO statements. The sort is per node, so
+    # the reference keeps source order here, and a fix that sorted the whole
+    # accumulated list would fail on this one.
+    ("two host externs in two statements keep source order", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let a = pg_write(row)
+      let b = audit_log(row)
+      return a + b
+    }
+  }
+}
+""",
+     "`Ledger.post` is declared `emission[db]`, but this implementation emits "
+     "through `audit_log`, `pg_write` (reaching `pg_write()`, `audit_log()`)"),
 ]
 
 

@@ -153,33 +153,41 @@ component PlainAgent requires ledger: Ledger provides refund: Refund {
 #: A click in the ACTIVATION body, with a covering `Approval[ui.click]` edge.
 #: The only shape in which a computer-use crossing is confirmable today.
 #:
-#: The target comes from a `pure` extern rather than from `ui.find`, which is
-#: the one place in this file where that is the right call. Item 521 slice 4
-#: constrains the SIGNATURES of the computer-use verbs and deliberately does
-#: not constrain who mints the record ("floor, not ceiling"), and an
+#: The target is a CONFIG FIELD, and the reason is the whole of issue #1371.
+#: This fixture used `extern pure fn a_target() -> UiTarget`, on the ground
+#: that slice 4 constrains the SIGNATURES of the computer-use verbs and
+#: deliberately does not constrain who mints the record ("floor, not
+#: ceiling"). That ground is gone: a host boundary returning the record
+#: without declaring `emission[ui.find]` is a target nothing resolved, and
+#: `lower._check_ui_target_provenance` refuses it.
+#:
+#: `ui.find` is still not usable here, for the reason the old comment gave: an
 #: activation body cannot bind an emission result at all — `let t = emit …`
-#: there is a G6 refusal, because an activation body records effects. Using
-#: `ui.find` would therefore have meant restructuring the only shape in which
-#: a crossing is confirmable today, to add a step that is not what these
-#: assertions measure.
+#: there is a G6 refusal, because an activation body records effects. So an
+#: activation-body actuation can only act on a target that entered the
+#: component some other way, and a config field is the one such entry the
+#: provenance check leaves open by name. What that costs is worth stating,
+#: because it is a fact about the SYSTEM and not about this fixture: the only
+#: shape in which a computer-use crossing is confirmable today is also a shape
+#: in which the target cannot have been resolved by `ui.find`.
 CONFIRMED = UI_TARGET + """
-extern pure fn a_target() -> UiTarget = @py { return None }
 extern emission[ui.click] fn actuate(target: UiTarget) = @py { return None }
 service Ops { fn ping() -> Int }
 component Clicker provides ops: Ops {
+  config { target: UiTarget }
   let a = await approval["ui.click"] { target: 1 }
-  emit actuate(a_target()) with a
+  emit actuate(config.target) with a
   provide ops { fn ping() = 1 }
 }
 """
 
 #: The same activation-body click with NO edge.
 UNCONFIRMED = UI_TARGET + """
-extern pure fn a_target() -> UiTarget = @py { return None }
 extern emission[ui.click] fn actuate(target: UiTarget) = @py { return None }
 service Ops { fn ping() -> Int }
 component Clicker provides ops: Ops {
-  emit actuate(a_target())
+  config { target: UiTarget }
+  emit actuate(config.target)
   provide ops { fn ping() = 1 }
 }
 """

@@ -56,6 +56,7 @@ from pathlib import Path
 
 from ._paths import backends_root
 from .errors import RevlError
+from .refusal import refusals
 from .wal import WAL_GUARANTEE
 
 _BACKENDS_DIR = backends_root()
@@ -194,10 +195,20 @@ def _load_order(ir: dict) -> list[str]:
     return manifest.get("loadOrder") or [c["name"] for c in ir.get("components") or []]
 
 
-def _emit_modules(ir: dict, record: bool = False) -> dict[str, str]:
+def _wasm_emitter():
+    """Load backends/wasm/emit.py and hand the CALLER the module object.
+
+    The caller keeps it because `EmitError` is a class on the module OBJECT: a
+    second `exec_module` produces a different class, and an `except` against it
+    would not catch the instance the first module raised (issue #1406)."""
     spec = importlib.util.spec_from_file_location("revl_wasm_emit", _WASM_DIR / "emit.py")
     emit_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(emit_module)
+    return emit_module
+
+
+def _emit_modules(ir: dict, record: bool = False, emit_module=None) -> dict[str, str]:
+    emit_module = _wasm_emitter() if emit_module is None else emit_module
     return emit_module.emit(ir, record=record)
 
 
@@ -222,11 +233,19 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
     record = wal_path is not None
 
     order = _load_order(ir)
+    # issue #1406: `refusals(emit_module)` is the wasm emitter's own `EmitError`
+    # and nothing wider. This used to be `except Exception`, which reported a
+    # FAULT inside the emitter with the same sentence as a tier limit -- so an
+    # `AttributeError` from an emitter bug arrived as "could not emit the wasm
+    # composition (the substrate tier is the strictest emitter)", which reads as
+    # a property of the author's document. A refusal is an answer and is
+    # reported; a fault is a bug and keeps its traceback.
+    emit_module = _wasm_emitter()
     try:
-        modules = _emit_modules(ir, record=record)
-    except Exception as exc:  # noqa: BLE001 — surface any EmitError as one diagnostic
+        modules = _emit_modules(ir, record=record, emit_module=emit_module)
+    except refusals(emit_module) as refusal:
         print(f"error: could not emit the wasm composition (the substrate tier "
-              f"is the strictest emitter; see backends/wasm/README.md):\n{exc}",
+              f"is the strictest emitter; see backends/wasm/README.md):\n{refusal}",
               file=sys.stderr)
         return 1
     missing = [name for name in order if name not in modules]
