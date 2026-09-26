@@ -45,7 +45,7 @@ to the diagnostic; see docs/why-traces.md.
 | G-SECRET | a capability-bound secret never leaves its capability's own extern bodies through any revl construct or declared crossing | lower (taint flow) |
 | G-SECRET-FLOW | a Secret[T] value never reaches a disclosure sink (a log, a serialization, an LLM prompt, an MCP return, an unapproved realm or an undeclared receiver); it crosses only at a declared Secret[T] receiver and downgrades only at a declared endorse[confidential] | lower (taint flow) |
 | G-RETAIN | a Retained[T, P] value past P's retention deadline never reaches a persistence sink (a db/fs/store/kv/blob/archive/index/cache/queue/wal crossing), unless P declares a legal hold, which overrides the deadline | lower (taint: declaration and flow) |
-| G-MODEL-PLACE | a model role declared `off_device` never receives a confidentiality origin, and an action reaches only the roles its `route model` block names | checker (declaration) |
+| G-MODEL-PLACE | a model role declared `off_device` never receives a confidentiality origin, an action reaches only the roles its `route model` block names, and a role reaches no capability the component routing through it holds | checker (declaration) |
 | G-COUNCIL-SPLIT | a model council never resolves disagreement toward allow: its aggregation is written down, is total over the DECLARED members, and names no value rather than admitting when the members disagree or one of them is silent | checker (declaration) |
 | A1 | iteration boundaries exist only during activation | lower |
 | A2 | no acquisition after a provision | linker |
@@ -238,6 +238,57 @@ component C requires a: A, b: B provides relay: Relay {
 
 A plain (non-emission) call in argument position needs no marker and is
 admitted as before.
+
+An arrow written in the argument list is not in it. Its body runs when the
+arrow is called, not while the arguments are evaluated, so a crossing inside
+it is judged as it would be in the same arrow bound by `let` first: marked, it
+is admitted, and unmarked, it draws the missing-marker refusal
+(tests/fixtures/g4_emit_arrow_argument_inline.rvl and its two `let` twins):
+
+```revl
+service Approvals { emission fn approve(ticket: Str, actor: Str) -> Str }
+service Gate { emission fn decide(ok: Bool, verdict: Str) -> Str }
+service Review { emission fn review(key: Str) -> Str }
+
+fn approve_args(key: Str, approver: (Str, Str) -> Str) -> Str {
+  return approver(key, key)
+}
+
+component Reviewer requires approvals: Approvals, gate: Gate provides review: Review {
+  provide review {
+    fn review(key) {
+      return emit gate.decide(true, approve_args(key, (t: Str, a: Str) => emit approvals.approve(t, a)))
+    }
+  }
+}
+```
+
+The carrier of the nested crossing does not change the answer. A host
+emission extern in the same position is a crossing too, and it draws the same
+refusal (g4_nested_host_emission_activation.rvl):
+
+```revl reject G4
+extern emission fn log_line(n: Int) -> Int = @py { return 1 }
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+component Checkout {
+  emit log_line(charge(199))
+}
+```
+
+```
+call to emission `charge` must be marked `emit` (G4)
+```
+
+Neither does the position of the body, nor the extern's capability scope:
+`g4_nested_host_emission_method.rvl` is the provide-method spelling,
+`g4_nested_host_emission_scoped.rvl` and
+`g4_nested_host_emission_scoped_method.rvl` declare the extern
+`emission[net]`, and `g4_nested_emit_expression_host.rvl` marks the inner
+call where it stands. The head's carrier is free too: a required service can
+head the `emit` and a host extern be nested under it
+(`g4_nested_host_emission_in_service_emit.rvl`), or the other way round
+(`g4_nested_service_emission_in_host_emit.rvl`).
 
 **A provider that exceeds a plain declaration** — a service declaration is
 an *upper bound* on its providers' effects, because consumers bind to the
@@ -716,6 +767,39 @@ The block is a permission checked at admission, not a runtime selection, so it
 writes no IR: an admitted program is byte-identical to the same program without
 it. Scheduling inside the boundary it draws is roadmap item 515, and the flow
 rule that refuses a confidential VALUE reaching an unrouted role is item 514.
+
+### The reach half (item 519)
+
+A role may also declare how far a call to it can itself reach:
+
+```revl
+model role local on_device reaches [model.complete]
+```
+
+A model is an authority surrogate: it picks which capability the component
+consulting it reaches for. So a component that routes an action through a role
+has an effective ceiling of what it HOLDS together with what the role REACHES,
+and a role reaching past its component is refused with both sets named:
+
+    `Classifier` routes `classify` (*) through model role `local`, which
+    reaches `shell.exec`, but `Classifier` holds only `model.complete` - a
+    component's effective ceiling is the pair's, so a model may not reach past
+    the component that consults it (G-MODEL-PLACE)
+
+The fold is `cap_order.covers`, the same one item 66 runs over a spawn edge, so
+a valuation is really compared: a role reaching bare `fs.write` under a
+component holding `fs.write(path="/tmp")` is refused, because a dropped
+parameter widens.
+
+Omitting the clause leaves the reach UNDECLARED, and undeclared is not empty.
+It resolves to the unnameable `*`, which no held set covers, so a component
+that consults a model it has said nothing about is refused rather than
+admitted. `reaches [*]` is the honest spelling of the unbounded role and is
+refused the same way; `reaches []` declares a role that reaches nothing and is
+admitted, with what it does not reach recorded as the attenuation. The question
+is only asked of a component that holds a boundary which could be a model call,
+because a role can only steer an action that reaches a boundary. See
+`docs/design/541-model-in-attenuation.md`.
 
 ## G-COUNCIL-SPLIT — a council never answers for members that disagreed
 

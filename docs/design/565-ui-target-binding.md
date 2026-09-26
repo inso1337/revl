@@ -198,13 +198,17 @@ behind it.
   substrate's side.
 - That a target is used where it was resolved. revl checks the signature, not
   the dataflow between two crossings. A program may resolve a target and act
-  on a different one, and the taint discipline of slice 2 is what bounds that,
-  not this slice.
+  on a different one. **This paragraph used to end "and the taint discipline
+  of slice 2 is what bounds that, not this slice". That sentence was wrong,
+  and §13 has the measurement and the repair.**
 - Which parameter is the target. A capability token carries no parameter
   roles (item 294's parameters narrow the capability, they do not name the
   parameters), so the check says one parameter is a `UiTarget`, not which.
   That is the same limit slice 2 recorded for the all-arguments taint
-  derivation, and it is a limit rather than a choice.
+  derivation, and it is a limit rather than a choice. **§13 narrows this
+  where it matters**: the capability token names no parameter, but the
+  extern's SIGNATURE does, so the parameters declared `UiTarget` are the
+  target positions.
 - That `List[UiTarget]` will do. It is refused, because a consumer taking a
   list has not named WHICH target it acts on, which is the bare-string defect
   one level out.
@@ -322,7 +326,7 @@ and the declaration does not name would be a member nothing can fill.
   `evidence` that is not a hash, an `action` that names no verb: all
   admitted. The obligation is that the field EXISTS, and a value check has no
   home in a compiler that never sees a screen.
-- **The dataflow between resolve and actuate is unchecked** (see §7).
+- **The dataflow between resolve and actuate is unchecked** (see §7). Closed in part by §13; what remains open there is stated in §13.4.
 - **The backends** were not exercised. No emitted `@py`, `@ts`, `@rs`, `@go`,
   `@java` or wasm body for a UI verb was run, here or anywhere.
 - **Multi-file programs** were not measured. The record is looked up in the
@@ -444,3 +448,113 @@ is a property of the record rather than of the recorder.
   a `capability` the component's reach does not contain is admitted here. That
   cross-check is possible (the reach is on the G8 audit surface) and is not
   done, because the consumer that would run it does not exist yet.
+
+## 13. Where an actuated target came from (issue #1371)
+
+§7's second bullet named slice 2's taint discipline as what bounds a program
+that resolves one target and acts on another. Measured on `fc0d84ce`, that
+bound runs the other way.
+
+### 13.1 The measurement
+
+`ui.find` is a taint SOURCE and `ui.click` is an all-arguments SINK, so under
+`taint_strict`:
+
+| program | verdict |
+| --- | --- |
+| resolve a target, then click the target resolved | refused, G9 |
+| click a `UiTarget` record literal written in the body | admitted |
+
+and the second admits under every profile. A forged target carries no origin,
+so there is nothing on it to refuse: taint bounds what a value is DERIVED
+FROM, and it cannot bound a value derived from nothing. A value derived from
+nothing is exactly the one no observation justifies. The discipline named as
+the bound refuses the honest program and admits the forged one.
+
+Nine more spellings were admitted on the same tree, including a `pure` extern
+minting the record, a helper `fn` returning one, a mutable binding rebound
+from a resolution to a literal, and a SECOND COMPONENT building the target and
+handing it over a service. All ten are in
+`tests/test_ui_target_provenance_1371.py`.
+
+### 13.2 The invariant, and why it is placed on the construction
+
+**In an admitted program, every `UiTarget` originates in a target-producing
+crossing.** `lower._check_ui_target_provenance` holds it with three refusals,
+all G8 like slice 4's own three:
+
+| origin | what the program did | fails |
+| --- | --- | --- |
+| `constructed` | a record literal carrying the declared target's fields | closed |
+| `minted` | an extern returning the record without declaring `emission[ui.find]` | closed |
+| `rebound` | a functional update rewriting a registry-owned field of a resolved target | closed |
+
+What is refused is the CONSTRUCTION, not the flow to a particular use, and
+that is the whole of the placement argument. A check on the flow is only as
+good as its walk, and issue #1327 measured what that costs on this exact
+family: a walk that named three statement kinds missed seven spellings of the
+same crossing, every miss in the fail-open direction. A target that was never
+constructed came from a crossing, whatever path it then took, so there is no
+position for a walk to miss.
+
+An extra field the registry does not name is the author's own (§3's floor) and
+may still be updated. The ten registry fields are ONE binding: an update of
+`name` keeps the resolved control's evidence hash and points the actuation at
+a different control, which is the race written in one expression.
+
+### 13.3 Which parameter is the target, narrowed
+
+§7's third bullet is about the capability TOKEN, and it stands: a token names
+no parameter. The extern's SIGNATURE does. Slice 4 already requires an
+actuation to declare a `UiTarget` parameter, so the positions declared with
+that type are the target positions, and this check reads them there rather
+than guessing. That is narrower than "one parameter is a `UiTarget`" and it is
+as far as the declaration can be read.
+
+### 13.4 What is still not claimed
+
+- **Not that the target is the one resolved for THIS step.** A program that
+  resolves two targets and acts on the second acted on a target it resolved,
+  and it admits. The stronger form is a resolved HANDLE a phase boundary
+  carries, which needs the substrate that actually resolves a target
+  (item 539, upstream `inso1337/revl-harness#11`).
+- **Not that the resolution is still fresh.** `expiry` is a field, not a
+  check; revl never sees a clock a screen agrees with.
+- **A `config` field typed `UiTarget` is admitted, deliberately.** It is the
+  one entry point left open, and the failure direction is OPEN. An operator
+  supplying a target through the environment contract (item 350) is the same
+  authority that granted the component `ui.click`, and it is not the program
+  writing authority for itself. It is also load-bearing today: an activation
+  body cannot bind an emission result (`let t = emit …` there is a G6
+  refusal), and an activation body is the only place an `Approval[C]` can be
+  minted, so a CONFIRMABLE computer-use crossing can only act on a target that
+  entered the component some other way. Refusing a `UiTarget` config field
+  would make a confirmable UI crossing unwritable. That is a fact about the
+  system worth recording on its own.
+- **Nothing crosses a compilation unit.** The closure holds within one
+  compiled program, including across components. A target arriving over a
+  remote seam or from a separately compiled unit is not traced.
+
+### 13.5 Self-host
+
+**No port.** §8's answer covers this refusal without extension: the frontier
+axis `capability_roots`, derived from `ui_family.ROOTS`, already makes the
+native gate answer `OutsideFrontier { FRONTIER }` for any source carrying
+`ui.` or `screen.`, so a fourth reference refusal over the same namespace adds
+no agreement obligation. There is no tag and no message for the two sides to
+disagree about, because the self-host side issues neither.
+`test_the_selfhost_gate_still_declines_the_namespace_by_name` keeps measuring
+the `admit_src` silence on the new refusal specifically and fails by name the
+day it stops, at which point the port and the message agreement become real
+work. `src/revl/ui_family.py` is a `DIGEST_INPUTS` entry, so the crate and the
+wasm crate were both regenerated for this change.
+
+### 13.6 Why not the transaction unit
+
+`ui_transaction` already records `targetResolvedBy` per actuating step
+(item 522 slice 5), and it is `null` for a forged click and `"ui_find"` for an
+honest one. The report can see the difference and issues no verdict on it. It
+cannot simply become one: `targetResolvedBy` is `null` for an honest target
+passed through a local `fn` too, so a refusal keyed on it would refuse correct
+programs. That is the measured reason this lands in the type and capability
+layer, and it is why nothing in `ui_transaction.py` changed.

@@ -2798,6 +2798,68 @@ fn note_host_emission(s: Stmt, ck: Ck) -> Ck {
            msg: ck.msg }
 }
 
+// ---- one statement's evidence, in the reference's order (issue #1261) ------
+//
+// `_method_emissions` notes a statement's evidence at the STATEMENT NODE: the
+// step's own crossing first, then `for name in sorted(calls & emitting_fns)`
+// over the WHOLE statement subtree (`_calls_in` collects it at that one node,
+// before any recursion), then the names the statement passes as VALUES, and
+// only then the sub-nodes, whose own labels `note`'s `seen` set dedups against
+// those. The walk below reaches the names in SOURCE order instead, so this
+// slice refused the same program as the reference with the same tag and the
+// same offending tokens in a different reach order:
+//
+//   let r = true ? zulu(row) : alpha(row)
+//     reference:   … (reaching `alpha()`, `zulu()`)
+//     this slice:  … (reaching `zulu()`, `alpha()`)
+//
+// The label SHAPES are recognised by their spelling because that is what the
+// reference partitions by: `note` is handed `f"{name}()"` for a called name and
+// `f"{name} (passed as a function value)"` for a value one, and nothing else
+// this accumulator carries ends either way.
+fn is_fn_label(l: Str) -> Bool { return l.endsWith("()") }
+
+fn is_value_label(l: Str) -> Bool {
+  return l.endsWith(" (passed as a function value)")
+}
+
+// `grown`'s labels reordered into that order. Everything up to
+// `before.length()` is an earlier statement's evidence and never moves.
+// `step` says the statement is an `emit`, whose own crossing the reference
+// notes ahead of the sorted names; it holds the first new label back only when
+// that label is the step's own shape — neither a name nor a value — so an
+// `emit` whose head is itself an emitting name sorts from the front.
+fn order_ev_labels(before: List[Str], grown: List[Str],
+                   step: Bool) -> List[Str] {
+  var out = before
+  var fns: List[Str] = []
+  var vals: List[Str] = []
+  var rest: List[Str] = []
+  var i = before.length()
+  if (step && i < grown.length() && !is_fn_label(grown[i])
+      && !is_value_label(grown[i])) {
+    out = out.push(grown[i])
+    i += 1
+  }
+  while (i < grown.length()) {
+    let l = grown[i]
+    if (is_fn_label(l)) { fns = fns.push(l) }
+    else {
+      if (is_value_label(l)) { vals = vals.push(l) } else { rest = rest.push(l) }
+    }
+    i += 1
+  }
+  return union_into(union_into(union_into(out, sort_strs(fns)),
+                               sort_strs(vals)), rest)
+}
+
+fn ck_ordered(before: Ev, ck: Ck, step: Bool) -> Ck {
+  return { ctx: ck.ctx, env: ck.env,
+           ev: mk_ev2(order_ev_labels(before.labels, ck.ev.labels, step),
+                      ck.ev.caps),
+           msg: ck.msg }
+}
+
 fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
   if (i >= ss.length() || ck.msg != "") { return ck }
   let s = ss[i]
@@ -2807,6 +2869,7 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
     // calls in the value count even though the statement also binds
     next = walk_expr(s.e, s.kind == "emit", ck)
     if (next.msg != "") { return next }
+    next = ck_ordered(ck.ev, next, s.kind == "emit")
     let inf = infer_t(s.e, next.env, next.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(next, inf.msg) }
     next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
@@ -2815,7 +2878,7 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
   }
   next = walk_expr(s.e, s.kind == "emit", note_host_emission(s, ck))
   if (next.msg != "") { return next }
-  return check_stmts(ss, i + 1, next)
+  return check_stmts(ss, i + 1, ck_ordered(ck.ev, next, s.kind == "emit"))
 }
 
 fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {

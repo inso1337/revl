@@ -698,15 +698,45 @@ class RouteStmt:
 
 
 @dataclass
+class DeviceProfileClause:
+    """`device <class> memory <int> quant <tag>` on a `model role` (item 515).
+
+    The resource a placement DEMANDS, written in the program. It is not the
+    profile a host publishes: what the member was actually loaded onto is the
+    provider's fact (item 538) and reaches revl only inside the opaque
+    `placement_digest` of `revl.model_profile`.
+
+    SYNTAX ONLY. The device vocabulary and the positive-memory rule are
+    `revl.model_route`'s, and `quant` is an opaque tag no rule interprets."""
+    device: str
+    memory_mib: int
+    quant: str
+    line: int
+
+
+@dataclass
 class ModelRouteArm:
-    """One arm of a `route model` block: `<origin> -> <role>`.
+    """One arm of a `route model` block: `<origin> -> <role> | <role> | ...`.
 
     `origin` is an origin class from the item-249 lattice, or `"*"` for the
-    catch-all. `role` names a `model role` declaration. SYNTAX ONLY — every
-    rule over the pair lives in `revl.model_route`."""
+    catch-all. `role` names a `model role` declaration and is the arm's HEAD,
+    the placement item 514's ceiling reads. `alternates` is the rest of the
+    ordered candidate set a scheduler may fall back to (item 515), empty for
+    every arm written before that surface existed.
+
+    `role` may also be the literal `"*"`, which parses so that
+    `revl.model_route` can refuse "any available role" BY NAME rather than as
+    a bare syntax error. SYNTAX ONLY — every rule over the pair lives in
+    `revl.model_route`."""
     origin: str
     role: str
     line: int
+    alternates: tuple = ()
+
+    @property
+    def candidates(self) -> tuple:
+        """The ordered candidate set: the head first, then the alternates."""
+        return (self.role,) + tuple(self.alternates)
 
 
 @dataclass
@@ -736,10 +766,30 @@ class ModelRoleDecl:
     vocabulary in `revl.model_route`, never here.
 
     `model` is a CONTEXTUAL keyword on the `retention`/`secret` discipline — it
-    heads a declaration only in the shape `model role NAME <residence>`."""
+    heads a declaration only in the shape `model role NAME <residence>`.
+
+    Two optional clauses may follow the residence, in this order and each
+    independently omittable:
+
+        model role fast on_device device gpu memory 6144 quant q4_k_m
+                                  reaches [net, fs.read]
+
+    `profile` is the item-515 device clause, `None` for a role written
+    without one.
+
+    `reach` is the `reaches [...]` clause of roadmap item 519: the capability
+    tokens a call to this role can itself reach, which is what puts the role
+    in the attenuation product. `None` means the clause was OMITTED and the
+    reach is UNDECLARED, which is NOT the same as empty. The meaning of an
+    undeclared reach is `revl.model_route`'s, never the parser's.
+
+    Both fields are keyword-defaulted, so `ModelRoleDecl(name, residence,
+    line)` still builds a role with neither clause."""
     name: str
     residence: str
     line: int
+    profile: object = None
+    reach: tuple | None = None
 
 
 @dataclass
@@ -2884,7 +2934,116 @@ class Parser:
         name = self.expect("ident", what="a model role name").value
         residence = self.expect(
             "ident", what="a residence for the role (`on_device` or `off_device`)").value
-        return ModelRoleDecl(name, residence, line)
+        profile = None
+        reach = None
+        # Two optional clauses may follow the residence, and both are read
+        # here so that one declaration has one spelling:
+        #
+        #     model role fast on_device device gpu memory 6144 quant q4_k_m
+        #                               reaches [net, fs.read]
+        #
+        # ORDER IS FIXED, `device` before `reaches`, and each clause is
+        # independently omittable. The order is not a taste call: `device`
+        # refines the residence that precedes it (both answer where the call
+        # runs), so the placement facts read together, and the bracketed
+        # capability list reads last, in the position a reader of `requires`
+        # and `emission` already expects one. A free order would give the same
+        # role two spellings and make every later reader of this slot carry
+        # the permutation.
+        #
+        # `device`, `memory`, `quant` and `reaches` are all CONTEXTUAL
+        # identifiers read only in this slot, so KEYWORDS is untouched and a
+        # program using any of the four as an ordinary name keeps parsing.
+        while self.at("ident", "device") or self.at("ident", "reaches"):
+            tok = self.peek()
+            if tok.value == "device":
+                if profile is not None:
+                    raise self.err(
+                        tok.line,
+                        f"model role `{name}` writes a second `device` clause",
+                        hint="a role declares one device profile; merge the "
+                             "two clauses, or give the second placement its "
+                             "own role name")
+                if reach is not None:
+                    raise self.err(
+                        tok.line,
+                        f"model role `{name}` writes `device ...` after "
+                        f"`reaches [...]`",
+                        hint="the clauses after a residence are written "
+                             "`device <class> memory <MiB> quant <tag>` and "
+                             "then `reaches [...]`, so one declaration has one "
+                             "spelling. Move the `device` clause in front of "
+                             "the `reaches` clause")
+                profile = self._model_role_profile(name)
+            else:
+                if reach is not None:
+                    raise self.err(
+                        tok.line,
+                        f"model role `{name}` writes a second `reaches` clause",
+                        hint="a role's reach is one set; name every capability "
+                             "inside a single `reaches [...]`")
+                reach = self._model_role_reach()
+        return ModelRoleDecl(name, residence, line, profile, reach)
+
+    def _model_role_profile(self, name: str) -> DeviceProfileClause:
+        """`device <class> memory <int> quant <tag>` on a role (item 515).
+
+        SYNTAX ONLY. The device vocabulary and the positive-memory rule are
+        `revl.model_route`'s, and `quant` is an opaque tag no rule interprets.
+        The clause is OPTIONAL: every role written against item 512 has none,
+        so nothing that compiles stops compiling."""
+        dline = self.expect("ident", value="device").line
+        device = self.expect(
+            "ident", what="a device class (`cpu`, `gpu` or `npu`)").value
+        self.expect("ident", value="memory",
+                    what="`memory <MiB>` after the device class")
+        memory = self.expect(
+            "int", what="the resident memory the placement needs, in MiB")
+        self.expect("ident", value="quant",
+                    what="`quant <tag>` after the memory floor")
+        quant = self.expect(
+            "ident", what="a quantisation tag for the placement").value
+        return DeviceProfileClause(device, memory.value, quant, dline)
+
+    def _model_role_reach(self) -> tuple:
+        """`reaches [<cap>, ...]` on a `model role` (roadmap item 519).
+
+        The capability tokens a call to this role can itself reach. Spelled
+        with the `emission [...]` / `witnessed [...]` bracket so a reader meets
+        one capability-list grammar, and funnelled through `_capability_params`
+        so `model.complete(calls=3)` validates and canonicalizes at the one
+        canonical point every other token list uses.
+
+        Two spellings the emission list does not carry, both meaningful here:
+        `reaches [*]` is the DECLARED unbounded role, and `reaches []` is the
+        role that declares it reaches nothing. Omitting the clause is neither.
+        It leaves the reach UNDECLARED, and what that means is decided in
+        `revl.model_route`, not here. `reaches` is a CONTEXTUAL identifier read
+        only in this slot, so the lexer's KEYWORDS table and the self-hosted
+        lexer that mirrors it need no sync."""
+        self.expect("ident", value="reaches")
+        self.expect("[", what="`[` after `reaches`")
+        names: list[str] = []
+        while not self.at("]"):
+            if self.at("*"):
+                tok = self.next()
+                names.append("*")
+            else:
+                tok = self.expect("ident", what="a capability name, or `*`")
+                parts = [tok.value]
+                while self.at("."):
+                    self.next()
+                    parts.append(self.expect("ident").value)
+                names.append(self._capability_params(".".join(parts)))
+            if names.count(names[-1]) > 1:
+                raise self.err(
+                    tok.line,
+                    f"duplicate capability `{names[-1]}` in `reaches [...]`",
+                    hint="a role's reach is a set; name each capability once")
+            if self.at(","):
+                self.next()
+        self.expect("]")
+        return tuple(names)
 
     def model_council_decl(self) -> ModelCouncilDecl:
         """`model council NAME { <fn> -> <role>, ..., aggregate <rule> }`
@@ -3004,13 +3163,34 @@ class Parser:
                     "ident", what="an origin class, or `*`, on the left of `->`")
                 origin = origin_tok.value
             self.expect("arrow", what=f"`->` after `{origin}`")
-            role = self.expect(
-                "ident", what=f"a model role name after `{origin} ->`").value
-            arms.append(ModelRouteArm(origin, role, origin_tok.line))
+            role = self._model_route_candidate(origin)
+            # item 515: `<origin> -> a | b | c` is an ORDERED candidate set a
+            # scheduler may pick from. The head stays first, so item 514's
+            # ceiling reads exactly what it read before the alternates existed.
+            alternates: list[str] = []
+            while self.at("|"):
+                self.next()
+                alternates.append(self._model_route_candidate(origin))
+            arms.append(ModelRouteArm(origin, role, origin_tok.line,
+                                      tuple(alternates)))
             if self.at(","):
                 self.next()
         self.expect("}")
         return ModelRouteStmt(action, arms, line)
+
+    def _model_route_candidate(self, origin: str) -> str:
+        """One candidate on the right of a `route model` arrow (item 515).
+
+        `*` is accepted HERE and refused in `revl.model_route`. It is the
+        spelling an author reaches for to mean "any available role", and a
+        bare parse error would answer it with a syntax complaint rather than
+        with the reason: a scheduler that may pick a role no arm names is the
+        fail-open shape this item exists to remove."""
+        if self.at("*"):
+            self.next()
+            return "*"
+        return self.expect(
+            "ident", what=f"a model role name after `{origin} ->`").value
 
     def extern_decl(self, public: bool) -> ExternDecl:
         line = self.expect("kw", "extern").line
