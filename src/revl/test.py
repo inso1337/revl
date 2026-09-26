@@ -37,6 +37,7 @@ import types
 from pathlib import Path
 
 from ._paths import backends_root, stdlib_root
+from .refusal import refusals
 
 BACKENDS = backends_root()
 
@@ -251,7 +252,18 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
     module = None
     entries: list = []
     if base_emittable:
-        source = emit.emit(ir)
+        try:
+            source = emit.emit(ir)
+        except refusals(emit) as error:
+            # issue #1393. The five non-py runners below already report an emit
+            # refusal as a tier failure; this one did not, so the same refusal
+            # that reads `[rust] fail: emitter refused: ...` on rust reached the
+            # author as a raw traceback on py. Same wording as its siblings, so
+            # there is one rendering of this class of failure and not two.
+            # `refusals(emit)` is this module's own `EmitError` and nothing
+            # wider: an internal emitter fault must still surface as a traceback
+            # rather than be dressed up as a refusal (issue #1406).
+            return ("fail", f"emitter refused: {error}")
         # Preflight before any test runs. The py emitter imports cordis LAZILY,
         # inside each `lifecycle test` body (not at module scope — a document may
         # mix pure and lifecycle blocks), so exec succeeds on an interpreter

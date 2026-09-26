@@ -796,3 +796,129 @@ def strip_qualifiers_shallow(type_name: str | None) -> str | None:
         if text.startswith(head) and text.endswith("]"):
             return strip_qualifiers_shallow(text[len(head):-1])
     return text
+
+
+# ------------------------------------------------- where a target comes from
+#
+# Roadmap item 521 (issue #1195), issue #1371,
+# docs/design/565-ui-target-binding.md §7. Slice 4 landed the record and the
+# two signature obligations, and §7 recorded what they do not claim: "revl
+# checks the signature, not the dataflow between two crossings. A program may
+# resolve a target and act on a different one." That is the check-to-use race,
+# and the sentence after it - "the taint discipline of slice 2 is what bounds
+# that" - is the half that measured wrong.
+#
+# WHAT `taint_strict` ACTUALLY BOUNDS, measured on `fc0d84ce`. `ui.find` is a
+# SOURCE, so a resolved target carries the `screen` origin, and `ui.click` is
+# an all-arguments SINK. So under `taint_strict`:
+#
+#   resolve, then click what was resolved          REFUSED   (untrusted -> sink)
+#   click a `UiTarget` record literal the program wrote itself   ADMITTED
+#
+# The discipline named as the bound refuses the HONEST program and admits the
+# forged one, because a literal is not untrusted data: nobody looked at a
+# screen to write it, so there is no origin on it to refuse. Taint bounds what
+# a target is DERIVED FROM. It cannot bound a target that is derived from
+# nothing, and a target derived from nothing is exactly the one no observation
+# justifies.
+#
+# THE INVARIANT THIS CLOSES ON, stated as the property rather than as the
+# three refusals below: in an admitted program, every `UiTarget` value
+# originates in a target-producing crossing. The refusals are placed so that
+# the property holds by CONSTRUCTION rather than by a walk being complete: a
+# target can only enter a program by being built (refused), by being declared
+# at a host boundary that is not a resolution (refused), or by being returned
+# from `ui.find`. There is no dataflow position to miss, because what is
+# refused is the CONSTRUCTION and not the flow to a particular use.
+#
+# WHAT IT STILL DOES NOT CLAIM, and issue #1371 says so itself: not that the
+# target is the one resolved for THIS step (a program that resolves two and
+# acts on the second acted on a target it resolved), and not that the
+# resolution is still fresh. Both need a substrate that actually resolves a
+# target (item 539, upstream inso1337/revl-harness#11) and neither is promised
+# here.
+
+#: A target the program BUILT: a record literal carrying the declared target's
+#: fields. Nothing looked at a screen to produce it.
+CONSTRUCTED = "constructed"
+
+#: A target the program EDITED: a functional update rewriting a registry-owned
+#: field of a target that was resolved. The value is part one control's
+#: binding and part another's.
+REBOUND = "rebound"
+
+#: A target a HOST BOUNDARY handed back without declaring the resolution: an
+#: extern returning the record under some capability other than `ui.find`, or
+#: under none.
+MINTED = "minted"
+
+#: origin -> what the program did, and why it is not a resolution. The text is
+#: the rule, not a comment: the refusals quote it, so an author reads the
+#: reason rather than only the verdict.
+TARGET_ORIGINS: dict[str, str] = {
+    CONSTRUCTED: "a record literal supplies all ten fields with no "
+                 "observation behind any of them, so the evidence hash names "
+                 "a screen nobody read and the expiry is an instant nobody "
+                 "measured",
+    REBOUND: "an update keeps the resolved target's evidence hash while "
+             "renaming what it points at, so the binding says one control "
+             "was looked at and the actuation lands on another",
+    MINTED: "a host boundary that hands back a target has RESOLVED one, and "
+            "a resolution that is not declared as one is a screen read that "
+            "no capability bounds and no audit reach names",
+}
+
+
+def target_origin_refusal(origin: str, where: str) -> tuple[str, str] | None:
+    """`(message, hint)` for a `UiTarget` that no target-producing crossing
+    resolved, else `None` for an origin this does not refuse.
+
+    `where` names the thing the diagnostic points at: the FIELD for an
+    update, the EXTERN for a mint, and nothing for a literal (its line is
+    already the diagnostic's). It is quoted into the message so two of these
+    in one program are told apart by their text.
+
+    All three are G8, like slice 4's own three, and for slice 4's reason: the
+    target is what makes an actuation's reach enumerable, and a target the
+    program wrote for itself is a crossing whose reach is whatever the author
+    typed.
+    """
+    producers = ", ".join(f"`{p}`" for p in TARGET_PRODUCERS)
+    if origin == CONSTRUCTED:
+        return (
+            f"`{TARGET_TYPE}` is built as a record literal here, which is a "
+            f"target nothing resolved",
+            f"{TARGET_ORIGINS[CONSTRUCTED]}. {producers} is what resolves a "
+            f"target: it is the crossing that looks at the screen, and the "
+            f"evidence it returns is the only thing connecting an actuation "
+            f"to the observation that justified it. Note that the taint "
+            f"discipline does NOT catch this - a literal carries no origin to "
+            f"refuse, so a forged target is cleaner than a real one. Bind the "
+            f"target with `emit <{TARGET_PRODUCERS[0]} extern>(...)` (G8, "
+            f"roadmap item 521, docs/design/565-ui-target-binding.md §7)",
+        )
+    if origin == REBOUND:
+        binds = TARGET_FIELD_BINDS.get(where, "part of the target's binding")
+        return (
+            f"the resolved target's `{where}` is rewritten before the "
+            f"actuation, so the target acted on is not the target resolved",
+            f"`{where}` binds {binds}, and the ten registry fields are ONE "
+            f"binding: {TARGET_ORIGINS[REBOUND]}. Resolve the target you mean "
+            f"with `{TARGET_PRODUCERS[0]}` instead of editing the one you "
+            f"have; a field the registry does not name is the author's own "
+            f"and may still be updated (G8, roadmap item 521, "
+            f"docs/design/565-ui-target-binding.md §7)",
+        )
+    if origin == MINTED:
+        return (
+            f"extern `{where}` returns `{TARGET_TYPE}` without declaring "
+            f"`emission[{TARGET_PRODUCERS[0]}]`",
+            f"{TARGET_ORIGINS[MINTED]}. An actuation may only act on a target "
+            f"a declared resolution produced, and a second host boundary "
+            f"returning the record is the way around that rule rather than a "
+            f"use of it. Declare this extern "
+            f"`emission[{TARGET_PRODUCERS[0]}]`, or return something that is "
+            f"not a target (G8, roadmap item 521, "
+            f"docs/design/565-ui-target-binding.md §7)",
+        )
+    return None

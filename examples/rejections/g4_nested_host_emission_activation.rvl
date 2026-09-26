@@ -1,0 +1,18 @@
+// REJECTED — G4: a host emission extern evaluated to build an `emit`'s
+// argument, with no marker of its own. The carrier differs from
+// `g4_nested_unmarked_emission.rvl`'s required service; the rule is the same
+// one. `emit` marks one boundary crossing, the head's arguments are judged in
+// the position the `emit` itself sits in, and `charge(1)` written there is a
+// second crossing under a single marker. Hoist it into an `emit` step of its
+// own; an activation body discards an `emit` step's result, so a pair whose
+// value flows from one crossing into the next belongs in a provide method.
+//
+// expected error:
+//   call to emission `charge` must be marked `emit` (G4)
+
+extern emission fn log_line(n: Int) -> Int = @py { return 1 }
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+component Checkout {
+  emit log_line(charge(199))
+}

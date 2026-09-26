@@ -83,6 +83,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..errors import RevlError
+from ..refusal import refusal_class
 
 # Tier outcomes.
 OK = "OK"
@@ -604,25 +605,11 @@ def _load_artifact_record(entry_dir: Path) -> dict | None:
     return backends if isinstance(backends, dict) else None
 
 
-def _refusal_class(module) -> type | None:
-    """The `EmitError` class carried on an emitter MODULE object, or None for a
-    module that defines none.
-
-    Each backend defines its own `class EmitError(ValueError)` inside its own
-    `emit.py`, so there is no class under `src/` to name in an `except` clause
-    and no shared base narrower than `ValueError` (issue #1393). The class has
-    to be read off the module that will raise, and off THAT module object:
-    loading `emit.py` twice produces two distinct classes and an `except`
-    against one does not catch an instance of the other.
-
-    This is the same helper `revl.bundle` needs for the same reason (issue
-    #1400); it lives here because the import already runs bundle -> truc.
-    reproduce, which is also where `Check`, `OK`, `MISMATCH` and `UNVERIFIED`
-    come from."""
-    cls = getattr(module, "EmitError", None)
-    if isinstance(cls, type) and issubclass(cls, BaseException):
-        return cls
-    return None
+# One definition of the three-way emitter outcome, shared with `revl.bundle` and
+# every other entry point that loads an emitter (issue #1406). This module and
+# bundle each carried a copy, which was the argument for the shared one.
+# `_refusal_class` stays as the name this module's tests reach for.
+_refusal_class = refusal_class
 
 
 def _emit_backend_source(backend: str, ir: dict) -> tuple[str | None, str | None]:

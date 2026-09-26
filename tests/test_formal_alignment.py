@@ -77,8 +77,10 @@ DIRECT_EXTERN_CASES = (
 )
 
 #: The activation-surface twin of F2: an emitting fn evaluated to build an
-#: emit's argument. The checker accepts it, and its `A` surface is the head
-#: crossing alone (`lower._emit_step_caps_pairs` reads the step's target).
+#: emit's argument. Its `A` surface is the head crossing alone
+#: (`lower._emit_step_caps_pairs` reads the step's target). Since issue #1427
+#: the checker refuses the program, because `helper` is a second crossing under
+#: one marker; the model refuses it through the `G` row, not by widening `A`.
 ARG_POSITION_SOURCE = """\
 service A { emission fn send(q: Str) -> Str }
 extern emission fn wire(q: Str) -> Str = @py { return "row" }
@@ -308,10 +310,14 @@ def test_an_argument_position_call_is_not_on_the_activation_surface(
     exporter switched the whole subtree to the marked region, so an
     emitting fn evaluated inside the argument list contributed `*` to the
     component's `A` surface. The reference's emit-step fold reads the head
-    target only, and the checker accepts the program."""
+    target only. The checker refuses the program for the unmarked nested
+    crossing (issue #1427), which is the marker rule's business; the surface
+    must still not count the argument."""
     from revl.compiler import compile_source
+    from revl.errors import RevlError
 
-    compile_source(ARG_POSITION_SOURCE, "arg_position.rvl")
+    with pytest.raises(RevlError, match="call to emission `helper` must be marked"):
+        compile_source(ARG_POSITION_SOURCE, "arg_position.rvl")
     corpus = tmp_path / "corpus"
     corpus.mkdir()
     (corpus / "arg_position.rvl").write_text(ARG_POSITION_SOURCE,
