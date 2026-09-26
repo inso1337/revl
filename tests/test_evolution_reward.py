@@ -104,8 +104,8 @@ def test_retention_requires_every_component(reward):
         assert one_bad.blockers == (victim,)
 
 
-def test_seven_of_eight_is_not_retained(reward):
-    """The case a weighted score would have kept: 7/8 is 0.875, and 0.875 is
+def test_all_but_one_is_not_retained(reward):
+    """The case a weighted score would have kept: 8 of 9 is 0.889, and 0.889 is
     above every threshold anybody would pick. The conjunction says no."""
     card = reward.Scorecard(
         _candidate(reward, "/nowhere"),
@@ -146,6 +146,24 @@ def test_every_component_of_item_536_is_present(reward):
             "artifact-stability", "formal", "scope", "documentation"} \
         <= set(reward.COMPONENTS)
     assert set(reward.PROBES) == set(reward.COMPONENTS)
+
+
+def test_every_component_carries_a_probe_not_a_placeholder(reward):
+    """The close condition for issue #1206.
+
+    Slice 1 shipped five real probes and four placeholders built by a
+    `_unimplemented` factory, so `compiles`, `tests`, `conformance` and
+    `formal` returned the same `failed` verdict for every input: a component
+    that cannot tell a better tree from a worse one is not a component. A
+    placeholder left behind here would make the conjunction unsatisfiable
+    while the scorecard looked complete.
+    """
+    for name in reward.COMPONENTS:
+        probe = reward.PROBES[name]
+        assert callable(probe), name
+        assert "no probe implemented" not in (probe.__doc__ or ""), name
+    assert not hasattr(reward, "_unimplemented"), \
+        "the placeholder factory is gone; every component reads an artifact"
 
 
 def test_the_ninth_component_is_the_one_no_other_can_supply(reward):
@@ -384,22 +402,31 @@ def test_a_probe_answering_for_another_component_fails(reward):
     assert formal.verified is False
 
 
-def test_an_unimplemented_component_fails_rather_than_defaulting(reward):
-    for name in ("compiles", "tests", "conformance", "formal"):
-        verdict = reward.PROBES[name](_candidate(reward, "/nowhere"))
-        assert verdict.verified is False
-        assert "no probe implemented" in verdict.reason
+def test_every_component_fails_on_a_tree_that_is_not_there(reward, tiny_repo):
+    """The blanket fail-closed check. `tiny_repo` has a git history and nothing
+    else: no tools, no crate, no ledger, no doc. Every component must land on
+    `failed`, because "the artifact is missing" is never "nothing objected"."""
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("**",))
+    for name in reward.COMPONENTS:
+        verdict = reward.PROBES[name](candidate)
+        assert verdict.verified is False, f"{name}: {verdict.reason}"
+        assert verdict.component == name
 
 
-def test_the_conformance_component_names_the_tool_that_does_not_exist(reward):
-    """Item 536 maps this component to `tools/gate_verdict_parity.py`, which is
-    not in the tree. Fail-closed means the component says so rather than being
-    quietly dropped, and this test reds when the tool arrives, which is when the
-    probe has to be written."""
-    assert not (ROOT / "tools" / "gate_verdict_parity.py").exists()
-    verdict = reward.PROBES["conformance"](_candidate(reward, "/nowhere"))
-    assert verdict.verified is False
-    assert "gate_verdict_parity.py" in verdict.reason
+def test_the_conformance_component_does_not_wait_on_a_tool_that_never_existed(
+        reward):
+    """Item 536 mapped this component to `tools/gate_verdict_parity.py`, a file
+    that has never been in this tree (issue #1233, roadmap item 547). Slice 1
+    failed the component by name so the absence would block rather than be
+    awarded. The decision taken in slice 3 is to re-point the component at the
+    registers that DO record cross-tier divergence, so the scorer must no
+    longer depend on that name in either direction."""
+    source = (ROOT / "tools" / "evolution_reward.py").read_text()
+    assert "gate_verdict_parity" in source, \
+        "the decision not to build it is recorded in the module, not erased"
+    assert reward.PROBES["conformance"] is reward.probe_conformance
+    body = reward.probe_conformance.__doc__ or ""
+    assert "tier_guarantees" in body or "check-tier-parity" in body
 
 
 # --------------------------------------------------------------------------
@@ -645,4 +672,638 @@ def test_the_cli_exits_nonzero_while_anything_is_unverified(
     card = json.loads(out.read_text())
     assert card["retained"] is False
     assert "compiles" in card["blockers"]
+    assert "held-out" in card["blockers"]
     assert card["prose_ignored"] == ["rationale"]
+
+
+# --------------------------------------------------------------------------
+# compiles: the gate crate through real cargo, the six-tier matrix through the
+# repository's own walk. Non-vacuity is a fixture that genuinely does not
+# compile and a fixture whose matrix genuinely has a gap.
+# --------------------------------------------------------------------------
+
+def _stub_tool(tree, rel, body):
+    path = tree / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def _matrix_report(gaps=(), tiers=None, cases=("expr/add",)):
+    """A `tools/conformance.py --json` report, in that tool's own shape."""
+    tiers = tuple(tiers if tiers is not None
+                  else ("python", "typescript", "rust", "java", "wasm", "go"))
+    report = {"cases": [{"case": c, "tiers": {t: "ok" for t in tiers},
+                         "emit_kind": {t: "ok" for t in tiers}} for c in cases],
+              "frontend_rejected": [], "gaps": {}}
+    for tier, case, deliberate in gaps:
+        report["gaps"].setdefault(tier, []).append(
+            {"case": case, "message": "no case for it", "deliberate": deliberate})
+    return report
+
+
+@pytest.fixture
+def crate_repo(tiny_repo):
+    """`tiny_repo` plus a real, minimal cargo crate at `crates/revl-gate`.
+
+    A real crate rather than a mocked `cargo`: the component's claim is that
+    rustc accepted this source, and a stubbed compiler would test the stub. It
+    has no dependencies, so `--offline` needs no registry and the check is about
+    a second, against twenty for the repository's own gate crate.
+    """
+    crate = tiny_repo / "crates" / "revl-gate"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text(
+        "[package]\nname = \"revl-gate\"\nversion = \"0.1.0\"\n"
+        "edition = \"2021\"\n\n[workspace]\n")
+    (crate / "src" / "lib.rs").write_text("pub fn admit(n: i64) -> i64 { n }\n")
+    return tiny_repo
+
+
+def _with_matrix(tree, report):
+    _stub_tool(tree, "tools/conformance.py",
+               "import json, sys\nprint(json.dumps(%r))\n" % (report,))
+    return tree
+
+
+def test_compiles_verifies_when_the_crate_builds_and_no_tier_has_a_real_gap(
+        reward, crate_repo):
+    _with_matrix(crate_repo, _matrix_report())
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+
+
+def test_compiles_fails_on_source_that_does_not_compile(reward, crate_repo):
+    """Non-vacuity for the crate half, with a real rustc refusal. This is the
+    case a digest gate cannot see: `tools/build_gate_crate.py --check` compares
+    BYTES, so a regenerated crate can be byte-correct and not compile."""
+    _with_matrix(crate_repo, _matrix_report())
+    (crate_repo / "crates" / "revl-gate" / "src" / "lib.rs").write_text(
+        "pub fn admit(n: i64) -> i64 { n + }\n")
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "cargo check" in verdict.reason
+
+
+def test_compiles_fails_on_a_real_emitter_gap_and_passes_a_deliberate_limit(
+        reward, crate_repo):
+    """The distinction the component turns on. An emitter that raised its own
+    `EmitError` declared a tier limit; an emitter that crashed had no case for a
+    construct it should express. `origin/main` carries eleven of the first and
+    zero of the second, so the bar is zero REAL gaps, not zero refusals."""
+    candidate = _candidate(reward, crate_repo, base="HEAD", scope=("**",))
+
+    _with_matrix(crate_repo, _matrix_report(
+        gaps=[("wasm", "expr/true division", True)]))
+    assert reward.probe_compiles(candidate).verified is True
+
+    _with_matrix(crate_repo, _matrix_report(
+        gaps=[("wasm", "expr/true division", True),
+              ("rust", "expr/add", False)]))
+    verdict = reward.probe_compiles(candidate)
+    assert verdict.verified is False
+    assert "rust" in verdict.reason and "real emitter gap" in verdict.reason
+
+
+def test_compiles_fails_when_a_tier_stops_being_walked_everywhere(
+        reward, crate_repo):
+    """The matrix cannot shrink its way to green, direction one: a tier dropped
+    from EVERY row. No per-row comparison sees this, because every row still
+    agrees with every other. The union is held against `MIN_TIERS` instead."""
+    _with_matrix(crate_repo, _matrix_report(
+        tiers=("python", "typescript", "rust", "java", "go")))
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "5 host tier(s)" in verdict.reason
+    assert str(reward.MIN_TIERS) in verdict.reason
+
+
+def test_compiles_fails_when_one_case_row_drops_a_tier(reward, crate_repo):
+    """Direction two: a tier dropped from ONE row. The reference is the union
+    over rows, so the short row fails and names the tier it is missing."""
+    report = _matrix_report(cases=("expr/add", "ctrl/loop"))
+    report["cases"][1]["tiers"].pop("wasm")
+    _with_matrix(crate_repo, report)
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "ctrl/loop" in verdict.reason and "wasm" in verdict.reason
+
+
+def test_the_tier_roster_is_not_re_declared_here(reward):
+    """Issue #1285's gate: the six backend names are a closed vocabulary already
+    declared in eight places and recorded as an unresolved mirror. This module
+    must not become the ninth copy, so the coverage read carries a floor and
+    reads the roster off the report."""
+    roster = {"python", "typescript", "rust", "java", "wasm", "go"}
+    for name in dir(reward):
+        value = getattr(reward, name)
+        if isinstance(value, (tuple, list, set, frozenset, dict)):
+            assert not roster <= set(value), \
+                f"{name} re-declares the six-tier roster; read it off the report"
+    assert reward.MIN_TIERS == 6
+    assert reward._walked_tiers([{"case": "c", "tiers": dict.fromkeys(roster)}]) \
+        == (True, sorted(roster))
+
+
+def test_compiles_fails_when_the_matrix_prints_nothing_readable(
+        reward, crate_repo):
+    _stub_tool(crate_repo, "tools/conformance.py", "print('not json')\n")
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+
+
+def test_compiles_verifies_on_this_tree(reward, real_candidate):
+    """The real artifact: the real gate crate and the real six-tier walk. About
+    twenty seconds, almost all of it a cold `cargo check`."""
+    verdict = reward.probe_compiles(real_candidate)
+    assert verdict.verified is True, verdict.reason
+
+
+# --------------------------------------------------------------------------
+# tests: the repository's own selection, actually run, with a collected count.
+# --------------------------------------------------------------------------
+
+def _with_selection(tree, full="0", pytest_targets="", backends="",
+                    gates="", reason="stub"):
+    block = "\n".join([f"FULL {full}", f"REASON {reason}",
+                        f"PYTEST {pytest_targets}", f"BACKENDS {backends}",
+                        f"GATES {gates}"])
+    _stub_tool(tree, "tools/affected_tests.py", f"print({block!r})\n")
+    return tree
+
+
+@pytest.fixture
+def suite_repo(tiny_repo):
+    (tiny_repo / "tests").mkdir()
+    (tiny_repo / "tests" / "test_green.py").write_text(
+        "def test_a():\n    assert True\n\n\ndef test_b():\n    assert True\n")
+    return tiny_repo
+
+
+def test_tests_verifies_when_the_selected_suite_runs_green(reward, suite_repo):
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "2 test(s) passed" in verdict.reason
+
+
+def test_tests_fails_on_a_selected_suite_that_genuinely_fails(
+        reward, suite_repo):
+    """Non-vacuity: a real pytest process, a real assertion failure."""
+    (suite_repo / "tests" / "test_red.py").write_text(
+        "def test_c():\n    assert 1 == 2\n")
+    _with_selection(suite_repo,
+                    pytest_targets="tests/test_green.py tests/test_red.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "exited" in verdict.reason
+
+
+def test_a_suite_that_collected_nothing_is_not_a_pass(reward, suite_repo):
+    """The fail-open shape this probe exists to close. A pytest summary with no
+    test count means zero tests ran, and a run of zero tests exits 0 whenever
+    something else in the selection kept the exit status clean. The probe reads
+    the COUNT, not only the status."""
+    (suite_repo / "tests" / "test_all_skipped.py").write_text(
+        "import pytest\n\n\n@pytest.mark.skip(reason='stub')\n"
+        "def test_d():\n    assert True\n")
+    _with_selection(suite_repo, pytest_targets="tests/test_all_skipped.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "collected nothing" in verdict.reason
+
+
+def test_an_empty_selection_is_not_a_pass(reward, suite_repo):
+    _with_selection(suite_repo, pytest_targets="", reason="nothing mapped")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "named no test at all" in verdict.reason
+
+
+def test_a_full_selection_means_the_whole_tests_tree(reward, suite_repo):
+    """FULL is the selector falling safe, and falling safe must not be read as
+    "nothing to run"."""
+    _with_selection(suite_repo, full="1", pytest_targets="",
+                    reason="a core file changed")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "FULL" in verdict.reason
+
+
+def test_a_selected_backend_suite_is_added_to_the_run(reward, suite_repo):
+    """`pytest tests/` does not contain the per-backend emit suites; they live
+    outside `tests/` and run as their own CI jobs. A selection that names a tier
+    and a probe that ran only `tests/` is the wave gap this repository has
+    already paid for twice."""
+    (suite_repo / "backends" / "go").mkdir(parents=True)
+    (suite_repo / "backends" / "go" / "test_emit_go.py").write_text(
+        "def test_go_golden():\n    assert True\n")
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py",
+                    backends="go")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "3 test(s) passed" in verdict.reason
+
+
+def test_a_backend_whose_suite_this_probe_cannot_run_fails_it(
+        reward, suite_repo):
+    """`tools/pre_merge.sh` SKIPS the python and typescript backend suites when
+    their toolchain is absent. A skip is not a pass, so a selection that names
+    one fails the component by name instead."""
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py",
+                    backends="typescript")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "typescript" in verdict.reason
+
+
+def test_a_selector_that_cannot_run_fails_the_component(reward, suite_repo):
+    _stub_tool(suite_repo, "tools/affected_tests.py", "import sys\nsys.exit(2)\n")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "selection could not be read" in verdict.reason
+
+
+# --------------------------------------------------------------------------
+# conformance: the two divergence registers, ratcheted against `base`. The
+# component item 536 pointed at a tool that has never existed; these hold the
+# read that replaced it.
+# --------------------------------------------------------------------------
+
+_TIERS = ("py", "ts", "rust", "java", "wasm", "go", "revl")
+
+
+def _committed_block(cells):
+    """The GUARANTEE-TIER-MATRIX block as `tools/conformance.py` writes it."""
+    glyph = {"proved": "proved", "divergence": "**div**",
+             "no reproducer": "no repro", "unimplemented": "unimpl"}
+    lines = ["<!-- GUARANTEE-TIER-MATRIX:START -->",
+             "",
+             "| guarantee | " + " | ".join(_TIERS) + " | evidence |",
+             "|---" * (len(_TIERS) + 2) + "|"]
+    for code in sorted({c for c, _ in cells}):
+        row = [glyph[cells[(code, tier)]] for tier in _TIERS]
+        lines.append(f"| `{code}` | " + " | ".join(row) + " | [`src/x.py`](x) |")
+    lines += ["", "| tier | proved | div | no repro | unimpl |",
+              "|---|---|---|---|---|",
+              "| py | 1 | 0 | 0 | 0 |", "",
+              "<!-- GUARANTEE-TIER-MATRIX:END -->"]
+    return "\n".join(lines) + "\n"
+
+
+def _matrix_json(cells):
+    rows = {}
+    for (code, tier), verdict in cells.items():
+        rows.setdefault(code, {})[tier] = {"verdict": verdict, "why": "stub"}
+    return {"tiers": list(_TIERS),
+            "rows": [{"code": code, "cells": tiers}
+                     for code, tiers in sorted(rows.items())]}
+
+
+def _cells(**overrides):
+    out = {(code, tier): "proved"
+           for code in ("G1", "G2") for tier in _TIERS}
+    for key, verdict in overrides.items():
+        code, _, tier = key.partition("_")
+        out[(code, tier)] = verdict
+    return out
+
+
+@pytest.fixture
+def matrix_repo(tiny_repo):
+    """A repo whose committed `docs/conformance.md` carries a base matrix."""
+    (tiny_repo / "docs").mkdir()
+    (tiny_repo / "docs" / "conformance.md").write_text(
+        "# conformance\n\n" + _committed_block(_cells()))
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "matrix")
+    return tiny_repo
+
+
+def _with_tier_guarantees(tree, cells, exit_code=0):
+    _stub_tool(tree, "tools/tier_guarantees.py",
+               "import json, sys\nprint(json.dumps(%r))\nsys.exit(%d)\n"
+               % (_matrix_json(cells), exit_code))
+    return tree
+
+
+def test_conformance_verifies_when_no_cell_is_weaker_than_at_base(
+        reward, matrix_repo):
+    _with_tier_guarantees(matrix_repo, _cells())
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "none weaker" in verdict.reason
+
+
+def test_a_guarantee_lost_on_one_tier_fails_conformance(reward, matrix_repo):
+    """Non-vacuity, and the promotion-bar entry it serves: "no weakened
+    refusal". A tier that was `proved` at base and is a recorded divergence at
+    head has lost the guarantee, whatever else the candidate did."""
+    _with_tier_guarantees(matrix_repo, _cells(G1_java="divergence"))
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "G1 on java: proved -> divergence" in verdict.reason
+
+
+def test_a_cell_getting_stronger_is_the_work_and_passes(reward, tiny_repo):
+    """The ratchet has a direction. `unimplemented -> divergence` is a partial
+    port arriving, which is progress; reading it as a regression would punish
+    exactly the work this component is supposed to be indifferent to."""
+    (tiny_repo / "docs").mkdir()
+    (tiny_repo / "docs" / "conformance.md").write_text(
+        _committed_block(_cells(G1_revl="unimplemented")))
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "matrix")
+    _with_tier_guarantees(tiny_repo, _cells(G1_revl="divergence"))
+    verdict = reward.probe_conformance(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+
+
+def test_a_row_deleted_at_head_fails_conformance(reward, matrix_repo):
+    """Deleting the row is the other way to make a cell stop being a
+    divergence, and it is the one a subset check would miss."""
+    cells = {k: v for k, v in _cells().items() if k[0] != "G2"}
+    _with_tier_guarantees(matrix_repo, cells)
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "the row is gone" in verdict.reason
+
+
+def test_a_register_that_grew_without_a_decision_fails_conformance(
+        reward, matrix_repo):
+    """`tools/tier_guarantees.py` raises rather than dropping an unmapped
+    `--check-tier-parity` subject or an unmapped `DIVERGENCES` entry. That exit
+    status is what keeps the registers armed, so it has to fail the component
+    rather than be read as an empty matrix."""
+    _with_tier_guarantees(matrix_repo, _cells(), exit_code=1)
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "exited 1" in verdict.reason
+
+
+def test_conformance_fails_when_base_carries_no_matrix(reward, tiny_repo):
+    (tiny_repo / "docs").mkdir()
+    (tiny_repo / "docs" / "conformance.md").write_text("# nothing generated\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "no matrix")
+    _with_tier_guarantees(tiny_repo, _cells())
+    verdict = reward.probe_conformance(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "GUARANTEE-TIER-MATRIX" in verdict.reason
+
+
+def test_the_committed_block_parser_reads_the_real_one(reward):
+    """The base side is parsed out of the real generated block, so the parser
+    is held against the real artifact rather than against the fixture that
+    mimics it."""
+    ok, cells = reward._committed_matrix(
+        (ROOT / "docs" / "conformance.md").read_text())
+    assert ok, cells
+    assert cells[("G1", "py")] == "proved"
+    assert set(cells.values()) <= set(reward.CELL_STRENGTH)
+    assert len({tier for _, tier in cells}) == 7
+
+
+def test_conformance_verifies_on_this_tree(reward, real_candidate):
+    """The real registers, measured live, against the real committed matrix."""
+    verdict = reward.probe_conformance(real_candidate)
+    assert verdict.verified is True, verdict.reason
+
+
+# --------------------------------------------------------------------------
+# formal: the ledger, and the two gates over it that need no Lean.
+# --------------------------------------------------------------------------
+
+_AXIOMS = "import RevL\n\n#print axioms RevL.G1.a\n#print axioms RevL.G2.b\n"
+_TSV = ("# registry\n"
+        "RevL.G1.a\tinstance\tRevL.G2.b\ta witness\n"
+        "RevL.G2.b\tconcrete\t\ta computation\n")
+
+
+@pytest.fixture
+def formal_repo(tiny_repo):
+    (tiny_repo / "formal" / "scripts").mkdir(parents=True)
+    (tiny_repo / "formal" / "CheckAxioms.lean").write_text(_AXIOMS)
+    (tiny_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(_TSV)
+    for name in ("nonvacuity_gate.py", "layering_gate.py"):
+        (tiny_repo / "formal" / "scripts" / name).write_text("print('clean')\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "formal")
+    return tiny_repo
+
+
+def test_formal_verifies_when_the_ledger_did_not_shrink(reward, formal_repo):
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "2 registered theorem(s)" in verdict.reason
+
+
+def test_a_removed_theorem_fails_formal(reward, formal_repo):
+    """Non-vacuity, and item 536's negative bar entry "no reduced formal
+    coverage". Deleting the theorem deletes the obligation, and a green suite
+    says nothing about it."""
+    (formal_repo / "formal" / "CheckAxioms.lean").write_text(
+        "import RevL\n\n#print axioms RevL.G1.a\n")
+    (formal_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(
+        "RevL.G1.a\tinstance\tRevL.G2.b\ta witness\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "SHRANK" in verdict.reason and "RevL.G2.b" in verdict.reason
+
+
+def test_an_added_theorem_is_the_work_and_passes_formal(reward, formal_repo):
+    (formal_repo / "formal" / "CheckAxioms.lean").write_text(
+        _AXIOMS + "#print axioms RevL.G3.c\n")
+    (formal_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(
+        _TSV + "RevL.G3.c\tinstance\tRevL.G2.b\ta new witness\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "3 registered theorem(s)" in verdict.reason
+
+
+def test_a_theorem_downgraded_to_contentless_fails_formal(reward, formal_repo):
+    """The row survives and the content does not, so a set comparison alone
+    would read this as unchanged. `contentless` is the registry's own word for
+    "true by definition", and it is recorded as a FINDING, not a pass."""
+    (formal_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(
+        "RevL.G1.a\tcontentless\tRevL.G2.b\ttrue by definition now\n"
+        "RevL.G2.b\tconcrete\t\ta computation\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "contentless" in verdict.reason and "RevL.G1.a" in verdict.reason
+
+
+def test_a_failing_ledger_gate_fails_formal(reward, formal_repo):
+    (formal_repo / "formal" / "scripts" / "nonvacuity_gate.py").write_text(
+        "import sys\nprint('a witness is not registered')\nsys.exit(1)\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "nonvacuity_gate" in verdict.reason
+
+
+def test_formal_is_the_control_for_the_conformance_fixture(
+        reward, matrix_repo):
+    """The control. `matrix_repo` has no `formal/` at all, so `formal` fails
+    there for its own reason on BOTH sides of the conformance fault, and the
+    conformance verdict above is located rather than global."""
+    candidate = _candidate(reward, matrix_repo, base="HEAD", scope=("**",))
+    _with_tier_guarantees(matrix_repo, _cells())
+    clean = reward.probe_formal(candidate)
+    _with_tier_guarantees(matrix_repo, _cells(G1_java="divergence"))
+    dirty = reward.probe_formal(candidate)
+    assert clean.verified is dirty.verified is False
+    assert clean.reason == dirty.reason
+
+
+def test_formal_verifies_on_this_tree(reward, real_candidate):
+    verdict = reward.probe_formal(real_candidate)
+    assert verdict.verified is True, verdict.reason
+
+
+# --------------------------------------------------------------------------
+# progress (issue #1224, roadmap item 545): the one component that rises when
+# the system gets better. Scored for real on a tree built by the progress
+# suite's own builder; every OTHER component is a stub, so what is under test
+# is the composition, not the other nine probes.
+# --------------------------------------------------------------------------
+
+def _progress_builder():
+    """`tests/test_evolution_progress.py`'s tree builder, loaded by path under
+    a private name and not registered: two test modules must not share one
+    importable name for a helper, and a bare `import` would bind whichever
+    copy was found first."""
+    spec = importlib.util.spec_from_file_location(
+        "_evolution_reward_progress_builder",
+        ROOT / "tests" / "test_evolution_progress.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def progress_repo(tmp_path):
+    builder = _progress_builder()
+    tree = tmp_path / "progress"
+    builder.build_tree(tree)
+    _git(tree.parent, "init", "-q", str(tree))
+    _git(tree, "config", "user.email", "t@example.com")
+    _git(tree, "config", "user.name", "t")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", "base")
+    return tree, builder
+
+
+def _all_but_progress(reward, failing=()):
+    table = {n: (lambda c, n=n: reward.failed(n, "stub") if n in failing
+                 else reward.verified(n, "stub"))
+             for n in reward.COMPONENTS}
+    table["progress"] = reward.probe_progress
+    return table
+
+
+def test_progress_is_a_registered_component(reward):
+    assert "progress" in reward.COMPONENTS
+    assert reward.PROBES["progress"] is reward.probe_progress
+
+
+def test_the_empty_diff_is_not_retained_when_everything_else_verifies(
+        reward, progress_repo):
+    """Item 545's property, on the scorer itself. Nine preservation components
+    say yes, and the candidate that changed nothing is still not retained,
+    because it improved nothing. Before `progress` was registered this exact
+    scorecard was a retention."""
+    tree, _builder = progress_repo
+    card = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward))
+    assert card.retained is False
+    assert card.blockers == ("progress",)
+    progress = [v for v in card.verdicts if v.component == "progress"][0]
+    assert "did not advance" in progress.reason
+
+
+def test_a_real_improvement_with_everything_else_verified_is_retained(
+        reward, progress_repo):
+    """The satisfying side: the same scorer retains a candidate whose reach
+    ledger genuinely shrank, so the conjunction is satisfiable."""
+    tree, builder = progress_repo
+    builder.build_tree(tree, gaps=("kind=a",))
+    card = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward))
+    assert card.retained is True, card.render()
+
+
+def test_an_improvement_does_not_buy_back_any_failed_component(
+        reward, progress_repo):
+    """Property 2: progress is added to preservation, never traded against it.
+    With a real improvement on the tree, failing ANY one other component is
+    still a non-retention, and it is that component that blocks."""
+    tree, builder = progress_repo
+    builder.build_tree(tree, gaps=("kind=a",))
+    candidate = _candidate(reward, tree, base="HEAD")
+    for victim in reward.COMPONENTS:
+        if victim == "progress":
+            continue
+        card = reward.score(candidate,
+                            probes=_all_but_progress(reward, failing={victim}))
+        assert card.retained is False, victim
+        assert card.blockers == (victim,)
+
+
+def test_the_scorecard_carries_the_ledger_promote_reads(reward, progress_repo):
+    """The reopening comment on issue #1224: the scorecard carries the counter
+    ledger, so a generation is judged from reward scorecards directly."""
+    tree, builder = progress_repo
+    flat = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward)).as_dict()
+    builder.build_tree(tree, gaps=("kind=a",))
+    moved = reward.score(_candidate(reward, tree, base="HEAD"),
+                         probes=_all_but_progress(reward)).as_dict()
+    assert [d["direction"] for d in moved["progress"]["deltas"]].count(
+        "improved") == 1
+    assert moved["progress"]["base"] == _git(tree, "rev-parse", "HEAD").stdout.strip()
+    evolution_progress = reward._progress_module()
+    assert evolution_progress.promote([flat]).promoted is False
+    result = evolution_progress.promote([flat, moved])
+    assert result.promoted is True
+    assert result.witnesses == (str(tree),)
+
+
+def test_the_progress_probe_leaves_the_interpreter_as_it_found_it(
+        reward, progress_repo):
+    """The probe imports `evolution_progress` from this checkout. It may ADD
+    that one module; it must not replace any module already loaded, and it
+    must hand `sys.path` back unchanged, or every later bare import in the
+    session resolves against a directory nobody asked for."""
+    tree, _builder = progress_repo
+    path_before = list(sys.path)
+    modules_before = dict(sys.modules)
+    reward.probe_progress(_candidate(reward, tree, base="HEAD"))
+    assert sys.path == path_before
+    replaced = [k for k, v in modules_before.items() if sys.modules.get(k) is not v]
+    assert not replaced, replaced
+    added = set(sys.modules) - set(modules_before)
+    assert added <= {"evolution_progress"}, added
