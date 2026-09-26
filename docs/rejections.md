@@ -239,6 +239,57 @@ component C requires a: A, b: B provides relay: Relay {
 A plain (non-emission) call in argument position needs no marker and is
 admitted as before.
 
+An arrow written in the argument list is not in it. Its body runs when the
+arrow is called, not while the arguments are evaluated, so a crossing inside
+it is judged as it would be in the same arrow bound by `let` first: marked, it
+is admitted, and unmarked, it draws the missing-marker refusal
+(tests/fixtures/g4_emit_arrow_argument_inline.rvl and its two `let` twins):
+
+```revl
+service Approvals { emission fn approve(ticket: Str, actor: Str) -> Str }
+service Gate { emission fn decide(ok: Bool, verdict: Str) -> Str }
+service Review { emission fn review(key: Str) -> Str }
+
+fn approve_args(key: Str, approver: (Str, Str) -> Str) -> Str {
+  return approver(key, key)
+}
+
+component Reviewer requires approvals: Approvals, gate: Gate provides review: Review {
+  provide review {
+    fn review(key) {
+      return emit gate.decide(true, approve_args(key, (t: Str, a: Str) => emit approvals.approve(t, a)))
+    }
+  }
+}
+```
+
+The carrier of the nested crossing does not change the answer. A host
+emission extern in the same position is a crossing too, and it draws the same
+refusal (g4_nested_host_emission_activation.rvl):
+
+```revl reject G4
+extern emission fn log_line(n: Int) -> Int = @py { return 1 }
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+component Checkout {
+  emit log_line(charge(199))
+}
+```
+
+```
+call to emission `charge` must be marked `emit` (G4)
+```
+
+Neither does the position of the body, nor the extern's capability scope:
+`g4_nested_host_emission_method.rvl` is the provide-method spelling,
+`g4_nested_host_emission_scoped.rvl` and
+`g4_nested_host_emission_scoped_method.rvl` declare the extern
+`emission[net]`, and `g4_nested_emit_expression_host.rvl` marks the inner
+call where it stands. The head's carrier is free too: a required service can
+head the `emit` and a host extern be nested under it
+(`g4_nested_host_emission_in_service_emit.rvl`), or the other way round
+(`g4_nested_service_emission_in_host_emit.rvl`).
+
 **A provider that exceeds a plain declaration** — a service declaration is
 an *upper bound* on its providers' effects, because consumers bind to the
 service and providers are hot-swappable (g4_emission_not_declared.rvl):

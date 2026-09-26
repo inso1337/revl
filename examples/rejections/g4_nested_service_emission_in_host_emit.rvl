@@ -1,0 +1,17 @@
+// REJECTED — G4: the mirror of
+// `g4_nested_host_emission_in_service_emit.rvl`, with the carriers swapped.
+// The marked head is a host emission extern and the unmarked nested crossing
+// is a required service operation. Both shipped nested fixtures put a
+// required service in the HEAD, so this is the spelling that shows the head's
+// carrier does not decide how its arguments are judged.
+//
+// expected error:
+//   call to emission `ledger.fetch` must be marked `emit` (G4)
+
+extern emission fn log_line(n: Int) -> Int = @py { return 1 }
+
+service Ledger { emission fn fetch() -> Int }
+
+component Checkout requires ledger: Ledger {
+  emit log_line(ledger.fetch())
+}
