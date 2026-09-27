@@ -2108,19 +2108,53 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
     return None
 
 
-def _model_schedule_problem(files, processes: dict) -> str | None:
+def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
     """Schedule the routed model actions onto each host's declared devices
     (item 515, `revl.model_schedule`). Prints the decision, one line per
-    placement, and returns the refusal text when a host cannot satisfy it."""
+    placement, and returns `(refusal, {host: spec entry})`. The entry is what
+    the host's child is handed under `model_schedule.SPEC_KEY`; a host with
+    no routed model action has none, so its spec is unchanged."""
     from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
     try:
         schedules = model_schedule.placement_schedules(files, processes)
     except model_schedule.ScheduleRefusal as exc:
-        return str(exc)
+        return str(exc), {}
+    for host in schedules:
+        backend = _canonical_backend(processes[host.host].get("backend", "py"))
+        if backend not in model_schedule.READING_TIERS:
+            return (f"host `{host.host}` routes model action(s) and is placed on "
+                    f"the {backend} tier, whose process runner does not read a "
+                    f"model schedule; a schedule its child never reads is a "
+                    f"decision nothing enforces, so the placement is refused. "
+                    f"Place the component on a "
+                    f"{' or '.join(model_schedule.READING_TIERS)} process "
+                    f"(item 515, docs/model-scheduling.md)"), {}
     for host in schedules:
         for line in host.lines():
             print(f"  {line}", flush=True)
-    return None
+    return None, {host.host: model_schedule.handoff(host) for host in schedules}
+
+
+def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
+                             to_backend: str) -> tuple[dict | None, str | None]:
+    """The model schedule a swap successor is handed (item 515), as
+    `(spec entry or None, refusal or None)`. Scheduled against the devices the
+    predecessor's host declared; None when the component routes no model
+    action."""
+    from . import model_schedule  # noqa: PLC0415
+    devices = (old_spec.get("modelSchedule") or {}).get("devices")
+    try:
+        decided = model_schedule.placement_schedules(
+            files, {succ: {"components": [component], "devices": devices}})
+    except model_schedule.ScheduleRefusal as exc:
+        return None, str(exc)
+    if not decided:
+        return None, None
+    if _canonical_backend(to_backend) not in model_schedule.READING_TIERS:
+        return None, (f"component {component!r} routes model action(s) and "
+                      f"the {to_backend} tier's runner does not read a model "
+                      f"schedule (item 515)")
+    return model_schedule.handoff(decided[0]), None
 
 
 # --------------------------------------------------------------------------
@@ -3703,7 +3737,7 @@ def run_placement(files, placement_path: str, once: bool = False,
     # candidates. No candidate fitting is a refusal here, before anything
     # spawns. A composition with no `route model` block schedules nothing and
     # prints nothing (docs/model-scheduling.md).
-    model_problem = _model_schedule_problem(files, processes)
+    model_problem, model_handoffs = _model_schedules(files, processes)
     if model_problem:
         return abort(model_problem)
 
@@ -4161,6 +4195,11 @@ def run_placement(files, placement_path: str, once: bool = False,
             # path calls too so the pins survive a re-host (see `do_swap`).
             **host_ref_pins(ir, own, files),
         }
+        if pname in model_handoffs:
+            # item 515: this host's model schedule, re-derived and installed
+            # by the child before any component activates. Absent for a host
+            # that routes no model action, so its spec is unchanged.
+            spec["modelSchedule"] = model_handoffs[pname]
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
             # declaration* admits for each exported key, read off the IR. The
@@ -4972,6 +5011,21 @@ def run_placement(files, placement_path: str, once: bool = False,
         # Carried only when the successor tier can actually RUN the guard: the
         # guard is built in `_process_runner.py`, so a swap onto a non-python
         # tier drops it, the same rule the boot path applies.
+        # item 515: the successor gets its OWN model schedule, re-derived for
+        # the component it hosts, on the devices the predecessor's host
+        # declared, from the files it is about to load. Copying the
+        # predecessor's entry would name the wrong host and the wrong
+        # component set, so the child would refuse it at boot. A candidate
+        # that no longer fits those devices, or a scheduled successor on a
+        # tier that does not read a schedule, refuses the swap here instead.
+        succ_model, model_refusal = _successor_model_schedule(
+            files, specs[old], succ, component, to_backend)
+        if model_refusal:
+            print(f"swap refused: {model_refusal}", flush=True)
+            print("  running composition untouched.", flush=True)
+            return
+        if succ_model is not None:
+            succ_spec["modelSchedule"] = succ_model
         _old_corr = old_serve.get("correlation")
         if _old_corr and to_backend in _CORRELATION_SEALING_TIERS:
             succ_spec["serve"]["correlation"] = {

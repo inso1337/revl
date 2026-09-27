@@ -8,7 +8,9 @@ conductor picks, for every routed model action, one candidate that fits. If
 no candidate fits, the placement is refused.
 
 The code is `src/revl/model_schedule.py`, called from `run_placement` in
-`src/revl/placement.py`. The tests are `tests/test_model_schedule_515.py`.
+`src/revl/placement.py`, and `src/revl/model_placement.py` in the child. The
+tests are `tests/test_model_schedule_515.py` and
+`tests/test_model_schedule_handoff_515.py`.
 
 ## The two declarations
 
@@ -147,6 +149,69 @@ leaving them out:
   allows that only in a single-candidate arm. It is reported as `declares no
   device profile, reserves nothing`.
 
+## The child receives it
+
+The conductor writes each scheduled host's decision into the spec it already
+hands that host's child, under `modelSchedule`: the host name, its declared
+devices, and the schedule. A host that routes no model action gets no such
+key, so its spec is byte for byte what it was.
+
+The py runner (`src/revl/_process_runner.py`) does not believe the entry. Before
+any component activates, it re-derives the schedule from the composition's own
+files, its own components and the devices in the entry, and refuses to boot
+(`BOOT REFUSED`, non-zero exit, never `UP`) when:
+
+- the host routes a model action and the spec carries no schedule;
+- the spec carries a schedule for a host that routes nothing, or for another
+  host;
+- the entry differs in any field from the derived schedule.
+
+Otherwise it installs the result in `revl.model_placement`, which is what
+code running in the child reads:
+
+```revl
+model role fast  on_device device gpu memory 6144 quant q4_k_m
+model role small on_device device cpu memory  512 quant int8
+
+service Answer { fn classify(text: Str) -> Str }
+
+extern pure fn model_device(role: Str) -> Str
+  = @py { from revl import model_placement; return model_placement.device_for(role) }
+
+component Classifier provides out: Answer {
+  route model on classify { confidential -> fast | small }
+  provide out { fn classify(text) = model_device("fast") }
+}
+```
+
+- `model_placement.device_for(role)` returns the device the role is scheduled
+  on in this process.
+- `model_placement.claim(role, device)` returns `device` if that is the
+  scheduled one.
+
+Both raise `ModelPlacementRefused`, naming the role, for a role not scheduled
+on this host (a fallback the scheduler did not pick), for a device other than
+the scheduled one, and for any question in a process that was handed no
+schedule:
+
+```
+ModelPlacementRefused: model role `fast` was claimed on device `gpu1`, but the
+schedule for host `edge` places it on `gpu0`; ...
+ModelPlacementRefused: model role `small` is not scheduled on host `edge`
+(scheduled here: fast on gpu0); ...
+```
+
+Only the py runner reads the schedule. A scheduled host placed on any other
+tier is refused at plan time, because a schedule its child never reads is a
+decision nothing enforces. A composition that routes no model action is
+unaffected on every tier.
+
+A `revl swap` successor is scheduled for itself: the component it hosts, on
+the devices the predecessor's host declared, from the files it is about to
+load. A candidate that no longer fits, or a scheduled successor on a tier that
+does not read the schedule, refuses the swap and leaves the running
+composition untouched.
+
 ## Additivity
 
 A composition with no `route model` block schedules nothing and prints
@@ -162,10 +227,19 @@ with it is refused as placed on a host with no devices.
   program. The scheduler compares two declarations. What a member was actually
   loaded onto is the provider's published profile, which reaches revl only as
   the opaque `placement_digest` (`src/revl/model_profile.py`, item 538).
-- **It does not load or unload anything.** The schedule is a plan-time
-  decision that the conductor prints and refuses on. Nothing passes it to the
-  child processes yet. The provision keyed by role, with one load, one unload
-  and `no_residue` at teardown for N consumers, is slice S2 and is not built.
+- **It does not load or unload anything.** The child answers which device a
+  role is scheduled on and refuses any other, but nothing in revl loads a
+  member there. The provision keyed by role, with one load, one unload and
+  `no_residue` at teardown for N consumers, is slice S2 and is not built.
+- **It cannot stop host code that never asks.** `revl.model_placement` is
+  the checked answer a provider reads. A host body that loads a model without
+  asking is not refused; the S2 provider adapters are the code meant to ask on
+  every load.
+- **It does not detect a consistent rewrite of the spec.** The child
+  re-derives the schedule from the files and the devices carried in its own
+  spec, so an edited decision is refused, but an edit to the devices and the
+  decision together is a different, self-consistent declaration. The spec is
+  written by the conductor into a `0700` placement directory; it is not signed.
 - **It has no load cost and no residency over time.** "The small model is
   resident here" is a statement about a placement over time; slice S3 owns it.
   The scheduler ranks candidates by the order the program wrote, not by cost.

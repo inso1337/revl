@@ -249,6 +249,29 @@ class BootRefused(RuntimeError):
     """
 
 
+def _install_model_schedule(spec: dict) -> None:
+    """Re-derive this host's model schedule and install it (item 515).
+
+    The conductor hands the schedule in `spec["modelSchedule"]`. This process
+    recomputes it from `spec["files"]`, its own components and the host's
+    declared devices carried in the same entry, and refuses to boot on a
+    missing schedule, an unexpected one, or any difference, so the device a
+    role is answered with at run time (`revl.model_placement`) is one the
+    composition's own files lead to. A host that routes no model action was
+    handed nothing and installs nothing.
+    """
+    from revl import model_placement, model_schedule  # noqa: PLC0415
+    name = spec["name"]
+    try:
+        resident = model_schedule.verify_handoff(
+            spec["files"], name, spec.get("components") or [],
+            spec.get(model_schedule.SPEC_KEY))
+    except model_schedule.ScheduleRefusal as exc:
+        raise BootRefused(f"[{name}] BOOT REFUSED: {exc}") from None
+    if resident is not None:
+        model_placement.install(name, resident)
+
+
 def _load_module(ir: dict) -> types.ModuleType:
     import emit  # noqa: PLC0415  backend dir already on sys.path
 
@@ -730,6 +753,10 @@ async def run(spec: dict, spec_path=None) -> None:
     # manifest a re-pointed successor must re-admit against at the seam (item
     # 337, `_repoint_decision`); it also feeds the emitter for this slice.
     running_ir = compile_files(spec["files"])
+    # item 515: install this host's model schedule BEFORE anything activates,
+    # so a component's first model call already reads the scheduled device.
+    # Re-derived from the files, never believed off the spec.
+    _install_model_schedule(spec)
     module = _load_module(running_ir)
     # The backend directory is a trusted LOADER path for the runtime's own
     # first-party modules (`emit`, `runtime`, `bridge`), not an ambient import
