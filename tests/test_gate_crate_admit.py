@@ -407,6 +407,11 @@ def agreement(consumer) -> list[tuple[str, str, tuple[str, str], dict]]:
 # --------------------------------------------- the release-blocking direction
 
 
+# Issue #1449: the first test in this file to ask for `consumer`, so its setup
+# carries the module's one cargo build of the consumer crate plus the corpus
+# run in `agreement`: 19-26s measured at load average 4, and a timeout counts
+# setup. The build is shared by every later test; it only has to land somewhere.
+@pytest.mark.timeout(300)
 def test_the_verdict_surface_issues_no_admission_for_anything_in_the_corpus(agreement):
     """THE security clause, on the surface a consumer of `admit` holds.
 
@@ -1496,6 +1501,10 @@ def test_the_consumer_reads_the_frontier_the_crate_was_generated_with(consumer):
         "decide, or a consumer will read a no-objection as an admission")
 
 
+# Issue #1449: `cargo test` in crates/revl-gate, compile-dominated. Measured
+# 36.5s with a cold target directory at load average 4; a loaded machine
+# multiplies that past the hook's 60s default.
+@pytest.mark.timeout(600)
 def test_the_crate_ships_its_own_cargo_tests(consumer):
     """`cargo test` inside the crate is the no-Python half of the evidence: the
     self-host's own in-file `test` blocks run natively there, alongside the
@@ -1788,6 +1797,15 @@ def test_emit_ir_fails_closed_outside_what_it_can_back(consumer):
 # ------------------------------------------------- the census's fast engine
 
 
+# Issue #1449: inherently slow, and the hook's 60s default cannot hold it.
+# Profiled: building the fast engine (compile `selfhost/lower.rvl`, emit it to
+# python) about 12s, running it over the 923-program census corpus about 24s,
+# and the crate over the same corpus, plus the consumer's cargo build when
+# this is the first test to ask for it (19-26s). Measured 75s alone (19s
+# setup, 56s call) at load average 5 and 57-148s inside a module run; about
+# 120s alone was reported on a loaded machine. Every part is per-program work
+# over the whole corpus, not something another test already computed.
+@pytest.mark.timeout(600)
 def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
     """`tools/gate_reference_census.py` runs on every PR through the frontend
     job, where there is no cargo. It gets its verdicts from the self-host

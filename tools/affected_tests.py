@@ -706,6 +706,30 @@ def _stdlib_tests(root: Path, mod: str) -> set[str]:
     return out
 
 
+# A bare word, as `_word_tests` bounds it: a maximal run of these characters.
+_WORD_RUN = re.compile(r"[A-Za-z0-9_]+")
+_WORD_INDEX_CACHE: dict[tuple[Path, str, bool], frozenset[str]] = {}
+
+
+def _word_index(root: Path, p: Path, own_only: bool) -> frozenset[str]:
+    """Every bare word in a test's text (its own, or with its companions).
+
+    Issue #1449. `_word_tests` used to run one regex over every test's
+    companion text per call, and `select()` calls it once per leaf module it
+    is asked about. The text does not change between calls, so its words are
+    read once and each later question is a set lookup. Measured on one input
+    list (the 198 files `playground/build_wheel.py` reads): 131,655 regex
+    searches and about 90 of the 102 seconds the selector spent.
+    """
+    key = (root, _node(p), own_only)
+    words = _WORD_INDEX_CACHE.get(key)
+    if words is None:
+        text = _read(p) if own_only else _companion_text(root, p)
+        words = frozenset(_WORD_RUN.findall(text))
+        _WORD_INDEX_CACHE[key] = words
+    return words
+
+
 def _word_tests(root: Path, token: str) -> set[str]:
     """Frontend tests mentioning `token` as a bare word anywhere (name or body).
 
@@ -720,10 +744,18 @@ def _word_tests(root: Path, token: str) -> set[str]:
     # 623 tests, which is a match on the language rather than on the change, so
     # a dunder is read out of the test's own text only.
     idiom = token.startswith("__") and token.endswith("__")
+    # For a token made only of word characters, "`word` matches somewhere" is
+    # exactly "`token` is one of the text's maximal word runs": the lookarounds
+    # above are what bound a run. Any other token keeps the regex.
+    indexed = _WORD_RUN.fullmatch(token) is not None
     out: set[str] = set()
     for p in _test_files(root):
-        text = _read(p) if idiom else _companion_text(root, p)
-        if word.search(p.name) or word.search(text):
+        if word.search(p.name):
+            out.add(_node(p))
+        elif indexed:
+            if token in _word_index(root, p, idiom):
+                out.add(_node(p))
+        elif word.search(_read(p) if idiom else _companion_text(root, p)):
             out.add(_node(p))
     return out
 
