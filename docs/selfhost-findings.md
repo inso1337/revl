@@ -1739,17 +1739,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     59 |                   59 (100%) |             53 (89.8%) |
+| py   |     64 |                   64 (100%) |             57 (89.1%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
 | go   |     23 |                   23 (100%) |            23 (100.0%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **263** | **263 (100%)** | **251 (95.4%)** |
+| **total** | **268** | **268 (100%)** | **255 (95.1%)** |
 
-Every one of the 263 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 251 of
-them survive the **fully-native** chain, so all 12 residual documents
+Every one of the 268 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 255 of
+them survive the **fully-native** chain, so all 13 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,10 +1779,11 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 6 residual of 59:
+`py`, 7 residual of 64:
 
 - `services_control_flow.rvl`
 - `services_host_stream.rvl`
+- `../emit_py_placement.rvl`
 - `branches.rvl`
 - `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
