@@ -1,4 +1,5 @@
-"""No test registers a by-path module in `sys.modules` except through the helper.
+"""No test registers a by-path module in `sys.modules` except through the
+helper, and no test imports the bare module name `emit`.
 
 Issue #1449. `tests/test_evolution_reward.py` loaded `tools/evolution_reward.py`
 by path and REPLACED the `sys.modules` entry `tools/evolution_controller.py` had
@@ -194,3 +195,72 @@ def test_a_module_that_fails_to_execute_leaves_the_entry_as_it_was(
     with pytest.raises(ZeroDivisionError):
         load_by_path(scratch_name, _write(tmp_path, "bad.py", "1 / 0\n"))
     assert sys.modules[scratch_name] is good
+
+
+# --------------------------------------------------------------------------- #
+# The bare name `emit`.                                                         #
+# --------------------------------------------------------------------------- #
+#
+# Every backend directory has an `emit.py`, and pytest's default import mode
+# puts the directory of each collected test module at the front of sys.path.
+# A bare `import emit` therefore answers with whichever backend's directory
+# is first: tests/test_crash_recovery.py and tests/test_phase1_bracket_fault.py
+# ran the JAVA emitter in a session that collected backends/java (issue #1449,
+# 13 failures). Twenty-one test modules under tests/ did the same bare import.
+# The python emitter is reached through `revl._paths.python_backend_emitter()`,
+# which puts backends/python first and refuses an `emit` from any other file;
+# another backend's emitter is loaded by path under a private name.
+
+#: Directories whose tests may use the bare name, and why.
+BARE_EMIT_DIRS = {
+    "backends/python/tests/":
+        "the directory's conftest.py pins `emit` (and `runtime`) to this "
+        "backend's own copies before any test here is collected",
+}
+
+
+def bare_emit_imports(source: str) -> list[int]:
+    """Lines that bind the bare module name `emit`: `import emit [as x]`,
+    `from emit import ...`, `importlib.import_module("emit")`,
+    `__import__("emit")`."""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import) and any(a.name == "emit" for a in node.names):
+            out.append(node.lineno)
+        elif isinstance(node, ast.ImportFrom) and node.module == "emit" and not node.level:
+            out.append(node.lineno)
+        elif (isinstance(node, ast.Call) and node.args
+              and isinstance(node.args[0], ast.Constant) and node.args[0].value == "emit"
+              and ast.unparse(node.func).split(".")[-1] in ("import_module", "__import__")):
+            out.append(node.lineno)
+    return sorted(out)
+
+
+def test_no_collected_test_imports_the_bare_name_emit():
+    found = []
+    for path in collected_test_modules():
+        rel = path.relative_to(ROOT).as_posix()
+        if any(rel.startswith(d) for d in BARE_EMIT_DIRS):
+            continue
+        found += [f"{rel}:{line}" for line in
+                  bare_emit_imports(path.read_text(encoding="utf-8"))]
+    assert not found, (
+        "a test imports the bare module name `emit`, which answers with "
+        "whichever backend directory is first on sys.path. Use "
+        "`revl._paths.python_backend_emitter()` for the python emitter, or "
+        "`load_by_path` under a private name for another backend's:\n  "
+        + "\n  ".join(found))
+    for directory in BARE_EMIT_DIRS:
+        assert (ROOT / directory).is_dir(), f"allowed directory is gone: {directory}"
+
+
+def test_the_bare_emit_detector_sees_every_spelling():
+    """Non-vacuity: each spelling, and none of the qualified ones."""
+    for source in ("import emit", "import emit as py_emit",
+                   "from emit import EmitError", "def f():\n    import emit\n",
+                   "importlib.import_module('emit')", "__import__('emit')"):
+        assert bare_emit_imports(source), source
+    for source in ("from backends.go import emit as go_emit",
+                   "import emit_temporal", "from . import emit",
+                   "emit = python_backend_emitter()"):
+        assert not bare_emit_imports(source), source
