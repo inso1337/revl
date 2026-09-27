@@ -1366,6 +1366,31 @@ def recover_shared_grants(wal: dict, *, wal_path: Optional[str],
             # accumulator, nothing owed.
             continue
         inverse = grant.get("inverse") or {}
+        if getattr(world, "reclaims_shared", False):
+            # issue #1477: through a real binding, the runtime's own reclaim
+            # (`runtime.reclaim_shared`) writes the handle's fence before the
+            # inverse and `shared-complete` after it; recover writes neither.
+            state = world.reclaim_shared([grant]).get(handle, "unresolved")
+            if state in ("ran", "settled"):
+                reclaims.append(_reclaim_record(handle, len(holders), basis,
+                                                ok=True))
+                continue
+            note = getattr(world, "generation_note", lambda _h: "")(handle)
+            reclaims.append(_reclaim_record(
+                handle, len(holders), basis, ok=False,
+                error={"type": state,
+                       "message": {
+                           "failed": "the inverse raised when the runtime "
+                                     "reclaimed it; its fence stays, so it "
+                                     "will not be re-fired",
+                           "fenced": "an earlier attempt fenced this reclaim; "
+                                     "its outcome is unknown, not re-fired",
+                           "stranded": "an E-Stop is in force, nothing ran",
+                           "other-generation": f"{note}; not attempted",
+                       }.get(state, "the inverse names no host body in this "
+                                    "composition binding; not attempted")},
+                fenced_unknown=state == "fenced"))
+            continue
         if not _re_issues_calls(world):
             reclaims.append(_reclaim_record(
                 handle, len(holders), basis, ok=False,
@@ -1654,6 +1679,9 @@ def _reissue_owed(wal_path: str, world: Optional[World], descriptor: dict,
                     hint="a confidential value is never written to the WAL. "
                          "Finish this flush by hand with the value from its own "
                          "store, or carry a non-confidential idempotency key")}
+    if getattr(world, "reissues_deferred", False):
+        return _reissue_through_binding(wal_path, world, descriptor, seq,
+                                        referent, register)
     if not _re_issues_calls(world):
         return {"outcome": "failed", "seq": seq, "referent": referent,
                 "residue": _unbound_record(_crossing_of_descriptor(descriptor),
@@ -1678,6 +1706,50 @@ def _reissue_owed(wal_path: str, world: Optional[World], descriptor: dict,
     return {"outcome": "reissued", "seq": seq, "referent": referent,
             "register": register,
             "idempotency": descriptor.get("idempotency")}
+
+
+def _reissue_through_binding(wal_path: Optional[str], world: World,
+                             descriptor: dict, seq, referent: str,
+                             register: Optional[str]) -> dict:
+    """The re-issue seam through a real composition binding (issue #1477).
+
+    Recover keeps what it always owned: the operator's policy and the tier
+    (already decided by the caller) and the consume-before-fire
+    `reissue-fence`, written here before the fire. The fire itself is the
+    runtime's own flush (`runtime.reissue_deferred`), which checks the E-Stop
+    and appends `flushed` (or `flush-residue`) for the seq, so a later recover
+    reads the emission as flushed and fires nothing."""
+    call = descriptor.get("call") or {}
+    if wal_path is not None and seq is not None and _spends_fences(world):
+        _append_reissue_fence(wal_path, seq, register)
+    state = world.reissue_deferred([descriptor]).get(seq, "unresolved")
+    if state in ("ran", "settled"):
+        return {"outcome": "reissued", "seq": seq, "referent": referent,
+                "register": register,
+                "idempotency": descriptor.get("idempotency"),
+                "replay": "binding"}
+    named = _named_call(call)
+    message, kind = {
+        "failed": (f"{named} raised when the runtime flushed it "
+                   "(`flush-residue` written)", "flush-residue"),
+        "stranded": (f"{named}: an E-Stop is in force, so nothing fired",
+                     "stranded-residue"),
+        "other-generation": (f"{named}: "
+                             + getattr(world, "generation_note", lambda _s: "")(seq)
+                             + "; not fired", "generation-residue"),
+    }.get(state, (f"{named}: names no host body in this composition binding; "
+                  "not fired", "unresolved-residue"))
+    return {"outcome": "failed", "seq": seq, "referent": referent,
+            "residue": _record(
+                kind, crossing=_crossing_of_descriptor(descriptor),
+                attempted={"call": call.get("method"),
+                           "args": list(call.get("args") or []), "phase": None},
+                error={"type": state, "message": message},
+                attempted_flag=state == "failed",
+                outcome="failed" if state == "failed" else "unknown",
+                referent=named,
+                hint="finish the flush by hand; its reissue-fence is spent, so "
+                     "a declared-tier emission will not be fired again")}
 
 
 def _window_proof(rolled: list, fired: list, owed: list,
@@ -1717,22 +1789,15 @@ def _re_issues_calls(world: Optional[World]) -> bool:
 #: "not attempted" as a choice. Each names the runtime entry point that would
 #: be needed; none exists in the py runtime today.
 UNBOUND_OWED_EMISSION = (
-    "an owed deferred emission is a FORWARD crossing, and the runtime has no "
-    "fresh-process entry point that re-fires one: `runtime.replay_descriptors` "
-    "runs inverses and compensations through the abort path (it would record "
-    "the emission as `aborted`, and never as `flushed`), and the flush path "
-    "(`SessionOwner._flush`) fires the in-memory closures of a live session. "
-    "Needed: a runtime entry point that resolves the descriptor's call against "
-    "the binding, checks the E-Stop, fires it and appends `flushed` (or "
-    "`flush-residue`) for its seq")
+    "this world has no entry point that re-fires an owed deferred emission "
+    "(a FORWARD crossing, which must be flushed, never replayed as an "
+    "inverse). A composition binding (`revl recover --composition`) fires it "
+    "through `runtime.reissue_deferred`, the session's own flush")
 UNBOUND_SHARED_RECLAIM = (
-    "a shared grant is fenced by HANDLE (`shared-reclaim-fence`, "
-    "`shared-complete`), and `runtime.replay_descriptors` fences and settles by "
-    "descriptor seq, so it cannot replay a grant's inverse without inventing a "
-    "seq. No py-tier runtime entry point replays a shared grant, and no py-tier "
-    "runtime journals one today (only `revl.shared_runtime` does). Needed: a "
-    "runtime entry point that resolves the grant's inverse against the "
-    "binding and honours the handle's fence and completion records")
+    "this world has no entry point that reclaims a shared grant, which is "
+    "fenced by HANDLE (`shared-reclaim-fence`, `shared-complete`), not by "
+    "seq. A composition binding (`revl recover --composition`) reclaims it "
+    "through `runtime.reclaim_shared`")
 
 
 def _unbound_record(crossing: dict, call: dict, referent: Optional[str],

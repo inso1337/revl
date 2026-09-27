@@ -496,7 +496,8 @@ a compensation whose argument is itself a call) or were redacted as
 `Secret[T]` is never handed to the runtime: recover never guesses an argument.
 It is residue, named by its call, for example `a.y(<not captured>)`.
 
-What else the binding does, call family by call family:
+What else the binding does, call family by call family. Each goes to its own
+runtime entry point, so the fences and settling records are the runtime's:
 
 - **A legacy boundary inverse** (an `effect` record with a reconstructible
   `op`, written by `record_boundary`) is a named call with captured arguments,
@@ -504,22 +505,22 @@ What else the binding does, call family by call family:
   in the same batch as the descriptors: one seq space, one LIFO order, the
   runtime's fence and `aborted` record. It lands in `ran`. The one py-tier
   writer today is a durable-cursor subscription, whose op is
-  `Stream.close(cursor)`; `Stream` is neither a module binding nor a
-  required-service key, so the runtime answers `unresolved` and the verdict
-  names the call.
-- **An owed deferred emission** is not re-fired. It is a forward crossing, and
-  the runtime has no fresh-process entry point for one: the replay path runs
-  inverses and compensations through the abort path, and the flush path fires
-  the in-memory closures of a live session. It is `unbound-residue`, no
-  `reissue-fence` is spent, and the message says what the runtime would need:
-  an entry point that resolves the call against the binding, checks the
-  E-Stop, fires it and appends `flushed` or `flush-residue`.
-- **A shared reclaim** is not attempted. A shared grant is fenced by handle,
-  the replay path by seq, and no py-tier runtime journals a shared grant
-  today. The reclaim is reported not ok, no fence is spent, and the message
-  says what the runtime would need: an entry point that resolves the grant's
-  inverse against the binding and honours the handle's fence and completion
-  records.
+  `Stream.close(cursor)`; the runtime resolves `Stream` to its own class and
+  closes whatever live subscription resumes from that cursor. In a fresh
+  process nothing is live, so the close has nothing left to do; the recorded
+  position is kept, which is the point of a durable cursor.
+- **An owed deferred emission** is re-fired through `runtime.reissue_deferred`,
+  the session's own flush: the same E-Stop check before the host body and the
+  same `flushed` (or `flush-residue`) record after it. Recover keeps what it
+  always owned: the operator's policy (`--policy` with `recovery may re-issue
+  owed emissions`), the tier, and the `reissue-fence` it writes before the
+  fire. A second recover reads `flushed` and fires nothing.
+- **A shared reclaim** runs through `runtime.reclaim_shared`, which writes the
+  handle's `shared-reclaim-fence` before the inverse and `shared-complete`
+  after it. A second recover finds the completion and reclaims nothing; a
+  fence with no completion is an unknown outcome and is not re-fired.
+
+Against the model none of these is performed, and none spends a fence.
 
 A compensated emission is **offset** once its compensation ran. Each
 compensation descriptor names the emission it offsets (`offsets`, the seq of

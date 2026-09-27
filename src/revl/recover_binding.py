@@ -56,12 +56,14 @@ def _open_calls(records: list) -> dict:
             settled.update(record.get("discharged") or [])
         elif record.get("record") == "aborted":
             settled.update(record.get("replayed") or [])
+        elif record.get("record") in ("flushed", "flush-residue"):
+            settled.add(record.get("seq"))
     calls: dict = {}
     for r in records:
         seq = r.get("seq")
         if seq in settled:
             continue
-        if r.get("record") == "discharge-descriptor":
+        if r.get("record") in ("discharge-descriptor", "deferred-emission"):
             calls[seq] = r.get("call") or {}
         elif r.get("record") == "effect" \
                 and (r.get("inverse") or {}).get("reconstructible"):
@@ -84,6 +86,26 @@ def _segments(wal: dict) -> list:
                              "fromSeq": record.get("fromSeq") or 0,
                              "composition": record.get("composition")})
     return segments
+
+
+def _open_grants(wal: dict) -> dict:
+    """``{handle: (grant, segment)}`` for the latest `shared-grant` of every
+    handle with no `shared-complete`. A grant carries no seq, so its opening is
+    the last one written before it in the file."""
+    segments = _segments(wal)
+    opening = 0
+    latest: dict = {}
+    completed: set = set()
+    for record in wal.get("records") or []:
+        kind = record.get("record")
+        current = segments[opening]
+        if kind == "generation":
+            opening += 1   # `_segments` lists the openings in this same order
+        elif kind == "shared-grant":
+            latest[record.get("handle")] = (record, current)
+        elif kind == "shared-complete":
+            completed.add(record.get("handle"))
+    return {h: v for h, v in latest.items() if h not in completed}
 
 
 def _segment_of(segments: list, seq: Any) -> dict:
@@ -148,13 +170,19 @@ class CompositionWorld(World):
     kind = WORLD_REAL
     #: recover hands this world the discharge-descriptor family as one batch
     replays_descriptors = True
-    #: and nothing else: see the module docstring
+    #: it makes no generic `apply_inverse` / `reissue` call: every family it
+    #: performs goes to a runtime entry point, below
     re_issues_calls = False
+    #: owed deferred emissions: `runtime.reissue_deferred`
+    reissues_deferred = True
+    #: `shared` grants' inverses: `runtime.reclaim_shared`
+    reclaims_shared = True
 
     def __init__(self, *, files: list, digest: str, module: Any, runtime: Any,
                  wal_path: str, services: dict, booted: list,
                  provider_session: Any, cleanup: list,
-                 foreign: Optional[dict] = None) -> None:
+                 foreign: Optional[dict] = None,
+                 foreign_handles: Optional[dict] = None) -> None:
         self.files = list(files)
         self.digest = digest
         self.module = module
@@ -167,13 +195,16 @@ class CompositionWorld(World):
         #: seq -> the log opening (generation) that wrote it, for every open
         #: call a different composition wrote. Never handed to the runtime.
         self.foreign = dict(foreign or {})
+        #: the same, for `shared` grants (keyed by handle: a grant has no seq)
+        self.foreign_handles = dict(foreign_handles or {})
 
     def describe(self) -> dict:
         """What the verdict says about the binding it ran through."""
         return {"composition": self.files, "digest": self.digest,
                 "booted": self.booted,
                 "otherGenerations": sorted(
-                    {_label(seg) for seg in self.foreign.values()})}
+                    {_label(seg) for seg in self.foreign.values()}
+                    | {_label(seg) for seg in self.foreign_handles.values()})}
 
     def replay_descriptors(self, descriptors: list) -> dict:
         """The runtime's outcomes for the calls this composition wrote, and
@@ -188,8 +219,32 @@ class CompositionWorld(World):
                 self.module, self.wal_path, mine, services=self.services))
         return outcome
 
+    def reissue_deferred(self, descriptors: list) -> dict:
+        """Owed deferred emissions through the runtime's own flush
+        (`runtime.reissue_deferred`): `flushed` or `flush-residue` per seq. A
+        call another composition wrote is ``other-generation``, not fired."""
+        mine = [d for d in descriptors if d.get("seq") not in self.foreign]
+        outcome = {d.get("seq"): "other-generation" for d in descriptors
+                   if d.get("seq") in self.foreign}
+        if mine:
+            outcome.update(self.runtime.reissue_deferred(
+                self.module, self.wal_path, mine, services=self.services))
+        return outcome
+
+    def reclaim_shared(self, grants: list) -> dict:
+        """`shared` grants' inverses through `runtime.reclaim_shared`, which
+        writes the handle's `shared-reclaim-fence` before and `shared-complete`
+        after. A grant another composition wrote is ``other-generation``."""
+        mine = [g for g in grants if g.get("handle") not in self.foreign_handles]
+        outcome = {g.get("handle"): "other-generation" for g in grants
+                   if g.get("handle") in self.foreign_handles}
+        if mine:
+            outcome.update(self.runtime.reclaim_shared(
+                self.module, self.wal_path, mine, services=self.services))
+        return outcome
+
     def generation_note(self, seq: Any) -> str:
-        segment = self.foreign.get(seq)
+        segment = self.foreign.get(seq, self.foreign_handles.get(seq))
         if segment is None:
             return ""
         return (f"written by {_label(segment)}, composition "
@@ -289,6 +344,9 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
     digest = _replay_module().composition_digest(ir)
     wal = read_wal(wal_path)
     foreign = plan_generations(wal, digest, list(files))
+    grants = _open_grants(wal)
+    foreign_handles = {h: seg for h, (_g, seg) in grants.items()
+                       if seg["composition"] != digest}
 
     try:
         emit, runtime, Context, FiberState = _backend()
@@ -312,6 +370,10 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
         keys = {call.get("receiver")
                 for seq, call in _open_calls(wal["records"]).items()
                 if seq not in foreign and call.get("receiver") is not None}
+        keys |= {(g.get("inverse") or {}).get("receiver")
+                 for h, (g, _seg) in grants.items()
+                 if h not in foreign_handles
+                 and (g.get("inverse") or {}).get("receiver") is not None}
         booted = _provider_closure(ir, keys)
         if booted:
             session = Session()
@@ -334,4 +396,4 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
                             runtime=runtime, wal_path=wal_path,
                             services=services, booted=booted,
                             provider_session=session, cleanup=cleanup,
-                            foreign=foreign)
+                            foreign=foreign, foreign_handles=foreign_handles)

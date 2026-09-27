@@ -399,10 +399,9 @@ def test_a_real_recover_replays_a_legacy_inverse_through_the_runtime(tmp_path):
     assert aborted["replayed"] == [0]
 
 
-def test_an_owed_emission_is_not_re_fired_and_the_verdict_says_why(tmp_path):
-    """No runtime entry point re-fires a deferred emission in a fresh process,
-    so the binding does not; the verdict names what the runtime would need, and
-    no `reissue-fence` is spent."""
+def test_a_world_without_the_reissue_entry_point_says_why_and_spends_no_fence(tmp_path):
+    """A world with no entry point for owed emissions (the stub here) does not
+    fire one: the verdict names what would, and no `reissue-fence` is spent."""
     path = tmp_path / "owed.wal"
     wal = replay.WriteAheadLog(str(path), ir={}, generation=1).open()
     wal.record_deferred_emission(receiver="ledger", method="post", args=["k1"],
@@ -416,13 +415,14 @@ def test_an_owed_emission_is_not_re_fired_and_the_verdict_says_why(tmp_path):
     assert report["reissued"] == []
     [rec] = report["residue"]["outstanding"]
     assert rec["kind"] == "unbound-residue"
-    assert "no fresh-process entry point that re-fires" in rec["error"]["message"]
+    assert "no entry point that re-fires an owed deferred emission" in rec["error"]["message"]
+    assert "runtime.reissue_deferred" in rec["error"]["message"]
     assert "reissue-fence" not in path.read_text(encoding="utf-8")[len(before):]
 
 
-def test_a_shared_reclaim_is_not_attempted_and_the_verdict_says_why(tmp_path):
-    """A shared grant is fenced by handle and the runtime's replay path by
-    seq; the binding does not invent a seq, spends no fence, and says so."""
+def test_a_world_without_the_reclaim_entry_point_says_why_and_spends_no_fence(tmp_path):
+    """A world with no entry point for shared reclaims (the stub here) does not
+    attempt one: the verdict names what would, and no fence is spent."""
     from revl.wal import WAL_VERSION  # noqa: PLC0415
     path = tmp_path / "shared.wal"
     path.write_text(
@@ -439,6 +439,7 @@ def test_a_shared_reclaim_is_not_attempted_and_the_verdict_says_why(tmp_path):
     [reclaim] = report["shared"]["reclaims"]
     assert reclaim["ok"] is False
     assert "fenced by HANDLE" in reclaim["error"]["message"]
+    assert "runtime.reclaim_shared" in reclaim["error"]["message"]
     assert path.read_text(encoding="utf-8") == before
 
 
@@ -552,3 +553,124 @@ def test_two_runs_reusing_one_wal_recover_only_with_their_own_compositions(tmp_p
         "offset('a')", "tickets.withdraw('T-a')"]
     assert not [r for r in report["residue"]["outstanding"]
                 if r["kind"] == "generation-residue"]
+
+
+# ------------------------------------ the other three call families, for real
+#
+# Through a composition binding each family goes to its own runtime entry point
+# (PR #1506): an owed deferred emission to `runtime.reissue_deferred`, a
+# durable-cursor legacy inverse to `Stream.close(cursor)` inside
+# `runtime.replay_descriptors`, a shared reclaim to `runtime.reclaim_shared`.
+# Each is performed once; a second real recover does nothing, and a model run
+# before it spends no fence.
+
+FAMILIES = COMPOSITION + f"""
+extern emission fn post(k: Str) -> Unit = @py {{
+{_host("post", "'post:' + k")}}}
+extern pure fn release_host(h: Str) -> Unit = @py {{
+{_host("release_host", "'release:' + h")}}}
+"""
+
+
+def _families_wal(tmp_path: Path, write) -> dict:
+    """A WAL opened with FAMILIES' IR, filled by ``write(wal)``, as a crash
+    would leave it: no terminal marker."""
+    from revl.compiler import compile_files  # noqa: PLC0415
+    (tmp_path / "agent.rvl").write_text(FAMILIES, encoding="utf-8")
+    ir = compile_files([str(tmp_path / "agent.rvl")])
+    wal = replay.WriteAheadLog(str(tmp_path / "run.wal"), ir=ir, generation=1).open()
+    write(wal)
+    wal.close()
+    return {"dir": tmp_path, "log": tmp_path / "world.log",
+            "wal": tmp_path / "run.wal"}
+
+
+def _model_then_real_then_again(state, *extra: str) -> tuple:
+    """A model recover (which must leave the WAL byte-identical), then two
+    real ones. Returns the two real reports and the log after each."""
+    before = state["wal"].read_text(encoding="utf-8")
+    model = _revl(["recover", "--wal", "run.wal", "--model-only", *extra],
+                  state["dir"], state["log"])
+    assert model.returncode in (0, 1), model.stderr[-2000:]
+    assert state["wal"].read_text(encoding="utf-8") == before
+    assert not state["log"].exists()
+    first_proc, first = _recover(state, *extra)
+    assert first_proc.returncode == 0, first_proc.stderr[-2000:]
+    log_first = _lines(state["log"])
+    wal_first = state["wal"].read_text(encoding="utf-8")
+    second_proc, second = _recover(state, *extra)
+    assert second_proc.returncode == 0, second_proc.stderr[-2000:]
+    assert _lines(state["log"]) == log_first
+    assert state["wal"].read_text(encoding="utf-8") == wal_first
+    return first, second, log_first
+
+
+def _lines(log: Path) -> list:
+    """The host bodies' log. `Stream.close` writes none, so it may not exist."""
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+@needs_cordis
+def test_an_owed_deferred_emission_is_re_fired_through_the_runtime_flush(tmp_path):
+    def write(wal):
+        wal.record_deferred_emission(receiver="post", method="post", args=["k1"],
+                                     register="keyed", idempotency="k1")
+        wal.record_commit_approved("h0")
+    state = _families_wal(tmp_path, write)
+    (tmp_path / "policy.txt").write_text(
+        "recovery may re-issue owed emissions\n", encoding="utf-8")
+
+    first, second, log = _model_then_real_then_again(
+        state, "--policy", "policy.txt")
+
+    assert log == ["post:k1"]
+    assert first["world"] == "real"
+    [reissued] = first["reissued"]
+    assert (reissued["referent"], reissued["replay"]) == ("post.post", "binding")
+    assert first["residue"]["clean"] is True
+    records = _records(state["wal"])
+    kinds = [r["record"] for r in records]
+    assert kinds.index("reissue-fence") < kinds.index("flushed")
+    # the second recover reads the `flushed` record and fires nothing
+    assert second["reissued"] == []
+    assert [f["seq"] for f in second["flushed"]] == [reissued["seq"]]
+
+
+@needs_cordis
+def test_a_durable_cursor_inverse_is_replayed_as_stream_close(tmp_path):
+    def write(wal):
+        wal.record_boundary("Agent", "subscribe orders", resource="cursor:orders",
+                            inverse_op={"receiver": "Stream", "method": "close",
+                                        "args": ["orders"]})
+    state = _families_wal(tmp_path, write)
+
+    first, second, _log = _model_then_real_then_again(state)
+
+    [ran] = first["ran"]
+    assert (ran["label"], ran["replay"], ran["op"]["receiver"]) == (
+        "subscribe orders", "binding", "Stream")
+    assert first["residue"]["clean"] is True
+    [aborted] = [r for r in _records(state["wal"]) if r["record"] == "aborted"]
+    assert aborted["replayed"] == [0]
+    assert second["ran"] == []
+    assert [e["seq"] for e in second["settledByReplay"]] == [0]
+
+
+@needs_cordis
+def test_a_shared_reclaim_runs_through_the_runtime_once(tmp_path):
+    def write(wal):
+        wal._write({"record": "shared-grant", "handle": "h1",
+                    "inverse": {"receiver": None, "method": "release_host",
+                                "args": ["h1"]},
+                    "holders": ["a"]})
+    state = _families_wal(tmp_path, write)
+
+    first, second, log = _model_then_real_then_again(state)
+
+    assert log == ["release:h1"]
+    [reclaim] = first["shared"]["reclaims"]
+    assert (reclaim["handle"], reclaim["ok"]) == ("h1", True)
+    kinds = [r["record"] for r in _records(state["wal"])]
+    assert kinds.index("shared-reclaim-fence") < kinds.index("shared-complete")
+    # `shared-complete` settles it: the second recover reclaims nothing
+    assert second["shared"]["reclaims"] == []
