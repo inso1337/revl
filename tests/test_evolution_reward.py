@@ -998,6 +998,12 @@ def test_compiles_fails_when_the_matrix_prints_nothing_readable(
     assert verdict.verified is False
 
 
+# Issue #1449: real cargo work in a cold scratch target directory, plus the
+# six-tier walk, and nothing another test has already built. Measured 26.5s
+# inside a hook-sized selection at load average 25 with `cargo check` alone;
+# building the crate's test profile as well (PR #1483) was measured at 60-75s
+# under load, past the pre-commit hook's 60s default.
+@pytest.mark.timeout(600)
 def test_compiles_verifies_on_this_tree(reward, real_candidate):
     """The real artifact: the real gate crate and the real six-tier walk. About
     twenty seconds, almost all of it a cold `cargo check`.
