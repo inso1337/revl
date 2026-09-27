@@ -621,3 +621,114 @@ def test_a_real_merge_era_test_deleted_since_is_caught():
         assert bool(problems) is expect_problem, (pin, problems)
         if expect_problem:
             assert any("collects no test" in p for p in problems), problems
+
+
+# ------------------------------------------- after a history rewrite
+#
+# The baseline's `merge` is a copy of GitHub's merge commit id and its
+# `carried_at` names a commit on main, so both were written before a rewrite
+# and name commits a rewritten clone does not have. With the rewrite map
+# present they are translated like GitHub's own ids.
+
+
+def _rewrite_everything(r: Path) -> dict[str, str]:
+    """Replay every commit on every branch with a new author, as a rewrite
+    does. Returns old id -> new id."""
+    _git(r, "config", "user.name", "rewritten")
+    mapping: dict[str, str] = {}
+    for old in _git(r, "rev-list", "--reverse", "--topo-order",
+                    "--branches").splitlines():
+        tree = _git(r, "rev-parse", f"{old}^{{tree}}")
+        msg = _git(r, "log", "-1", "--format=%B", old)
+        args = ["commit-tree", tree, "-m", msg]
+        for parent in _git(r, "log", "-1", "--format=%P", old).split():
+            args += ["-p", mapping[parent]]
+        mapping[old] = _git(r, *args)
+    for ref in _git(r, "for-each-ref", "--format=%(refname)",
+                    "refs/heads").splitlines():
+        _git(r, "update-ref", ref, mapping[_git(r, "rev-parse", ref)])
+    _git(r, "reset", "-q", "--hard")
+    return mapping
+
+
+@pytest.fixture
+def rewritten(repo, tmp_path) -> dict:
+    """`repo` rewritten and cloned: the clone holds only the new ids, and
+    the baseline entry still records the old ones, as the real file will."""
+    mapping = _rewrite_everything(repo["root"])
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(repo["root"]),
+                    str(clone)], check=True, capture_output=True)
+    for old in (repo["merge"], repo["carried"]):
+        assert mapping[old] != old
+        assert not chk.object_exists(clone, old)
+    tsv = tmp_path / "history_rewrite_map.tsv"
+    tsv.write_text("".join(f"{o}\t{n}\n" for o, n in mapping.items()),
+                   encoding="utf-8")
+    base = tmp_path / "baseline.json"
+    base.write_text(json.dumps({"unreachable": {"7": _good(repo)}}),
+                    encoding="utf-8")
+    prs = tmp_path / "prs.json"
+    prs.write_text(json.dumps([{"number": 7, "title": "the merge",
+                                "baseRefName": "feature",
+                                "mergeCommit": {"oid": repo["merge"]}}]),
+                   encoding="utf-8")
+    return {"clone": clone, "map": tsv, "baseline": base, "prs": prs,
+            "mapping": mapping, **repo}
+
+
+def test_the_witness_is_measured_through_the_rewrite_map(rewritten, capsys):
+    t = rewritten
+    argv = ["--witness-only", "--no-fetch", "--root", str(t["clone"]),
+            "--baseline", str(t["baseline"])]
+    # without the map the recorded ids are gone: unanswered, not a pass
+    assert chk.main(argv + ["--rewrite-map", str(t["map"]) + ".absent"]) == 2
+    assert "UNRESOLVED  #7" in capsys.readouterr().out
+    assert chk.main(argv + ["--rewrite-map", str(t["map"])]) == 0
+    out = capsys.readouterr().out
+    assert "verified    #7 CARRIED" in out
+    assert "translated 2 recorded baseline commit id(s)" in out
+
+
+def test_the_full_run_translates_github_and_the_baseline_alike(rewritten,
+                                                              capsys):
+    """GitHub's id and the baseline's copy of it are both pre-rewrite. Both
+    are translated, so the ancestry audit reads the entry as known, the
+    MERGE SHA cross-check agrees, and the witness verifies."""
+    t = rewritten
+    argv = ["--from-json", str(t["prs"]), "--no-fetch",
+            "--root", str(t["clone"]), "--main-ref", "origin/main",
+            "--baseline", str(t["baseline"])]
+    assert chk.main(argv + ["--rewrite-map", str(t["map"]) + ".absent"]) == 2
+    capsys.readouterr()
+    assert chk.main(argv + ["--rewrite-map", str(t["map"])]) == 0
+    out = capsys.readouterr().out
+    assert "known       #7:" in out and "MERGE SHA" not in out
+    assert "translated 1 GitHub merge commit id(s)" in out
+    assert "verified    #7 CARRIED" in out
+
+
+def test_the_merge_sha_cross_check_compares_translated_ids():
+    old, new, other = "a" * 40, "b" * 40, "c" * 40
+    rewrite = chk.RewriteMap({old: new}, Path("m.tsv"))
+    entries, changed = chk.translate_entries({"7": {"merge": old}}, rewrite)
+    assert entries == {"7": {"merge": new}} and changed == 1
+    github = [{"number": 7, "mergeCommit": {"oid": old}}]
+    assert chk.merge_sha_mismatches(github, entries, rewrite) == []
+    # translating only one side is the defect this guards against
+    assert len(chk.merge_sha_mismatches(github, entries)) == 1
+    # and a real disagreement survives translation
+    wrong = [{"number": 7, "mergeCommit": {"oid": other}}]
+    out = chk.merge_sha_mismatches(wrong, entries, rewrite)
+    assert len(out) == 1 and "wrong commit" in out[0]
+
+
+def test_translate_entries_leaves_what_it_cannot_read_alone():
+    rewrite = chk.RewriteMap({"a" * 40: "b" * 40}, Path("m.tsv"))
+    raw = {"1": "bare prose", "2": {"merge": 5, "carried_at": "a" * 40},
+           "3": {"verdict": "REWORKED"}}
+    out, changed = chk.translate_entries(raw, rewrite)
+    assert out == {"1": "bare prose", "2": {"merge": 5, "carried_at": "b" * 40},
+                   "3": {"verdict": "REWORKED"}}
+    assert changed == 1
+    assert raw["2"]["carried_at"] == "a" * 40  # the input is not mutated
