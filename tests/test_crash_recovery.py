@@ -20,6 +20,7 @@ back. These tests establish, in order:
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -404,6 +405,138 @@ def test_a_torn_final_record_is_tolerated_not_crashed_on(tmp_path):
     report = recover(str(path))
     assert report["verdict"] == "rolled-back"
     assert report["torn"] is True
+
+
+# ------------------------------------------- the model says it is a model (#1477)
+#
+# `revl recover` has no way to bind the outside world yet, so it replays against
+# the in-memory `DictWorld`. Before issue #1477 its output read as if the
+# effects were undone out there, and a clean model run exited 0. These pin the
+# honest form: every call line says it was modelled, the verdict JSON carries
+# `world: "model"`, and a model run exits non-zero unless `--model-only`.
+
+
+_MODEL_TAG = "modelled, not performed"
+
+
+def _model_rollback_wal(path: str, *, with_compensation: bool) -> str:
+    """A mid-activation crash with one reconstructible acquire (the `ran`
+    lane), one undischarged transactional inverse (`rolled-back`) and,
+    optionally, one owed compensation (Phase 2, always residue)."""
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    wal.record_boundary("Store", "create scratch", resource="File",
+                        inverse_op={"receiver": "fs", "method": "unlink",
+                                    "args": ["/data/gen1.scratch"]},
+                        undo_idempotent=True)
+    wal.record_discharge_descriptor(
+        "transactional", receiver="db", method="delete", args=["row#1"],
+        undo_idempotent=True)
+    if with_compensation:
+        wal.record_discharge_descriptor(
+            "compensation", receiver="payments", method="refund",
+            args=["order-7"])
+    wal.close()  # crash: no activation-complete
+    return path
+
+
+def _call_lines(text: str) -> list:
+    """The rendered lines that report a call against the world."""
+    heads = ("ran ", "rolled-back ", "RESIDUE  compensation", "re-issued ",
+             "read ", "reclaim ", "RECLAIM!")
+    return [line for line in text.splitlines()
+            if line.strip().startswith(heads)]
+
+
+def test_a_model_recover_says_every_call_was_modelled_not_performed(
+        tmp_path, capsys):
+    from revl.__main__ import main  # noqa: PLC0415
+
+    path = _model_rollback_wal(str(tmp_path / "model.wal"),
+                               with_compensation=True)
+    rc = main(["recover", "--wal", path])
+    captured = capsys.readouterr()
+
+    calls = _call_lines(captured.out)
+    assert len(calls) == 3, captured.out
+    assert all(_MODEL_TAG in line for line in calls), calls
+    assert "world: MODEL" in captured.out.splitlines()[1]
+    assert "residue proof [RESIDUE] in the model:" in captured.out
+    # residue in the model is still residue: exit 1, and stderr says why
+    # nothing out there was reconciled.
+    assert rc == 1
+    assert "not reconciled" in captured.err
+
+
+def test_a_clean_model_recover_refuses_to_exit_zero_without_model_only(
+        tmp_path, capsys):
+    from revl.__main__ import main  # noqa: PLC0415
+    from revl.cli.change import EXIT_MODEL_ONLY  # noqa: PLC0415
+
+    path = _model_rollback_wal(str(tmp_path / "clean.wal"),
+                               with_compensation=False)
+    rc = main(["recover", "--wal", path, "--json"])
+    captured = capsys.readouterr()
+    report = json.loads(captured.out)
+
+    assert report["world"] == "model"
+    assert report["residue"]["clean"] is True
+    assert report["residue"]["proof"].startswith("world: model.")
+    assert _MODEL_TAG in report["residue"]["proof"]
+    assert rc == EXIT_MODEL_ONLY != 0
+    assert "--model-only" in captured.err
+
+    rc = main(["recover", "--wal", path, "--model-only"])
+    captured = capsys.readouterr()
+    assert rc == 0
+    assert captured.err == ""
+    calls = _call_lines(captured.out)
+    assert len(calls) == 2 and all(_MODEL_TAG in line for line in calls)
+
+
+def test_every_verdict_names_the_world_it_ran_against(tmp_path):
+    """Roll-forward and fork-retired touch no world at all, and still say which
+    one recover was bound to, so a consumer never has to infer it."""
+    rolled_back = _model_rollback_wal(str(tmp_path / "rb.wal"),
+                                      with_compensation=False)
+    forward = str(tmp_path / "fwd.wal")
+    with replay.WriteAheadLog(forward, ir={}, generation=1) as wal:
+        wal.append_timeline(_closure_effect_timeline())
+        wal.commit_activation(["Svc"])
+
+    assert recover(rolled_back)["world"] == "model"
+    assert recover(forward)["world"] == "model"
+    assert recover(forward, world=DictWorld())["world"] == "model"
+
+
+def test_a_world_that_declares_itself_real_is_reported_as_real(tmp_path):
+    """The other value, for the adapter a real host supplies. Only `kind =
+    "real"` earns it; the proof and the render then carry no model marker, and
+    a clean verdict may exit 0 without `--model-only`."""
+    from revl.cli.change import _recover_exit_status  # noqa: PLC0415
+
+    class RealWorld(DictWorld):
+        kind = "real"
+
+    path = _model_rollback_wal(str(tmp_path / "real.wal"),
+                               with_compensation=False)
+    report = recover(path, world=RealWorld())
+
+    assert report["world"] == "real"
+    assert report["residue"]["clean"] is True
+    assert _MODEL_TAG not in report["residue"]["proof"]
+    assert _MODEL_TAG not in render(report)
+    assert "world: MODEL" not in render(report)
+    assert _recover_exit_status(report, model_only=False) == 0
+
+
+def test_a_verdict_with_no_world_field_is_treated_as_a_model():
+    """Fail closed: a report that does not say it ran against the real world
+    (a hand-built one, or one from an older writer) never exits 0 by default."""
+    from revl.cli.change import EXIT_MODEL_ONLY, _recover_exit_status  # noqa: PLC0415
+
+    report = {"residue": {"clean": True}}
+    assert _recover_exit_status(report, model_only=False) == EXIT_MODEL_ONLY
+    assert _recover_exit_status(report, model_only=True) == 0
 
 
 # --------------------------------------------------------------- production path
