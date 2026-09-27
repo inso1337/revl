@@ -965,8 +965,10 @@ LIFO), ending in a checked verdict + residue proof
   past the crash and whose surface still matches. Without it, recover only
   reports each un-finalized decision.
 - `--composition FILE...` - recover against the REAL world: the composition
-  that wrote the WAL. Refused, by name, unless it matches the digest in the WAL
-  header. The WAL's open discharge descriptors are re-issued through its own
+  that wrote the WAL. Each open call is replayed only through the composition
+  of the log opening that wrote it (the header, or a later `generation`
+  record); another opening's calls are residue naming that opening, and a
+  composition that wrote none of them is refused by name. The WAL's open discharge descriptors are re-issued through its own
   host bodies and the providers they call through, by the runtime's abort
   path, and the runtime's `aborted` record settles each one that ran.
 - `--config FILE` - with `--composition`, the config the composition ran with,

@@ -45,19 +45,58 @@ def _replay_module():
     return replay_module()
 
 
-def _open_descriptor_receivers(records: list) -> set:
-    """The required-service keys the still-open descriptors call through. A seq
-    named in a `discharge` or `aborted` record is settled and needs nothing."""
+def _open_calls(records: list) -> dict:
+    """``{seq: call}`` for every call the binding could still be asked to
+    make: a discharge descriptor, or a legacy boundary effect with a
+    reconstructible inverse op. A seq named in a `discharge` or `aborted`
+    record is settled and needs nothing."""
     settled: set = set()
     for record in records:
         if record.get("record") == "discharge":
             settled.update(record.get("discharged") or [])
         elif record.get("record") == "aborted":
             settled.update(record.get("replayed") or [])
-    return {(r.get("call") or {}).get("receiver") for r in records
-            if r.get("record") == "discharge-descriptor"
-            and r.get("seq") not in settled
-            and (r.get("call") or {}).get("receiver") is not None}
+    calls: dict = {}
+    for r in records:
+        seq = r.get("seq")
+        if seq in settled:
+            continue
+        if r.get("record") == "discharge-descriptor":
+            calls[seq] = r.get("call") or {}
+        elif r.get("record") == "effect" \
+                and (r.get("inverse") or {}).get("reconstructible"):
+            calls[seq] = (r.get("inverse") or {}).get("op") or {}
+    return calls
+
+
+def _segments(wal: dict) -> list:
+    """The log's openings, in order. The header opens it; every later opening
+    (a `--watch` reload, or a later run reusing the file, #641/#642) writes a
+    `generation` record naming its own composition digest and the first seq it
+    owns."""
+    header = wal.get("header") or {}
+    segments = [{"opening": 1, "generation": header.get("generation"),
+                 "fromSeq": 0, "composition": header.get("composition")}]
+    for record in wal.get("records") or []:
+        if record.get("record") == "generation":
+            segments.append({"opening": len(segments) + 1,
+                             "generation": record.get("generation"),
+                             "fromSeq": record.get("fromSeq") or 0,
+                             "composition": record.get("composition")})
+    return segments
+
+
+def _segment_of(segments: list, seq: Any) -> dict:
+    owner = segments[0]
+    for segment in segments:
+        if isinstance(seq, int) and seq >= segment["fromSeq"]:
+            owner = segment
+    return owner
+
+
+def _label(segment: dict) -> str:
+    return (f"generation {segment['generation']} (opening {segment['opening']} "
+            f"of this log, from seq {segment['fromSeq']})")
 
 
 def _provider_closure(ir: dict, keys: set) -> list:
@@ -114,7 +153,8 @@ class CompositionWorld(World):
 
     def __init__(self, *, files: list, digest: str, module: Any, runtime: Any,
                  wal_path: str, services: dict, booted: list,
-                 provider_session: Any, cleanup: list) -> None:
+                 provider_session: Any, cleanup: list,
+                 foreign: Optional[dict] = None) -> None:
         self.files = list(files)
         self.digest = digest
         self.module = module
@@ -124,15 +164,37 @@ class CompositionWorld(World):
         self.booted = list(booted)
         self._provider_session = provider_session
         self._cleanup = cleanup
+        #: seq -> the log opening (generation) that wrote it, for every open
+        #: call a different composition wrote. Never handed to the runtime.
+        self.foreign = dict(foreign or {})
 
     def describe(self) -> dict:
         """What the verdict says about the binding it ran through."""
         return {"composition": self.files, "digest": self.digest,
-                "booted": self.booted}
+                "booted": self.booted,
+                "otherGenerations": sorted(
+                    {_label(seg) for seg in self.foreign.values()})}
 
     def replay_descriptors(self, descriptors: list) -> dict:
-        return self.runtime.replay_descriptors(
-            self.module, self.wal_path, descriptors, services=self.services)
+        """The runtime's outcomes for the calls this composition wrote, and
+        ``other-generation`` for a call another composition wrote: that one is
+        not handed over, because this composition's host bodies are not the
+        ones it was registered against."""
+        mine = [d for d in descriptors if d.get("seq") not in self.foreign]
+        outcome = {d.get("seq"): "other-generation" for d in descriptors
+                   if d.get("seq") in self.foreign}
+        if mine:
+            outcome.update(self.runtime.replay_descriptors(
+                self.module, self.wal_path, mine, services=self.services))
+        return outcome
+
+    def generation_note(self, seq: Any) -> str:
+        segment = self.foreign.get(seq)
+        if segment is None:
+            return ""
+        return (f"written by {_label(segment)}, composition "
+                f"{segment['composition'] or '(no digest)'}; recover it with "
+                f"that composition")
 
     # The referent bookkeeping `DictWorld` keeps is a model's; the real world
     # has nothing to seed and cannot enumerate what is still out there.
@@ -161,22 +223,51 @@ class CompositionWorld(World):
         self.close()
 
 
-def check_digest(wal: dict, digest: str, files: list) -> None:
-    """Refuse unless the WAL header names this composition."""
-    recorded = (wal.get("header") or {}).get("composition")
-    named = ", ".join(files)
+def _mismatch(segment: dict, digest: str, named: str) -> str:
+    recorded = segment["composition"]
     if recorded is None:
+        return (f"{_label(segment)} carries no composition digest, so recover "
+                f"cannot tell whether {named} wrote it (a log written before "
+                f"issue #1477, or opened without an IR)")
+    return (f"{named} is not the composition that wrote {_label(segment)}: "
+            f"the log records {recorded}, {named} compiles to {digest}")
+
+
+def plan_generations(wal: dict, digest: str, files: list) -> dict:
+    """Which of the log's open calls this composition may make.
+
+    Every opening of the log names the composition that wrote it. An open call
+    is replayed only through its own opening's composition. Returns
+    ``{seq: segment}`` for the open calls another composition wrote, which the
+    binding refuses call by call. Raises :class:`CompositionMismatch`, naming
+    each opening, when the composition wrote none of the open calls, or, with
+    nothing open, is not the composition of the log's latest opening."""
+    named = ", ".join(files)
+    segments = _segments(wal)
+    calls = _open_calls(wal.get("records") or [])
+    owners = {seq: _segment_of(segments, seq) for seq in calls}
+    mine = {seq for seq, seg in owners.items() if seg["composition"] == digest}
+    if calls and not mine:
+        opened = {seg["opening"]: seg for seg in owners.values()}
+        reasons = "; ".join(_mismatch(opened[k], digest, named)
+                            for k in sorted(opened))
         raise CompositionMismatch(
-            f"the WAL header carries no composition digest, so recover cannot "
-            f"tell whether {named} is the composition that wrote it. A log "
-            f"written before issue #1477, or opened without an IR, can only be "
-            f"recovered against the model (drop --composition).")
-    if recorded != digest:
+            f"{named} wrote none of this WAL's open calls: {reasons}. Recover "
+            f"each generation with its own composition; recovering through a "
+            f"different one would replay the log's calls against the wrong "
+            f"host bodies.")
+    if not calls and segments[-1]["composition"] != digest:
         raise CompositionMismatch(
-            f"{named} is not the composition that wrote this WAL: the header "
-            f"records {recorded}, {named} compiles to {digest}. Recovering "
-            f"through a different composition would replay the log's calls "
-            f"against the wrong host bodies.")
+            _mismatch(segments[-1], digest, named) + ". Recovering through a "
+            "different composition would replay the log's calls against the "
+            "wrong host bodies.")
+    return {seq: seg for seq, seg in owners.items() if seq not in mine}
+
+
+def check_digest(wal: dict, digest: str, files: list) -> None:
+    """Refuse unless this composition wrote the log (see
+    :func:`plan_generations`)."""
+    plan_generations(wal, digest, files)
 
 
 def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> CompositionWorld:
@@ -197,7 +288,7 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
         raise RecoveryError(f"cannot compile {', '.join(files)}: {error}") from None
     digest = _replay_module().composition_digest(ir)
     wal = read_wal(wal_path)
-    check_digest(wal, digest, list(files))
+    foreign = plan_generations(wal, digest, list(files))
 
     try:
         emit, runtime, Context, FiberState = _backend()
@@ -218,7 +309,9 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
     booted: list = []
     services: dict = {}
     try:
-        keys = _open_descriptor_receivers(wal["records"])
+        keys = {call.get("receiver")
+                for seq, call in _open_calls(wal["records"]).items()
+                if seq not in foreign and call.get("receiver") is not None}
         booted = _provider_closure(ir, keys)
         if booted:
             session = Session()
@@ -240,4 +333,5 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
     return CompositionWorld(files=list(files), digest=digest, module=module,
                             runtime=runtime, wal_path=wal_path,
                             services=services, booted=booted,
-                            provider_session=session, cleanup=cleanup)
+                            provider_session=session, cleanup=cleanup,
+                            foreign=foreign)
