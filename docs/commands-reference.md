@@ -1665,6 +1665,21 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
   its `mcp` sandbox bounds admitted agent code, and `leases enforced` refuses a
   swap that would replace a component another operator leases (item 61). Omit
   for advisory-only leases.
+- `--http HOST:PORT` - serve MCP 2026-07-28 Streamable HTTP at
+  `http(s)://HOST:PORT/mcp` instead of stdio, one operator per request
+  ([mcp-http-transport.md](mcp-http-transport.md)). Needs `--operator-profile`
+  and refuses `--operator`. With it:
+  - `--auth {bearer, mtls}` - a bearer secret whose SHA-256 is the operator's
+    `key sha256:` line (default), or a client certificate whose commonName is
+    the operator token.
+  - `--tls-cert PEM`, `--tls-key PEM` - serve HTTPS. Required for any address
+    other than loopback.
+  - `--tls-client-ca PEM` - require client certificates from this CA (`--auth
+    mtls`).
+  - `--allow-host NAME` - a Host value to answer besides the bind address
+    (repeatable); required for a wildcard bind.
+  - `--allow-origin ORIGIN` - a browser origin that may call the server
+    (repeatable); any other `Origin` is refused.
 
 `revl mcp schema FILES` - project provided services to MCP tool definitions
 (the `revl -> MCP` direction, annotations derived from the checker).
@@ -1707,6 +1722,9 @@ write-ahead log and declared undos apply at call time.
   directory).
 - `--operator-profile PROFILE`, `--operator TOKEN`, `--policy POLICY`,
   `--approval-record-values {bound, withheld}` - as for `revl mcp serve`.
+- `--http HOST:PORT`, `--auth`, `--tls-cert`, `--tls-key`, `--tls-client-ca`,
+  `--allow-host`, `--allow-origin` - serve the gated tools over HTTP, one
+  operator per request, as for `revl mcp serve`.
 
 ### `revl import`
 
@@ -1900,8 +1918,16 @@ compiler's.
     compiler-derived `readOnly`/`emission` hints, and the gate FRONTIER the face
     was projected under. The face is LOCAL contract only - it makes no safety
     claim about any callee it in turn reaches - and binds loopback by default.
-- `--host HOST` - `--http` bind address (default: `127.0.0.1`).
+- `--host HOST` - `--http` bind address (default: `127.0.0.1`). Any address
+  other than loopback needs `--tls-cert` and `--tls-key`, or the server refuses
+  to start.
 - `--port PORT` - `--http` bind port (default: `8080`).
+- `--tls-cert PEM`, `--tls-key PEM` - serve HTTPS.
+- `--allow-host NAME` - a Host value to answer besides the bind address
+  (repeatable). A request with any other Host is refused (403), which stops DNS
+  rebinding; a wildcard bind needs at least one.
+- `--allow-origin ORIGIN` - a browser origin that may call the face
+  (repeatable); a request with any other `Origin` is refused (403).
 - `--config FILE` - TOML/JSON file of `component-name = { ... }` config tables,
   supplied to each component at boot.
 - `--env FILE` - TOML/JSON file of flat `name = value` environment values,

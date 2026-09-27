@@ -44,6 +44,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ..gate import gate_version
 from .approval import ApprovalRequired, two_step_payload
+from .http_guard import Exposure, Listener, check_exposure, request_refusal
 from .composed import ComposedServer
 from .session import SessionError
 
@@ -990,7 +991,7 @@ def _all_digits(value: str) -> bool:
     return all("0" <= ch <= "9" for ch in value)
 
 
-def _make_handler(server: HttpComposedServer):
+def _make_handler(server: HttpComposedServer, exposure=None):
     class _Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
@@ -1039,6 +1040,16 @@ def _make_handler(server: HttpComposedServer):
                 self.wfile.write(reply.body)
 
         def _respond(self, method: str) -> None:
+            # issue #1463: the Host and Origin checks every revl HTTP listener
+            # shares (`http_guard`), before anything reads the body. A page that
+            # re-points its own name at 127.0.0.1 (DNS rebinding) still sends
+            # its own name as Host, and a browser sends its page as Origin.
+            if exposure is not None:
+                guard = request_refusal(self.headers, exposure)
+                if guard is not None:
+                    self._write(HttpReply.json(_FORBIDDEN, _err(
+                        guard, code="forbidden-origin")), close=True)
+                    return
             length, refusal = _frame_request(self.headers, _MAX_BODY)
             if refusal is not None:
                 # A clean, structured refusal in the module's own error shape,
@@ -1081,19 +1092,25 @@ def _make_handler(server: HttpComposedServer):
     return _Handler
 
 
-def build_http_server(server: HttpComposedServer, host: str,
-                      port: int) -> ThreadingHTTPServer:
-    """Bind a `ThreadingHTTPServer` for `server` (a port of 0 picks a free one).
+def build_http_server(server: HttpComposedServer, host: str, port: int, *,
+                      exposure: Exposure | None = None) -> ThreadingHTTPServer:
+    """Bind a listener for `server` (a port of 0 picks a free one).
 
     Split out from `serve_http` so a test can bind a stub-backed face to
     loopback and drive it over a real socket with no cordis runtime.
+
+    The listener applies `http_guard` (issue #1463): a non-loopback address
+    needs TLS or it refuses to bind (`ExposureError`), and a request whose Host
+    is not this listener's own, or whose Origin is not allowed, is refused 403.
     """
-    return ThreadingHTTPServer((host, port), _make_handler(server))
+    exposure = exposure or Exposure(host=host, port=port)
+    exposure.host, exposure.port = host, port
+    return Listener(exposure, _make_handler(server, exposure))
 
 
 def serve_http(ir: dict, config: dict | None = None, *,
                composition: str = "revl", host: str = "127.0.0.1",
-               port: int = 8080) -> int:
+               port: int = 8080, exposure: Exposure | None = None) -> int:
     """Boot `ir` into a live session and serve its operations over HTTP.
 
     Booting is admission, so this loads through the same `Session.load` the MCP
@@ -1102,6 +1119,10 @@ def serve_http(ir: dict, config: dict | None = None, *,
     """
     from .session import Session  # noqa: PLC0415 — lazy: Session pulls cordis
 
+    # refuse an unsafe listener BEFORE booting anything (issue #1463)
+    exposure = exposure or Exposure(host=host, port=port)
+    exposure.host, exposure.port = host, port
+    check_exposure(exposure)
     session = Session()
     session.load(ir, config or {}, origin=None)
     # item 457: wire the live module's decoder so a routed handler binding a typed
@@ -1121,9 +1142,10 @@ def serve_http(ir: dict, config: dict | None = None, *,
         except Exception:  # noqa: BLE001 — the escape hatch degrades to identity
             decode = None
     face = HttpComposedServer(session, composition=composition, decode=decode)
-    httpd = build_http_server(face, host, port)
+    httpd = build_http_server(face, host, port, exposure=exposure)
     bound_host, bound_port = httpd.server_address[:2]
-    print(f"revl serve --http: {composition} on http://{bound_host}:{bound_port}",
+    scheme = "https" if httpd.tls_context is not None else "http"
+    print(f"revl serve --http: {composition} on {scheme}://{bound_host}:{bound_port}",
           file=sys.stderr)
     print(f"  gate frontier: {face.frontier}", file=sys.stderr)
     print(f"  {len(face._by_path)} operation(s); GET / for the manifest. LOCAL "

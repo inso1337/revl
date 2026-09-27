@@ -534,6 +534,15 @@ class Proxy:
             return _payload_result(self.server._session_error(self.refused[name]))
         if not isinstance(arguments, dict):
             return _error_result("`arguments` must be an object")
+        # item 55: a proxied tool is a call on the proxied composition, so it
+        # answers to the operator profile's `call` verb, like `revl_call`. With
+        # no profile bound this is ungated (stdio without --operator-profile).
+        from . import operator as _operator  # noqa: PLC0415
+
+        decision = _operator.decide(self.session, "revl_call",
+                                    {"key": KEY, "method": tool["op"]})
+        if decision.gated and not decision.allowed:
+            return _payload_result(self.server._refused_by_operator(decision))
         self._last = None
         self._pending_meta = meta
         try:
@@ -778,14 +787,27 @@ def _error_result(message: str) -> dict:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
+class _Discard:
+    """Where client-bound notifications go when there is no stream to carry
+    them: MCP over HTTP delivers them only on `subscriptions/listen`, which the
+    first HTTP slice does not serve (docs/mcp-http-transport.md)."""
+
+    def write(self, _text: str) -> int:
+        return 0
+
+    def flush(self) -> None:
+        pass
+
+
 def run(command: list[str], *, undo: dict | None = None,
         trust_read_only: bool = False, timeout: float = 120.0,
-        stdin=None, stdout=None, stderr=None) -> int:
-    """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin."""
+        stdin=None, stdout=None, stderr=None, http: dict | None = None) -> int:
+    """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin, or,
+    with `http` (`{"exposure", "auth", "registry"}`), until interrupted."""
     stderr = stderr or sys.stderr
     upstream = Upstream(command, timeout=timeout)
     proxy = Proxy(upstream, undo=undo, trust_read_only=trust_read_only,
-                  stdout=stdout)
+                  stdout=_Discard() if http is not None else stdout)
     proxy.activate()
     try:
         upstream.start()
@@ -806,7 +828,21 @@ def run(command: list[str], *, undo: dict | None = None,
         for excluded in proxy.excluded:
             print(f"revl mcp proxy: not proxied: tool #{excluded['index']} "
                   f"{excluded['name']!r}: {excluded['excludedBecause']}", file=stderr)
-        code = proxy.serve(stdin)
+        if http is not None:
+            from .http_transport import HttpTransport, ProxyDispatcher, TransportError  # noqa: PLC0415
+
+            try:
+                transport = HttpTransport(ProxyDispatcher(proxy),
+                                          registry=http["registry"],
+                                          exposure=http["exposure"],
+                                          auth=http.get("auth", "bearer"),
+                                          server_module=proxy.server)
+            except TransportError as error:
+                print(f"error: {error}", file=stderr)
+                return 1
+            code = transport.serve_forever(stderr=stderr)
+        else:
+            code = proxy.serve(stdin)
         _abort_at_exit(proxy, stderr)
         return code
     finally:
@@ -829,6 +865,6 @@ def _abort_at_exit(proxy: Proxy, stderr) -> None:
         print(f"revl mcp proxy: could not abort the uncommitted session at exit: "
               f"{error}", file=stderr)
         return
-    print(f"revl mcp proxy: the client left without committing; aborted, "
+    print(f"revl mcp proxy: the session ended without a commit; aborted, "
           f"replayed {len(result.get('replayed') or [])} declared undo(s), "
           f"residue-free: {bool(result.get('noResidue'))}", file=stderr)

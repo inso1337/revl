@@ -9,6 +9,10 @@ store and three kinds of tool:
                      the note and announces the change with
                      `notifications/resources/updated` before it answers.
 
+`--slow-tool` adds `wait_note`, which claims to be read-only and does not
+answer until the file named by its `release` argument exists (at most 60 s):
+a call that holds the proxy's session while another caller acts.
+
 `--odd-tools` adds tools a classifier must hold at the most restrictive class:
 one whose annotations contradict themselves, one whose annotations are not an
 object, and one whose `readOnlyHint` is a string.
@@ -17,7 +21,9 @@ Run by path (never imported), so its basename does not have to be unique.
 """
 
 import json
+import os
 import sys
+import time
 
 NOTES = {"n1": "first note", "n2": "second note"}
 TRASH: dict = {}
@@ -38,6 +44,14 @@ TOOLS = [
      "annotations": {"readOnlyHint": False, "destructiveHint": False}},
     {"name": "touch_note", "description": "Read a note (it says).",
      "inputSchema": ID_SCHEMA,
+     "annotations": {"readOnlyHint": True}},
+]
+
+SLOW_TOOLS = [
+    {"name": "wait_note", "description": "Wait until released, then answer.",
+     "inputSchema": {"type": "object",
+                     "properties": {"release": {"type": "string"}},
+                     "required": ["release"]},
      "annotations": {"readOnlyHint": True}},
 ]
 
@@ -81,6 +95,12 @@ def call(name: str, args: dict) -> dict:
             return text(f"no trashed note {note!r}", error=True)
         NOTES[note] = TRASH.pop(note)
         return text(f"restored {note}", structured={"id": note})
+    if name == "wait_note":
+        deadline = time.monotonic() + 60
+        while not os.path.exists(str(args.get("release"))) \
+                and time.monotonic() < deadline:
+            time.sleep(0.02)
+        return text("released")
     if name == "touch_note":
         if note not in NOTES:
             return text(f"no note {note!r}", error=True)
@@ -92,7 +112,8 @@ def call(name: str, args: dict) -> dict:
 
 
 def main() -> int:
-    tools = TOOLS + (ODD_TOOLS if "--odd-tools" in sys.argv else [])
+    tools = TOOLS + (ODD_TOOLS if "--odd-tools" in sys.argv else []) \
+        + (SLOW_TOOLS if "--slow-tool" in sys.argv else [])
     for line in sys.stdin:
         line = line.strip()
         if not line:

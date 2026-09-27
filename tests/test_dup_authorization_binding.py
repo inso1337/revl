@@ -106,7 +106,7 @@ def _stop(serving):
 def _request(serving, auth: bytes, path: str = "/notes/7"):
     """Send one request verbatim and return `(status, calls)`."""
     del serving.stub.calls[:]
-    payload = (b"GET " + path.encode() + b" HTTP/1.1\r\nHost: x\r\n"
+    payload = (b"GET " + path.encode() + b" HTTP/1.1\r\nHost: 127.0.0.1\r\n"
                + auth + b"Connection: close\r\n\r\n")
     sock = socket.create_connection(("127.0.0.1", serving.port), timeout=3)
     sock.settimeout(3)

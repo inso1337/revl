@@ -20,6 +20,46 @@ BUNDLE_BACKENDS = ("python", "typescript", "rust", "java", "go", "wasm")
 REPLAY_MODES = ("exact", "tool-only", "model-substitute", "counterfactual")
 
 
+def _add_exposure_arguments(sub) -> None:
+    """The listener options every revl HTTP server shares (issue #1463,
+    `revl.mcp.http_guard`): TLS, and the Host and Origin allowlists."""
+    sub.add_argument("--tls-cert", default=None, metavar="PEM",
+                     help="serve HTTPS with this certificate chain (with "
+                          "--tls-key). Required to listen on any address "
+                          "other than loopback")
+    sub.add_argument("--tls-key", default=None, metavar="PEM",
+                     help="the private key for --tls-cert")
+    sub.add_argument("--allow-host", action="append", default=[], metavar="NAME",
+                     help="a Host header value to answer besides the bind "
+                          "address (repeatable); a request naming any other "
+                          "host is refused, which is what stops DNS rebinding")
+    sub.add_argument("--allow-origin", action="append", default=[],
+                     metavar="ORIGIN",
+                     help="a browser origin that may call this server, exactly "
+                          "(repeatable). A request with any other Origin header "
+                          "is refused; one with no Origin is not a browser page")
+
+
+def _add_mcp_http_arguments(sub) -> None:
+    """`--http HOST:PORT` and its identity options for `revl mcp serve` and
+    `revl mcp proxy` (docs/mcp-http-transport.md)."""
+    sub.add_argument("--http", default=None, metavar="HOST:PORT",
+                     help="serve MCP 2026-07-28 Streamable HTTP at "
+                          "http(s)://HOST:PORT/mcp instead of stdio. Needs "
+                          "--operator-profile: every request is bound to one of "
+                          "its operators")
+    sub.add_argument("--auth", default="bearer", choices=("bearer", "mtls"),
+                     help="how an HTTP caller proves which operator it is: a "
+                          "bearer secret whose SHA-256 is the operator's `key "
+                          "sha256:` line (default), or a client certificate "
+                          "whose commonName is the operator token (needs "
+                          "--tls-client-ca)")
+    sub.add_argument("--tls-client-ca", default=None, metavar="PEM",
+                     help="require a client certificate signed by this CA "
+                          "(mutual TLS, --auth mtls)")
+    _add_exposure_arguments(sub)
+
+
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
     parser = argparse.ArgumentParser(prog="revl")
@@ -948,6 +988,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 "`registry`) may name (repeatable). Defaults to "
                                 "the directory the server was started in; anything "
                                 "outside is refused before it is read")
+    _add_mcp_http_arguments(mcp_serve)
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -1007,6 +1048,7 @@ def build_parser() -> argparse.ArgumentParser:
                            help="whether an approved crossing's caller-supplied "
                                 "resource value is written to the durable approval "
                                 "log (default: withheld)")
+    _add_mcp_http_arguments(mcp_proxy)
 
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
@@ -1299,6 +1341,7 @@ def build_parser() -> argparse.ArgumentParser:
                             "it is not exposed off-host by default)")
     serve.add_argument("--port", type=int, default=8080, metavar="PORT",
                        help="--http bind port (default: 8080)")
+    _add_exposure_arguments(serve)
     serve.add_argument("--config", default=None,
                        help="TOML/JSON file of `component-name = { ... }` config "
                             "tables — supplied to each component at boot")

@@ -6349,7 +6349,10 @@ class Session:
                                        vote=vote),
             now_ms=self._now_ms(),
             bound=getattr(self, "operator", None),
-            registry=getattr(self, "operator_registry", None))
+            registry=getattr(self, "operator_registry", None),
+            # issue #1463: "transport" when the HTTP transport authenticated the
+            # bound operator for this request; the label is the only difference
+            bound_by=getattr(self, "operator_bound_by", "session"))
         if isinstance(outcome, _quorum.UnboundCast):
             self._record_quorum("quorum-refused", {
                 **self._refusal_row(record, action, outcome.reason,
