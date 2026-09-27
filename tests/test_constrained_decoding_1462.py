@@ -521,3 +521,22 @@ def test_revl_run_attaches_the_grammar_and_holds_the_answer_to_it(tmp_path,
     done = run()
     assert re.search(r"error\s+\|\s+GrammarNotHonouredError\|.*stated "
                      r"decoding grammar not honoured", done.stdout), done.stdout
+
+
+def test_the_benchmark_writes_nothing_when_the_server_never_answered(capsys):
+    """Measured on this machine: a local server restarted mid-run and every
+    sample after it was `cannot reach`. Such a run is not a measurement, so
+    `--write` refuses it instead of committing a table of zeros."""
+    import importlib.util  # noqa: PLC0415
+    spec = importlib.util.spec_from_file_location(
+        "revl_bench_structured_output_1462b",
+        ROOT / "bench" / "structured_output_bench.py")
+    bench = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(bench)
+    before = sorted(bench.RESULTS.glob("*")) if bench.RESULTS.exists() else []
+    assert bench.main(["--base-url", "http://127.0.0.1:1/v1", "--model",
+                       "nothing-here", "--n", "1", "--arms", "none",
+                       "--timeout", "5", "--write"]) == 1
+    assert "not written" in capsys.readouterr().err
+    after = sorted(bench.RESULTS.glob("*")) if bench.RESULTS.exists() else []
+    assert after == before
