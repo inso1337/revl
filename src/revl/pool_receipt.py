@@ -241,12 +241,14 @@ def verify_result(record: Mapping[str, Any], result: Any) -> tuple[bool, str]:
 
 def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
                   result: Any, identity: PeerIdentity,
-                  at: Optional[datetime] = None) -> dict:
+                  at: Optional[datetime] = None,
+                  network_exposed: bool = False) -> dict:
     """The peer signs what it ran and what came out.
 
     ``identity.peer_id`` is the peer named in the receipt; it is not a separate
     parameter, so a receipt cannot be issued in another peer's name by a caller
-    that holds only its own key."""
+    that holds only its own key. ``network_exposed`` is passed to
+    :func:`revl.peer_identity.sign_record` (issue #1460)."""
     if not isinstance(identity, PeerIdentity):
         raise ReceiptError("issuing a receipt needs the peer's own PeerIdentity")
     for name, value in (("pool_id", pool_id), ("task_id", task_id),
@@ -263,17 +265,20 @@ def issue_receipt(*, pool_id: str, task_id: str, artifact_digest: str,
         "result_digest": result_digest(result),
         "issued_at": _iso(at or _utc_now()),
     }
-    return peer_identity.sign_record(RECEIPT_DOMAIN, body, identity)
+    return peer_identity.sign_record(RECEIPT_DOMAIN, body, identity,
+                                     network_exposed=network_exposed)
 
 
 def attest_receipt(record: Mapping[str, Any], *, identity: PeerIdentity,
                    verdict: str = ADMITTED,
-                   at: Optional[datetime] = None) -> dict:
+                   at: Optional[datetime] = None,
+                   network_exposed: bool = False) -> dict:
     """An attesting authority signs the digest of a peer's receipt.
 
     It signs the digest and not the body: there is then exactly one copy of
     what is being attested, so an attestation and the receipt it covers cannot
-    drift apart."""
+    drift apart. ``network_exposed`` is passed to
+    :func:`revl.peer_identity.sign_record` (issue #1460)."""
     if not isinstance(identity, PeerIdentity):
         raise ReceiptError("attesting needs the attestor's own PeerIdentity")
     if not isinstance(record, Mapping):
@@ -289,7 +294,8 @@ def attest_receipt(record: Mapping[str, Any], *, identity: PeerIdentity,
         "attestor": identity.peer_id,
         "attested_at": _iso(at or _utc_now()),
     }
-    return peer_identity.sign_record(ATTESTATION_DOMAIN, body, identity)
+    return peer_identity.sign_record(ATTESTATION_DOMAIN, body, identity,
+                                     network_exposed=network_exposed)
 
 
 # ---------------------------------------------------------------------------

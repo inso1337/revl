@@ -899,7 +899,9 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   - `--peer-addr HOST:PORT` - where that member's `revl pool serve` is
     listening. The address is how to REACH the peer; its identity is the key it
     signs with, so an address nobody vouched for reaches a peer whose receipts
-    then fail to verify.
+    then fail to verify. A non-loopback address needs the `revl[crypto]` extra
+    for constant-time signing and exits 2 naming it, before the ledger is
+    touched, when it is missing (issue #1460).
   - `--dispatch-identity PATH` - the operator's PRIVATE identity file, which
     signs the task. The peer holds only its public half.
   - `--attest-identity PATH` - the private identity file that attests the
@@ -1395,7 +1397,12 @@ for the key lifecycle and what the signature binds.
     security: every record on it is signed, so nothing can be forged
     undetected, and nothing on it is secret - the artifact source crosses in
     the clear. A confidential cross-machine channel is roadmap item 118's mTLS
-    work, which this is a caller of rather than a second copy of.
+    work, which this is a caller of rather than a second copy of. A
+    non-loopback bind also needs the `revl[crypto]` extra
+    (`pip install 'revl[crypto]'`) and exits 2 naming it before binding,
+    because the peer signs a receipt for every task a remote party sends and
+    the pure-Python signer's timing leaks its key (issue #1460; see
+    [tee-attestation-root.md](tee-attestation-root.md)).
   - `--workdir DIR` - where artifacts are written and run (default: a fresh
     temporary directory removed on exit).
   - `--timeout SECONDS` - how long one artifact may run (default 300).
