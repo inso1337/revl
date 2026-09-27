@@ -139,7 +139,7 @@ extern emission[net.billing_internal] async fn a2a_billing_agent_invoice_lookup(
 
 component BillingAgentProvider provides billing_agent: BillingAgent {
   provide billing_agent {
-    async fn invoice_lookup(message) = a2a_billing_agent_invoice_lookup(message)
+    async fn invoice_lookup(message) = emit a2a_billing_agent_invoice_lookup(message)
   }
 }
 ```
