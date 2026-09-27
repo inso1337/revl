@@ -51,7 +51,7 @@
     "reference": {
       "go": 3348,
       "java": 986,
-      "py": 620,
+      "py": 584,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 91,
       "java": 175,
-      "py": 105,
+      "py": 112,
       "rust": 286,
       "ts": 97,
       "wasm": 63
@@ -755,8 +755,8 @@
           "_emit_py_ref_thunk": 26,
           "_ref_dotted": 2
         },
-        "Extern residual ABI/configuration boundary: _emit_externs emits capability-bound secret lookup/store and extern plug-time config required/default merging; dispatches @py refs; rejects missing target bodies and emits pass for empty bodies. Port supports verbatim bodies and declared Secret[T] marking, not capability-secret/config installation. Representative sources: stdlib/fs.rvl, tests/test_extern_config_cross_tier_378.py and tests/test_secret_bound.py. Empty-body pass is equivalent on both sides. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481), so one statement arrives with it and this is re-recorded 40 to 41 under the same reason. `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap.": {
-          "_emit_externs": 41
+        "Extern residual boundary: _emit_externs rejects a missing target body; emits `pass` for an empty body; renders the lazy `@py ref` import thunk (item 396 option B), which selfhost/emit_py.rvl refuses by name (`<<UNSUPPORTED-EXTERN:py-ref ...>>`, pinned by tests/test_selfhost_emit_py.py::test_a_py_ref_extern_is_named_not_emitted_empty); and writes the capability-bound secret store and lookup (item 256 Slice 1), which the port carries byte-identically but no census-directory document can reach, because the self-host gate refuses a top-level `secret ... for` declaration (tests/test_selfhost_emit_py.py::test_selfhosted_emitter_binds_an_extern_secret holds both halves to agreement from an inline source). The extern plug-time config helper and its `_revl_config` local are exercised by extern_config.rvl since item 391. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481); `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap.": {
+          "_emit_externs": 18
         },
         "Fault-harness boundary: _emit_fault_tests validates target component and serializes injection/assertion metadata into REVL_FAULT_TESTS. tests/test_fault_tests.py::SOURCE and test_python_tier_lowers_the_section_into_the_module reproduce this unported trailer.": {
           "_emit_fault_tests": 11
@@ -820,14 +820,14 @@
         "Method residuals: assign emits the same name/value form as the covered let path (port combines them); the witnessed bind is frontend-rejected; deferred/await use retained runtime paths (the port refuses a deferred emission by name). The `Map.cas` undo and the by-value pins on an effect undo and an emission compensate are exercised by emit_ts_corpus/cas_runtime.rvl and emit_py_placement.rvl. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
           "_ComponentEmitter._method_step": 11
         },
-        "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter. (The idempotent map, the per-operation commutative/async/idempotent metadata and the router runtime source are exercised by emit_py_placement.rvl, async_effects.rvl and erase_receipt.rvl since item 391's placement slice. The SERVICE-wide `'commutative': True` line is not: the self-host gate refuses a `commutative service` declaration as \"unexpected declaration\", so no census-directory document can carry one, and tests/test_selfhost_emit_py.py::test_selfhosted_emitter_renders_a_commutative_service holds both halves to agreement from an inline source.) Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. Issue #957's `Map` subscript arm adds seven statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 513 slice 2 (PR #1326) adds the two statements inside `if grammar_registry:`: the module-level `register_grammars(...)` call and the blank line after it. The guard is the point, because a document with no validated service crossing stays byte-identical to one compiled before the slice. No emit_py_corpus document declares a `response_grammar`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no grammar-registry arm at all (item-429(d)); the seam is pinned by tests/test_decode_grammar_seam_513s2.py instead.": {
-          "emit": 37
+        "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter. (The idempotent map, the per-operation commutative/async/idempotent metadata and the router runtime source are exercised by emit_py_placement.rvl, async_effects.rvl and erase_receipt.rvl since item 391's placement slice. The SERVICE-wide `'commutative': True` line is not: the self-host gate refuses a `commutative service` declaration as \"unexpected declaration\", so no census-directory document can carry one, and tests/test_selfhost_emit_py.py::test_selfhosted_emitter_renders_a_commutative_service holds both halves to agreement from an inline source.) Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. The `import inspect` / `_REVL_REFS` header and the #957 `Map` subscript helper are exercised by stdlib/fs.rvl and maps.rvl since item 391. Item 513 slice 2 (PR #1326) adds the two statements inside `if grammar_registry:`: the module-level `register_grammars(...)` call and the blank line after it. The guard is the point, because a document with no validated service crossing stays byte-identical to one compiled before the slice. No emit_py_corpus document declares a `response_grammar`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no grammar-registry arm at all (item-429(d)); the seam is pinned by tests/test_decode_grammar_seam_513s2.py instead.": {
+          "emit": 27
         },
         "Item 513 slice 2 (PR #1326) composes `{\"Service.method\": grammar}` for every VALIDATED service emission in the document, adding the slice-4 `json-schema` dialect from the `response_schema` the crossing already carries. The function IS called on every emit; what no corpus document reaches is the body below the per-service loop, because no emit_py_corpus document declares a `response_grammar`. A document that declared one would flip the byte-agreement oracle RED rather than close the gap: selfhost/emit_py.rvl has no grammar-registry arm at all, so the reference would emit a `register_grammars(...)` line the port does not (item-429(d)). The seam is pinned by tests/test_decode_grammar_seam_513s2.py.": {
           "_grammar_registry": 10
         },
-        "Module expression residuals: bare Some identity and legacy sized_length field both match expr_inner; unsupported binary/unary/kind raise while port emits explicit markers. Awaited call and async arrow require the retained async surface (emit_ts_corpus/async_module_local.rvl). Legal current module .length lowers to len, already covered by branches.rvl. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
-          "_expr": 9
+        "Module expression residuals: bare Some identity and legacy sized_length field both match expr_inner; unsupported binary/unary/kind raise while port emits explicit markers. Awaited call and async arrow require the retained async surface (emit_ts_corpus/async_module_local.rvl). Legal current module .length lowers to len, already covered by branches.rvl. The #957 `Map` subscript arm is exercised by maps.rvl since item 391.": {
+          "_expr": 8
         },
         "Nonfinite literal refusal in _finite_float: no finite source Float literal can produce NaN/Infinity in literal IR. Runtime floating arithmetic is not this branch. Direct malformed IR is rejected, not a positive oracle input.": {
           "_finite_float": 1
@@ -845,7 +845,7 @@
           "_render_builtin": 2
         },
         "Reviewed eager-substitution residuals: _inline_eager_vars returns empty for non-dict children and descends optfield/optcall targets or match scrutinees. Both sources implement the same recursion; inline.rvl covers strict/list/record/index/field/unary/short-circuit argument positions, while opt/match functions may exceed the 24-node template bound before this helper is queried. No broader optimization claim is inferred from coverage.": {
-          "_inline_eager_vars": 3
+          "_inline_eager_vars": 2
         },
         "Reviewed owned-map evaluation order: _py_inplace_stmts binds a nontrivial set key to _revl_key before value evaluation; port inplace_stmts emits the same two statements. Current unique assignments have trivial keys; in_place.rvl covers owned set/remove/copy paths. The missing branch is a computed key, not unsupported Map mutation.": {
           "_py_inplace_stmts": 1
@@ -863,9 +863,6 @@
           "_ComponentEmitter._ctor_map": 8,
           "_ComponentEmitter._validated_call": 1
         },
-        "`Map` subscript lowering (issue #957): `_scan_uses` sets the `map_index` gate that pulls the `_revl_map_index` helper into the module. No emit_py_corpus document indexes a `Map` — `lookup`/`has`/`set` are the Map surface the corpus exercises — and a document that did would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d), the same shape as the declared-`Secret[Map[K, V]]` entry). The reference half is pinned on all five tiers by tests/test_cross_tier_execution.py: the hit, the miss asserted by its reason, and a per-tier guard on the emitted lowering. Porting the arm to selfhost/emit_py.rvl is the corpus work that retires this entry.": {
-          "_scan_uses": 1
-        },
         "backends/python/emit.py::_ComponentEmitter._method_control: issue #548 provide-method control flow. `_method_control` itself is covered now — emit_py_corpus/services_control_flow.rvl (issue #721) is the corpus document that reaches every arm of it. What is left is its nested `block` helper's EMPTY-arm `pass`, which is legal but is a shape no author writes, and the port's twin line is recorded under selfhost/py `method_block`.": {
           "_ComponentEmitter._method_control.block": 2
         },
@@ -876,7 +873,7 @@
           "_refuse_validated_externs": 2
         }
       },
-      "uncovered_statements": 606
+      "uncovered_statements": 570
     },
     "rust": {
       "statements": 3771,
@@ -1745,13 +1742,13 @@
       "uncovered_statements": 175
     },
     "py": {
-      "statements": 2248,
+      "statements": 2322,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds; a fourth is the named refusal of a deferred emission (`<<UNSUPPORTED-BODYSTEP:deferred-emit>>`), which only a document the port refuses reaches. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 9
         },
-        "Component cexpr residuals: do rejects non-let steps and wraps empty tail; bare None/Some map to None/identity; single-argument Some call returns its argument; ADT argument loop constructs positional payloads; final unknown-kind marker captures named host/format/spawn/instance/stream runtime boundaries. branches.rvl covers nonempty do, optional and ordinary records; declarations/construction are supported, not deferred wholesale.": {
-          "cexpr": 8
+        "Component cexpr residuals: do rejects non-let steps and wraps empty tail; bare None/Some map to None/identity; single-argument Some call returns its argument; ADT argument loop constructs positional payloads; final unknown-kind marker captures named host/format/spawn/instance/stream runtime boundaries. The #957 `Map` subscript arm mirrors the reference's component `_expr` arm, which no corpus document reaches on either side: a component-body subscript lowers through the list path today. branches.rvl covers nonempty do, optional and ordinary records; declarations/construction are supported, not deferred wholesale.": {
+          "cexpr": 9
         },
         "Conditional capability discovery branches: body_has_secret_param/body_has_timer/body_has_receiver_secret_witness return true when nested if branches contain a provide/timer/witnessed effect. Source activation guards permit only fail/nested guard, not conditional provision/timers/effects (negative boundary tests pin that rule). Top-level secret provides and both timer modes are covered by secrets and services_timers; the top-level and provide-method receiver-position registrations are covered by witnessed_secret. The recursion is kept rather than dropped because the reference's `_body_step` descends `if` the same way, so the port's import gate has to ask the question at every step the emit site can reach.": {
           "body_has_receiver_secret_witness": 2,
@@ -1768,8 +1765,9 @@
           "provide_lines": 1,
           "timer_emit": 1
         },
-        "Extern formatting residuals: emit_externs selects async def (retained async boundary) and emits pass for empty dedented bodies, identical to reference. Verbatim sync multiline/dedent bodies are covered by externs.rvl; async_module_local.rvl pins why a declaration alone is not full await support.": {
-          "emit_externs": 2
+        "Extern residuals: emit_externs selects `async def` (retained async boundary) and emits `pass` for an empty body, identical to the reference; it refuses a bodiless `@py ref` extern by name; and it writes the capability-bound secret store (`secrets_block`) and each bound extern's `_revl_secret` local, byte-identical to the reference but reachable by no census-directory document, because the self-host gate refuses a top-level `secret ... for` declaration. tests/test_selfhost_emit_py.py pins the secret agreement and the ref refusal from inline sources. Verbatim sync bodies and the extern config helper are covered by externs.rvl and extern_config.rvl.": {
+          "emit_externs": 6,
+          "secrets_block": 2
         },
         "Legacy/invalid comparison spelling paths: is_cmp_op retains ===/!== aliases, py_bin_op translates them plus raw / and % and returns empty for unknown ops. Canonical source uses ==/!=; arithmetic /,% dispatch specialized semantics before the generic mapper. arith/branches exercise the canonical comparisons and arithmetic, not invented frontend spellings.": {
           "is_cmp_op": 2,
@@ -1874,7 +1872,7 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 105
+      "uncovered_statements": 112
     },
     "rust": {
       "statements": 4092,

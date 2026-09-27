@@ -149,24 +149,47 @@ extern pure fn py_repr(v: Any) -> Str = @py { return repr(v) }
 // line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
 extern pure fn newline() -> Str = @py { return chr(10) }
 // The A3 rename (mirrors backends/python/emit.py::_mangle): a valid revl
-// identifier that is a Python keyword emits and RUNS instead of crashing.
-// A pure function of the name — declaration and use sites agree without a table
-// — and INJECTIVE, so two distinct revl identifiers never land on one Python
-// identifier. Escape a name iff the name or any name reachable from it by
-// dropping trailing `_` is a keyword, by exactly one `_`: that shifts the whole
-// `kw`/`kw_`/`kw__` ladder up a rung (`lambda` -> `lambda_`, `lambda_` ->
-// `lambda__`) and leaves every other name verbatim, so nothing collapses.
-extern pure fn mangle(name: Str) -> Str = @py {
+// identifier that is a Python keyword emits and RUNS instead of crashing, and
+// one that names a Python builtin this emitter calls BARE (`len` for
+// `.length()`, `sorted`, `bytes`, ... the reference's `_EMITTED_BUILTINS`) is
+// lifted off it, because a module-scope `def len` would rebind the `len` every
+// emitted `.length()` calls and silently change its value. A pure function of
+// the name, so declaration and use sites agree without a table, and INJECTIVE:
+// escape a name iff the name or any name reachable from it by dropping trailing
+// `_` is a keyword or such a builtin, by exactly one `_`. That shifts the whole
+// ladder up a rung (`lambda` -> `lambda_`, `lambda_` -> `lambda__`, `len` ->
+// `len_`, `len_` -> `len__`) and leaves every other name verbatim.
+//
+// `mangle_kw` is the keyword-only rung (`_mangle_kw`), for the two sites whose
+// name cannot shadow a builtin and must keep its contract spelling: a provide
+// method's `def` (dispatched by its service-contract name) and a record field
+// annotation. `mangle_type` adds the module-scope classes the emitter writes
+// itself (`Ok`/`Err`, the router's two classes) for a type-name position.
+extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py {
     import keyword
+    extra = set()
+    if builtins:
+        extra |= {
+            "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
+            "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
+            "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
+            "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
+            "tuple", "type",
+        }
+    if types:
+        extra |= {"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"}
     root = name
     while root:
-        if keyword.iskeyword(root) or keyword.issoftkeyword(root):
+        if keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra:
             return name + "_"
         if not root.endswith("_"):
             break
         root = root[:-1]
     return name
 }
+fn mangle(name: Str) -> Str { return mangle_with(name, true, false) }
+fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false) }
+fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true) }
 // `_snake` / `_pascal` verbatim (backends/python/emit.py): the component's apply
 // fn name is `_<snake>_apply`, a provision class is `_<Pascal>`.
 extern pure fn snake(name: Str) -> Str = @py {
@@ -315,7 +338,7 @@ fn uses_true_division(n: Any) -> Bool {
 // string-LITERAL key is a host/`Any` property read, not a List subscript, so
 // it does not pull the helper in (#549).
 fn uses_index(n: Any) -> Bool {
-  if (node_kind(n) == "index") {
+  if (node_kind(n) == "index" && value_is_null(value_field(n, "key_type"))) {
     let idx = value_field(n, "index")
     if (!(node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str")) {
       return true
@@ -325,6 +348,30 @@ fn uses_index(n: Any) -> Bool {
     if (uses_index(c)) { return true }
   }
   return false
+}
+
+// issue #957: a `Map` subscript (an `index` node the frontend stamps with the
+// map's `key_type`) reads by KEY through `_revl_map_index`, whose miss faults
+// with the cross-tier reason. It is not a List subscript, so it never pulls in
+// `_revl_index`, whose `i < 0` guard raises a TypeError on a `Str` key.
+fn uses_map_index(n: Any) -> Bool {
+  if (node_kind(n) == "index" && !value_is_null(value_field(n, "key_type"))) { return true }
+  for (c of value_children(n)) {
+    if (uses_map_index(c)) { return true }
+  }
+  return false
+}
+
+fn map_index_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_map_index(m, k):")
+  o = o.push(`    """A Map subscript reads by key; a MISS faults on every tier (#957)."""`)
+  o = o.push("    \"\"\"`m.lookup(k)` is the total form.\"\"\"")
+  o = o.push("    if k not in m:")
+  o = o.push(`        raise KeyError('revl: map index: no entry for key')`)
+  o = o.push("    return m[k]")
+  o = o.push("")
+  return o
 }
 
 // `_uses_i32_shl`: left shift is the one bitwise op whose result can leave the
@@ -835,6 +882,10 @@ fn expr_inner(node: Any) -> Str {
   }
   if (kind == "index") {
     let idx = value_field(node, "index")
+    // A `Map` subscript reads by KEY (issue #957), never positionally.
+    if (!value_is_null(value_field(node, "key_type"))) {
+      return `_revl_map_index(${expr(value_field(node, "target"))}, ${expr(idx)})`
+    }
     // A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
     // List subscript — bare `[...]`. A List subscript routes through
     // `_revl_index`, which faults on a negative index (#549).
@@ -1178,8 +1229,74 @@ fn splitlines(s: Str) -> List[Str] {
 // dedented + split into indented lines. An async extern's `async def` header is
 // reproduced faithfully; the await-seed / awaited call sites it needs are
 // DEFERRED to slice 5 (so an async extern is excluded from the cross-check).
+// item 256 Slice 1: the composition secrets map and its FAIL-LOUD lookup,
+// emitted only when some emission extern carries a bound secret.
+fn secrets_block() -> List[Str] {
+  let o = ["_REVL_SECRETS = {}", "",
+    "def _revl_secret(_name):",
+    "    if _name not in _REVL_SECRETS:",
+    "        raise RuntimeError(",
+    "            \"capability-bound secret `\" + _name + \"` was not \"",
+    "            \"installed before its extern body ran; the run driver \"",
+    "            \"must resolve it at plug (item 256). No default exists \"",
+    "            \"for a secret.\")",
+    "    return _REVL_SECRETS[_name]", ""]
+  return o
+}
+
+// item 379 / 395: the composition config map for document-global config
+// externs, and the FAIL-LOUD lookup that names the extern when a required
+// field was never installed. Emitted only when some extern carries a schema.
+fn extern_config_block() -> List[Str] {
+  let o = ["_REVL_EXTERN_CONFIG = {}", "",
+    "def _revl_extern_config(_name, _required, _defaults):",
+    "    _cfg = _REVL_EXTERN_CONFIG.get(_name)",
+    "    if _cfg is None:",
+    "        if _required:",
+    "            raise RuntimeError(",
+    "                \"config extern `\" + _name + \"` called before plug-time \"",
+    "                \"configuration was installed (required config: \" +",
+    "                \", \".join(_required) + \"); configure it through the run \"",
+    "                \"driver's config seam\")",
+    "        return dict(_defaults)",
+    "    _missing = [_f for _f in _required if _f not in _cfg]",
+    "    if _missing:",
+    "        raise RuntimeError(",
+    "            \"config extern `\" + _name + \"` called before plug-time \"",
+    "            \"configuration was installed (missing required config: \" +",
+    "            \", \".join(_missing) + \")\")",
+    "    return {**_defaults, **_cfg}", ""]
+  return o
+}
+
+// A config extern's first body local: `_revl_config` resolved through the
+// fail-loud helper, from the schema's REQUIRED (non-defaulted) field names and
+// its defaults. The defaults render as the reference's dict literal.
+fn extern_config_bind(name: Str, schema: List[Any]) -> Str {
+  var required = []
+  var defaults = []
+  for (f of schema) {
+    let fname = value_str(value_field(f, "name"))
+    let dv = value_field(f, "default")
+    if (value_is_null(dv)) {
+      required = required.push(fname)
+    } else {
+      defaults = defaults.push(`${py_repr(fname)}: ${py_repr(dv)}`)
+    }
+  }
+  return `_revl_config = _revl_extern_config(${py_repr(name)}, ${py_repr(required)}, {${defaults.join(", ")}})`
+}
+
 fn emit_externs(externs: List[Any]) -> List[Str] {
   var out = []
+  var any_secret = false
+  var any_config = false
+  for (ext of externs) {
+    if (value_list(value_field(ext, "secrets")).length() > 0) { any_secret = true }
+    if (value_list(value_field(ext, "config")).length() > 0) { any_config = true }
+  }
+  if (any_secret) { out = out.concat(secrets_block()) }
+  if (any_config) { out = out.concat(extern_config_block()) }
   for (ext of externs) {
     let name = mangle(value_str(value_field(ext, "name")))
     var ps = []
@@ -1198,14 +1315,30 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     if (value_bool(value_field(ext, "secret_return"))) {
       out = out.push("@".concat(runtime_ref("secret_result")))
     }
-    out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
-    let body = dedent(strip_nl(value_str(value_field(value_field(ext, "bodies"), "py"))))
-    if (body != "") {
-      for (ln of splitlines(body)) { out = out.push(line(1, ln)) }
+    let py_body = value_field(value_field(ext, "bodies"), "py")
+    // item 396 option B: a `@py ref` extern with no inline body is a lazy import
+    // THUNK in the reference (host symbol imported at first call, colour
+    // asserted through `inspect`). This port does not carry the thunk, and an
+    // empty `def ... pass` would return None for every call, so it is refused
+    // by name.
+    if (value_is_null(py_body) && !value_is_null(value_field(value_field(ext, "refs"), "py"))) {
+      out = out.concat([`<<UNSUPPORTED-EXTERN:py-ref ${name}>>`, ""])
     } else {
-      out = out.push(line(1, "pass"))
+      out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
+      // item 256 Slice 1: a bound secret is the FIRST body local of the
+      // emission extern it is bound to, and nowhere else.
+      let secrets = value_list(value_field(ext, "secrets"))
+      for (sn of secrets) { out = out.push(line(1, `${mangle(value_str(sn))} = _revl_secret(${py_repr(sn)})`)) }
+      let schema = value_list(value_field(ext, "config"))
+      if (schema.length() > 0) { out = out.push(line(1, extern_config_bind(name, schema))) }
+      let body = dedent(strip_nl(value_str(py_body)))
+      // `pass` only for a def with no line at all: an injected secret or
+      // config local is a statement in its own right.
+      let bare = body == "" && schema.length() == 0 && secrets.length() == 0
+      for (ln of splitlines(body)) { out = out.push(line(1, ln)) }
+      if (bare) { out = out.push(line(1, "pass")) }
+      out = out.push("")
     }
-    out = out.push("")
   }
   return out
 }
@@ -1644,6 +1777,9 @@ fn cexpr(node: Any) -> Str {
   }
   if (kind == "index") {
     let idx = value_field(node, "index")
+    if (!value_is_null(value_field(node, "key_type"))) {
+      return `_revl_map_index(${cexpr(value_field(node, "target"))}, ${cexpr(idx)})`
+    }
     if (node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str") {
       return `${cexpr(value_field(node, "target"))}[${cexpr(idx)}]`
     }
@@ -1934,7 +2070,7 @@ fn method_secret_params(m: Any, specs: Any) -> List[Str] {
 // `_method`: one provide-method as a Python `def` (sync only in this slice),
 // threading the shared timer/effect counter across its body steps.
 fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> EmitLines {
-  let name = mangle(value_str(value_field(m, "name")))
+  let name = mangle_kw(value_str(value_field(m, "name")))
   // An `async` operation lowers to an `async def` whose calls to async ops and
   // coloured fns are awaited (the reference's `_in_async` await-seed). This
   // port carries no async colouring, so it names the method rather than emit a
@@ -2779,11 +2915,11 @@ fn typing_imports(types: Any) -> List[Str] {
 // per case, in declaration order.
 fn emit_types(types: Any) -> List[Str] {
   var all_names = []
-  for (nm of value_keys(types)) { all_names = all_names.push(mangle(nm)) }
+  for (nm of value_keys(types)) { all_names = all_names.push(mangle_type(nm)) }
   var emitted = []
   var out = []
   for (nm of value_keys(types)) {
-    let name = mangle(nm)
+    let name = mangle_type(nm)
     let spec = value_field(types, nm)
     if (value_str(value_field(spec, "kind")) == "record") {
       out = out.push(`class ${name}:`)
@@ -2792,7 +2928,7 @@ fn emit_types(types: Any) -> List[Str] {
       if (fkeys.length() == 0) { out = out.push(line(1, "pass")) }
       for (f of fkeys) {
         let ftype = value_str(value_field(fields, f))
-        out = out.push(line(1, `${mangle(f)}: ${type_ann(ftype, all_names, emitted)}`))
+        out = out.push(line(1, `${mangle_kw(f)}: ${type_ann(ftype, all_names, emitted)}`))
       }
       emitted = emitted.push(name)
     } else {
@@ -3342,6 +3478,18 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
     out = out.push("")
   }
+  // item 396 option B: an extern carrying a host `ref` (on ANY tier) makes the
+  // module import `inspect` and open the resolved-symbol cache the py thunk
+  // reads, exactly where the reference writes them.
+  var any_ref = false
+  for (e of value_list(value_field(ir, "externs"))) {
+    if (value_keys(value_field(e, "refs")).length() > 0) { any_ref = true }
+  }
+  if (any_ref) {
+    out = out.push("import inspect as _inspect")
+    out = out.push("_REVL_REFS = {}")
+    out = out.push("")
+  }
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
   if (uses_bounded_int32(ir)) { out = out.concat(i32_block()) }
   if (uses_i32_shl(ir)) { out = out.concat(i32_wrap_block()) }
@@ -3351,6 +3499,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
       || uses_builtin_method(ir, "codepoint_at")) {
     out = out.concat(str_at_block())
   }
+  if (uses_map_index(ir)) { out = out.concat(map_index_block()) }
   if (uses_trunc_rem(ir)) { out = out.concat(rem_block()) }
   if (uses_float_rem(ir)) { out = out.concat(float_rem_block()) }
   if (uses_builtin_method(ir, "div_trunc")) { out = out.concat(div_trunc_block()) }

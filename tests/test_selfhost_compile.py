@@ -500,6 +500,17 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `idempotent` modifier (the Ledger service comes out empty), and the
         # `undo_captures` pin on a method-body effect.
         "../emit_py_placement.rvl",
+        # item 391: two more EMITTER-exact documents the native IR producer
+        # reproduces wrongly. emit_py_builtin_shadow.rvl: the reference frontend
+        # escapes a parameter named `len_` to `len__` (and every read of it) and
+        # leaves a call of the user's `fn len` as `len`. The native IR escapes
+        # the reads but not the parameter, and escapes the call, so the native
+        # chain emits `def ladder(len__, sorted__)` over a body that reads
+        # `len___` and calls `len__`. stdlib/fs.rvl: the native IR drops the
+        # extern's host `refs`, so the module loses its `import inspect` /
+        # `_REVL_REFS` header.
+        "../emit_py_builtin_shadow.rvl",
+        "../../../stdlib/fs.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at

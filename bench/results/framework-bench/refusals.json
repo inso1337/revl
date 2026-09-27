@@ -18,13 +18,15 @@
           "documents": []
         },
         "py": {
-          "residual": 7,
-          "corpus": 64,
-          "reproduced": 57,
+          "residual": 9,
+          "corpus": 68,
+          "reproduced": 59,
           "documents": [
             "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
             "../../../src/revl/truc/components/cli.rvl",
+            "../../../stdlib/fs.rvl",
+            "../emit_py_builtin_shadow.rvl",
             "../emit_py_placement.rvl",
             "branches.rvl",
             "services_control_flow.rvl",
@@ -58,8 +60,8 @@
           "documents": []
         }
       },
-      "total_residual": 13,
-      "total_corpus": 268,
+      "total_residual": 15,
+      "total_corpus": 272,
       "clean_tiers": [
         "go",
         "java",
