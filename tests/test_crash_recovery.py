@@ -413,7 +413,9 @@ def test_a_torn_final_record_is_tolerated_not_crashed_on(tmp_path):
 # the in-memory `DictWorld`. Before issue #1477 its output read as if the
 # effects were undone out there, and a clean model run exited 0. These pin the
 # honest form: every call line says it was modelled, the verdict JSON carries
-# `world: "model"`, and a model run exits non-zero unless `--model-only`.
+# `world: "model"` and how many calls the model stood in for, a model run
+# that stood in for any call exits non-zero unless `--model-only`, and a model
+# run never spends an at-most-once fence.
 
 
 _MODEL_TAG = "modelled, not performed"
@@ -504,8 +506,89 @@ def test_every_verdict_names_the_world_it_ran_against(tmp_path):
         wal.commit_activation(["Svc"])
 
     assert recover(rolled_back)["world"] == "model"
+    assert recover(rolled_back)["worldCalls"] == 2
     assert recover(forward)["world"] == "model"
+    assert recover(forward)["worldCalls"] == 0
     assert recover(forward, world=DictWorld())["world"] == "model"
+
+
+def test_a_clean_model_run_that_called_nothing_exits_zero(tmp_path, capsys):
+    """A recovery that made no call against any world modelled nothing: its
+    clean verdict is as true of the outside world as of the model, so it exits
+    0 without `--model-only`. The JSON still names the model it was bound to."""
+    from revl.__main__ import main  # noqa: PLC0415
+
+    moot_only = str(tmp_path / "moot.wal")
+    with replay.WriteAheadLog(moot_only, ir={}, generation=1) as wal:
+        wal.append_timeline(_closure_effect_timeline())  # in-process -> moot
+    forward = str(tmp_path / "fwd.wal")
+    with replay.WriteAheadLog(forward, ir={}, generation=1) as wal:
+        wal.append_timeline(_closure_effect_timeline())
+        wal.commit_activation(["Svc"])
+        wal.commit_run()
+
+    for path in (moot_only, forward):
+        rc = main(["recover", "--wal", path, "--json"])
+        captured = capsys.readouterr()
+        report = json.loads(captured.out)
+        assert (report["world"], report["worldCalls"]) == ("model", 0)
+        assert report["residue"]["clean"] is True
+        assert rc == 0, path
+        assert captured.err == ""
+
+
+def _undeclared_inverse_wal(path: str) -> str:
+    """One undeclared (fenced-tier) reconstructible inverse, crash mid-
+    activation: the case whose single at-most-once attempt a fence spends."""
+    wal = replay.WriteAheadLog(path, ir={}, generation=1).open()
+    wal.record_boundary("Store", "scratch", resource="File",
+                        inverse_op={"receiver": "fs", "method": "unlink",
+                                    "args": ["/data/x"]})
+    wal.close()
+    return path
+
+
+def _records(path: str) -> list:
+    return [json.loads(line)["record"]
+            for line in Path(path).read_text(encoding="utf-8").splitlines()
+            if line.strip()]
+
+
+def test_a_model_run_never_spends_an_at_most_once_fence(tmp_path):
+    """Two model recovers in a row. Before issue #1477 the first appended a
+    `replay-fence`, and the second refused the inverse as fenced-before-attempt
+    although nothing had reached the outside world, which would also have
+    blocked the real recovery after it. A model run writes no fence, so the
+    second run still sees the inverse as unfenced."""
+    path = _undeclared_inverse_wal(str(tmp_path / "fence.wal"))
+    before = _records(path)
+
+    first = recover(path)
+    second = recover(path)
+
+    assert _records(path) == before
+    assert "replay-fence" not in _records(path)
+    for report in (first, second):
+        assert [e["op"]["method"] for e in report["ran"]] == ["unlink"]
+        assert report["fencedDeferred"] == []
+        assert report["residue"]["clean"] is True
+
+
+def test_a_real_world_still_spends_the_fence_once(tmp_path):
+    """The item-309 invariant is unchanged against a real world: the first run
+    fences before its single attempt, the second refuses a second attempt."""
+    class RealWorld(DictWorld):
+        kind = "real"
+
+    path = _undeclared_inverse_wal(str(tmp_path / "fence-real.wal"))
+    first = recover(path, world=RealWorld())
+    assert _records(path).count("replay-fence") == 1
+    second = recover(path, world=RealWorld())
+
+    assert [e["op"]["method"] for e in first["ran"]] == ["unlink"]
+    assert second["ran"] == []
+    assert [d["seq"] for d in second["fencedDeferred"]] == [0]
+    assert _records(path).count("replay-fence") == 1
 
 
 def test_a_world_that_declares_itself_real_is_reported_as_real(tmp_path):
@@ -530,8 +613,9 @@ def test_a_world_that_declares_itself_real_is_reported_as_real(tmp_path):
 
 
 def test_a_verdict_with_no_world_field_is_treated_as_a_model():
-    """Fail closed: a report that does not say it ran against the real world
-    (a hand-built one, or one from an older writer) never exits 0 by default."""
+    """Fail closed: a report that does not say which world it ran against or
+    how many calls it made (a hand-built one, or one from an older writer) is
+    read as a model that made calls, and never exits 0 by default."""
     from revl.cli.change import EXIT_MODEL_ONLY, _recover_exit_status  # noqa: PLC0415
 
     report = {"residue": {"clean": True}}
