@@ -3823,8 +3823,16 @@ fn appr_crossed(head: Expr, cx: Ctx) -> List[Str] {
   return match head {
     Call(c) => match c.target {
       Field(fl) => match fl.target {
-        Var(v) => cx.reqMap.has(v) && !cx.provAlias.has(v)
-          ? appr_req_caps(v, fl.name, cx) : [],
+        Var(v) => cx.provAlias.has(v)
+          ? appr_alias_caps(v, fl.name, cx)
+          : (cx.reqMap.has(v) ? appr_req_caps(v, fl.name, cx) : []),
+        // `h.<key>.<op>(…)` off a spawn handle: the op's declared scope, off
+        // the one resolver the marker rule uses for this carrier
+        // (`handle_msig`, the reference's `_instance_get_call`)
+        Field(inner) => match inner.target {
+          Var(h) => cx.handles.has(h) ? appr_handle_caps(h, inner.name, fl.name, cx) : [],
+          _ => [],
+        },
         _ => [],
       },
       Var(n) => appr_name_caps(n, cx),
@@ -3832,6 +3840,21 @@ fn appr_crossed(head: Expr, cx: Ctx) -> List[Str] {
     },
     _ => [],
   }
+}
+
+fn appr_handle_caps(h: Str, key: Str, op: Str, cx: Ctx) -> List[Str] {
+  let decl = handle_msig(h, key, op, cx)
+  if (decl.name == "") { return [] }
+  return decl.caps.length() > 0 ? decl.caps : ["*"]
+}
+
+// A call through a local aliasing a spawn-handle provision (`let t = w.task`):
+// `provAlias` holds `<handle>#<key>`, the same split `alias_call` reads.
+fn appr_alias_caps(v: Str, op: Str, cx: Ctx) -> List[Str] {
+  let ref = match cx.provAlias.lookup(v) { Some(r) => r, None => "" }
+  let cut = ref.indexOf("#")
+  if (cut == 0 - 1) { return [] }
+  return appr_handle_caps(ref.slice(0, cut), ref.slice(cut + 1, ref.length()), op, cx)
 }
 
 fn appr_req_caps(key: Str, op: Str, cx: Ctx) -> List[Str] {
@@ -3885,7 +3908,84 @@ fn appr_check(head: Expr, edge: Str, cx: Ctx, a: Ac) -> Ac {
 // binding, the value form, with none.
 fn appr_group(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (a.msg != "" || ss[i].kind != "emit") { return a }
-  return appr_check(ss[i].e, ss[i].bind == "" ? ss[i].edge : "", cx, a)
+  let edge = ss[i].bind == "" ? ss[i].edge : ""
+  let ha = appr_check(ss[i].e, edge, cx, a)
+  if (ha.msg != "" || i + 1 >= ss.length() || ss[i + 1].kind != "compensate") {
+    return ha
+  }
+  // A compensation crosses too, during rollback, where there is nobody to
+  // ask: every emission in the slot meets the same floor under the step's own
+  // edge (the reference's `_compensate_crossings`, outermost first).
+  let xs = em_calls(ss[i + 1].e, cx)
+  var ca = ha
+  var k = 0
+  while (k < xs.length() && ca.msg == "") {
+    ca = appr_check(xs[k], edge, cx, ca)
+    k += 1
+  }
+  return ca
+}
+
+// Every call in `e` that crosses as an emission, outermost first and in source
+// order: a named call to an emitting name, a `req` or spawn-handle call to an
+// `emission` op. The pre-order the reference's walk over the lowered slot has.
+fn em_calls(e: Expr, cx: Ctx) -> List[Expr] {
+  return em_calls_in(e, cx, [])
+}
+
+fn em_calls_in(e: Expr, cx: Ctx, acc: List[Expr]) -> List[Expr] {
+  return match e {
+    Call(c)    => em_calls_list(c.args, 0, cx,
+                    em_calls_in(c.target, cx, is_em_call(e, cx) ? acc.push(e) : acc)),
+    Field(f)   => em_calls_in(f.target, cx, acc),
+    OptField(f) => em_calls_in(f.target, cx, acc),
+    OptCall(c) => em_calls_list(c.args, 0, cx, em_calls_in(c.target, cx, acc)),
+    Bin(b)     => em_calls_in(b.r, cx, em_calls_in(b.l, cx, acc)),
+    Un(u)      => em_calls_in(u.e, cx, acc),
+    Emit(u)    => em_calls_in(u.e, cx, acc),
+    Index(x)   => em_calls_in(x.idx, cx, em_calls_in(x.target, cx, acc)),
+    If(x)      => em_calls_in(x.els, cx, em_calls_in(x.then_, cx, em_calls_in(x.cond, cx, acc))),
+    Lst(l)     => em_calls_list(l.items, 0, cx, acc),
+    _          => acc,
+  }
+}
+
+fn em_calls_list(xs: List[Expr], i: Int, cx: Ctx, acc: List[Expr]) -> List[Expr] {
+  if (i >= xs.length()) { return acc }
+  return em_calls_list(xs, i + 1, cx, em_calls_in(xs[i], cx, acc))
+}
+
+// Whether a call node is an emission crossing (`_is_emission_call`).
+fn is_em_call(e: Expr, cx: Ctx) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Var(n) => contains(cx.emittingNames, n),
+      Field(fl) => match fl.target {
+        Var(v) => cx.provAlias.has(v)
+          ? alias_is_em(v, fl.name, cx)
+          : cx.reqMap.has(v) && req_is_em(v, fl.name, cx),
+        Field(inner) => match inner.target {
+          Var(h) => cx.handles.has(h) && handle_msig(h, inner.name, fl.name, cx).isEm,
+          _ => false,
+        },
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn req_is_em(key: Str, op: Str, cx: Ctx) -> Bool {
+  let svcName = match cx.reqMap.lookup(key) { Some(s) => s, None => "" }
+  return find_msig(svc_of(cx, svcName), op, 0).isEm
+}
+
+fn alias_is_em(v: Str, op: Str, cx: Ctx) -> Bool {
+  let ref = match cx.provAlias.lookup(v) { Some(r) => r, None => "" }
+  let cut = ref.indexOf("#")
+  if (cut == 0 - 1) { return false }
+  return handle_msig(ref.slice(0, cut), ref.slice(cut + 1, ref.length()), op, cx).isEm
 }
 
 // ---- one `emit` marker per crossing (issue #1175) --------------------------
@@ -22222,6 +22322,22 @@ test "the approval floor is keyed by token and reaches every marked crossing (it
   assert admit_src(sc.concat("service O { fn ping() -> Int } component C provides o: O { let a = await approval[staging.payment] { reason: \"pay\" } emit charge(1) with a provide o { fn ping() = 1 } }")) == msg
   assert admit_src(sc.concat("service O { fn ping() -> Int } component C provides o: O { let a = await approval[production.*] { reason: \"pay\" } emit charge(1) with a provide o { fn ping() = 1 } }")) == ""
   assert admit_src("""extern emission fn charge(n: Int) -> Int requires approval = @py { return 1 } service O { fn ping() -> Int } component C provides o: O { emit charge(1) provide o { fn ping() = 1 } }""") == "G4|crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge"
+}
+
+// The floor reaches the two carriers it did not see: a `compensate` slot (a
+// compensation runs during rollback with nobody to ask, so it is judged under
+// the step's own `with` edge) and a crossing through a spawn handle (its token
+// is the op's declared scope, off `handle_msig`).
+test "the approval floor reaches a compensation and a spawn-handle crossing (item 246)" {
+  let ex = "extern emission fn charge(n: Int) -> Int requires approval = @py { return 1 } extern emission fn notify(n: Int) -> Int = @py { return 1 } service O { fn ping() -> Int } "
+  let cmsg = "G4|crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge"
+  assert admit_src(ex.concat("component C provides o: O { emit notify(1) compensate charge(2) provide o { fn ping() = 1 } }")) == cmsg
+  assert admit_src(ex.concat("component C provides o: O { let a = await approval[charge] { reason: \"r\" } emit notify(1) compensate charge(2) with a provide o { fn ping() = 1 } }")) == ""
+  let wk = "extern emission[pay] fn charge(n: Int) -> Int requires approval = @py { return 1 } service Pay { emission[pay] fn run(n: Int) -> Int } component Worker provides task: Pay { let a = await approval[pay] { reason: \"c\" } provide task { fn run(n) { emit charge(n) with a return 1 } } } service Sup { emission fn go(n: Int) -> Int } "
+  let pmsg = "G4|crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge"
+  assert admit_src(wk.concat("component Supervisor provides sup: Sup { let w = effect spawn Worker with { } undo w.dispose() emit w.task.run(1) provide sup { fn go(n) = 0 } }")) == pmsg
+  assert admit_src(wk.concat("component Supervisor provides sup: Sup { let w = effect spawn Worker with { } undo w.dispose() let b = await approval[pay] { reason: \"p\" } emit w.task.run(1) with b provide sup { fn go(n) = 0 } }")) == ""
+  assert admit_src(wk.concat("component Supervisor provides sup: Sup { provide sup { fn go(n) { let w = effect spawn Worker with { } undo w.dispose() let t = w.task let r = emit t.run(n) return r } } }")) == pmsg
 }
 
 // An arrow's body is not in the enclosing `emit`'s argument list: it runs when

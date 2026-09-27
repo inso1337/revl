@@ -337,6 +337,14 @@ REJECTIONS = {
     # an approval-required crossing nested unmarked in another `emit`'s
     # arguments, refused by the marker rule of issue #1427
     "g4_nested_approval_emission.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    # the approval floor on a `compensate` slot (a compensation runs during
+    # rollback with nobody to ask) and on a spawn-handle crossing
+    "g4_approval_compensate.rvl": "crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge",
+    "g4_approval_compensate_method.rvl": "crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge",
+    "g4_approval_compensate_other_edge.rvl": "crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge",
+    "g4_approval_spawn_handle.rvl": "crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge",
+    "g4_approval_spawn_handle_method.rvl": "crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge",
+    "g4_approval_spawn_handle_alias.rvl": "crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge",
     # --- the indirection cluster ------------------------------------------
     # One shape recurs across all of these: an obligation is carried through an
     # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function
