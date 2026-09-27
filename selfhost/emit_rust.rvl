@@ -1607,6 +1607,55 @@ fn render_interp(node: Any, ctx: Ctx) -> Str {
   return `format!(${string_lit(joined)}, ${args.join(", ")})`
 }
 
+// `_format`: a component-dialect template (`"go ${config.count}"` lowers to
+// `$0`/`$1` placeholders, with `$$` for a literal `$`, A4) as a Rust
+// `format!`. A placeholder becomes `{0}`/`{1}`, and literal text doubles its
+// braces, or `format!` would read them as format specs. The argument list is
+// always joined after `, `, so a zero-argument template renders
+// `format!("...", )` exactly as the reference does.
+fn format_literal(text: Str) -> Str {
+  var out = ""
+  var i = 0
+  while (i < text.length()) {
+    let ch = text.charAt(i)
+    if (ch == "{") { out = out.concat("{{") } else if (ch == "}") { out = out.concat("}}") } else { out = out.concat(ch) }
+    i = i + 1
+  }
+  return out
+}
+
+fn is_ascii_digit(ch: Str) -> Bool {
+  return ch >= "0" && ch <= "9" && ch.length() == 1
+}
+
+fn render_format(node: Any, ctx: Ctx) -> Str {
+  let tpl = value_str(value_field(node, "template"))
+  var args = []
+  for (a of value_list(value_field(node, "args"))) { args = args.push(render_expr(a, ctx)) }
+  var pieces = ""
+  var buf = ""
+  var i = 0
+  let n = tpl.length()
+  while (i < n) {
+    let ch = tpl.charAt(i)
+    if (ch == "$" && i + 1 < n && tpl.charAt(i + 1) == "$") {
+      buf = buf.concat("$")
+      i = i + 2
+    } else if (ch == "$" && i + 1 < n && is_ascii_digit(tpl.charAt(i + 1))) {
+      var j = i + 1
+      while (j < n && is_ascii_digit(tpl.charAt(j))) { j = j + 1 }
+      pieces = pieces.concat(format_literal(buf)).concat("{").concat(tpl.slice(i + 1, j)).concat("}")
+      buf = ""
+      i = j
+    } else {
+      buf = buf.concat(ch)
+      i = i + 1
+    }
+  }
+  pieces = pieces.concat(format_literal(buf))
+  return `format!(${string_lit(pieces)}, ${args.join(", ")})`
+}
+
 // The kind dispatch, mirroring `_render_expr`'s branch order (post-widen).
 fn render_inner(node: Any, ctx: Ctx) -> Str {
   let kind = node_kind(node)
@@ -1672,6 +1721,8 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "interp") { return render_interp(node, ctx) }
   if (kind == "host") { return render_host(node, ctx) }
   if (kind == "subscribe") { return render_subscribe(node, ctx) }
+  // component dialect: a `$0`/`$1` template -> Rust `format!`.
+  if (kind == "format") { return render_format(node, ctx) }
   return `<<UNSUPPORTED-EXPR:${kind}>>`
 }
 
