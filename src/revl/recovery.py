@@ -153,6 +153,24 @@ class World:
 
     kind = WORLD_MODEL
 
+    #: issue #1477. A world that sets this takes the discharge-descriptor family
+    #: as ONE batch through :meth:`replay_descriptors` (the composition binding,
+    #: `revl.recover_binding`, hands it to the runtime's own abort path). Every
+    #: other world gets the per-call `apply_inverse`/`apply_compensation` walk.
+    replays_descriptors = False
+
+    #: Whether this world can make the calls outside that family: a legacy
+    #: boundary inverse, an owed emission's re-issue, a shared reclaim. A world
+    #: that cannot reports them as residue, not attempted, and spends no fence.
+    re_issues_calls = True
+
+    def replay_descriptors(self, descriptors: list) -> dict:  # pragma: no cover
+        """``{seq: outcome}`` for each descriptor, outcome one of ``ran``,
+        ``failed``, ``fenced``, ``settled``, ``unresolved``, ``stranded``
+        (`runtime.replay_descriptors`). Only for a world that sets
+        :attr:`replays_descriptors`."""
+        raise NotImplementedError
+
     def key(self, op: dict) -> str:
         args = op.get("args") or []
         return f"{op.get('receiver')}:{args[0] if args else ''}"
@@ -402,6 +420,8 @@ class _Counted(World):
         self._inner = inner
         self._tally = tally
         self.kind = world_kind(inner)
+        self.replays_descriptors = bool(getattr(inner, "replays_descriptors", False))
+        self.re_issues_calls = bool(getattr(inner, "re_issues_calls", True))
 
     def key(self, op: dict) -> str:
         return self._inner.key(op)
@@ -426,6 +446,12 @@ class _Counted(World):
 
     def remaining(self) -> list:
         return self._inner.remaining()
+
+    def replay_descriptors(self, descriptors: list) -> dict:
+        outcome = self._inner.replay_descriptors(descriptors)
+        self._tally.extend(("descriptor", seq) for seq, state in outcome.items()
+                           if state in ("ran", "failed"))
+        return outcome
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._inner, name)
@@ -1340,6 +1366,14 @@ def recover_shared_grants(wal: dict, *, wal_path: Optional[str],
             # accumulator, nothing owed.
             continue
         inverse = grant.get("inverse") or {}
+        if not _re_issues_calls(world):
+            reclaims.append(_reclaim_record(
+                handle, len(holders), basis, ok=False,
+                error={"type": "not-bound",
+                       "message": "a shared reclaim is not a call the "
+                                  "composition binding re-issues; not "
+                                  "attempted"}))
+            continue
         if wal_path is not None and _spends_fences(world):
             _append_shared_reclaim_fence(wal_path, handle)
         try:
@@ -1622,6 +1656,10 @@ def _reissue_owed(wal_path: str, world: Optional[World], descriptor: dict,
                     hint="a confidential value is never written to the WAL. "
                          "Finish this flush by hand with the value from its own "
                          "store, or carry a non-confidential idempotency key")}
+    if not _re_issues_calls(world):
+        return {"outcome": "failed", "seq": seq, "referent": referent,
+                "residue": _unbound_record(_crossing_of_descriptor(descriptor),
+                                           call, referent, "an owed emission")}
     if wal_path is not None and seq is not None and _spends_fences(world):
         _append_reissue_fence(wal_path, seq, register)
     try:
@@ -1670,6 +1708,120 @@ def _window_proof(rolled: list, fired: list, owed: list,
             f"host bodies may not have fired before the crash. Reported honestly, "
             f"{rule}; {len(fired)} confirmed flushed, "
             f"{len(rolled)} witnessed mutation(s) rolled forward.{note}")
+
+
+def _re_issues_calls(world: Optional[World]) -> bool:
+    return bool(getattr(world, "re_issues_calls", True))
+
+
+def _unbound_record(crossing: dict, call: dict, referent: Optional[str],
+                    what: str) -> dict:
+    """Residue for a call the bound world cannot make (issue #1477): the
+    composition binding re-issues discharge descriptors only. Not attempted,
+    no fence spent."""
+    return _record(
+        "unbound-residue", crossing=crossing,
+        attempted={"call": call.get("method"),
+                   "args": list(call.get("args") or []), "phase": None},
+        error={"type": "not-bound",
+               "message": f"{what} is not a call the composition binding "
+                          "re-issues (it replays discharge descriptors only); "
+                          "not attempted"},
+        attempted_flag=False, outcome="not-attempted", referent=referent,
+        hint="finish it by hand, or recover against the model to see what "
+             "the model would do (drop --composition)")
+
+
+def _named_call(call: dict) -> str:
+    args = call.get("args")
+    shown = "<not captured>" if args is None else ", ".join(map(repr, args))
+    receiver = call.get("receiver")
+    return f"{receiver + '.' if receiver else ''}{call.get('method')}({shown})"
+
+
+def _replay_through_binding(world: World, descriptors: list, *,
+                            outstanding: list, rolled_back: list,
+                            restore_residue: list, fenced_deferred: list,
+                            settled: list, compensations_ran: list) -> None:
+    """Hand the open discharge descriptors to a real composition binding and
+    fold its per-seq outcomes into the roll-back's lanes (issue #1477).
+
+    Outcomes come from `runtime.replay_descriptors`: ``ran`` and ``failed`` are
+    calls made; ``fenced`` is an undeclared inverse whose single attempt an
+    earlier run spent; ``settled`` is a seq a discharge or `aborted` record
+    already names; ``unresolved`` is a call naming no host body here, or one
+    whose arguments were not captured at registration; ``stranded`` is an
+    E-Stop in force. Only ``ran`` and ``settled`` are clean. Everything else is
+    residue, named by its call, never reported as done."""
+    replayable, uncaptured = [], []
+    for d in descriptors:
+        call = d.get("call") or {}
+        if _has_redacted_arg(call) or not isinstance(call.get("args"), list):
+            uncaptured.append(d)
+        else:
+            replayable.append(d)
+    for d in uncaptured:
+        call = d.get("call") or {}
+        redacted = isinstance(call.get("args"), list)
+        outstanding.append(_record(
+            "redacted-residue" if redacted else "unresolved-residue",
+            crossing=_crossing_of_descriptor(d),
+            attempted={"call": call.get("method"), "args": list(call.get("args") or []),
+                       "phase": 1 if d.get("entry") == "transactional" else 2},
+            error={"type": "redacted-argument" if redacted else "args-not-captured",
+                   "message": (f"{_named_call(call)}: "
+                               + ("an argument was declared `Secret[T]` and is "
+                                  "redacted in the log" if redacted else
+                                  "its arguments were not captured at "
+                                  "registration (an argument is itself a call)")
+                               + "; not attempted")},
+            attempted_flag=False, outcome="unknown", referent=_named_call(call),
+            hint="finish this call by hand; recovery never guesses an argument"))
+    outcome = world.replay_descriptors(replayable) if replayable else {}
+    for d in replayable:
+        seq = d.get("seq")
+        call = d.get("call") or {}
+        named = _named_call(call)
+        state = outcome.get(seq, "unresolved")
+        transactional = d.get("entry") == "transactional"
+        phase = 1 if transactional else 2
+        if state == "ran":
+            (rolled_back if transactional else compensations_ran).append(
+                {"seq": seq, "referent": named, "op": call, "replay": "binding"})
+            continue
+        if state == "settled":
+            settled.append({"seq": seq, "referent": named, "entry": d.get("entry")})
+            continue
+        if state == "fenced":
+            fenced_deferred.append({"seq": seq, "referent": named})
+        elif transactional:
+            restore_residue.append({"seq": seq, "referent": named})
+        message, kind, hint = {
+            "failed": (f"{named} raised when the runtime replayed it",
+                       "restore-residue" if transactional else "compensation-residue",
+                       "the host body raised; check the referent and finish it "
+                       "by hand"),
+            "fenced": (f"{named}: fenced-before-attempt, outcome unknown, will "
+                       "not re-run: an earlier attempt fenced this undeclared "
+                       "inverse", "fenced-residue",
+                       "declare `undo idempotent`, or finish this inverse by "
+                       "hand: its at-most-once attempt is already spent"),
+            "stranded": (f"{named}: an E-Stop is in force, so nothing ran",
+                         "stranded-residue",
+                         "clear the latch (`revl estop --clear`) and recover "
+                         "again"),
+        }.get(state, (f"{named}: names no host body in this composition "
+                      "binding; not attempted", "unresolved-residue",
+                      "the call's receiver or method is not bound here; "
+                      "finish it by hand"))
+        outstanding.append(_record(
+            kind, crossing=_crossing_of_descriptor(d),
+            attempted={"call": call.get("method"), "args": list(call.get("args") or []),
+                       "phase": phase},
+            error={"type": state, "message": message},
+            attempted_flag=state == "failed",
+            outcome="failed" if state == "failed" else "unknown",
+            referent=named, hint=hint))
 
 
 def _record(kind: str, *, crossing: dict, attempted: Optional[dict],
@@ -1865,6 +2017,11 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                          "why": "in-process referent — died with the process; "
                                 "its inverse is a no-op after restart"})
             continue
+        if inverse.get("reconstructible") and not _re_issues_calls(world):
+            outstanding.append(_unbound_record(
+                _crossing_of_effect(record), inverse.get("op") or {}, referent,
+                "a legacy boundary inverse"))
+            continue
         if inverse.get("reconstructible"):
             seq = record.get("seq")
             declared_idempotent = bool(inverse.get("undo_idempotent"))
@@ -1956,6 +2113,24 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     # so no `aborted` record can ever explain one of its fences.
     abort_completed: bool = any(r.get("record") == "aborted"
                                 for r in wal["records"])
+    settled_by_replay: list = []
+    compensations_ran: list = []
+    if getattr(world, "replays_descriptors", False):
+        # issue #1477: the real world. The whole family goes to the runtime's
+        # own abort path in one batch (fences, budget and the `aborted` record
+        # are the runtime's), and the walk below has nothing left to do.
+        _replay_through_binding(
+            world, [d for d in transactional + compensations
+                    if d.get("seq") not in discharged],
+            outstanding=outstanding, rolled_back=transactional_rolled_back,
+            restore_residue=restore_residue, fenced_deferred=fenced_deferred,
+            settled=settled_by_replay, compensations_ran=compensations_ran)
+        for d in transactional + compensations:
+            if d.get("seq") in discharged:
+                discharged_skipped.append({
+                    "seq": d.get("seq"), "referent": world.key(d.get("call") or {}),
+                    "retained": d.get("entry") == "transactional"})
+        transactional, compensations = [], []
     # Phase 1: transactional inverses, reverse-seq, skipping discharged seqs.
     for d in sorted(transactional, key=lambda x: x.get("seq", 0), reverse=True):
         call = d.get("call") or {}
@@ -2152,8 +2327,11 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                      "and ran them newest-first (LIFO), L-Raise style. "
                      "Transactional inverses with a durable discharge record were "
                      "skipped (committed, not rolled back); owed compensations "
-                     "were re-attempted best-effort; deferred emissions were "
-                     "dropped, never fired."),
+                     + ("were re-issued through the composition binding by the "
+                        "runtime's own abort path; "
+                        if getattr(world, "replays_descriptors", False) else
+                        "were re-attempted best-effort; ")
+                     + "deferred emissions were dropped, never fired."),
         "committedEffects": len(effects),
         "torn": wal.get("torn", False),
         "ran": ran,
@@ -2167,6 +2345,12 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
         "dischargedSkipped": discharged_skipped,
         "compensationsReissued": compensations_reissued,
         "compensationsSettled": compensations_settled,
+        # issue #1477: through a real composition binding, a compensation the
+        # runtime ran is PERFORMED (its host body returned), not re-attempted
+        # best-effort, and a seq an earlier replay already settled is named.
+        # Both empty against the model.
+        "compensationsRan": compensations_ran,
+        "settledByReplay": settled_by_replay,
         # item 309 §3a: undeclared inverses whose single at-most-once attempt was
         # already spent (fenced), refused this run and deferred to a human.
         "fencedDeferred": fenced_deferred,
@@ -2178,7 +2362,8 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
             "worldRemaining": remaining,
             "proof": _residue_proof(ran, moot, outstanding, remaining,
                                     discharged_skipped, transactional_rolled_back,
-                                    compensations_reissued, dropped_deferred),
+                                    compensations_reissued, dropped_deferred,
+                                    compensations_ran, settled_by_replay),
         },
         "guarantee": _guarantee(),
     }
@@ -2187,8 +2372,19 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
 def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
                    discharged_skipped: list, transactional_rolled_back: list,
                    compensations_reissued: list,
-                   dropped_deferred: Optional[list] = None) -> str:
+                   dropped_deferred: Optional[list] = None,
+                   compensations_ran: Optional[list] = None,
+                   settled_by_replay: Optional[list] = None) -> str:
     committed = [d for d in discharged_skipped if d.get("retained")]
+    # issue #1477: what a real composition binding did, stated first. Empty
+    # (and so absent from the proof) against the model.
+    bound = ""
+    if compensations_ran:
+        bound += (f" {len(compensations_ran)} compensation(s) ran through the "
+                  f"composition binding and returned.")
+    if settled_by_replay:
+        bound += (f" {len(settled_by_replay)} descriptor(s) were already "
+                  f"settled by an earlier replay; nothing was re-run.")
     ran_n = len(ran) + len(transactional_rolled_back)
     dropped_n = len(dropped_deferred or [])
     dropped_note = (f" {dropped_n} deferred emission(s) dropped, never fired "
@@ -2202,13 +2398,13 @@ def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
                     f"is never rolled back).")
         return (f"no residue: {ran_n} reconstructed boundary inverse(s) ran and "
                 f"cleared every referent they owed; {len(moot)} in-process "
-                f"inverse(s) were moot (memory gone).{note}{dropped_note} The "
+                f"inverse(s) were moot (memory gone).{bound}{note}{dropped_note} The "
                 f"world holds only what was deliberately committed.")
     kinds: dict = {}
     for rec in outstanding:
         kinds[rec["kind"]] = kinds.get(rec["kind"], 0) + 1
     breakdown = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
-    return (f"RESIDUE: {len(outstanding)} outstanding record(s) ({breakdown}); "
+    return (f"RESIDUE: {len(outstanding)} outstanding record(s) ({breakdown});{bound} "
             f"{len(remaining)} referent(s) still out in the world "
             f"({', '.join(remaining) or 'none named'}). "
             f"{len(compensations_reissued)} compensation(s) were re-attempted "
@@ -2239,6 +2435,13 @@ def render(report: dict) -> str:
         lines.append(f"world: MODEL. Recovery ran against an in-memory model; "
                      f"every call below was {MODELLED}. The outside world was "
                      f"not touched.")
+    elif report.get("world") == WORLD_REAL and report.get("binding"):
+        binding = report["binding"]
+        booted = ", ".join(binding.get("booted") or []) or "none"
+        lines.append(f"world: REAL. Recovery replayed the WAL's discharge "
+                     f"descriptors through {', '.join(binding.get('composition') or [])} "
+                     f"({binding.get('digest', '')[:19]}...); providers booted: "
+                     f"{booted}.")
     lines += [report["decision"], ""]
     if report["verdict"] == "rolled-forward" and "owedFlushes" in report:
         # item 245's approved-to-discharged window verdict shares the
@@ -2319,9 +2522,22 @@ def render(report: dict) -> str:
         for entry in report.get("compensationsSettled") or []:
             lines.append(f"  settled  compensation seq {entry['seq']:<3} an `aborted` "
                          f"record names it — ran, not re-issued: {entry['referent']}")
+        for entry in report.get("compensationsRan") or []:
+            lines.append(f"  ran      compensation seq {entry['seq']:<3} "
+                         f"{entry['referent']} - performed, returned")
+        for entry in report.get("settledByReplay") or []:
+            lines.append(f"  settled  {entry['entry']} seq {entry['seq']:<3} "
+                         f"{entry['referent']} - an earlier replay settled it; "
+                         f"not re-run")
         for entry in report.get("compensationsReissued") or []:
             lines.append(f"  RESIDUE  compensation seq {entry['seq']:<3} re-attempted "
                          f"best-effort — still out: {entry['referent']}{tag}")
+        for rec in (report.get("residue") or {}).get("outstanding") or []:
+            # issue #1477: the binding's own refusals, named by their call.
+            if rec.get("kind") in ("unresolved-residue", "stranded-residue",
+                                   "unbound-residue"):
+                lines.append(f"  RESIDUE  {rec.get('referent')} - "
+                             f"{(rec.get('error') or {}).get('message')}")
         for entry in report.get("fencedDeferred") or []:
             lines.append(f"  FENCED   seq {entry['seq']:<3} undeclared inverse — "
                          f"fenced-before-attempt, will not re-run: {entry['referent']}")

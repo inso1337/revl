@@ -1423,6 +1423,19 @@ def build_parser() -> argparse.ArgumentParser:
                               "recover reports the classification per un-finalized "
                               "decision and changes nothing, matching `revl estop "
                               "--report`")
+    recover.add_argument("--composition", nargs="+", default=None,
+                         metavar="FILE",
+                         help="replay against the REAL world (issue #1477): the "
+                              "composition the WAL was written by, compiled and "
+                              "checked against the digest in the WAL header "
+                              "(refused on a mismatch). Its discharge "
+                              "descriptors are re-issued through its own host "
+                              "bodies and the providers they call through, by "
+                              "the runtime's abort path")
+    recover.add_argument("--config", default=None, metavar="FILE",
+                         help="with --composition: the component config (TOML "
+                              "or JSON) the composition ran with, as for `revl "
+                              "run --config`")
     recover.add_argument("--model-only", action="store_true",
                          help="accept a run against the in-memory model (issue "
                               "#1477). recover has no real world binding yet, so "
