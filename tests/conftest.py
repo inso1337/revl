@@ -139,6 +139,20 @@ _SRC = _ROOT / "src"
 if (_SRC / "revl").is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
+# The same for every python a test starts. Without it, a child resolves revl
+# through the interpreter's own install, which for the main checkout's `.venv`
+# (the one tools/hooks/pre-commit falls back to in a worktree) is an editable
+# `.pth` entry naming the MAIN checkout's src/: in-process imports read this
+# tree and `python -m revl` in a subprocess read another. PYTHONPATH outranks
+# site-packages and `.pth` entries. Where revl is installed from this same tree
+# (CI) this changes nothing. tests/test_child_python_resolves_this_tree.py.
+if (_SRC / "revl").is_dir():
+    _inherited = os.environ.get("PYTHONPATH", "")
+    if _inherited.split(os.pathsep)[0] != str(_SRC):
+        os.environ["PYTHONPATH"] = (
+            str(_SRC) + (os.pathsep + _inherited if _inherited else ""))
+    del _inherited
+
 if _ROOT.is_dir() and str(_ROOT) not in sys.path:
     sys.path.append(str(_ROOT))
 
