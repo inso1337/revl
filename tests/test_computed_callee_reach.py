@@ -74,7 +74,7 @@ def _plain_service(dispatch_body: str, extra: str = "",
     return (_SEND + extra
             + f"fn dispatch(x: Str) -> Str {{ {dispatch_body} }}\n"
             + f"service S {{ {decl} }}\n"
-            + "component C provides s: S { provide s { fn calc(a) = dispatch(a) } }\n")
+            + "component C provides s: S { provide s { fn calc(a) = emit dispatch(a) } }\n")
 
 
 # --------------------------------------------------------------- the walk
@@ -135,7 +135,7 @@ def test_the_direct_form_is_refused_identically_the_asymmetry_is_gone():
              + "fn dispatch(x: Str) -> Str { return send(x) }\n"
              + "service S { fn calc(a: Str) -> Str }\n"
              + "component C provides s: S "
-             + "{ provide s { fn calc(a) = dispatch(a) } }\n", "G4")
+             + "{ provide s { fn calc(a) = emit dispatch(a) } }\n", "G4")
 
 
 def test_the_emitting_fixed_point_reaches_the_dispatching_fn():
@@ -232,7 +232,7 @@ _G8_ADMITTED = (_SEND
                 + "fn dispatch(x: Str) -> Str { return [send][0](x) }\n"
                 + "service S { emission fn calc(a: Str) -> Str }\n"
                 + "component C provides s: S "
-                  "{ provide s { fn calc(a) = dispatch(a) } }\n")
+                  "{ provide s { fn calc(a) = emit dispatch(a) } }\n")
 
 
 def test_the_g8_audit_reports_the_boundary_behind_a_computed_callee():

@@ -323,6 +323,20 @@ REJECTIONS = {
     "g4_nested_service_emission_in_host_emit.rvl": "call to emission `ledger.fetch` must be marked `emit` (G4)",
     "g4_nested_emit_expression_host.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
     "g4_nested_unmarked_emission_method.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
+    # issue #1437: the marker is required on every emission crossing, the
+    # host extern carrier included, not only inside an `emit`'s arguments.
+    "g4_unmarked_host_emission.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_unmarked_host_emission_helper.rvl": "call to emission `bill` must be marked `emit` (G4)",
+    "g4_unmarked_host_emission_acquire.rvl": "call to emission `open_line` must be marked `emit` (G4)",
+    # the declaration-owned approval floor (item 246) on the spellings it did
+    # not reach: a capability-scoped extern (the floor was keyed by name, the
+    # crossing by token), the `emit` value form, and a `fn` reaching the extern.
+    "g4_approval_scoped_extern.rvl": "crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge",
+    "g4_approval_value_form_method.rvl": "crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge",
+    "g4_approval_helper_reach.rvl": "crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge",
+    # an approval-required crossing nested unmarked in another `emit`'s
+    # arguments, refused by the marker rule of issue #1427
+    "g4_nested_approval_emission.rvl": "call to emission `charge` must be marked `emit` (G4)",
     # --- the indirection cluster ------------------------------------------
     # One shape recurs across all of these: an obligation is carried through an
     # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function

@@ -42,7 +42,7 @@ extern emission fn wit_greeter_log_greeting(name: Str, at_millis: Int)
 component GreeterProvider provides greeter: Greeter {
   provide greeter {
     fn greet(name) = wit_greeter_greet(name)
-    fn log_greeting(name, at_millis) = wit_greeter_log_greeting(name, at_millis)
+    fn log_greeting(name, at_millis) = emit wit_greeter_log_greeting(name, at_millis)
   }
 }
 ```
