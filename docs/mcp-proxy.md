@@ -165,9 +165,14 @@ The session then behaves as any revl session does (item 245):
   fails is reported as `restore-residue`, not hidden.
 
 Either verdict ends the generation; the proxy boots the next one so the client
-can carry on. **If the client disconnects without a verdict, the proxy aborts**,
-which runs the undos while the upstream is still there to receive them. Commit
-first if you want to keep the work.
+can carry on. **If the session ends without a verdict, the proxy aborts**,
+which runs the undos while the upstream is still there to receive them: over
+stdio when the client disconnects, over HTTP when the proxy shuts down (one HTTP
+request ending is not the session ending). Commit first if you want to keep the
+work.
+
+With an operator profile bound, a proxied tool call answers to the `call` verb,
+like `revl_call`: an operator without it gets nothing from any upstream tool.
 
 ## Other verbs and methods
 
@@ -237,4 +242,7 @@ These hold as long as the proxy is the only way the client reaches the server.
    elicitation requests from the upstream are answered with an error, not
    relayed. A client's `notifications/cancelled` is not forwarded.
 
-Transport: stdio on both sides. An HTTP transport is not implemented yet.
+Transport: stdio to the upstream. To the client, stdio by default, or MCP
+2026-07-28 Streamable HTTP with `--http HOST:PORT`, where each request is bound
+to its own operator ([mcp-http-transport.md](mcp-http-transport.md)). An HTTP
+upstream is not implemented yet.

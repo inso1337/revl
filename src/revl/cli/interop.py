@@ -112,25 +112,31 @@ def _bind_session_authority(args) -> int | None:
             print(f"error: cannot load operator profile "
                   f"{args.operator_profile}: {error}", file=sys.stderr)
             return 1
-        token = getattr(args, "operator", None)
-        operator = registry.get(token) if token else registry.sole()
-        if operator is None:
-            if token:
-                print(f"error: operator profile names no operator {token!r} "
-                      f"(known: {', '.join(sorted(registry.operators)) or 'none'})",
-                      file=sys.stderr)
-            else:
-                print("error: the operator profile declares multiple "
-                      "operators — pass --operator to select which identity "
-                      "this session runs as", file=sys.stderr)
-            return 1
-        SESSION.operator = operator
-        # item 471 / issue #979: the session runs AS one operator, but a
-        # multi-party question is answered by several. The whole registry is
-        # what a cast attributed to another operator is checked against
-        # (`revl.mcp.quorum.resolve_cast`); without it, a second identity
-        # cannot be proven and every such cast is refused.
-        SESSION.operator_registry = registry
+        if getattr(args, "http", None):
+            # issue #1463: over HTTP every REQUEST is bound to its own operator
+            # (revl.mcp.http_transport); the process runs as nobody, so there is
+            # no identity for an unauthenticated request to fall back to
+            SESSION.operator_registry = registry
+        else:
+            token = getattr(args, "operator", None)
+            operator = registry.get(token) if token else registry.sole()
+            if operator is None:
+                if token:
+                    print(f"error: operator profile names no operator {token!r} "
+                          f"(known: {', '.join(sorted(registry.operators)) or 'none'})",
+                          file=sys.stderr)
+                else:
+                    print("error: the operator profile declares multiple "
+                          "operators — pass --operator to select which identity "
+                          "this session runs as", file=sys.stderr)
+                return 1
+            SESSION.operator = operator
+            # item 471 / issue #979: the session runs AS one operator, but a
+            # multi-party question is answered by several. The whole registry is
+            # what a cast attributed to another operator is checked against
+            # (`revl.mcp.quorum.resolve_cast`); without it, a second identity
+            # cannot be proven and every such cast is refused.
+            SESSION.operator_registry = registry
     # boundary policy (item 33): bind a policy to the session so its agent
     # sandbox is enforced and, with `leases enforced`, the item-61 lease
     # advisory becomes an admission refusal. Opt-in, like the profile above.
@@ -157,6 +163,19 @@ def _bind_session_authority(args) -> int | None:
         self_approvable = operator is None or any(
             g.allow and g.covers_verb("approve")
             for g in getattr(operator, "grants", ()))
+        if getattr(args, "http", None):
+            # over HTTP each caller is its own operator: the hole is an operator
+            # that may both make a gated call and approve it
+            both = sorted(
+                o.token for o in SESSION.operator_registry.operators.values()
+                if any(g.allow and g.covers_verb("call") for g in o.grants)
+                and any(g.allow and g.covers_verb("approve") for g in o.grants))
+            self_approvable = False
+            if both:
+                print(f"warning: operator(s) {', '.join(both)} may both call and "
+                      f"approve, so each can answer its own class-(c) tickets; "
+                      f"grant `approve` only to the human's identity (item 246, "
+                      f"Decision 4)", file=sys.stderr)
         if self_approvable:
             print("warning: the approval policy is enabled but the calling "
                   "identity can answer its own class-(c) tickets (no operator "
@@ -173,6 +192,33 @@ def _bind_session_authority(args) -> int | None:
 
         SESSION.approval_record_values = values
     return None
+
+
+def _http_exposure(args):
+    """`(Exposure, None)` for `--http HOST:PORT`, or `(None, exit code)` after
+    saying why HTTP mode cannot start (issue #1463)."""
+    from ..mcp.http_guard import Exposure
+
+    host, sep, port = (args.http or "").rpartition(":")
+    if not sep or not host or not port.isdigit():
+        print(f"error: --http expects HOST:PORT, got {args.http!r}", file=sys.stderr)
+        return None, 1
+    if not getattr(args, "operator_profile", None):
+        print("error: --http needs --operator-profile: every HTTP request is "
+              "bound to one of its operators, and a request with no identity is "
+              "refused, never run as a default operator", file=sys.stderr)
+        return None, 1
+    if getattr(args, "operator", None):
+        print("error: --operator does not apply with --http: each request "
+              "authenticates as its own operator, and the process runs as none",
+              file=sys.stderr)
+        return None, 1
+    exposure = Exposure(host=host.strip("[]"), port=int(port),
+                        tls_cert=args.tls_cert, tls_key=args.tls_key,
+                        tls_client_ca=args.tls_client_ca,
+                        allow_hosts=tuple(args.allow_host or ()),
+                        allow_origins=tuple(args.allow_origin or ()))
+    return exposure, None
 
 
 def _run_mcp(args) -> int:
@@ -203,6 +249,11 @@ def _run_mcp(args) -> int:
             providers=providers or None,
             roots=tuple(getattr(args, "root", None) or ()) or None,
         )
+        exposure = None
+        if getattr(args, "http", None):
+            exposure, code = _http_exposure(args)
+            if exposure is None:
+                return code
         refused = _bind_session_authority(args)
         if refused is not None:
             return refused
@@ -227,6 +278,20 @@ def _run_mcp(args) -> int:
                 print(f"error: cannot restore {args.restore}: {error}",
                       file=sys.stderr)
                 return 1
+        if exposure is not None:
+            from ..mcp import server as _server
+            from ..mcp.http_transport import (HttpTransport, ServerDispatcher,
+                                              TransportError)
+
+            try:
+                transport = HttpTransport(ServerDispatcher(_server),
+                                          registry=_server.SESSION.operator_registry,
+                                          exposure=exposure, auth=args.auth,
+                                          server_module=_server)
+            except TransportError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 1
+            return transport.serve_forever()
         return serve()
 
     if args.mcp_command == "schema":
@@ -283,16 +348,24 @@ def _run_mcp_proxy(args) -> int:
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    http = None
+    if args.http:
+        exposure, code = _http_exposure(args)
+        if exposure is None:
+            return code
     # the proxy always runs the approval policy: gating is its whole purpose
     args.approval_policy = "auto"
     refused = _bind_session_authority(args)
     if refused is not None:
         return refused
+    if args.http:
+        http = {"exposure": exposure, "auth": args.auth,
+                "registry": SESSION.operator_registry}
     if args.wal:
         SESSION._wal_path = args.wal
     return proxy.run(command, undo=undo,
                      trust_read_only=args.trust_read_only_hints,
-                     timeout=args.upstream_timeout)
+                     timeout=args.upstream_timeout, http=http)
 
 
 def _run_serve(args) -> int:
@@ -367,8 +440,19 @@ def _run_serve(args) -> int:
     try:
         if http:
             from ..mcp.http_face import serve_http  # noqa: PLC0415
-            return serve_http(ir, config, composition=args.composition,
-                              host=args.host, port=args.port)
+            from ..mcp.http_guard import Exposure, ExposureError  # noqa: PLC0415
+
+            exposure = Exposure(host=args.host, port=args.port,
+                                tls_cert=getattr(args, "tls_cert", None),
+                                tls_key=getattr(args, "tls_key", None),
+                                allow_hosts=tuple(getattr(args, "allow_host", None) or ()),
+                                allow_origins=tuple(getattr(args, "allow_origin", None) or ()))
+            try:
+                return serve_http(ir, config, composition=args.composition,
+                                  host=args.host, port=args.port, exposure=exposure)
+            except ExposureError as error:
+                print(f"error: {error}", file=sys.stderr)
+                return 1
         from ..mcp.composed import serve_composition  # noqa: PLC0415
         return serve_composition(ir, config, composition=args.composition)
     except SessionError as error:
