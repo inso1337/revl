@@ -50,7 +50,8 @@ sys.path.insert(0, str(ROOT / "backends" / "python"))
 
 from revl import compile_source  # noqa: E402
 
-import emit  # noqa: E402
+from revl._paths import python_backend_emitter  # noqa: E402
+emit = python_backend_emitter()
 
 
 _TYPES = """

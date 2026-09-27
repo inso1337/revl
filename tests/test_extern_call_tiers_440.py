@@ -175,7 +175,9 @@ pub extern witnessed[db] fn charge(id: Str) -> Result[ChargeWitness, Str]
 def test_read_register_is_emitted_into_the_transactional_kwargs():
     """The py emitter passes `register='read'` down to the runtime, which writes
     it onto the WAL discharge-descriptor."""
-    from emit import _transactional_register_kwargs  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    _py_emit = python_backend_emitter()
+    _transactional_register_kwargs = _py_emit._transactional_register_kwargs
 
     assert _transactional_register_kwargs({"register": "read"}) \
         == ", register='read'"
@@ -403,7 +405,8 @@ def test_a_keyed_deferred_emission_emits_its_register_and_key_value(tmp_path):
     """The seam decides from the DESCRIPTOR, so the emitter must put the register
     and the key's VALUE (not the parameter name) onto the enqueue call — the key
     a fresh-process re-issue has to repeat is the argument at this call site."""
-    import emit  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     from revl.compiler import compile_source  # noqa: PLC0415
 
     ir = compile_source(
@@ -426,7 +429,8 @@ def test_a_keyed_deferred_emission_emits_its_register_and_key_value(tmp_path):
 
 def test_an_unregistered_deferred_emission_emits_byte_identically(tmp_path):
     """Additivity: a pre-440 deferred emission's emitted enqueue is unchanged."""
-    import emit  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     from revl.compiler import compile_source  # noqa: PLC0415
 
     ir = compile_source(
