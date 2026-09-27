@@ -233,6 +233,8 @@ it. The line is drawn per caller, from what the code does with the signature:
 | --- | --- | --- |
 | `revl pool serve` on a non-loopback `--host` | yes | it signs a receipt for every task a remote party sends, which is a timing oracle on demand; it refuses before it binds |
 | `revl run --pool private` to a non-loopback `--peer-addr` | yes | the task and the attestation are signed by the operator's keys for a peer the pool does not trust; it refuses before the ledger is touched |
+| `revl pool probe` to a non-loopback address (`pool_health.probe_member`) | yes | same key and same peer as a dispatch; it refuses before the probe is signed, sent or recorded |
+| the heartbeat a peer signs in answer to a probe (`pool_health.answer_probe`) | as its `serve` | it shares the task channel; a non-loopback `serve` has already refused to bind without the extra |
 | `revl.mcp.quorum.sign_cast` | yes, by default | a proof exists to cross the MCP transport to a session the quorum does not trust, and an automated voter signs as questions arrive; pass `network_exposed=False` for a local session |
 | `revl pool serve` on loopback, a dispatch to loopback | no | only this machine can reach it; tunnelling that port elsewhere makes it exposed, and then you need the extra |
 | `revl pool request`, `revl pool withdraw` | no | the record is written to a file, once, by the operator |

@@ -1360,6 +1360,8 @@ for the key lifecycle and what the signature binds.
   - `--peer-addr HOST:PORT` - where that member's `pool serve` listens. Needs
     exactly one `--peer`. Without it the address of the member's last verified
     contact is used, and a member never contacted is refused on `no-address`.
+    Probing a non-loopback address needs the `revl[crypto]` extra and exits 2
+    naming it, before anything is signed, sent or recorded (issue #1460).
   - `--dispatch-identity PATH` - the operator's private identity file, the one
     `run --pool private` signs tasks with.
   - `--timeout SECONDS` - per member (default 10).

@@ -403,6 +403,135 @@ def test_cli_pool_serve_off_loopback_names_the_extra(tmp_path, capsys,
 
 
 # ---------------------------------------------------------------------------
+# pool liveness (issue #1198): probes and heartbeats sign on the same channel
+# ---------------------------------------------------------------------------
+
+POOL_KEY = b"pool-operator-key-1460"
+PROBE_OPERATOR = pi.identity_from_seed("operator", b"seed/operator/1460")
+PROBE_WORKER = pi.identity_from_seed("worker", b"seed/worker/1460")
+
+
+def _pool_with_one_member(tmp_path) -> tuple[Path, dict]:
+    """A charter, a roster with one admitted member, and its directory: the
+    least `pool_health.probe_member` reads before it signs."""
+    from revl import peer_offer
+    from revl import peer_pool as pp
+    from revl.attest import key_id
+
+    ceiling = ("compute()",)
+    record = pp.sign_charter(pp.PoolCharter(
+        pool_id="lab-1460", ceiling=ceiling,
+        tiers={pp.ENTRY_TIER: pp.TierGrant(caps=ceiling)},
+        admit_key_ids=(key_id(POOL_KEY),), revoke_key_ids=(key_id(POOL_KEY),),
+        attest_key_ids=(), artifact_digests=("a" * 64,),
+        identity_mode=pp.MODE_ASYMMETRIC), POOL_KEY)
+    directory = pi.IdentityDirectory()
+    directory.register(PROBE_WORKER.public())
+    roster = pp.Roster(record["pool_id"], pp.canonical_digest(record))
+    offer = peer_offer.PeerOffer(
+        peer_id="worker", attestation=peer_offer.Attestation(trust="verified"),
+        grant_ceiling=ceiling)
+    join = pp.sign_join_identity(pp.JoinRequest(
+        pool_id=record["pool_id"], charter_digest=pp.canonical_digest(record),
+        peer_id="worker",
+        offer=peer_offer.sign_offer_identity(offer, PROBE_WORKER),
+        artifact_digest="a" * 64, nonce="n-0",
+        issued_at=pp._iso(pp._utc_now())), PROBE_WORKER)
+    verdict = pp.admit(record, join, charter_key=POOL_KEY, peer_keys={},
+                       directory=directory, admitting_key_id=key_id(POOL_KEY),
+                       roster=roster)
+    assert verdict["verdict"] == pp.ADMIT, verdict
+    pool_dir = tmp_path / "pool"
+    pool_dir.mkdir()
+    (pool_dir / pp.CHARTER_FILE).write_text(json.dumps(record),
+                                            encoding="utf-8")
+    pp.save_roster(pool_dir, roster)
+    pp.save_directory(pool_dir, directory)
+    return pool_dir, record
+
+
+def _probe_cli(tmp_path, pool_dir, addr):
+    from revl import pool_health as ph
+
+    pi.write_private_identity(tmp_path / "op.key", PROBE_OPERATOR)
+    args = _parse(["pool", "probe", "--dir", str(pool_dir), "--peer", "worker",
+                   "--peer-addr", addr,
+                   "--dispatch-identity", str(tmp_path / "op.key"),
+                   "--timeout", "2"])
+    return ph.probe_command(args)
+
+
+def test_pool_probe_to_a_remote_member_names_the_extra(config, tmp_path,
+                                                       capsys, monkeypatch):
+    """`revl pool probe --peer-addr` off loopback: the operator's key signs a
+    probe for a peer the pool does not trust. Without the extra it exits 2
+    naming it, before anything is signed, sent or recorded. With the extra it
+    gets as far as the connection (stubbed here to fail, so the member reads
+    unreachable and the command exits 1)."""
+    from revl import pool_health as ph
+
+    connections = []
+
+    def unreachable(address, *_args, **_kwargs):
+        connections.append(address)
+        raise OSError("stubbed: no network in this test")
+
+    monkeypatch.setattr(pd.socket, "create_connection", unreachable)
+    pool_dir, _record = _pool_with_one_member(tmp_path)
+    code = _probe_cli(tmp_path, pool_dir, "192.0.2.10:9")
+    err = capsys.readouterr().err
+    if config == BLOCKED:
+        assert code == 2
+        assert EXTRA in err
+        assert connections == []
+        assert not (pool_dir / ph.HEALTH_FILE).exists()
+    else:
+        assert code == 1, err
+        assert EXTRA not in err
+        assert connections == [("192.0.2.10", 9)]
+
+
+def test_pool_probe_on_loopback_keeps_the_pure_path(config, tmp_path, capsys):
+    import socket
+
+    with socket.socket() as spare:
+        spare.bind(("127.0.0.1", 0))
+        port = spare.getsockname()[1]
+    pool_dir, _record = _pool_with_one_member(tmp_path)
+    code = _probe_cli(tmp_path, pool_dir, f"127.0.0.1:{port}")
+    assert code == 1  # nobody listening: unreachable, not refused
+    assert EXTRA not in capsys.readouterr().err
+
+
+def test_a_network_exposed_runner_signs_its_heartbeat_through_the_flag(
+        config, tmp_path, monkeypatch):
+    """The heartbeat is the second signer on the peer's channel. A runner
+    marked network-exposed hands its flag to `answer_probe`, so the heartbeat
+    is refused rather than signed on the pure path. `serve` already refuses to
+    bind first, so this is defence in depth, checked by marking the flag
+    directly."""
+    from revl import peer_pool as pp
+    from revl import pool_health as ph
+
+    pool_dir, record = _pool_with_one_member(tmp_path)
+    runner = pd.PeerRunner(charter_record=record, identity=PROBE_WORKER,
+                           operator_public=PROBE_OPERATOR.public(),
+                           workspace=tmp_path / "work")
+    runner.network_exposed = True  # as `serve` would, without its check
+    body = ph.build_probe(pool_id=record["pool_id"],
+                          charter_digest=pp.canonical_digest(record),
+                          peer_id="worker")
+    signed = ph.sign_probe(body, PROBE_OPERATOR)
+    if config == BLOCKED:
+        _refuses(lambda: runner.handle(signed))
+    else:
+        answer = runner.handle(signed)
+        assert answer.get("ok"), answer
+        assert pi.verify_record(ph.HEARTBEAT_DOMAIN, answer["heartbeat"],
+                                PROBE_WORKER.public_key)[0]
+
+
+# ---------------------------------------------------------------------------
 # the simulation itself, and the import boundary
 # ---------------------------------------------------------------------------
 
