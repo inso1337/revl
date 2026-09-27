@@ -809,7 +809,21 @@ class PeerRunner:
         A liveness probe shares the channel and is answered by
         `pool_health.answer_probe`, which checks it against the same pinned
         operator key and signs a heartbeat. It runs nothing and does not
-        touch `seen`."""
+        touch `seen`.
+
+        A runner flagged network-exposed whose signing backend is missing
+        answers with the same `task-shape` refusal `serve`'s backstop would
+        give, naming the extra, rather than raising (issue #1460). The
+        construction and `serve` checks make that unreachable in practice;
+        the contract holds without them."""
+        try:
+            return self._handle(record)
+        except SigningBackendUnavailable as error:
+            return _refusal(LINK_TASK_SHAPE,
+                            f"the frame could not be processed: "
+                            f"{type(error).__name__}: {error}")
+
+    def _handle(self, record: Any) -> dict:
         if pool_health.is_probe(record):
             return pool_health.answer_probe(
                 record, charter_record=self.charter_record,

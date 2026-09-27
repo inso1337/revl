@@ -507,9 +507,10 @@ def test_a_network_exposed_runner_signs_its_heartbeat_through_the_flag(
         config, tmp_path, monkeypatch):
     """The heartbeat is the second signer on the peer's channel. A runner
     marked network-exposed hands its flag to `answer_probe`, so the heartbeat
-    is refused rather than signed on the pure path. `serve` already refuses to
-    bind first, so this is defence in depth, checked by marking the flag
-    directly."""
+    is refused rather than signed on the pure path, and `handle` keeps its
+    never-raises contract by answering with a named refusal. `serve` already
+    refuses to bind first, so this is defence in depth, checked by marking the
+    flag directly."""
     from revl import peer_pool as pp
     from revl import pool_health as ph
 
@@ -523,7 +524,12 @@ def test_a_network_exposed_runner_signs_its_heartbeat_through_the_flag(
                           peer_id="worker")
     signed = ph.sign_probe(body, PROBE_OPERATOR)
     if config == BLOCKED:
-        _refuses(lambda: runner.handle(signed))
+        answer = runner.handle(signed)  # a refusal, never an exception
+        assert answer.get("ok") is False, answer
+        assert answer["link"] == pd.LINK_TASK_SHAPE
+        assert "SigningBackendUnavailable" in answer["reason"]
+        assert EXTRA in answer["reason"]
+        assert "heartbeat" not in answer
     else:
         answer = runner.handle(signed)
         assert answer.get("ok"), answer
