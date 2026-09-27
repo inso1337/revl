@@ -142,10 +142,7 @@
     "subscribe=<true>"
   ],
   "emit_py": [
-    "async=<true>",
-    "commutative=<true>",
     "deferred=<true>",
-    "idempotent=<true>",
     "kind=__rendered__",
     "kind=hole",
     "kind=instance-get",
