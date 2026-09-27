@@ -2125,6 +2125,24 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
             outstanding=outstanding, rolled_back=transactional_rolled_back,
             restore_residue=restore_residue, fenced_deferred=fenced_deferred,
             settled=settled_by_replay, compensations_ran=compensations_ran)
+        # issue #1369: the effect records were classified before the replay,
+        # against the WAL as read. A compensation this replay just ran (or
+        # found settled) offsets its emission, so re-ask the pairing for every
+        # emission still counted closure-only residue.
+        pairing.settle({e["seq"] for e in compensations_ran}
+                       | {e["seq"] for e in settled_by_replay})
+        still = []
+        for e in unreconstructible:
+            by = pairing.offset_by_seq(e.get("seq"))
+            if by is None:
+                still.append(e)
+                continue
+            offset.append({k: v for k, v in e.items() if k not in ("reason", "still_out")}
+                          | {"compensation": by})
+            outstanding[:] = [o for o in outstanding
+                              if not (o.get("kind") == "unreconstructible"
+                                      and o.get("referent") == e["still_out"])]
+        unreconstructible[:] = still
         for d in transactional + compensations:
             if d.get("seq") in discharged:
                 discharged_skipped.append({
