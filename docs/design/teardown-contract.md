@@ -397,6 +397,37 @@ Under an E-Stop the unit runs nothing and the halt strands the entries.
 Only the python tier implements it. The other five tiers keep a failed call's
 entries parked until the activation settles.
 
+### A declared compensation registers wherever it is crossed (py tier)
+
+An extern may declare its own compensation (`extern emission fn put(..)
+compensate undo_put()`, item 254). The activation body registered it at an
+`emit put(..)` statement; a provide method registered it nowhere, so an abort
+after a tool call could not undo a crossing the program declared undoable.
+Every extern that declares `compensate` is now decorated with
+`runtime.declared_crossing`, and every provide method that can reach one runs
+in `Frame.call_scope`, inside which the decorator registers the compensation
+through `Frame.compensation_method`, the call a site-spelled compensation
+makes, after the host body returns. That holds in every position the frontend
+admits: a statement, a `let`, a `return`, an argument, an `if` arm. A plain
+call scope settles nothing on failure; the UI transaction unit above is the
+scope that does.
+
+Measured with `revl test --sweep --backend all` over an activation-body
+crossing: go, rust and java never run an extern-declared compensation, and the
+sweep still reports the tiers as agreeing and residue-free. Those tiers are
+not changed here.
+
+### An owed compensation that did not land is not a clean verdict
+
+A session boundary report (`Session.abort`, `commit`, `unload`, `aclose`)
+carries `noResidue`, the in-process R4 checks, beside `compensationResidue`.
+When a compensation was owed and did not land, `noResidue` used to stay true:
+a clean verdict for an undo that did not happen. When the residue is not
+empty, a fifth check, `compensations`, is now present and false, and
+`noResidue` is false with it. A boundary with no compensation residue reports
+the four checks as before. `aclose`'s `settled` stays physical settlement and
+reads the four R4 checks only.
+
 ## The merged residue schema (246 freezes this)
 
 One schema, one channel. 243 rule 6 (restore-residue feeds 246's prompt) and
@@ -547,6 +578,40 @@ rollback that owed a compensation it did not complete is `rolled-back` with
 residue, never clean. Because recover can re-attempt what an abort already
 attempted, inverses must be idempotent-on-replay (243 rule 5) and
 compensations should be idempotent or carry the idempotency key.
+
+### The named call, as the py tier writes it (issue #1369)
+
+Until issue #1369 the py tier did not keep the `call` shape above. It guessed:
+`receiver` was the component, `method` was the first global name the closure
+loaded, and `args` was `[]` for a compensation and `[witness]` for an inverse,
+so `compensate tickets.withdraw(t)` was recorded as receiver `Agent`, method
+`tickets`, args `[]`. Nothing a fresh process could call.
+
+The emitter now derives the named call at every registration site
+(activation and method, transactional and compensation, and the compensation
+an extern declares) and passes it as `call=`; the frame writes it verbatim.
+
+- `receiver` is the required-service key for a call through one, and `null`
+  for an extern or module fn, which the emitted module binds by `method`.
+- `args` are evaluated at registration. An inverse's are evaluated against
+  `result`, the `Ok` witness, so an `undo restore(result.path)` records the
+  path and not the whole witness.
+- A compensation whose argument is itself a call (`compensate a.y(a.q(t))`)
+  records `"args": null`. Capturing it would run `a.q` at registration, on
+  every successful call, instead of only when the compensation is owed; `null`
+  says the arguments were not captured rather than recording a list that
+  looks complete.
+
+`runtime.replay_descriptors(module, wal_path, descriptors, services=...)`
+re-issues open descriptors in a fresh process. It rebuilds each one as the
+`_Transactional` or `_Compensation` it was, under its original `seq`, and runs
+them through `Frame.drain` and `Frame._drain_phase2`, so the replay fences,
+the E-Stop, the Phase-2 budget and the residue records are the in-process
+ones. It writes an `aborted` record naming what ran, skips a seq a discharge
+or `aborted` record already settles and a non-idempotent inverse a previous
+attempt fenced, and reports a descriptor whose call names nothing it can
+resolve (or whose `args` are `null`) as `unresolved`. A service-call
+descriptor needs the live provider for its key, which the caller supplies.
 
 ### Owned deliverable: the recovery.py/replay.py WAL migration (py tier, landed)
 

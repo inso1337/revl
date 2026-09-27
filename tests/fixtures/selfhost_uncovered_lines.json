@@ -51,7 +51,7 @@
     "reference": {
       "go": 3348,
       "java": 986,
-      "py": 676,
+      "py": 710,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 91,
       "java": 175,
-      "py": 104,
+      "py": 109,
       "rust": 286,
       "ts": 97,
       "wasm": 63
@@ -758,8 +758,8 @@
           "_emit_py_ref_thunk": 26,
           "_ref_dotted": 2
         },
-        "Extern residual ABI/configuration boundary: _emit_externs emits capability-bound secret lookup/store and extern plug-time config required/default merging; dispatches @py refs; rejects missing target bodies and emits pass for empty bodies. Port supports verbatim bodies and declared Secret[T] marking, not capability-secret/config installation. Representative sources: stdlib/fs.rvl, tests/test_extern_config_cross_tier_378.py and tests/test_secret_bound.py. Empty-body pass is equivalent on both sides. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481), so one statement arrives with it and this is re-recorded 40 to 41 under the same reason. `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap. Item 522 slice 3 (issue #1369) adds three: the `ui_crossing` decorator a computer-use extern gets, which no corpus document declares (see the item 522 entry).": {
-          "_emit_externs": 44
+        "Extern residual ABI/configuration boundary: _emit_externs emits capability-bound secret lookup/store and extern plug-time config required/default merging; dispatches @py refs; rejects missing target bodies and emits pass for empty bodies. Port supports verbatim bodies and declared Secret[T] marking, not capability-secret/config installation. Representative sources: stdlib/fs.rvl, tests/test_extern_config_cross_tier_378.py and tests/test_secret_bound.py. Empty-body pass is equivalent on both sides. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481), so one statement arrives with it and this is re-recorded 40 to 41 under the same reason. `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap. Item 522 slice 3 (issue #1369) adds three: the decorator a computer-use extern gets, which no corpus document declares (see the item 522 entry). The declared-compensation fix under the same issue generalises it to `declared_crossing` and adds two more, the `ui=True` flag and the declared compensation's `call=` descriptor, re-recorded 44 to 46.": {
+          "_emit_externs": 46
         },
         "Fault-harness boundary: _emit_fault_tests validates target component and serializes injection/assertion metadata into REVL_FAULT_TESTS. tests/test_fault_tests.py::SOURCE and test_python_tier_lowers_the_section_into_the_module reproduce this unported trailer.": {
           "_emit_fault_tests": 11
@@ -881,8 +881,16 @@
         "issue #1382 added `_refuse_validated_externs` to the python reference emitter: the tier refuses a `validated` EXTERN rather than dropping the modifier and emitting a module byte-identical to one written without it. The loop header, the `validated` test and its `continue` are executed by every corpus document that declares any extern; the two statements that name the offender and raise are not, because no corpus document declares a validated extern (measured 2026-09-22: 0 of 1068 `.rvl` sources and 0 of 54 `.ir.json` documents). Adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_extern_python_1382.py, which asserts the message names the extern and that the sibling service-operation carrier still lowers.": {
           "_refuse_validated_externs": 2
         },
-        "Item 522 slice 3 (issue #1369), the UI transaction unit on the python tier: `_ui_transaction_facts` finds the computer-use externs and the provide methods `revl.ui_transaction.plans` reads as units, `_emit_externs` decorates a computer-use extern with `ui_crossing`, and `_ComponentEmitter._method` wraps a unit's body in `Frame.ui_transaction`. selfhost/emit_py.rvl does not port the unit, so no corpus document can declare a computer-use capability without the byte-agreement oracle diverging; the self-host port is the work that retires this entry. The input family is tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS.": {
-          "_ui_transaction_facts": 8
+        "Item 522 slice 3 (issue #1369), the UI transaction unit on the python tier: `_ui_transaction_facts` finds the computer-use externs and the provide methods `revl.ui_transaction.plans` reads as units, `_emit_externs` decorates a computer-use extern with `declared_crossing`, and `_ComponentEmitter._method` wraps a unit's body in `Frame.ui_transaction`. selfhost/emit_py.rvl does not port the unit, so no corpus document can declare a computer-use capability without the byte-agreement oracle diverging; the self-host port is the work that retires this entry. Re-recorded 8 to 12 when the capability check moved ahead of the frontend import, so a document with no computer-use capability no longer imports it. The input family is tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS.": {
+          "_ui_transaction_facts": 12
+        },
+        "Declared compensations in provide methods (found under issue #1369): `_crossing_facts` and `_reaches` find the externs that declare `compensate` or a computer-use capability and the provide methods that can reach one, which `_emit_externs` decorates with `declared_crossing` and `_ComponentEmitter._method` wraps in `Frame.call_scope`. selfhost/emit_py.rvl ports neither the decorator nor the scope, and no emit_py corpus document declares an extern `compensate` (measured on this branch: the corpus reaches only the early return), so a corpus document here would make the byte-agreement oracle diverge. The self-host port is the work that retires this entry. The input family is tests/test_declared_compensate_positions.py.": {
+          "_crossing_facts": 13,
+          "_reaches": 7
+        },
+        "The named call an inverse or a compensation writes into its WAL discharge descriptor, `call={receiver, method, args}` (issue #1369: a service-call compensation was recorded as receiver `Agent`, method `tickets`, args `[]`, and no descriptor could be re-issued in a fresh process). `_named_call_kwarg` and `_inert` derive it at every registration site; selfhost/emit_py.rvl `call_kwarg` agrees byte for byte on the corpus, which reaches the required-service shape (services_body.rvl, services_method_effects.rvl, service_call_surface.rvl) and the witnessed inverse (witnessed.rvl, witnessed_secret.rvl). Not reached: an unrecognised call shape, a non-`req` target, a `fn`-kind callee, a field-read argument, and an argument that is itself a call (`args: None`). A corpus document for each is the work that retires this entry; none was added here because tests/ is a formal census directory and the census regeneration needs a `lake build` this change did not run. The input family is tests/test_replay_descriptors_1369.py and tests/test_declared_compensate_positions.py.": {
+          "_inert": 2,
+          "_named_call_kwarg": 6
         }
       },
       "uncovered_statements": 649
@@ -1870,6 +1878,10 @@
         },
         "witnessed_extern final miss after a nonempty table: legal matching fn acquires are covered, and unknown fn names are frontend-rejected. The lookup's None fallback mirrors the reference dictionary miss.": {
           "witnessed_extern": 1
+        },
+        "The self-host port of the reference `_named_call_kwarg` / `_inert` (issue #1369): the named call an inverse or a compensation writes into its WAL discharge descriptor. The corpus reaches the required-service shape and the witnessed inverse, where the two emitters agree byte for byte. Not reached: an unrecognised call shape, a non-`req` target, a `fn`-kind callee, a field-read argument, and an argument that is itself a call, for the reason the reference entry gives.": {
+          "call_kwarg": 4,
+          "inert_arg": 1
         }
       },
       "uncovered_statements": 104

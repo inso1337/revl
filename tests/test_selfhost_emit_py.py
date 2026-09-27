@@ -499,7 +499,11 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
             # item 872: the DECLARED `witnessed[fs]` set rides on every
             # registration, activation or method, which is what the recorder
             # turns into the step's `scope`.
-            want = {"scope": {"caps": ["fs"]}}
+            want = {"scope": {"caps": ["fs"]},
+                    # issue #1369: the named inverse, its arguments evaluated
+                    # against the `Ok` witness, for the WAL descriptor.
+                    "call": {"receiver": None, "method": "unstash",
+                             "args": [witness]}}
             if mode == "activation":
                 want.update(undo_idempotent=True, register="declared")
             assert kwargs == want

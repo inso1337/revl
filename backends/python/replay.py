@@ -2263,7 +2263,12 @@ class WriteAheadLog:
         # spelling and not the other would leak on the next line.
         secret = self.secrets.crossing(method=method, key=receiver,
                                        component=receiver)
-        safe_args = confidential.redact_args(args, secret, _describe)
+        # `args=None` is a named call whose arguments could not be captured at
+        # registration without evaluating a crossing early (a compensation whose
+        # argument is itself a call runs that call only when it is owed). The
+        # record says so with `null` rather than a list that looks complete.
+        safe_args = (None if args is None
+                     else confidential.redact_args(args, secret, _describe))
         safe_witness = _describe(witness)
         record = {
             "record": "discharge-descriptor",
