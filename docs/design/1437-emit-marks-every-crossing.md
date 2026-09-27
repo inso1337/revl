@@ -96,8 +96,8 @@ and an empty baseline. With the reference change alone:
 | reference only, witnessed exempt | 486 | 10 | 7 | 8 | 1 |
 | reference, witnessed exempt, corpus markers | 495 | 0 | 0 | 2 | 0 |
 
-The two remaining `msg-mismatch/G4` are the consumer candidates below, and
-they close when the gate carries the same rule.
+The two remaining `msg-mismatch/G4` are the consumer candidates below; they
+closed when the gate carried the same rule (see "The gate" below).
 
 Nine corpus programs were newly refused and got their marker, each a real
 crossing: `backends/typescript/tests/fixtures/{a2a_agent, async_agent_loop,
@@ -188,6 +188,47 @@ refused on `7880a6a2` by the marker rule of issue #1427, in an activation body
 and in a provide method, scoped and unscoped, by the reference and the gate
 alike. `examples/rejections/g4_nested_approval_emission.rvl` pins the shape.
 
+## The gate
+
+`selfhost/lower.rvl` carries both rules, on top of the block reader of PR
+#1452, so a crossing inside or after an `if`/`else`/`while`/`for` arm, a
+one-line block, a braceless arm and an activation guard is judged as the
+reference judges it.
+
+- **The marker.** `fn_call` drops the `emitPos == "args"` condition and keeps
+  `!marked`, the gate's reading of `_expr_mode == "setup"`. A `witnessed`
+  extern is exempt by name.
+- **The approval floor.** `Ctx.appr` holds the required tokens (read off the
+  `requires approval` clause), the emission fixed point with first-class
+  values, and the `await approval[C]` bindings per component. An `emit` step
+  is judged after its `compensate` slot, with its `with` edge; the value form,
+  a `let x = emit …` binding and an expression-bodied method are judged with
+  none. What the gate cannot resolve (an edge that is not a bare name, a name
+  no `await approval` binds, a `[` class in a scope) it leaves to the
+  reference rather than refusing.
+- Two reader fixes the approval floor needed, both false rejections before
+  this: `let a = await approval[C] { … }` was read as an expression naming an
+  undeclared `approval` and refused under G1, and `fn m() = emit c()` was read
+  as an `emit` STEP, which put a spurious `a host emission` label on the
+  provider upper bound's message.
+
+The block-nesting corpus gains 24 documents
+(`tests/fixtures/gate_block_nesting/g4_host_marker_*.rvl` and
+`g4_approval_*.rvl`), one per rule and block form. The fourteen existing
+`g4_upper_*` documents there wrote an unmarked extern call; they would have
+kept agreeing on the marker refusal while no longer measuring the upper
+bound they are named for, so each now marks its crossing and draws the upper
+bound again.
+
+Census on the tree this lands on (`855f7fd1` plus this change): 1004
+programs, both engines, baseline empty, no divergence. One document changes
+between two buckets that are not divergences:
+`examples/rejections/g5_undo_fn_emission.rvl` moves from
+`no-objection-out-of-slice` to `refuse-out-of-slice/G4`. The reference
+refuses it under G5, outside the gate's slice; the gate now refuses the
+unmarked host emission in its `undo` slot, as it already did for the `req`
+carrier. The direction is the fail-closed one.
+
 ## What is not covered
 
 - **Teardown slots and approval.** A `compensate` slot that calls an
@@ -198,7 +239,7 @@ alike. `examples/rejections/g4_nested_approval_emission.rvl` pins the shape.
 - **Spawn-handle and service-typed-local carriers.** `_emit_crossed_caps`
   resolves only a `req` target and a direct extern, so a crossing through a
   spawn handle meets the floor only if its token is reached some other way.
-- **The formal model** carries no fact about approvals. The three approval
+- **The formal model** carries no fact about approvals. The fifteen approval
   documents sit in the ratcheted `out-of-fragment-approval` bucket
   (`formal/out_of_fragment_ledger.json`) rather than being judged against the
-  marker rule's `G` row.
+  marker rule's `G` row. Modelling approval is its own issue.

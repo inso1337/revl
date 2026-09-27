@@ -1,15 +1,15 @@
-// REFUSED G4 (provider upper bound): `K.f` is declared plain but reaches `zz_write()`.
+// REFUSED G4 (approval floor, item 246): `zz_charge` requires approval for
+// `pay`, and the crossing carries no covering `with` edge.
 //
 // A provide-method `while` over several lines. The crossing is written AFTER
-// the block, so the reader has to find the block's closing brace by nesting
-// depth to reach it.
+// the block.
 //
 // One document per rule and block form, so the gate/reference census measures
 // each (tools/gate_reference_census.py). The file name's prefix is the
 // expected verdict; tests/test_gate_reference_census.py holds it.
 
-extern emission[net] fn zz_write(t: Str) -> Int = @py { return 1 }
-service K { fn f(k: Str) -> Int }
+extern emission[pay] fn zz_charge(t: Str) -> Int requires approval = @py { return 1 }
+service K { emission fn f(k: Str) -> Int }
 component C provides k: K {
   provide k {
     fn f(k) {
@@ -17,7 +17,7 @@ component C provides k: K {
       while (n < 2) {
         n = n + 1
       }
-      let q = emit zz_write(k)
+      let q = emit zz_charge(k)
       return 0
     }
   }

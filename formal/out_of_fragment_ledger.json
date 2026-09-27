@@ -38,6 +38,18 @@
   "out-of-fragment-approval": [
     "examples/rejections/g4_approval_helper_reach.rvl",
     "examples/rejections/g4_approval_scoped_extern.rvl",
-    "examples/rejections/g4_approval_value_form_method.rvl"
+    "examples/rejections/g4_approval_value_form_method.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_after_guard_setup.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_after_if.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_after_while.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_in_braceless_if.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_in_multiline_if.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl",
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl"
   ]
 }
