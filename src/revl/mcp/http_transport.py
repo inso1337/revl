@@ -49,6 +49,7 @@ from http.server import BaseHTTPRequestHandler
 
 from .http_guard import (DispatchLock, Exposure, ExposureError, Listener,
                          request_refusal)
+from .live_profile import ProfileSource, ProfileUnavailable
 
 PROTOCOL_VERSION = "2026-07-28"
 SUPPORTED_VERSIONS = (PROTOCOL_VERSION,)
@@ -98,78 +99,6 @@ def _common_name(cert) -> str | None:
             if key == "commonName":
                 return value
     return None
-
-
-class ProfileSource:
-    """The operator profile FILE, re-read when it changes, so an edit (a
-    `revoked` line, a removed operator, a narrowed grant) takes effect on the
-    next request rather than at restart.
-
-    Checked on every request and cheap: one `stat`. The file is read and
-    hashed only when its stat signature (mtime, ctime, size, inode, device)
-    changed, or when its mtime is within `RACY_NS` of the last read, where a
-    second write in the same timestamp tick could otherwise hide behind an
-    unchanged signature (git's "racy clean" rule). A new digest is parsed.
-
-    Fail CLOSED: a profile that cannot be read or parsed leaves NO registry, and
-    every request is refused naming the error until the file is fixed. It never
-    keeps serving under the previous profile, because the edit that broke it may
-    have been the revocation."""
-
-    RACY_NS = 2_000_000_000
-
-    def __init__(self, path: str) -> None:
-        self.path = os.path.abspath(path)
-        self._lock = threading.Lock()
-        self._signature = None
-        self._digest: str | None = None
-        self._read_at_ns = 0
-        self.registry = None
-        self.error: str | None = None
-        self.refresh()
-        if self.error is not None:
-            raise TransportError(self.error)
-
-    def refresh(self) -> None:
-        from .operator import ProfileError, parse_profile  # noqa: PLC0415
-
-        with self._lock:
-            try:
-                st = os.stat(self.path)
-            except OSError as error:
-                self._fail(None, f"cannot read the operator profile {self.path}: {error}")
-                return
-            signature = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino, st.st_dev)
-            racy = st.st_mtime_ns >= self._read_at_ns - self.RACY_NS
-            if signature == self._signature and not racy and self.error is None:
-                return
-            try:
-                with open(self.path, "rb") as handle:
-                    data = handle.read()
-            except OSError as error:
-                self._fail(None, f"cannot read the operator profile {self.path}: {error}")
-                return
-            self._signature = signature
-            self._read_at_ns = time.time_ns()
-            digest = hashlib.sha256(data).hexdigest()
-            if digest == self._digest and self.error is None:
-                return
-            try:
-                registry = parse_profile(data.decode("utf-8"), source=self.path)
-            except (UnicodeDecodeError, ProfileError) as error:
-                self._fail(digest, f"the operator profile {self.path} no longer "
-                                   f"parses, so every request is refused until it "
-                                   f"does: {error}")
-                return
-            self.registry, self.error, self._digest = registry, None, digest
-
-    def _fail(self, digest, message: str) -> None:
-        self.registry, self.error, self._digest = None, message, digest
-
-    def current(self):
-        """`(registry, None)`, or `(None, why every request is refused)`."""
-        self.refresh()
-        return self.registry, self.error
 
 
 class _StaticProfile:
@@ -546,7 +475,10 @@ class HttpTransport:
         self.dispatcher = dispatcher
         self.server = server_module
         self.exposure = exposure
-        source = ProfileSource(profile_path) if profile_path else None
+        try:
+            source = ProfileSource(profile_path) if profile_path else None
+        except ProfileUnavailable as error:
+            raise TransportError(str(error)) from error
         self.authenticator = Authenticator(registry, auth, source=source)
         self.binding = CallerBinding(server_module, lambda: self.authenticator.registry)
         self.latch = HaltLatch()
@@ -588,6 +520,11 @@ class HttpTransport:
         scheme = "https" if self.exposure.tls else "http"
         print(f"revl mcp: MCP {PROTOCOL_VERSION} on {scheme}://{host}:{port}{ENDPOINT} "
               f"(auth: {self.authenticator.mode}; one request at a time)", file=stderr)
+        if self.latch.path:
+            # a broken or changing profile refuses every request, revl_estop
+            # included; the latch is the way to halt that needs no request
+            print(f"revl mcp: out-of-band E-Stop: revl estop --latch {self.latch.path}",
+                  file=stderr)
         try:
             while self._thread is not None and self._thread.is_alive():
                 self._thread.join(timeout=1.0)
