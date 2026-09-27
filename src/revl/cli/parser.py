@@ -1274,6 +1274,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--env", default=None,
                      help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
+    run.add_argument("--providers", default=None, metavar="FILE",
+                     help="JSON/TOML provider configuration binding each "
+                          "`model role` to a runtime adapter (OpenAI-compatible, "
+                          "Anthropic, Gemini). Checked before boot against the "
+                          "program's placement: an on_device role bound off the "
+                          "device, a crossing on an unbound or undeclared role, "
+                          "or a credential in the file refuses the run. "
+                          "Credentials come from the environment variables the "
+                          "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
                      help="boundary policy file (item 33). With --backend wasm it "
                           "enforces the item-289 least-authority chain (host "
