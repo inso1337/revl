@@ -135,7 +135,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from . import peer_identity, peer_pool, pool_receipt
+from . import peer_identity, peer_pool, pool_health, pool_receipt
 from .lawful_retry import EffectClass
 
 # ---------------------------------------------------------------------------
@@ -775,7 +775,16 @@ class PeerRunner:
 
     def handle(self, record: Any) -> dict:
         """Check one task and, if it passes every check, run it and sign a
-        receipt. Never raises: the wire is hostile."""
+        receipt. Never raises: the wire is hostile.
+
+        A liveness probe shares the channel and is answered by
+        `pool_health.answer_probe`, which checks it against the same pinned
+        operator key and signs a heartbeat. It runs nothing and does not
+        touch `seen`."""
+        if pool_health.is_probe(record):
+            return pool_health.answer_probe(
+                record, charter_record=self.charter_record,
+                identity=self.identity, operator_public=self.operator_public)
         shape = _task_shape(record)
         if shape:
             return _refusal(LINK_TASK_SHAPE, f"not a task: {shape}")
@@ -1019,6 +1028,19 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
             "attestation": attestation}
 
 
+def _note_contact(pool_dir, peer_id: str, state: str, host: str, port: int,
+                  **detail: str) -> None:
+    """Tell the health record what this dispatch learned about the member.
+
+    Only the two readings a dispatch can vouch for: a delivery whose receipt
+    verified under the member's key is a live contact, and a send nobody
+    answered is an unreachable one. A peer that answered and refused proves
+    nothing about who answered, so it is not recorded as either."""
+    pool_health.note_contact(pool_dir, pool_health.Contact(
+        peer_id=peer_id, state=state, at=_iso(_utc_now()), source="dispatch",
+        addr=f"{host}:{port}", **detail))
+
+
 def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
                  source: bytes, runner: str,
                  dispatch_identity: peer_identity.PeerIdentity,
@@ -1092,7 +1114,11 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
 
     if not answer.get("ok"):
         link = str(answer.get("link", LINK_RECEIPT_REFUSED))
-        if link != LINK_PEER_UNREACHABLE:
+        if link == LINK_PEER_UNREACHABLE:
+            _note_contact(pool_dir, peer_id, pool_health.HEALTH_UNREACHABLE,
+                          host, port,
+                          link=link, reason=str(answer.get("reason", "")))
+        else:
             # The peer answered and refused. That is a settled outcome, so the
             # task is terminal. An unreachable peer is NOT settled and stays
             # outstanding, which is the distinction a withdrawal reads.
@@ -1125,6 +1151,8 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
     save_ledger(pool_dir, ledger)
     if not delivered.get("ok"):
         return dict(delivered, task_id=task_id)
+    _note_contact(pool_dir, peer_id, pool_health.HEALTH_LIVE, host, port,
+                  key_id=str((answer.get("receipt") or {}).get("key_id", "")))
     return {"ok": True, "kind": "revl.pool-delivery", "version": "1.0",
             "pool_id": str(charter_record.get("pool_id", "")),
             "peer_id": peer_id, "task_id": task_id,
@@ -1176,7 +1204,10 @@ def serve_command(args) -> int:
                   flush=True)
 
         def report(response):
-            if response.get("ok"):
+            if response.get("heartbeat"):
+                print(f"answered probe {response['heartbeat'].get('nonce', '')[:16]}",
+                      flush=True)
+            elif response.get("ok"):
                 print(f"ran task {response.get('task_id', '')} -> receipt "
                       f"{pool_receipt.receipt_digest(response['receipt'])[:16]}",
                       flush=True)
@@ -1295,7 +1326,7 @@ def run_pool_command(args) -> int:
         # `revl` compile failure and no task is written to the ledger.
         print(f"error: {error}", file=sys.stderr)
         return 2
-    except (DispatchError, peer_pool.PoolError,
+    except (DispatchError, peer_pool.PoolError, pool_health.HealthError,
             pool_receipt.ReceiptError) as error:
         print(f"error: {error}", file=sys.stderr)
         return 2

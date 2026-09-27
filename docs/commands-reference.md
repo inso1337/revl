@@ -1217,8 +1217,8 @@ of [revl-attest.md](revl-attest.md) for the trust boundary.
 Stand up and operate a private peer pool (roadmap item 524): several
 independent operators running work for each other without trusting each other's
 machines. The verbs declare a pool, admit a peer that proves its identity and
-its artifact, read the roster, run work on a member and read the delivery
-ledger, and withdraw a peer. See
+its artifact, read the roster, check that members are still there, run work on
+a member and read the delivery ledger, and withdraw a peer. See
 [design/550-private-peer-pool.md](design/550-private-peer-pool.md) for the trust
 progression and the failure direction of every step in it, and
 [design/567-pool-dispatch.md](design/567-pool-dispatch.md) for the task
@@ -1305,8 +1305,37 @@ for the key lifecycle and what the signature binds.
     pinned public key is verified against that.
 - `status` - members, tiers, what each holds, the effect class each tier
   admits, who may admit, revoke and attest, and which members are on which
-  identity backing. Needs no key.
-  - `--dir DIR`, `--json`
+  identity backing. Each member's row also carries what it owes
+  (`outstanding=N`) and its liveness: `health=live@<instant>`,
+  `health=unreachable` or `health=unverified` with `since`, `failures`, the
+  link and `last-live`, or `health=unknown` if nothing ever contacted it.
+  Needs no key.
+  - `--dir DIR`
+  - `--json` - the charter, the roster with its event ledger, the identity
+    directory and the health record.
+  - `--require-live SECONDS` - a health check: exit 1, naming the members on
+    stderr, if any member's most recent contact was not a verified heartbeat
+    or delivery within SECONDS. It withdraws nobody.
+- `probe` - check that members are still there. Sends each a probe signed with
+  the operator identity tasks are signed with; the member's `pool serve`
+  answers with a heartbeat signed under its own key, echoing the probe's nonce.
+  The heartbeat counts only if it verifies under an ACTIVE key the directory
+  pins for that member and answers this probe; anything else at the address is
+  recorded `unverified`, never live (`heartbeat-signature`, `heartbeat-key`,
+  `stale-heartbeat`, `probe-refused`, ...). Results go to `health.json` in the
+  pool directory. A probe changes no authority: an unreachable member stays a
+  member until `pool withdraw` removes it under the revoke authority. Exits 1
+  if any probed member is not live, and on an empty pool. See
+  [design/550-private-peer-pool.md](design/550-private-peer-pool.md#liveness).
+  - `--dir DIR`
+  - `--peer ID` - a member to probe. Repeatable. Default: every member.
+  - `--peer-addr HOST:PORT` - where that member's `pool serve` listens. Needs
+    exactly one `--peer`. Without it the address of the member's last verified
+    contact is used, and a member never contacted is refused on `no-address`.
+  - `--dispatch-identity PATH` - the operator's private identity file, the one
+    `run --pool private` signs tasks with.
+  - `--timeout SECONDS` - per member (default 10).
+  - `--json` - every outcome, with the recorded health row.
 - `withdraw` - remove a peer and report, in three disjoint sets, what that
   revokes (an inverse exists), what it retains (no inverse: the work is done
   and the ledger keeps it) and what it orphans (outstanding work, handed to the
@@ -1323,7 +1352,9 @@ for the key lifecycle and what the signature binds.
   that could admit anybody, which is what makes running it on a machine the
   operator does not trust coherent. Every refusal names a link
   (`task-signature`, `charter-identity`, `artifact-digest`, `replayed-task`,
-  ...) and is answered on the connection rather than dropped.
+  ...) and is answered on the connection rather than dropped. It also answers
+  `pool probe` with a signed heartbeat, after checking the probe against the
+  same pinned operator key; a probe runs nothing.
   - `--charter PATH` - the charter this peer joined. A task must pin its
     digest, so a charter re-signed with different terms invalidates every task
     minted under the old ones.
