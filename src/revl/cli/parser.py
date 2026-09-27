@@ -982,9 +982,11 @@ def build_parser() -> argparse.ArgumentParser:
                                 "without a prompt, and is reverted on abort. INVERSE "
                                 "receives TOOL's arguments, or with `:result` its "
                                 "structuredContent")
-    mcp_proxy.add_argument("--distrust-read-only-hints", action="store_true",
-                           help="treat every `readOnlyHint: true` as absent, so "
-                                "every tool needs a human yes per call")
+    mcp_proxy.add_argument("--trust-read-only-hints", action="store_true",
+                           help="admit a tool whose uncontradicted `readOnlyHint: "
+                                "true` revl cannot check, without a prompt. By "
+                                "default the proxy does not trust an unchecked "
+                                "claim and gates the tool like any emission")
     mcp_proxy.add_argument("--upstream-timeout", type=float, default=120.0,
                            metavar="SECONDS",
                            help="how long to wait for one upstream answer "

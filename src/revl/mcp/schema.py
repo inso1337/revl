@@ -651,14 +651,21 @@ def classify_imported_tools(manifest, *, undo: dict | None = None,
         under the approval policy: a human yes per call).
 
     `distrust` maps a tool name to the reason its read-only claim is no longer
-    believed (the proxy's runtime observation); `trust_read_only=False`
-    distrusts every claim. Either way the claim is removed and the tool falls
-    to `emission` by the rule above, not by a second rule.
+    believed (the proxy's runtime observation). Either way the claim is removed
+    and the tool falls to `emission` by the rule above, not by a second rule.
+
+    `trust_read_only` decides what an UNCHECKED claim is worth. `True` (the
+    default, and what `revl mcp import` uses) admits it as `plain`: the
+    importer writes source for a human to review before anything runs.
+    `False` (the default of `revl mcp proxy`, which enforces at run time with
+    no review step) holds it at `emission` and sets `gated` to say why; the
+    claim itself stays `unchecked`, since nothing refuted it either.
 
     Each entry: `name`, `op` (a unique revl identifier), `effect`,
-    `readOnlyClaim` (`none` / `unchecked` / `contradicted` / `observed` /
-    `distrusted`), `reasons`, `unclassifiable` (a reason or None), `undo`,
-    `params`, `doc`, `callable` (False when the tool has no usable name).
+    `readOnlyClaim` (`none` / `unchecked` / `contradicted` / `observed`),
+    `gated` (why an uncontradicted claim is still gated, or None), `reasons`,
+    `unclassifiable` (a reason or None), `undo`, `params`, `doc`, `callable`
+    (False when the tool has no usable name).
     """
     tools = manifest.get("tools") if isinstance(manifest, dict) else manifest
     tools = tools or []
@@ -718,10 +725,11 @@ def classify_imported_tools(manifest, *, undo: dict | None = None,
                 claim = "observed"
                 reasons.append(f"read-only claim contradicted by observed behaviour: "
                                f"{distrust[name_text]}")
-            elif not trust_read_only:
-                claim = "distrusted"
-                reasons.append("read-only claim not trusted: the operator distrusts "
-                               "every unchecked claim")
+
+        gated = None
+        if claim == "unchecked" and not trust_read_only and unclassifiable is None \
+                and name_text not in undo:
+            gated = "unchecked read-only claim"
 
         spec = undo.get(name_text)
         if unclassifiable is not None:
@@ -734,6 +742,11 @@ def classify_imported_tools(manifest, *, undo: dict | None = None,
         elif spec is not None:
             effect = EFFECT_WITNESSED
             reasons.append(f"the operator declared {json.dumps(spec['tool'])} as its undo")
+        elif gated is not None:
+            effect = EFFECT_EMISSION
+            reasons.append("gated: unchecked read-only claim. It claims "
+                           "`readOnlyHint: true` and revl cannot check the claim, "
+                           "so it is not trusted")
         elif claim == "unchecked":
             effect = EFFECT_PLAIN
             reasons.append("claims `readOnlyHint: true`; revl cannot check the claim")
@@ -751,6 +764,7 @@ def classify_imported_tools(manifest, *, undo: dict | None = None,
             "op": op,
             "effect": effect,
             "readOnlyClaim": claim,
+            "gated": gated,
             "reasons": reasons,
             "unclassifiable": unclassifiable,
             "undo": dict(spec) if spec is not None else None,
@@ -800,7 +814,7 @@ def render_imported_source(tools: list[dict], *, service: str = "Imported",
         for reason in tool["reasons"]:
             # every upstream name inside a reason is JSON-quoted, so no reason
             # carries a line break out of its comment
-            if reason.startswith(("read-only claim", "unclassifiable")):
+            if reason.startswith(("read-only claim", "unclassifiable", "gated")):
                 ops.append(f"  // {' '.join(reason.splitlines())}")
         if effect == EFFECT_WITNESSED:
             ops.append(f"  // imported with a declared undo: "

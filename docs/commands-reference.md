@@ -1698,7 +1698,9 @@ write-ahead log and declared undos apply at call time.
 - `upstream` - the server command after `--` (required).
 - `--undo TOOL=INVERSE[:result]` - as for `revl mcp import`; a witnessed tool
   runs without a prompt and is reverted on abort.
-- `--distrust-read-only-hints` - treat every `readOnlyHint: true` as absent.
+- `--trust-read-only-hints` - admit a tool whose uncontradicted `readOnlyHint:
+  true` revl cannot check, as `plain`. By default such a tool is gated like any
+  emission and its verdict reads `gated: unchecked read-only claim`.
 - `--upstream-timeout SECONDS` - how long to wait for one upstream answer
   (default: `120`).
 - `--wal PATH` - the session write-ahead log (default: the per-user state

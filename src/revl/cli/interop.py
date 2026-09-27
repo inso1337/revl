@@ -291,7 +291,7 @@ def _run_mcp_proxy(args) -> int:
     if args.wal:
         SESSION._wal_path = args.wal
     return proxy.run(command, undo=undo,
-                     trust_read_only=not args.distrust_read_only_hints,
+                     trust_read_only=args.trust_read_only_hints,
                      timeout=args.upstream_timeout)
 
 
