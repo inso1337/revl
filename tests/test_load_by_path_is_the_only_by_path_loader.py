@@ -25,32 +25,66 @@ from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 TESTS = ROOT / "tests"
+BACKENDS = ROOT / "backends"
+
+
+def collected_test_modules() -> list[Path]:
+    """Every python file CI can collect or load as test scaffolding: tests/,
+    and under each backends/<tier>/ the test files, conftests and anything in
+    a tests/ directory. Virtualenvs and caches are not source."""
+    out = sorted(TESTS.glob("*.py"))
+    for path in sorted(BACKENDS.rglob("*.py")):
+        parts = path.relative_to(BACKENDS).parts
+        if any(p.startswith(".") or p in ("node_modules", "__pycache__") for p in parts):
+            continue
+        if (path.name.startswith("test_") or path.name.endswith("_test.py")
+                or path.name == "conftest.py" or "tests" in parts[:-1]):
+            out.append(path)
+    return out
+
 
 _BRIDGE = ("backends/python/bridge.py, a runtime module rather than a repo tool, "
            "under a name only this file uses; nothing else imports that name")
 _RUNTIME = ("a copy of backends/python/runtime.py whose class-level state the "
             "test resets or relies on being its own; not a repo tool")
 
-# (file, enclosing function) -> why it keeps an inline registration.
+_EXTERNAL = ("the cordis-wasm runtime from a checkout OUTSIDE this repository, "
+             "under its own name, skipping the test when it will not import")
+
+# (repo-relative file, enclosing function) -> why it keeps an inline
+# registration.
 ALLOWED = {
-    ("_load_by_path.py", "load_by_path"): "the helper itself",
-    ("_backend_import.py", "backend_emitter"):
+    ("tests/_load_by_path.py", "load_by_path"): "the helper itself",
+    ("tests/_backend_import.py", "backend_emitter"):
         "a caching loader for backend emitters under per-tier unique names; "
         "it returns the registered module before loading",
-    ("test_tier_host_trace_secret_421_f6.py", "_backend"):
+    ("tests/test_tier_host_trace_secret_421_f6.py", "_backend"):
         "returns the registered module before loading, and needs the emitter's "
         "directory on sys.path while it executes",
-    ("_net_gate_provider.py", "_bridge"): _BRIDGE,
-    ("test_deploy_118.py", "_bridge"): _BRIDGE,
-    ("test_hostile_wire_tck.py", "_bridge"): _BRIDGE,
-    ("test_network_placement.py", "_bridge"): _BRIDGE,
-    ("test_seam_admission.py", "_bridge"): _BRIDGE,
-    ("test_seam_deadlines.py", "_bridge"): _BRIDGE,
-    ("test_ts_correlation_seal.py", "_bridge"): _BRIDGE,
-    ("test_insert_if_absent.py",
+    ("tests/_net_gate_provider.py", "_bridge"): _BRIDGE,
+    ("tests/test_deploy_118.py", "_bridge"): _BRIDGE,
+    ("tests/test_hostile_wire_tck.py", "_bridge"): _BRIDGE,
+    ("tests/test_network_placement.py", "_bridge"): _BRIDGE,
+    ("tests/test_seam_admission.py", "_bridge"): _BRIDGE,
+    ("tests/test_seam_deadlines.py", "_bridge"): _BRIDGE,
+    ("tests/test_ts_correlation_seal.py", "_bridge"): _BRIDGE,
+    ("tests/test_insert_if_absent.py",
      "test_concurrency_exactly_one_true_on_the_reference_runtime"): _RUNTIME,
-    ("test_time_coeffect.py", "rt"): _RUNTIME,
-    ("test_time_coeffect.py", "test_emitted_python_body_reverts_cleanly"): _RUNTIME,
+    ("tests/test_time_coeffect.py", "rt"): _RUNTIME,
+    ("tests/test_time_coeffect.py", "test_emitted_python_body_reverts_cleanly"): _RUNTIME,
+    # backends/*/, which CI collects per tier and in combined sessions.
+    ("backends/python/tests/conftest.py", "_load_and_pin"):
+        "pins the bare names `emit` and `runtime` to the python backend's own "
+        "copies before this directory's tests are collected, on purpose: a "
+        "combined session may have put another backend's directory first",
+    ("backends/typescript/test_temporal_target.py", "_emit_module"):
+        "binds the bare `emit` to the typescript emitter because its sibling "
+        "`emit_temporal.py` imports `from emit import`; returns the module "
+        "first when `emit` is already that file",
+    ("backends/wasm/test_accessor_exec.py", "_cordis_runtime"): _EXTERNAL,
+    ("backends/wasm/test_router_exec_wasm.py", "_cordis_runtime"): _EXTERNAL,
+    ("backends/wasm/test_spawn_exec.py", "_cordis_runtime"): _EXTERNAL,
+    ("backends/wasm/test_str_literal_length_exec.py", "_cordis_runtime"): _EXTERNAL,
 }
 
 
@@ -90,16 +124,21 @@ def by_path_registrations(source: str) -> list[tuple[str, int]]:
 
 def test_no_new_inline_by_path_registration_in_tests():
     found = {}
-    for path in sorted(TESTS.glob("*.py")):
+    files = collected_test_modules()
+    assert any(p.parent.parent == BACKENDS for p in files), "no backend test was scanned"
+    for path in files:
+        rel = path.relative_to(ROOT).as_posix()
         for scope, line in by_path_registrations(path.read_text(encoding="utf-8")):
-            found.setdefault((path.name, scope), line)
-    new = sorted(f"tests/{f}:{line} in {s}()" for (f, s), line in found.items()
+            found.setdefault((rel, scope), line)
+    new = sorted(f"{f}:{line} in {s}()" for (f, s), line in found.items()
                  if (f, s) not in ALLOWED)
     assert not new, (
         "a test registers a by-path module in sys.modules itself. Use "
-        "`from _load_by_path import load_by_path`, which reuses the module "
-        "already loaded from the same file instead of replacing it:\n  "
-        + "\n  ".join(new))
+        "`from _load_by_path import load_by_path` (tests/_load_by_path.py; under "
+        "backends/, append tests/ to sys.path first, as "
+        "backends/java/test_reserved_word_idents_java.py does), which reuses "
+        "the module already loaded from the same file instead of replacing "
+        "it:\n  " + "\n  ".join(new))
     stale = sorted(f"{f}::{s}" for f, s in ALLOWED if (f, s) not in found)
     assert not stale, f"allowed sites that no longer exist: {stale}"
 

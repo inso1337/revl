@@ -331,7 +331,18 @@ _LOAD_MARKERS = (
     re.compile(r'"emit\.py"'),                       # spec_from_file_location(...)
     re.compile(r"^\s*import emit\b", re.M),          # backends/python on sys.path
     re.compile(r'import_module\(\s*f?"backends\.'),  # backends.<tier>.emit
+    re.compile(r"\bpython_backend_emitter\("),        # revl._paths' shared loader
 )
+
+#: Modules that load an emitter only to hand it to a caller, and answer no
+#: refusal themselves. The caller is the entry point, and the marker above
+#: finds it by its call. `revl/_paths.py::python_backend_emitter` is the one
+#: place the reference tier's `import emit` happens since issue #1449, where a
+#: bare import in each caller loaded another backend's emitter whenever that
+#: backend's directory sat earlier on `sys.path`.
+SHARED_LOADERS = {
+    "revl/_paths.py": "python_backend_emitter: returns the python emitter",
+}
 
 #: How each entry point answers a refusal. `reports` means it turns the
 #: emitter's own sentence into an answer of its own and lets a FAULT through,
@@ -382,7 +393,17 @@ def _entry_points_on_disk() -> dict[str, str]:
     src = ROOT / "src"
     return {str(path.relative_to(src)): path.read_text(encoding="utf-8")
             for path in sorted((src / "revl").rglob("*.py"))
-            if _scan(path.read_text(encoding="utf-8"))}
+            if _scan(path.read_text(encoding="utf-8"))
+            and str(path.relative_to(src)) not in SHARED_LOADERS}
+
+
+def test_every_shared_loader_is_still_a_loader():
+    """A shared loader is excluded from the census, so it must still be one:
+    otherwise the exclusion would hide a module that stopped being a loader
+    and became something else."""
+    src = ROOT / "src"
+    for name in SHARED_LOADERS:
+        assert _scan((src / name).read_text(encoding="utf-8")), name
 
 
 def test_the_census_scanner_detects_a_new_entry_point():
@@ -397,6 +418,7 @@ def test_the_census_scanner_detects_a_new_entry_point():
         'spec = importlib.util.spec_from_file_location("x", D / "emit.py")',
         "def load():\n    import emit\n    return emit",
         'module = importlib.import_module(f"backends.{backend}.emit")',
+        "emit = python_backend_emitter()",
     ):
         assert _scan(source), source
     assert not _scan("# this module mentions an emitter but loads none\nimport json")
