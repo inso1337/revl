@@ -358,3 +358,45 @@ def test_the_unmasked_documents_are_refused_and_undecided(verdicts, rel):
     assert got == "", (
         f"the checker now decides {rel} ({got!r}); delete it from "
         f"UNMASKED_UNDECIDED and say which slice grew")
+
+
+# --- authority rules after a block (tests/fixtures/gate_block_nesting/) -------
+#
+# Issue #1453. `p_stmts` and `p_comp_body` here had the shapes PR #1452 fixed in
+# `selfhost/lower.rvl`: a `}` that began a line ended the enclosing body, and a
+# block written on one line, a braceless arm and a block's condition were one
+# skipped line. Measured on the 42 documents before the fix: 35 no-objection,
+# 1 agree-refuse, 6 agree-admit. Every G4 document but the multi-line layout
+# twin read as no-objection, because the crossing was never reached.
+#
+# Held per document, by the file-name prefix:
+#   * `g4_`: both refuse with the same text. The marker and the upper bound are
+#     in this slice.
+#   * `ok_`: both admit, so a fix that works by refusing more shows up.
+#   * `g1_`: the reference refuses G1 and the checker raises no objection. An
+#     undeclared requirement is outside this slice (`req_call` passes a root
+#     that is not a requirement through unjudged), with or without a block.
+BLOCK_NESTING = ROOT / "tests" / "fixtures" / "gate_block_nesting"
+G1_MESSAGE = "`db` is not a declared requirement of C"
+
+
+def test_every_block_nesting_document_is_held_by_name(verdicts):
+    docs = sorted(BLOCK_NESTING.glob("*.rvl"))
+    assert len(docs) == 42, f"the block-nesting corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        rel = str(doc.relative_to(ROOT))
+        if rel not in verdicts:
+            wrong.append(f"{rel}: not in the census corpus")
+            continue
+        want, got = verdicts[rel]
+        prefix = doc.stem.split("_", 1)[0]
+        if prefix == "ok":
+            ok = want == "" and got == ""
+        elif prefix == "g4":
+            ok = want != "" and got == want
+        else:
+            ok = want == G1_MESSAGE and got == ""
+        if not ok:
+            wrong.append(f"{rel}: reference {want!r}, checker {got!r}")
+    assert not wrong, "\n  ".join(["block-nesting documents moved:"] + wrong)
