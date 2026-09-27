@@ -68,8 +68,9 @@ WHAT EACH COMPONENT READS
 Every component names a tool or a committed artifact the repository already
 owns. None of them is a new gate, and none of them reads a candidate's prose:
 
-    compiles              `cargo check --offline` on crates/revl-gate (after
-                          one `cargo fetch` if the registry is cold), PLUS
+    compiles              `cargo check` and `cargo test --lib`, offline, on
+                          crates/revl-gate (after one `cargo fetch` if the
+                          registry is cold), PLUS
                           tools/conformance.py --json with zero REAL gaps (a
                           crash, as against a named tier limit) on every tier
     tests                 tools/affected_tests.py's own selection, then that
@@ -652,14 +653,15 @@ def _in_scope(path: str, scope) -> bool:
 
 # --------------------------------------------------- compiles, and its bounds
 
-#: The crate whose build is the crate half of `compiles`. The gate crate only:
-#: `crates/revl-gate-wasm` needs a `wasm32-wasip2` target installed and
-#: `crates/revl-lsp` needs its dependencies fetched, so requiring either would
-#: make the component unverifiable rather than strict, and a component that can
-#: never verify is one nobody reads. Their BYTES are held by
-#: `artifact-stability`; what is uncovered here is that they compile, and
-#: section 9 of the design doc says so.
+#: The crate whose build AND unit tests are the crate half of `compiles`. The
+#: gate crate only. `crates/revl-gate-wasm` is a `cdylib` wrapper with no unit
+#: test of its own (no `#[test]` and no `#[cfg(test)]` in its source), so a
+#: `cargo test --lib` there would build a host copy and run nothing; its
+#: component build needs a `wasm32-wasip2` target. `crates/revl-lsp` needs its
+#: dependencies fetched. Their BYTES are held by `artifact-stability`; what is
+#: uncovered here is that they compile, and section 9 of the design doc says so.
 GATE_CRATE = "crates/revl-gate"
+CRATE_EVIDENCE = f"cargo check + cargo test --lib --offline in {GATE_CRATE}"
 CARGO_TIMEOUT = 1800
 
 #: How many host tiers the matrix must still carry. The six tier NAMES are
@@ -673,7 +675,7 @@ MIN_TIERS = 6
 
 
 def run_cargo(candidate: Candidate, args, cwd: Path,
-              timeout: int = CARGO_TIMEOUT) -> Run:
+              timeout: int = CARGO_TIMEOUT, target_dir=None) -> Run:
     """`Run` for a cargo invocation in the candidate tree. Fail-closed.
 
     `CARGO_TARGET_DIR` is a scratch directory, never `crates/*/target` inside
@@ -681,6 +683,7 @@ def run_cargo(candidate: Candidate, args, cwd: Path,
     that tree's own `scope` verdict, and a measurement that perturbs its subject
     is not a measurement. It costs a cold build every run, which is the right
     trade for a component whose whole claim is that this source compiles.
+    `target_dir` lets consecutive steps on one crate share that scratch build.
     """
     cargo = shutil.which("cargo")
     if cargo is None:
@@ -688,7 +691,7 @@ def run_cargo(candidate: Candidate, args, cwd: Path,
                           "gate crate compiles")
     env = candidate_env()
     with tempfile.TemporaryDirectory(prefix="evolution-reward-cargo-") as raw:
-        env["CARGO_TARGET_DIR"] = raw
+        env["CARGO_TARGET_DIR"] = str(target_dir) if target_dir else raw
         try:
             proc = subprocess.run(
                 [cargo] + [str(a) for a in args], cwd=str(cwd), env=env,
@@ -730,7 +733,7 @@ def _index_reachable() -> bool:
     return _crates_io_reachable()
 
 
-def check_crate(candidate: Candidate, crate: Path) -> Run:
+def check_crate(candidate: Candidate, crate: Path, target_dir=None) -> Run:
     """`cargo check` on `crate`, under the repository's cargo policy.
 
     The policy is `revl.run_rust.rust_runtime_reason`'s and
@@ -745,8 +748,13 @@ def check_crate(candidate: Candidate, crate: Path) -> Run:
     the second check exactly as it failed the first. A registry that cannot be
     filled is a failure named as such, never a skip.
     """
-    check = ["check", "--offline", "--quiet"]
-    first = run_cargo(candidate, check, cwd=crate)
+    return _cargo_offline(candidate, crate, ["check", "--offline", "--quiet"],
+                          target_dir)
+
+
+def _cargo_offline(candidate: Candidate, crate: Path, args, target_dir) -> Run:
+    """One offline cargo step under the policy `check_crate` describes."""
+    first = run_cargo(candidate, args, cwd=crate, target_dir=target_dir)
     if first.ok or not _offline_resolve_miss(first):
         return first
     if not _index_reachable():
@@ -757,9 +765,55 @@ def check_crate(candidate: Candidate, crate: Path) -> Run:
     if not fetched.ok:
         return Run(False, "the local cargo registry could not be filled: "
                    + fetched.detail)
-    second = run_cargo(candidate, check, cwd=crate)
+    second = run_cargo(candidate, args, cwd=crate, target_dir=target_dir)
     return Run(second.ok, second.detail + " (offline, after `cargo fetch` "
                "filled the local registry)", second.stdout, second.stderr)
+
+
+#: One `test result:` line of `cargo test`. Every test binary prints one.
+_CARGO_TEST_RESULT = re.compile(
+    r"test result: (ok|FAILED)\. (\d+) passed; (\d+) failed")
+
+
+def build_and_test_crate(candidate: Candidate, crate: Path) -> Run:
+    """`cargo check`, then `cargo test --lib`, on `crate`, in one scratch build.
+
+    Issue #1206 named `cargo test --offline --lib` for `compiles`. A check
+    alone proves the crate builds and says nothing about whether the unit tests
+    that ship inside it still pass, which is the immutable half verified and the
+    moving half not. Both steps run under `check_crate`'s policy, so a cold
+    registry is filled once and the verdict is always an offline run.
+
+    The test step is READ, not trusted by exit status. It fails on a nonzero
+    exit, on any `FAILED` result line, on no result line at all, and on a run
+    whose result lines add up to zero passed tests: a unit suite that ran
+    nothing is not a pass, the same rule `tests` applies to pytest.
+    """
+    with tempfile.TemporaryDirectory(prefix="evolution-reward-cargo-") as build:
+        built = check_crate(candidate, crate, target_dir=build)
+        if not built.ok:
+            return built
+        tested = _cargo_offline(
+            candidate, crate, ["test", "--offline", "--quiet", "--lib"], build)
+    results = _CARGO_TEST_RESULT.findall(tested.stdout + tested.stderr)
+    if not tested.ok:
+        return Run(False, "the gate crate builds but its unit tests do not "
+                   "pass: " + tested.detail, tested.stdout, tested.stderr)
+    if not results:
+        return Run(False, "cargo test --lib printed no `test result:` line, so "
+                   "no unit test is known to have run")
+    failing = sum(int(f) for _, _, f in results)
+    passed = sum(int(p) for _, p, _ in results)
+    if failing or any(status != "ok" for status, _, _ in results):
+        return Run(False, f"cargo test --lib reported {failing} failed unit "
+                   "test(s) despite its exit status")
+    if passed == 0:
+        return Run(False, "cargo test --lib ran zero unit tests, and a unit "
+                   "suite that ran nothing is not a pass")
+    return Run(True, f"cargo check and cargo test --lib exited 0; {passed} "
+               "unit test(s) passed" + (" (offline, after `cargo fetch` filled "
+               "the local registry)" if "after `cargo fetch`" in built.detail
+               else ""), tested.stdout, tested.stderr)
 
 
 def _walked_tiers(cases):
@@ -799,10 +853,10 @@ def _walked_tiers(cases):
 def probe_compiles(candidate: Candidate) -> Verdict:
     """Item 536's two readings of `compiles`: the crate build and the matrix.
 
-    Half one is the gate crate. `cargo check --offline` on
-    `crates/revl-gate` compiles the candidate's own `selfhost.rs`, which is the
-    largest generated artifact in the tree and the one a digest gate cannot
-    speak for: `tools/build_gate_crate.py --check` compares BYTES, so a
+    Half one is the gate crate: `cargo check --offline` on `crates/revl-gate`,
+    then `cargo test --offline --lib` there, which is what issue #1206 named.
+    The check compiles the candidate's own `selfhost.rs`, which is the largest
+    generated artifact in the tree and the one a digest gate cannot speak for: `tools/build_gate_crate.py --check` compares BYTES, so a
     regenerated crate can be byte-correct and not compile. That has happened
     here. No cargo on the machine is a FAILURE, not a skip, and it is the exact
     case the module docstring's 7-of-8 argument is about. A registry with no
@@ -826,14 +880,13 @@ def probe_compiles(candidate: Candidate) -> Verdict:
     if not (crate / "Cargo.toml").is_file():
         return failed(name,
                       f"{GATE_CRATE}/Cargo.toml is not present in the candidate tree")
-    run = check_crate(candidate, crate)
+    run = build_and_test_crate(candidate, crate)
     if not run.ok:
-        return failed(name, run.detail, [f"cargo check --offline in {GATE_CRATE}"])
+        return failed(name, run.detail, [CRATE_EVIDENCE])
 
     walk = run_tool(candidate, ["tools/conformance.py", "--json"])
     if not walk.ok:
-        return failed(name, walk.detail,
-                      [f"cargo check --offline in {GATE_CRATE}"])
+        return failed(name, walk.detail, [CRATE_EVIDENCE])
     try:
         report = json.loads(walk.stdout)
     except ValueError as exc:
@@ -857,9 +910,10 @@ def probe_compiles(candidate: Candidate) -> Verdict:
             ["tools/conformance.py --json"])
     return verified(
         name,
-        f"the gate crate compiles and all {len(tiers)} tiers "
-        f"({', '.join(tiers)}) emit {len(cases)} construct(s) with no real gap",
-        [f"cargo check --offline in {GATE_CRATE}", "tools/conformance.py --json"])
+        f"the gate crate compiles, {run.detail.split('; ')[-1]}, and all "
+        f"{len(tiers)} tiers ({', '.join(tiers)}) emit {len(cases)} "
+        "construct(s) with no real gap",
+        [CRATE_EVIDENCE, "tools/conformance.py --json"])
 
 
 # ------------------------------------------------------ tests, actually run
