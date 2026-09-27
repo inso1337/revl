@@ -45,6 +45,7 @@ from ..errors import RevlError
 from .approval import ApprovalRequired
 from .schema import (EFFECT_EMISSION, EFFECT_PLAIN, EFFECT_WITNESSED,
                      classify_imported_tools, render_imported_source)
+from .server import _error  # one JSON-RPC error shape (check_vocabulary_mirrors)
 from .session import SessionError
 
 PROTOCOL_VERSION = "2025-06-18"
@@ -775,11 +776,6 @@ def _payload_result(payload: dict) -> dict:
 
 def _error_result(message: str) -> dict:
     return {"content": [{"type": "text", "text": message}], "isError": True}
-
-
-def _error(request_id, code: int, message: str) -> dict:
-    return {"jsonrpc": "2.0", "id": request_id,
-            "error": {"code": code, "message": message}}
 
 
 def run(command: list[str], *, undo: dict | None = None,
