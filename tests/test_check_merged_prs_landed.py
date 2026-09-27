@@ -19,8 +19,11 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 from pathlib import Path
+
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
@@ -29,6 +32,17 @@ chk = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(chk)
 
 BASELINE = ROOT / "tools" / "merged_pr_landing_baseline.json"
+
+
+@pytest.fixture(autouse=True)
+def _no_inherited_git_env(monkeypatch):
+    """Every git call in this file, the fixtures' and the checker's, must
+    reach the temporary repository it names. A pre-commit hook exports
+    GIT_DIR and GIT_INDEX_FILE, and with those set `git -C <tmp> init`
+    re-initialises the COMMITTING repository as bare, `git config` writes its
+    identity, and the checker's `git fetch` lands in it too."""
+    for key in [k for k in os.environ if k.startswith("GIT_")]:
+        monkeypatch.delenv(key)
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -427,3 +441,196 @@ def test_the_baseline_ratchet_did_not_absorb_the_false_alarm():
     entries = json.loads(BASELINE.read_text(encoding="utf-8"))["unreachable"]
     assert "1372" not in entries
     assert len(entries) == 8, sorted(entries)
+
+
+# --------------------------------------------------------------------------
+# The history rewrite map. GitHub's PR records keep the commit ids they were
+# given at merge time, and a rewrite of this repository's history gives every
+# commit a new one. These build that situation for real: a repository whose
+# `main` is replayed onto new commit ids, then cloned, so the clone holds only
+# the new ids, exactly like a runner's checkout after the rewrite.
+
+
+def _rewrite_main(repo: Path) -> dict[str, str]:
+    """Replay every commit on `main` with a different author, as a rewrite
+    does, and point `main` at the result. Returns old id -> new id."""
+    _git(repo, "config", "user.name", "rewritten")
+    mapping: dict[str, str] = {}
+    parent = None
+    for old in _git(repo, "rev-list", "--reverse", "main").splitlines():
+        tree = _git(repo, "rev-parse", f"{old}^{{tree}}")
+        msg = _git(repo, "log", "-1", "--format=%B", old)
+        args = ["commit-tree", tree, "-m", msg]
+        if parent is not None:
+            args += ["-p", parent]
+        parent = _git(repo, *args)
+        mapping[old] = parent
+    _git(repo, "update-ref", "refs/heads/main", parent)
+    return mapping
+
+
+def _build_rewritten(tmp_path: Path) -> dict:
+    """`squash` is the merge commit id GitHub recorded before the rewrite;
+    `clone` has only the rewritten ids; `after` merged after the rewrite, so
+    GitHub records its new id and the map has no entry for it."""
+    src = tmp_path / "src"
+    src.mkdir()
+    _git(src, "init", "-q", "-b", "main")
+    _git(src, "config", "user.email", "t@example.invalid")
+    _git(src, "config", "user.name", "t")
+    _commit(src, "base.txt", "base\n")
+    squash = _commit(src, "feature.txt", "feature\n", msg="feature (#1)")
+    mapping = _rewrite_main(src)
+    assert mapping[squash] != squash
+    after = _commit(src, "after.txt", "after\n", msg="after the rewrite (#2)")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(src), str(clone)],
+                   check=True, capture_output=True)
+    # the precondition every test below depends on: the old id is GONE
+    assert not chk.object_exists(clone, squash)
+    return {"clone": clone, "squash": squash, "mapping": mapping,
+            "after": after}
+
+
+def _write_map(path: Path, mapping: dict[str, str], header: bool = True):
+    lines = (["old_sha\tnew_sha"] if header else []) + [
+        f"{old}\t{new}" for old, new in mapping.items()]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return path
+
+
+def test_without_the_map_a_rewritten_merge_commit_is_unresolved(tmp_path):
+    """The defect this map exists for: GitHub's id is not in the clone."""
+    t = _build_rewritten(tmp_path)
+    r = chk.audit(_pr(1, t["squash"]), t["clone"], "origin/main", {})
+    assert r.findings == [] and r.translated == 0
+    assert len(r.unresolved) == 1 and t["squash"][:12] in r.unresolved[0]
+
+
+def test_with_the_map_the_rewritten_merge_commit_resolves(tmp_path):
+    t = _build_rewritten(tmp_path)
+    rewrite = chk.RewriteMap.load(_write_map(tmp_path / "m.tsv", t["mapping"]))
+    r = chk.audit(_pr(1, t["squash"]), t["clone"], "origin/main", {},
+                  rewrite=rewrite)
+    assert r == chk.Audit([], [], [], [], translated=1), r
+
+
+def test_a_merge_commit_missing_from_the_map_passes_through(tmp_path):
+    """A PR merged after the rewrite has its new id on GitHub already, and the
+    map knows nothing about it. It must be looked up as is, not refused."""
+    t = _build_rewritten(tmp_path)
+    rewrite = chk.RewriteMap.load(_write_map(tmp_path / "m.tsv", t["mapping"]))
+    assert t["after"] not in rewrite.pairs
+    assert rewrite.translate(t["after"]) == t["after"]
+    r = chk.audit(_pr(2, t["after"]), t["clone"], "origin/main", {},
+                  rewrite=rewrite)
+    assert r == chk.Audit([], [], [], [], translated=0), r
+    # and an old id the map lacks still reads UNRESOLVED, not as a pass
+    partial = {k: v for k, v in t["mapping"].items() if k != t["squash"]}
+    rewrite = chk.RewriteMap.load(_write_map(tmp_path / "p.tsv", partial))
+    r = chk.audit(_pr(1, t["squash"]), t["clone"], "origin/main", {},
+                  rewrite=rewrite)
+    assert len(r.unresolved) == 1 and r.translated == 0, r
+
+
+def test_a_rewritten_stranding_is_still_a_finding(tmp_path):
+    """Translation must not disarm the check: a merge commit that maps to a
+    new id off `main` is UNREACHABLE, and the line names both ids."""
+    t = _build_repo(tmp_path)
+    repo = Path(t["repo"])
+    fake_old = "f" * 40
+    rewrite = chk.RewriteMap.load(_write_map(
+        tmp_path / "m.tsv", {fake_old: t["stranded_merge"]}))
+    r = chk.audit(_pr(2, fake_old, base="feature"), repo, "main", {},
+                  rewrite=rewrite)
+    assert r.translated == 1 and len(r.findings) == 1, r
+    assert t["stranded_merge"][:12] in r.findings[0]
+    assert f"GitHub records {fake_old[:12]}" in r.findings[0]
+
+
+def test_the_map_accepts_a_unique_prefix_of_seven_or_more():
+    old_a, old_b = "abcdef1" + "0" * 33, "abcdef1" + "1" * 33
+    rewrite = chk.RewriteMap({old_a: "1" * 40, "1234567" + "a" * 33: "2" * 40},
+                             Path("m.tsv"))
+    assert rewrite.translate("1234567") == "2" * 40
+    assert rewrite.translate("1234567AAA") == "2" * 40
+    assert rewrite.translate("123456") == "123456"   # too short: as is
+    assert rewrite.translate("abcdef1") == "1" * 40
+    ambiguous = chk.RewriteMap({old_a: "1" * 40, old_b: "2" * 40},
+                               Path("m.tsv"))
+    with pytest.raises(chk.RewriteMapError, match="more than one old id"):
+        ambiguous.translate("abcdef1")
+    assert ambiguous.translate(old_b) == "2" * 40
+
+
+_GOOD = "a" * 40 + "\t" + "b" * 40
+
+
+@pytest.mark.parametrize("body, says", [
+    ("a" * 40 + "\n", "found 1 tab-separated"),
+    (_GOOD + "\t" + "c" * 40 + "\n", "found 3 tab-separated"),
+    ("a" * 40 + " " + "b" * 40 + "\n", "found 1 tab-separated"),
+    ("a" * 39 + "\t" + "b" * 40 + "\n", "the old id is not a full commit id"),
+    ("a" * 40 + "\t" + "xyz" + "\n", "the new id is not a full commit id"),
+    (_GOOD + "\n" + "a" * 40 + "\t" + "c" * 40 + "\n", "is mapped twice"),
+    ("old_sha\tnew_sha\n", "holds no"),
+    ("", "holds no"),
+    (_GOOD + "\nold_sha\tnew_sha\n", "line 2"),
+])
+def test_a_malformed_map_is_refused_by_name(tmp_path, capsys, body, says):
+    """Never silently ignored. A skipped map brings every false UNRESOLVED
+    back with no hint why; a half-read one translates some ids and not
+    others. The run exits 2 and names the file, and the line where there is
+    one."""
+    t = _build_rewritten(tmp_path)
+    bad = tmp_path / "history_rewrite_map.tsv"
+    bad.write_text(body, encoding="utf-8")
+    src = tmp_path / "prs.json"
+    src.write_text(json.dumps(_pr(1, t["squash"])), encoding="utf-8")
+    rc = chk.main(["--from-json", str(src), "--root", str(t["clone"]),
+                   "--main-ref", "origin/main", "--no-fetch",
+                   "--rewrite-map", str(bad)])
+    out, err = capsys.readouterr()
+    assert rc == 2
+    assert "refusing the history rewrite map" in err
+    assert str(bad) in err and says in err, err
+    assert out == ""  # nothing was audited
+
+
+def test_a_map_that_cannot_be_read_is_refused_not_treated_as_absent(tmp_path):
+    with pytest.raises(chk.RewriteMapError, match="cannot be read"):
+        chk.RewriteMap.load(tmp_path)  # a directory
+    (tmp_path / "bin.tsv").write_bytes(b"\xff\xfe\n")
+    with pytest.raises(chk.RewriteMapError, match="not UTF-8"):
+        chk.RewriteMap.load(tmp_path / "bin.tsv")
+
+
+def test_the_map_turns_a_red_run_green_end_to_end(tmp_path, capsys):
+    """The CLI, both ways, on the same PR list: without the map the run
+    cannot answer (exit 2), with it every PR is accounted for (exit 0)."""
+    t = _build_rewritten(tmp_path)
+    src = tmp_path / "prs.json"
+    src.write_text(json.dumps(_pr(1, t["squash"]) + _pr(2, t["after"])),
+                   encoding="utf-8")
+    empty = tmp_path / "empty.json"
+    empty.write_text(json.dumps({"unreachable": {}}), encoding="utf-8")
+    common = ["--from-json", str(src), "--root", str(t["clone"]),
+              "--main-ref", "origin/main", "--no-fetch",
+              "--baseline", str(empty)]
+
+    assert chk.main(common + ["--rewrite-map",
+                              str(tmp_path / "absent.tsv")]) == 2
+    out = capsys.readouterr().out
+    assert "UNRESOLVED  #1:" in out and "translated" not in out
+
+    good = _write_map(tmp_path / "m.tsv", t["mapping"], header=False)
+    assert chk.main(common + ["--rewrite-map", str(good)]) == 0
+    out = capsys.readouterr().out
+    assert "translated 1 GitHub merge commit id(s)" in out
+    assert "UNRESOLVED" not in out
+
+
+def test_the_default_map_path_is_the_one_the_docstring_names():
+    assert chk.REWRITE_MAP == ROOT / "tools" / "history_rewrite_map.tsv"
+    assert "tools/history_rewrite_map.tsv" in chk.__doc__
+    assert "keep the commit ids" in chk.__doc__
