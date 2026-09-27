@@ -11,6 +11,7 @@ import ast
 import subprocess
 import importlib.util
 import io
+import re
 import sys
 import tokenize
 from pathlib import Path
@@ -550,6 +551,24 @@ def test_every_site_wheel_input_selects_the_site_wheel_gate():
         "Add a rule in tools/affected_tests.py::select (or let the path fall to "
         "the fail-safe FULL gate, which carries every gate)."
     )
+
+
+def test_the_word_index_answers_what_the_word_regex_answers():
+    """Issue #1449. `_word_tests` answers from a per-session index of bare words
+    instead of re-running its regex over every test for every token. The index
+    is only a speed-up if it selects exactly what the regex selected, so both
+    are asked here: a leaf module, a dunder (read from the test's own text
+    only), and a token that is not a single word (which keeps the regex)."""
+    for token in ("a2a_boundary", "__main__", "audit", "revl-gate"):
+        word = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])")
+        idiom = token.startswith("__") and token.endswith("__")
+        want = {
+            at._node(p) for p in at._test_files(ROOT)
+            if word.search(p.name) or word.search(
+                at._read(p) if idiom else at._companion_text(ROOT, p))
+        }
+        assert at._word_tests(ROOT, token) == want, token
 
 
 def test_every_selection_carries_the_vocabulary_gate():
