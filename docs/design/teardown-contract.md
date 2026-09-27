@@ -379,6 +379,24 @@ post-commit crash would find the logged inverse descriptors and replay a
 committed transaction's rollback. Discharge must be durable before the
 activation reports success.
 
+## A scoped abort: the UI transaction unit (item 522, py tier only)
+
+Amendment (issue #1369, [538-ui-transactions.md](538-ui-transactions.md)
+§10). A provide method that crosses a computer-use verb runs inside
+`Frame.ui_transaction`. When that call FAILS, the unit runs the abort above
+over the entries this call registered, and over no others: Phase 1 replays
+its `transactional` entries newest first, Phase 2 runs its `compensation`
+entries newest first under the same bound and the same continue-and-record
+rule, and the failure propagates. The entries are removed from the frame's
+deferred lists before they run, so the activation's own later commit or abort
+never reaches them again. A call that returns leaves its entries parked, and
+the path above settles them as it settles any method-registered entry.
+Brackets are not touched: releasing a handle stays the activation's business.
+Under an E-Stop the unit runs nothing and the halt strands the entries.
+
+Only the python tier implements it. The other five tiers keep a failed call's
+entries parked until the activation settles.
+
 ## The merged residue schema (246 freezes this)
 
 One schema, one channel. 243 rule 6 (restore-residue feeds 246's prompt) and
