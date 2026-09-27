@@ -36,8 +36,11 @@ and give the old command after `--`:
 ```
 
 At startup the proxy prints one line per tool to stderr: the class it enforces
-and the state of the tool's read-only claim. Check that list before you rely on
-it; `revl_proxy_verdicts` returns the same thing, with reasons, over MCP.
+and the state of the tool's read-only claim. By default a tool that claims to
+be read-only shows `gated: unchecked read-only claim`
+([below](#unchecked-read-only-claims-are-gated-by-default)). Check that list
+before you rely on it; `revl_proxy_verdicts` returns the same thing, with
+reasons, over MCP.
 
 Options:
 
@@ -45,7 +48,7 @@ Options:
 |---|---|
 | `--undo TOOL=INVERSE` | `TOOL` is revertible by calling `INVERSE` with `TOOL`'s arguments (repeatable). |
 | `--undo TOOL=INVERSE:result` | the same, but `INVERSE` receives `TOOL`'s `structuredContent` object. |
-| `--distrust-read-only-hints` | treat every `readOnlyHint: true` as absent: every tool then needs a yes per call. |
+| `--trust-read-only-hints` | admit a tool with an uncontradicted `readOnlyHint: true` without a prompt, as `plain`. Off by default. |
 | `--operator-profile PROFILE`, `--operator TOKEN` | bind the session to an operator identity (item 55), as `revl mcp serve` does. |
 | `--policy POLICY` | bind a boundary policy (item 33), as `revl mcp serve` does. |
 | `--approval-record-values {withheld,bound}` | whether an approved crossing's caller-supplied resource value reaches the approval log (default `withheld`). |
@@ -62,10 +65,11 @@ result, loads it into a live session, and routes each `tools/call` through
 
 | the upstream tool | class | what a call does |
 |---|---|---|
-| claims `readOnlyHint: true`, nothing contradicts it | `plain` | proceeds |
+| claims `readOnlyHint: true`, nothing contradicts it (default) | `emission` (class c), `gated: unchecked read-only claim` | returns a ticket; nothing reaches the upstream until a human says yes |
+| the same, under `--trust-read-only-hints` | `plain`, claim reported `unchecked` | proceeds |
 | the operator declared an undo for it (`--undo`) | `witnessed` (class a) | proceeds; its undo runs on abort |
-| anything else, including no annotations | `emission` (class c) | returns a ticket; nothing reaches the upstream until a human says yes |
-| cannot be classified | `emission` (class c) | as above |
+| anything else, including no annotations | `emission` (class c) | returns a ticket |
+| cannot be classified | `emission` (class c) | returns a ticket |
 
 A tool cannot be classified when its `annotations` is not an object, when its
 `readOnlyHint` is present but not a boolean, or when the server lists two tools
@@ -109,9 +113,38 @@ policy enforces, a refused swap), the flagged tool is refused by name until the
 proxy restarts.
 
 **Unchecked.** A claim with no declared contradiction and no observation is
-reported as `readOnlyClaim: "unchecked"`. The proxy follows the import's rule
-and lets the call proceed, but it does not vouch for the claim. Pass
-`--distrust-read-only-hints` to put every such tool behind a yes.
+reported as `readOnlyClaim: "unchecked"`, and is never reported as verified.
+What happens next depends on the default below.
+
+Observation still runs for a gated tool. If a human approves a call to it and
+the upstream announces a change during that call, the claim becomes `observed`
+(refuted). Its class does not change, because it was already gated.
+
+### Unchecked read-only claims are gated by default
+
+The proxy does not trust an unchecked `readOnlyHint: true`. Such a tool is held
+at `emission`, needs a yes per call like any other, and its verdict carries
+`gated: unchecked read-only claim`. `tools/list` advertises it with
+`readOnlyHint: false`, because that is what the proxy enforces.
+
+The reason: the proxy's whole claim is that it checks tool safety claims, and a
+claim it cannot check has not been checked. Letting it through by default would
+be a check that trusts exactly the half it cannot verify. The default costs a
+prompt; the other choice costs an unseen mutation.
+
+An operator who knows the upstream can opt in with `--trust-read-only-hints`.
+The tool is then `plain` and proceeds, its verdict still says
+`readOnlyClaim: "unchecked"` together with a `trusted` field naming the flag,
+and the proxy prints at startup that every unchecked claim is TRUSTED, not
+verified. Declared contradictions and runtime observation apply under the flag
+as well.
+
+`revl mcp import` keeps its own rule: an uncontradicted `readOnlyHint: true`
+becomes a plain `fn`. That is not a contradiction. The importer writes source
+for a human to review before anything runs, and the review is the check. The
+proxy enforces at run time with no review step, so it takes the stricter
+default. Both read the same classifier; the proxy passes
+`trust_read_only=False` unless the flag is given.
 
 Every proxied result carries the proxy's verdict under `_meta["revl/proxy"]`,
 and `tools/list` advertises the annotations the proxy enforces, not the ones
@@ -158,15 +191,18 @@ These hold as long as the proxy is the only way the client reaches the server.
    classified `emission` is called only after a ticket for that tool and those
    exact arguments was approved, or a standing grant covers it. The ticket, the
    approval and its spend are the session's own (item 246).
-2. **The class comes from the import.** No tool is more permissive under the
-   proxy than `revl mcp import` would make it, and an unclassifiable tool is
-   `emission`.
+2. **The class comes from the import's classifier.** No tool is more
+   permissive under the proxy than `revl mcp import` would make it; by default
+   the proxy is stricter, gating unchecked read-only claims too. An
+   unclassifiable tool is `emission`.
 3. **A contradicted read-only claim is not believed.** Declared contradictions
    are caught at startup; an observed resource change during a read-only call
    withdraws the claim for every later call, or refuses the tool.
 4. **A witnessed call is undone on abort.** Every successful witnessed call
    registers its undo, abort calls the undos in reverse order, and a failed undo
-   is reported as residue.
+   is reported as residue. One known exception (issue #1473): after the
+   proxy has swapped a reclassified surface in, an undo that fails raises out
+   of the abort instead of being recorded.
 5. **The session is recorded.** Approval spends and the undo descriptors go to
    the write-ahead log, as in any recorded session.
 6. **E-Stop stops it.** After `revl_estop`, no proxied tool call reaches the
@@ -177,11 +213,13 @@ These hold as long as the proxy is the only way the client reaches the server.
 
 ## What the proxy cannot guarantee
 
-1. **That a read-only claim is true.** The upstream is opaque. A tool that
+1. **That a read-only claim is true.** The upstream is opaque. By default this
+   costs a prompt per call. Under `--trust-read-only-hints`, a tool that
    mutates without announcing it stays `plain` for as long as it stays quiet.
    "Unchecked" means exactly that.
-2. **The first call of a lying tool.** Observation happens during the call, so
-   the call that exposes the lie has already run.
+2. **The first call of a lying tool, under `--trust-read-only-hints`.**
+   Observation happens during the call, so the call that exposes the lie has
+   already run. By default that first call needed a yes.
 3. **That an undo undoes.** `--undo` is your statement. The proxy calls the
    inverse and reports an error result as residue, but an inverse that answers
    success and does nothing is invisible to it.

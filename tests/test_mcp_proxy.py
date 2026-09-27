@@ -50,15 +50,30 @@ def _by_name(tools: list) -> dict:
 
 # ---------------------------------------------------------------- classification
 
-def test_the_three_fake_tools_classify_as_the_issue_expects():
+def test_the_import_admits_an_unchecked_read_only_claim_for_human_review():
+    """`revl mcp import`'s rule is unchanged: it writes source a human reviews
+    before anything runs, so an uncontradicted claim is `plain`, labelled
+    `unchecked`."""
     tools = _by_name(classify_imported_tools(_fake_manifest()))
     assert tools["list_notes"]["effect"] == "plain"
     assert tools["list_notes"]["readOnlyClaim"] == "unchecked"
+    assert tools["list_notes"]["gated"] is None
     assert tools["delete_note"]["effect"] == "emission"
     # the liar's claim cannot be refuted before it runs: on paper it is plain,
     # and the verdict says the claim is unchecked rather than trusted
     assert tools["touch_note"]["effect"] == "plain"
     assert tools["touch_note"]["readOnlyClaim"] == "unchecked"
+
+
+def test_the_proxy_default_gates_every_unchecked_read_only_claim():
+    tools = _by_name(classify_imported_tools(_fake_manifest(), trust_read_only=False))
+    assert {t["effect"] for t in tools.values()} == {"emission"}
+    for name in ("list_notes", "touch_note"):
+        # gated, but not refuted: the claim stays `unchecked`, never `verified`
+        assert tools[name]["readOnlyClaim"] == "unchecked"
+        assert tools[name]["gated"] == "unchecked read-only claim"
+        assert tools[name]["reasons"][0].startswith("gated: unchecked read-only claim")
+    assert tools["delete_note"]["gated"] is None, "no claim, nothing to gate on"
 
 
 def test_the_proxy_surface_is_the_import_classification_not_a_second_one(monkeypatch):
@@ -78,14 +93,26 @@ def test_the_proxy_surface_is_the_import_classification_not_a_second_one(monkeyp
         return real(*args, **kwargs)
 
     monkeypatch.setattr(proxy_mod, "classify_imported_tools", spy)
-    proxy = proxy_mod.Proxy(_NoUpstream(), undo=undo, stdout=io.StringIO())
-    proxy.manifest = manifest
-    proxy._build()
-    assert calls, "the proxy must classify through the import's classifier"
-    proxied_classes = {e["name"]: e["class"] for e in proxy.ir["externs"]}
-    # the proxy's identifiers carry a fixed `tool_` prefix; the classes match
-    assert {k.replace("mcp_tool_", "mcp_"): v
-            for k, v in proxied_classes.items()} == imported_classes
+
+    def proxied(trust_read_only):
+        proxy = proxy_mod.Proxy(_NoUpstream(), undo=undo, stdout=io.StringIO(),
+                                trust_read_only=trust_read_only)
+        proxy.manifest = manifest
+        proxy._build()
+        # the proxy's identifiers carry a fixed `tool_` prefix
+        return {e["name"].replace("mcp_tool_", "mcp_"): e["class"]
+                for e in proxy.ir["externs"]}
+
+    # with the operator's trust, the proxy's surface IS the import's
+    assert proxied(True) == imported_classes
+    assert calls[-1]["trust_read_only"] is True
+    # by default, the one difference is the unchecked read-only claim, moved to
+    # `emission` by the same classifier (never by a second rule in the proxy)
+    default = proxied(False)
+    assert calls[-1]["trust_read_only"] is False
+    assert {k for k in imported_classes if default[k] != imported_classes[k]} == \
+        {"mcp_list_notes", "mcp_touch_note"}
+    assert default["mcp_list_notes"] == "emission"
 
 
 def test_a_self_contradicting_read_only_claim_is_flagged_and_not_trusted():
@@ -131,12 +158,6 @@ def test_an_observed_crossing_withdraws_the_claim_through_the_same_classifier():
         manifest, distrust={"touch_note": "the upstream said so"})
         if t["name"] == "touch_note"]
     assert (touch["effect"], touch["readOnlyClaim"]) == ("emission", "observed")
-
-
-def test_distrusting_every_hint_leaves_nothing_plain():
-    tools = classify_imported_tools(_fake_manifest(), trust_read_only=False)
-    assert {t["effect"] for t in tools} == {"emission"}
-    assert _by_name(tools)["list_notes"]["readOnlyClaim"] == "distrusted"
 
 
 def test_a_declared_undo_makes_the_tool_witnessed_and_compiles():
@@ -194,7 +215,7 @@ def gated(tmp_path, monkeypatch):
     from revl.mcp import server
     from revl.mcp.session import Session
 
-    def build(*, undo=(), odd=False, trust_read_only=True):
+    def build(*, undo=(), odd=False, trust_read_only=False):
         session = Session()
         session._wal_path = str(tmp_path / "proxy.wal")
         monkeypatch.setattr(server, "SESSION", session)
@@ -233,14 +254,36 @@ def _upstream_state(proxy) -> dict:
 
 
 @needs_cordis
-def test_the_read_only_tool_proceeds_without_a_prompt(gated):
+def test_by_default_the_honest_read_only_tool_is_gated(gated):
     proxy = gated()
+    refused = _call(proxy, "list_notes")
+    assert refused["structuredContent"]["approvalRequired"] is True
+    verdicts = _by_name([{**v, "name": v["tool"]}
+                         for v in proxy.verdicts()["tools"]])
+    assert verdicts["list_notes"]["gated"] == "unchecked read-only claim"
+    assert verdicts["list_notes"]["readOnlyClaim"] == "unchecked"
+    listed = proxy.handle({"jsonrpc": "2.0", "id": 8, "method": "tools/list"})
+    assert _by_name(listed["result"]["tools"])["list_notes"]["annotations"][
+        "readOnlyHint"] is False, "the advertised hint is the one enforced"
+    # nothing reached the upstream: read its state directly, behind the proxy
+    assert _upstream_state(proxy)["calls"] == []
+
+    ticket = refused["structuredContent"]["ticket"]
+    _call(proxy, "revl_approve", {"hash": ticket["hash"]})
+    assert _call(proxy, "list_notes")["isError"] is False
+
+
+@needs_cordis
+def test_the_trust_flag_admits_the_read_only_tool_as_unchecked(gated):
+    proxy = gated(trust_read_only=True)
     result = _call(proxy, "list_notes")
     assert result["isError"] is False
     assert result["structuredContent"]["notes"]["n1"] == "first note"
     verdict = result["_meta"]["revl/proxy"]
     assert verdict["classification"] == "plain"
-    assert verdict["readOnlyClaim"] == "unchecked"
+    assert verdict["readOnlyClaim"] == "unchecked", "trusted, never `verified`"
+    assert "gated" not in verdict
+    assert "--trust-read-only-hints" in verdict["trusted"]
 
 
 @needs_cordis
@@ -267,7 +310,7 @@ def test_the_destructive_tool_needs_a_human_yes_and_nothing_fires_before_it(gate
 
 @needs_cordis
 def test_the_lying_tool_is_flagged_on_observation_and_gated_from_then_on(gated):
-    proxy = gated()
+    proxy = gated(trust_read_only=True)
     first = _call(proxy, "touch_note", {"id": "n1"})
     # the first call cannot be stopped: its claim was all there was to go on
     assert first["isError"] is False
@@ -292,6 +335,21 @@ def test_the_lying_tool_is_flagged_on_observation_and_gated_from_then_on(gated):
 
 
 @needs_cordis
+def test_by_default_an_approved_lying_call_still_refutes_its_claim(gated):
+    proxy = gated()
+    refused = _call(proxy, "touch_note", {"id": "n1"})
+    assert refused["structuredContent"]["approvalRequired"] is True
+    assert _upstream_state(proxy)["calls"] == [], "the lie never ran unapproved"
+    _call(proxy, "revl_approve", {"hash": refused["structuredContent"]["ticket"]["hash"]})
+    fired = _call(proxy, "touch_note", {"id": "n1"})
+    verdict = fired["_meta"]["revl/proxy"]
+    # the class does not move (it was already gated), the claim is now refuted
+    assert verdict["classification"] == "emission"
+    assert verdict["readOnlyClaim"] == "observed"
+    assert "gated" not in verdict
+
+
+@needs_cordis
 def test_a_declared_undo_rolls_the_proxied_call_back_on_abort(gated, tmp_path):
     proxy = gated(undo=["delete_note=restore_note"])
     result = _call(proxy, "delete_note", {"id": "n1"})
@@ -312,7 +370,7 @@ def test_a_declared_undo_rolls_the_proxied_call_back_on_abort(gated, tmp_path):
     assert "discharge-descriptor" in kinds and "aborted" in kinds
 
     # the proxy boots the next generation, so the client can carry on
-    assert _call(proxy, "list_notes")["isError"] is False
+    assert _call(proxy, "delete_note", {"id": "n2"})["isError"] is False
 
 
 @needs_cordis
@@ -359,7 +417,7 @@ def test_a_reclassification_that_cannot_go_live_refuses_the_flagged_tool(gated,
                                                                          monkeypatch):
     from revl.mcp.session import SessionError
 
-    proxy = gated()
+    proxy = gated(trust_read_only=True)
 
     def refuse_swap(*_args, **_kwargs):
         raise SessionError("swap refused for the test")
@@ -409,10 +467,29 @@ def test_the_cli_proxies_stdio_both_ways_and_aborts_an_uncommitted_session(tmp_p
     verdicts = _by_name([{**v, "name": v["tool"]} for v in
                          replies[5]["result"]["structuredContent"]["tools"]])
     assert verdicts["delete_note"]["classification"] == "witnessed"
+    assert verdicts["list_notes"]["gated"] == "unchecked read-only claim"
+    assert "list_notes: emission (gated: unchecked read-only claim)" in done.stderr
+    assert "TRUSTED" not in done.stderr
     assert "aborted, replayed 1 declared undo(s)" in done.stderr
     records = [json.loads(line) for line in
                (tmp_path / "cli.wal").read_text(encoding="utf-8").splitlines()]
     assert records[-1] == {"record": "aborted", "replayed": [2]}
+
+
+@needs_cordis
+def test_the_cli_trust_flag_says_out_loud_that_it_trusts(tmp_path):
+    env = dict(os.environ)
+    env["PYTHONPATH"] = os.pathsep.join(
+        [str(ROOT / "src")] + ([env["PYTHONPATH"]] if env.get("PYTHONPATH") else []))
+    done = subprocess.run(
+        [sys.executable, "-m", "revl", "mcp", "proxy", "--trust-read-only-hints",
+         "--wal", str(tmp_path / "t.wal"), "--", sys.executable, str(FAKE)],
+        input="", capture_output=True, text=True, timeout=300,
+        cwd=str(tmp_path), env=env)
+    assert done.returncode == 0, done.stderr
+    assert "list_notes: plain (read-only claim: unchecked)" in done.stderr
+    assert "every unchecked read-only claim above is TRUSTED, not verified" \
+        in done.stderr
 
 
 def test_the_cli_refuses_to_start_without_an_upstream(tmp_path):

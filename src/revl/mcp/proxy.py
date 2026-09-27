@@ -7,9 +7,12 @@ the one classification), loads that surface into the compiler server's live
 `Session`, and routes every `tools/call` through `Session.call`. So a proxied
 call meets exactly the authority a revl call meets:
 
-  * the effect class from the import: `plain` (an uncontradicted
-    `readOnlyHint: true`), `witnessed` (the operator declared an undo), or
-    `emission` (everything else, and every tool that cannot be classified);
+  * the effect class from the import's classifier: `witnessed` (the
+    operator declared an undo) or `emission` (everything else, and every tool
+    that cannot be classified). An unchecked `readOnlyHint: true` is NOT
+    trusted by default, so it is `emission` too, with `gated` saying why;
+    only `--trust-read-only-hints` admits it as `plain` (the import's own
+    rule, where a human reviews the generated source before anything runs);
   * the item-246 approval policy, always on here: plain and witnessed calls
     proceed, an emission call raises the class-(c) ticket two-step;
   * the session WAL (a policy session records) and the item-245 commit/abort:
@@ -289,7 +292,7 @@ class Proxy:
     live session (`revl.mcp.server.SESSION`)."""
 
     def __init__(self, upstream: Upstream, *, undo: dict | None = None,
-                 trust_read_only: bool = True, stdout=None) -> None:
+                 trust_read_only: bool = False, stdout=None) -> None:
         from . import server  # noqa: PLC0415 - the session the verbs act on
 
         self.server = server
@@ -440,6 +443,11 @@ class Proxy:
             return
         before = {t["name"]: t["effect"] for t in self.tools}
         changed = {t["name"] for t in proxied if before.get(t["name"]) != t["effect"]}
+        if not changed and set(before) == {t["name"] for t in proxied}:
+            # only a verdict label moved (a gated claim now observed false):
+            # the surface is the same, so there is nothing to swap
+            self._install(proxied, excluded)
+            return
         try:
             ir = self._compile(source)
             if self.session.loaded:
@@ -556,7 +564,9 @@ class Proxy:
             return verdict
         methods = sorted({m.get("method") for m in observed})
         self.observations.setdefault(tool["name"], []).extend(methods)
-        if tool["effect"] == EFFECT_PLAIN:
+        if tool["readOnlyClaim"] == "unchecked":
+            # plain under --trust-read-only-hints, or gated and approved by
+            # default: either way the claim is now refuted, not just unchecked
             reason = (f"during a call it claimed was read-only, the upstream sent "
                       f"{', '.join(methods)}")
             self.distrust[tool["name"]] = reason
@@ -644,8 +654,8 @@ class Proxy:
                 "capabilities": capabilities,
                 "serverInfo": {"name": "revl-mcp-proxy", "version": "2.0"},
                 "instructions": (
-                    f"Every tool of {name} is gated by revl. A call to an "
-                    "irreversible tool returns `approvalRequired` with a ticket "
+                    f"Every tool of {name} is gated by revl. A call to a tool "
+                    "revl cannot show to be safe returns `approvalRequired` with a ticket "
                     "instead of running: relay the ticket to a human, who answers "
                     "it with revl_approve. revl_proxy_verdicts lists each tool's "
                     "class and why."),
@@ -730,6 +740,15 @@ def _verdict(tool: dict) -> dict:
         [tool["effect"]],
         "classifiedBy": "revl mcp import",
     }
+    if tool.get("gated") is not None:
+        verdict["gated"] = tool["gated"]
+        verdict["approval"] = ("a human yes per call (class c ticket): the "
+                               "read-only claim is unchecked, and this proxy does "
+                               "not trust an unchecked claim without "
+                               "--trust-read-only-hints")
+    elif tool["effect"] == EFFECT_PLAIN:
+        verdict["trusted"] = ("an unchecked read-only claim, admitted because the "
+                              "operator passed --trust-read-only-hints")
     if tool["undo"] is not None:
         verdict["undo"] = dict(tool["undo"])
     if tool["unclassifiable"] is not None:
@@ -764,7 +783,7 @@ def _error(request_id, code: int, message: str) -> dict:
 
 
 def run(command: list[str], *, undo: dict | None = None,
-        trust_read_only: bool = True, timeout: float = 120.0,
+        trust_read_only: bool = False, timeout: float = 120.0,
         stdin=None, stdout=None, stderr=None) -> int:
     """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin."""
     stderr = stderr or sys.stderr
@@ -781,8 +800,13 @@ def run(command: list[str], *, undo: dict | None = None,
                   file=stderr)
             return 1
         for verdict in proxy.verdicts()["tools"]:
+            state = (f"gated: {verdict['gated']}" if "gated" in verdict
+                     else f"read-only claim: {verdict['readOnlyClaim']}")
             print(f"revl mcp proxy: {verdict['tool']}: {verdict['classification']} "
-                  f"(read-only claim: {verdict['readOnlyClaim']})", file=stderr)
+                  f"({state})", file=stderr)
+        if trust_read_only:
+            print("revl mcp proxy: --trust-read-only-hints: every unchecked "
+                  "read-only claim above is TRUSTED, not verified", file=stderr)
         for excluded in proxy.excluded:
             print(f"revl mcp proxy: not proxied: tool #{excluded['index']} "
                   f"{excluded['name']!r}: {excluded['excludedBecause']}", file=stderr)
