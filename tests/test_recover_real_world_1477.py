@@ -146,11 +146,58 @@ def test_a_real_recover_runs_the_declared_compensations_and_settles_them(crashed
     # the WAL: an `aborted` record, written by the runtime, settles both seqs
     [aborted] = [r for r in _records(crashed["wal"]) if r["record"] == "aborted"]
     assert sorted(aborted["replayed"]) == sorted(seqs.values())
-    # the bare `crash` emission (and the two forward emissions, which a
-    # compensation offsets and never inverts) are still honest residue
+    # the two compensated emissions are OFFSET once their compensations ran
+    # (the descriptor's `offsets` link, #1369); the bare `crash` emission has
+    # no compensation and is the only residue left
+    assert sorted(e["label"] for e in report["offset"]) == ["note", "tickets.file"]
+    assert [e["label"] for e in report["unreconstructible"]] == ["crash"]
+    assert [r["kind"] for r in report["residue"]["outstanding"]] == ["unreconstructible"]
     assert report["residue"]["clean"] is False
-    assert {r["kind"] for r in report["residue"]["outstanding"]} == {"unreconstructible"}
     assert proc.returncode == 1
+
+
+#: The same composition, but the process dies inside a WITNESSED effect, not
+#: an emission: `die` exits before it returns, so nothing about it crossed and
+#: no inverse was registered. Every crossing the WAL records is compensated.
+WITNESSED_CRASH = COMPOSITION.replace(
+    """extern emission fn crash() -> Unit = @py {
+    import os
+    os._exit(3)
+}""", """type Gone = { at: Str }
+type Down = { code: Str }
+extern pure fn back(g: Gone) -> Unit = @py {
+    return None
+}
+extern witnessed[proc] fn die() -> Result[Gone, Down] undo back(result) = @py {
+    import os
+    os._exit(3)
+}""").replace("  emit crash()\n", "  effect die()\n")
+
+
+@needs_cordis
+def test_a_real_recover_of_a_fully_compensated_crash_is_clean(tmp_path):
+    """Every emission the crashed activation made has a declared
+    compensation, and the crash is not itself a crossing. A real recover runs
+    both compensations and gives a CLEAN verdict: exit 0, `world: "real"`, and
+    calls made against it."""
+    assert "effect die()" in WITNESSED_CRASH and "emit crash()" not in WITNESSED_CRASH
+    (tmp_path / "agent.rvl").write_text(WITNESSED_CRASH, encoding="utf-8")
+    log = tmp_path / "world.log"
+    proc = _revl(["run", "agent.rvl", "--wal", "run.wal"], tmp_path, log)
+    assert proc.returncode == 3, proc.stderr[-3000:]
+    state = {"dir": tmp_path, "log": log, "wal": tmp_path / "run.wal"}
+
+    proc, report = _recover(state)
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert log.read_text(encoding="utf-8").splitlines() == [
+        "note:boot", "file:T1", "withdraw:T1", "offset:boot"]
+    assert report["world"] == "real"
+    assert report["worldCalls"] > 0
+    assert report["residue"]["clean"] is True
+    assert report["residue"]["outstanding"] == []
+    assert sorted(e["label"] for e in report["offset"]) == ["note", "tickets.file"]
+    assert report["unreconstructible"] == []
 
 
 @needs_cordis

@@ -488,10 +488,14 @@ boundary inverse (`record_boundary`), an owed deferred emission and a shared
 reclaim are reported as `unbound-residue` (or an unresolved reclaim), not
 attempted, and no fence is spent on them.
 
-What a real recover does not change: a bare emission, and the forward half of
-a compensated one, still crossed the boundary. A compensation offsets it and
-never inverts it, so those `effect` records stay residue in the verdict even
-after their compensation ran. The exit status follows the residue as always.
+A compensated emission is **offset** once its compensation ran. Each
+compensation descriptor names the emission it offsets (`offsets`, the seq of
+the emission's `effect` record), and after the replay recover re-asks, for
+every emission it had counted closure-only residue, whether its compensation
+is now settled; if so the emission moves to `offset` and out of the residue. A
+bare emission (one with no compensation) still crossed the boundary and stays
+residue. So a crash whose every emission was compensated recovers CLEAN, exit
+`0`; the exit status follows the residue as always.
 
 ### Recovering a session that was forked (item 250)
 
