@@ -231,8 +231,9 @@ def _stdio_live_profile(args):
     from ..mcp.live_profile import ProfileSource, ProfileUnavailable, StdioBinding
 
     try:
-        source = ProfileSource(args.operator_profile)
-    except ProfileUnavailable as error:
+        source = ProfileSource(args.operator_profile,
+                               settle_ms=getattr(args, "profile_settle_ms", 1000))
+    except (ProfileUnavailable, ValueError) as error:
         print(f"error: {error}", file=sys.stderr)
         return None, 1
     return StdioBinding(source, _server, _server.SESSION.operator.token), None
@@ -304,7 +305,8 @@ def _run_mcp(args) -> int:
                 transport = HttpTransport(ServerDispatcher(_server),
                                           exposure=exposure, auth=args.auth,
                                           server_module=_server,
-                                          profile_path=args.operator_profile)
+                                          profile_path=args.operator_profile,
+                                          profile_settle_ms=args.profile_settle_ms)
             except TransportError as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
@@ -380,7 +382,8 @@ def _run_mcp_proxy(args) -> int:
         return refused
     if args.http:
         http = {"exposure": exposure, "auth": args.auth,
-                "profile_path": args.operator_profile}
+                "profile_path": args.operator_profile,
+                "profile_settle_ms": args.profile_settle_ms}
     if args.wal:
         SESSION._wal_path = args.wal
     live = None

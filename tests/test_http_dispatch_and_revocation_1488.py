@@ -173,7 +173,7 @@ def from_file(tmp_path, monkeypatch):
     transport.stop()
 
 
-SETTLE_S = 0.3   # a little more than live_profile.ProfileSource.SETTLE_NS
+SETTLE_S = 1.1   # a little more than the default --profile-settle-ms (1000)
 
 
 def _settle(port, who="alice"):
@@ -196,17 +196,12 @@ def test_a_revocation_takes_effect_on_the_next_request(from_file):
     assert _list(port, "alice")[0] == 200, "only bob was revoked"
 
 
-def test_a_profile_truncated_before_a_deny_is_never_served(from_file, monkeypatch):
+def test_a_profile_truncated_before_a_deny_is_never_served(from_file):
     """The realistic race: the profile is written in two steps, and the first
     step stops just before a `may not` line. Served as it stands, it would widen
     alice's grant. No request is ever served under it, nor under the old
     profile once the edit has begun, and the completed profile is adopted."""
-    from revl.mcp.live_profile import ProfileSource
-
     path, port = from_file
-    # the rule under test is unchanged; the window is widened from 250 ms so a
-    # loaded machine cannot stretch the 100 ms gap between the writes past it
-    monkeypatch.setattr(ProfileSource, "SETTLE_NS", 1_000_000_000)
     # the edit adds a grant and, after it, the deny that bounds it
     deny = "operator alice may not lease on *\n"
     complete = _profile({}) + "operator alice may snapshot on *\n" + deny
@@ -231,7 +226,7 @@ def test_a_profile_truncated_before_a_deny_is_never_served(from_file, monkeypatc
     path.write_text(complete, encoding="utf-8")
     gap = time.monotonic() - first_write
     assert gap < 1.0, f"the second write came {gap:.2f}s later: not the race under test"
-    time.sleep(1.5)
+    time.sleep(2.0)
     stop.set()
     attacker.join(timeout=30)
 
@@ -428,8 +423,202 @@ def test_a_stdio_refusal_is_a_json_rpc_error_and_nothing_is_handled(monkeypatch)
     out = io.StringIO()
     server.serve(stdin=[json.dumps({"jsonrpc": "2.0", "id": 9, "method": "tools/list"}),
                         json.dumps({"jsonrpc": "2.0", "method": "notifications/x"})],
-                 stdout=out, before=lambda: "profile changing")
+                 stdout=out, before=lambda _message: "profile changing")
     assert handled == []
     assert [json.loads(line) for line in out.getvalue().splitlines()] == [
         {"jsonrpc": "2.0", "id": 9,
          "error": {"code": -32603, "message": "profile changing"}}]
+
+
+# ---------------------------------------------------------------- 4: E-Stop is never fenced
+
+_PURE = """
+service Cache { fn size() -> Int }
+component UserCache provides uc: Cache {
+  let s = effect Map.new() undo s.drop()
+  provide uc { fn size() = 0 }
+}
+"""
+
+HALTERS = {"alice": "alice-secret-2", "human": "human-secret-9"}
+
+
+def _halt_profile(extra=""):
+    return (f"operator alice key sha256:{_digest(HALTERS['alice'])}\n"
+            f"operator alice may lease, call on *\n"
+            f"operator human key sha256:{_digest(HALTERS['human'])}\n"
+            f"operator human may estop on *\n" + extra)
+
+
+def _tool_status(port, who, name, arguments=None):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": name, "arguments": arguments or {}, "_meta": {
+                "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                "io.modelcontextprotocol/clientCapabilities": {}}}}
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request("POST", "/mcp", body=json.dumps(body).encode(), headers={
+        "Content-Type": "application/json", "MCP-Protocol-Version": PROTOCOL_VERSION,
+        "Mcp-Method": "tools/call", "Mcp-Name": name,
+        "Authorization": f"Bearer {HALTERS[who]}"})
+    response = conn.getresponse()
+    payload = json.loads(response.read() or b"null")
+    conn.close()
+    return response.status, payload
+
+
+def _clear_halt():
+    sys.path.insert(0, str(ROOT / "backends" / "python"))
+    import runtime as rt
+
+    rt.clear_estop()
+    rt._LIVE_FRAMES.clear()
+
+
+@pytest.fixture
+def halting(tmp_path, monkeypatch):
+    from revl.mcp.session import Session
+
+    session = Session()
+    monkeypatch.setattr(server, "SESSION", session)
+    session.load(compile_source(_PURE, "pure.rvl"), origin={"source": _PURE})
+    path = tmp_path / "ops.profile"
+    path.write_text(_halt_profile(), encoding="utf-8")
+    transport = HttpTransport(ServerDispatcher(server), exposure=Exposure("127.0.0.1", 0),
+                              server_module=server, profile_path=str(path))
+    transport.start()
+    try:
+        yield path, transport.exposure.port_in_use, session
+    finally:
+        transport.stop()
+        _clear_halt()
+
+
+@needs_cordis
+@pytest.mark.parametrize("edit", ["settling", "broken"])
+def test_estop_is_accepted_while_the_profile_settles_or_is_broken(halting, edit):
+    path, port, session = halting
+    if edit == "settling":
+        path.write_text(_halt_profile("operator alice revoked\n"), encoding="utf-8")
+    else:
+        path.write_text(_halt_profile("operator bob key sha256:nope\n"), encoding="utf-8")
+    # every other verb in the window is refused, for every caller
+    for who, name, arguments in [("alice", "revl_state", {}),
+                                 ("alice", "revl_lease", {"action": "claim",
+                                                          "component": "X"}),
+                                 ("human", "revl_estop_report", {})]:
+        status, body = _tool_status(port, who, name, arguments)
+        assert status == 503, (who, name, status, body)
+    # an operator NOT authorized for estop under the last adopted profile is
+    # refused by the operator gate; the one that is authorized halts
+    status, body = _tool_status(port, "alice", "revl_estop", {"reason": "not mine"})
+    assert status == 200 and body["result"]["structuredContent"]["ok"] is False
+    assert session.halted is False
+    status, body = _tool_status(port, "human", "revl_estop", {"reason": "mid-edit"})
+    assert status == 200, body
+    assert body["result"]["structuredContent"]["ok"] is True
+    assert session.halted is True
+
+
+def test_estop_under_the_last_adopted_profile_is_judged_against_it(tmp_path):
+    """No live session is needed to show which registry an E-Stop is checked
+    against: the last adopted one, not the one being written."""
+    from revl.mcp.live_profile import ProfileSource, is_estop
+
+    path = tmp_path / "ops.profile"
+    path.write_text(_halt_profile(), encoding="utf-8")
+    source = ProfileSource(str(path), settle_ms=50)
+    adopted = source.registry
+    path.write_text("operator mallory may estop on *\n", encoding="utf-8")
+    registry, error = source.current()
+    assert registry is None and "changing" in error
+    assert source.last_adopted is adopted
+    assert is_estop({"method": "tools/call", "params": {"name": "revl_estop"}})
+    assert not is_estop({"method": "tools/call", "params": {"name": "revl_state"}})
+
+
+def test_a_negative_settle_window_is_refused(tmp_path):
+    from revl.mcp.live_profile import ProfileSource
+
+    path = tmp_path / "ops.profile"
+    path.write_text(_halt_profile(), encoding="utf-8")
+    with pytest.raises(ValueError):
+        ProfileSource(str(path), settle_ms=-1)
+
+
+# ---------------------------------------------------------------- 5: stdio operator revoked
+
+@needs_cordis
+def test_a_revoked_stdio_operator_is_refused_except_for_estop(tmp_path, monkeypatch):
+    import io
+
+    from revl.mcp.live_profile import ProfileSource, StdioBinding
+    from revl.mcp.operator import parse_profile
+    from revl.mcp.session import Session
+
+    session = Session()
+    monkeypatch.setattr(server, "SESSION", session)
+    session.load(compile_source(_PURE, "pure.rvl"), origin={"source": _PURE})
+    path = tmp_path / "ops.profile"
+    text = (f"operator ops key sha256:{_digest('ops-secret')}\n"
+            f"operator ops may lease, estop on *\n")
+    path.write_text(text, encoding="utf-8")
+    registry = parse_profile(text)
+    session.operator, session.operator_registry = registry.get("ops"), registry
+    binding = StdioBinding(ProfileSource(str(path)), server, "ops")
+
+    def stdin():
+        yield _rpc_line(1, "revl_lease", {"action": "claim", "component": "A"})
+        path.write_text(text + "operator ops revoked\n", encoding="utf-8")
+        yield _rpc_line(2, "revl_state", {})                 # settling: refused
+        time.sleep(SETTLE_S)
+        yield _rpc_line(3, "revl_lease", {"action": "claim", "component": "B"})
+        yield _rpc_line(4, "revl_estop", {"reason": "revoked but halting"})
+
+    out = io.StringIO()
+    try:
+        server.serve(stdin=stdin(), stdout=out, before=binding)
+        replies = {json.loads(line)["id"]: json.loads(line)
+                   for line in out.getvalue().splitlines()}
+        assert replies[1]["result"]["structuredContent"]["ok"] is True
+        assert "changing" in replies[2]["error"]["message"]
+        assert "REVOKED" in replies[3]["error"]["message"], replies[3]
+        assert replies[4]["result"]["structuredContent"]["ok"] is True
+        assert session.halted is True
+    finally:
+        _clear_halt()
+
+
+@needs_cordis
+def test_on_stdio_estop_is_accepted_while_the_profile_settles(tmp_path, monkeypatch):
+    import io
+
+    from revl.mcp.live_profile import ProfileSource, StdioBinding
+    from revl.mcp.operator import parse_profile
+    from revl.mcp.session import Session
+
+    session = Session()
+    monkeypatch.setattr(server, "SESSION", session)
+    session.load(compile_source(_PURE, "pure.rvl"), origin={"source": _PURE})
+    path = tmp_path / "ops.profile"
+    text = (f"operator ops key sha256:{_digest('ops-secret')}\n"
+            f"operator ops may lease, estop on *\n")
+    path.write_text(text, encoding="utf-8")
+    registry = parse_profile(text)
+    session.operator, session.operator_registry = registry.get("ops"), registry
+    binding = StdioBinding(ProfileSource(str(path)), server, "ops")
+
+    def stdin():
+        path.write_text(text + "operator other may lease on *\n", encoding="utf-8")
+        yield _rpc_line(1, "revl_lease", {"action": "claim", "component": "A"})
+        yield _rpc_line(2, "revl_estop", {"reason": "mid-edit"})
+
+    out = io.StringIO()
+    try:
+        server.serve(stdin=stdin(), stdout=out, before=binding)
+        replies = {json.loads(line)["id"]: json.loads(line)
+                   for line in out.getvalue().splitlines()}
+        assert "changing" in replies[1]["error"]["message"]
+        assert replies[2]["result"]["structuredContent"]["ok"] is True
+        assert session.halted is True
+    finally:
+        _clear_halt()
