@@ -65,9 +65,9 @@ Slice 4 (item 206) adds three more byte-identical forms:
 
 Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
 in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
-(async methods / async externs' await-seed / ``await`` bodies), realm placements
-(``isolate``/``intercept``/``routes``), spawn/instances, and
-the canonical ABI. Method-body ``let-effect`` is emitted (the
+(async methods / async externs' await-seed / ``await`` bodies), spawn/instances,
+and the canonical ABI. Realm placements (``isolate``/``intercept``/``routes``)
+are ported since item 391's placement slice. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
 ``spawn`` or result-declared host acquisitions there, whose ``cexpr`` lands in
 slice 5; it rejects bound witnessed acquisitions. ``let_pattern``
@@ -161,6 +161,25 @@ CORPUS = [
     # test_a_declared_stream_replay_is_named_not_dropped below.
     "services_host.rvl",
     "services_host_stream.rvl",
+    # item 391: component shapes the port used to DROP without a marker (a
+    # divergence the host marker had been hiding). Each is ported now:
+    #   emit_py_placement.rvl - a routed require read in a provide method (the
+    #     `_revl_route_<key>` proxy, the router class, `realm_label`), plain
+    #     `isolate` placements, the commutative/idempotent service-table
+    #     flags, and method inverses that pin a reassigned `var` by value;
+    #   realm_intercept.rvl - the dict-form inject an `intercept` declares;
+    #   async_effects.rvl - the `'async': True` table flag, and awaited
+    #     effect/let-effect/emit steps in an `async def` activation body;
+    #   cas_runtime.rvl - the result-guarded `Map.cas` undo, in an activation
+    #     body and in a provide method (with a pinned capture);
+    #   erase_receipt.rvl - the compensation an emission extern declares on
+    #     itself (item 254), registered after the fire.
+    # All failed first against the port that dropped them.
+    "../emit_py_placement.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl",
+    "../emit_ts_corpus/async_effects.rvl",
+    "../emit_ts_corpus/cas_runtime.rvl",
+    "../erase_receipt.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -576,10 +595,24 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
 
 
 @pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
-    ("tests/fixtures/emit_ts_corpus/async_module_local.rvl", "async def run(", None),
-    ("tests/fixtures/emit_ts_corpus/services_async.rvl", "'async': True", None),
-    ("tests/fixtures/emit_ts_corpus/realm_intercept.rvl", "'inject': {'db':", None),
-    ("tests/fixtures/emit_ts_corpus/realm_isolate.rvl", "'isolate':", None),
+    # Async colouring is not ported. A coloured fn and an `async` operation
+    # used to come out as sync bodies with un-awaited calls (a silent drop);
+    # each is now refused by name. The service table's `'async': True` flag and
+    # an activation body's async effect/emit steps ARE ported (async_effects.rvl
+    # in the CORPUS above).
+    ("tests/fixtures/emit_ts_corpus/async_module_local.rvl", "async def run(",
+     "<<UNSUPPORTED-FN:async run>>"),
+    ("tests/fixtures/emit_ts_corpus/services_async.rvl", "async def fetch(self, k):",
+     "<<UNSUPPORTED-METHOD:async fetch>>"),
+    # item 245: a deferred emission is enqueued on the session, never fired at
+    # the call site. The port used to fire the host body directly.
+    ("tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl",
+     "_revl_frame.enqueue_deferred(", "<<UNSUPPORTED-METHODSTEP:deferred-emit>>"),
+    # item 257: a call to a `validated` operation goes through the response
+    # validation seam. The port used to emit the raw call, handing the body an
+    # unvalidated model response.
+    ("tests/fixtures/emit_ts_refusals/validated_emission_operation.rvl",
+     "_revl_validate(", "<<UNSUPPORTED-COMPONENT:validated Model.complete>>"),
     ("stdlib/fs.rvl", "_REVL_REFS = {}", None),
     ("examples/lifecycle_wasm.rvl", "REVL_TESTS = []", None),
     ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
@@ -620,6 +653,58 @@ def test_named_runtime_and_harness_boundaries(emitted, reference, path, referenc
     assert reason is None, reason
     if port_marker is not None:
         assert port_marker in actual
+
+
+# The service-wide `commutative` flag is a line of its own in the SERVICES table.
+# It is not a CORPUS document: the self-host gate refuses `commutative service`
+# ("unexpected declaration"), which the gate/reference census would report as a
+# false reject for any file under a census directory.
+COMMUTATIVE_SERVICE_SRC = """commutative service Tally {
+  commutative emission fn add(n: Int)
+  fn total() -> Int
+}
+component Books provides tally: Tally {
+  let cells = effect Map.new() undo cells.drop()
+  provide tally {
+    fn add(n) {
+      effect cells.insert("n", n) undo cells.remove("n")
+    }
+    fn total() = 0
+  }
+}
+"""
+
+
+def test_selfhosted_emitter_renders_a_commutative_service(emitted, reference, tmp_path):
+    path = tmp_path / "commutative.rvl"
+    path.write_text(COMMUTATIVE_SERVICE_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert "    'Tally': {\n        'commutative': True,\n" in want
+    assert got == want
+
+
+# The activation-body half of the deferred-emission refusal (the method-body
+# half is the boundary row above): no document in the tree fires a deferred
+# extern straight from an activation body, so the source is inline.
+DEFERRED_BODY_SRC = """extern emission deferred fn deliver(msg: Str) = @py { return }
+component Mailer {
+  emit deliver("hi")
+}
+"""
+
+
+def test_a_deferred_emission_in_an_activation_body_is_named_not_fired(emitted, reference, tmp_path):
+    path = tmp_path / "deferred.rvl"
+    path.write_text(DEFERRED_BODY_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert "_revl_frame.enqueue_deferred('deliver'" in want
+    assert "enqueue_deferred" not in got
+    assert "deliver('hi')" not in got
+    assert "<<UNSUPPORTED-BODYSTEP:deferred-emit>>" in got
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-BODYSTEP:deferred-emit>>")
+    assert reason is None, reason
 
 
 # A `Stream.source()` that DECLARES its replay backlog (item 130 §4.5) is the
