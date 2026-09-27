@@ -969,10 +969,11 @@ LIFO), ending in a checked verdict + residue proof
 
 `revl recover` cannot bind the real outside world yet, so it replays against an
 in-memory model (`DictWorld`). Every call it reports is marked `[modelled, not
-performed]`, and the verdict carries `"world": "model"`. Exit status: `0` clean
-(only with `--model-only` while the world is a model), `1` honest residue, `3`
-clean in the model but not accepted with `--model-only`, so nothing out there
-was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
+performed]`, the verdict carries `"world": "model"` and `"worldCalls"`, and a
+model run never writes an at-most-once fence to the WAL. Exit status: `0`
+clean (with `--model-only` if the model stood in for any call), `1` honest
+residue, `3` clean in the model after the model stood in for at least one call,
+without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
 
 ### `revl estop`
 

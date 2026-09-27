@@ -48,6 +48,15 @@ from revl.policy import parse_policy               # noqa: E402
 from revl.recovery import DictWorld, recover       # noqa: E402
 
 
+class _RealWorld(DictWorld):
+    """An in-memory world that declares itself REAL (issue #1477). recover
+    writes its at-most-once fences only against a real world, because a model
+    run attempts nothing out there; the fence tests below exercise that
+    discipline, so they bind a world that claims to be the outside one."""
+
+    kind = "real"
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -203,11 +212,11 @@ def test_non_idempotent_inverse_still_refuses_on_the_second_run(tmp_path):
     inverse: one fenced attempt, then `outcome: "unknown"` for a human."""
     path = _wal(tmp_path, [_inverse_descriptor()])
 
-    first = recover(path, world=DictWorld())
+    first = recover(path, world=_RealWorld())
     assert [e["replay"] for e in first["transactionalRolledBack"]] == ["fenced"]
     assert first["residue"]["clean"] is True
 
-    second = recover(path, world=DictWorld())
+    second = recover(path, world=_RealWorld())
     assert second["transactionalRolledBack"] == []
     assert second["residue"]["clean"] is False
     (record,) = second["residue"]["outstanding"]
@@ -315,14 +324,14 @@ def test_a_declared_reissue_is_fenced_before_the_fire(tmp_path):
         _owed_emission(1, "Mail", "send", ["m"], register="declared"),
         {"record": "commit-approved", "hash": "h"},
     ])
-    first = recover(path, world=DictWorld(), reissue="declared")
+    first = recover(path, world=_RealWorld(), reissue="declared")
     assert [e["outcome"] for e in first["reissued"]] == ["reissued"]
     fences = [json.loads(line) for line in
               Path(path).read_text(encoding="utf-8").splitlines()
               if '"reissue-fence"' in line]
     assert fences == [{"record": "reissue-fence", "register": "declared", "seq": 1}]
 
-    second = recover(path, world=DictWorld(), reissue="declared")
+    second = recover(path, world=_RealWorld(), reissue="declared")
     assert second["reissued"] == []
     assert [e["outcome"] for e in second["owedFlushes"]] == ["unknown"]
     (record,) = second["residue"]["outstanding"]
