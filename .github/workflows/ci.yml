@@ -437,6 +437,11 @@ jobs:
         python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # Full history: `pytest tests/` includes the real-history tests in
+          # tests/test_landing_witness.py, which FAIL by name on a shallow
+          # clone. They used to skip there, and a skip reads as a pass.
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python }}
@@ -634,6 +639,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # Full history: `pytest tests/` includes the real-history tests in
+          # tests/test_landing_witness.py, which FAIL by name on a shallow
+          # clone. They used to skip there, and a skip reads as a pass.
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
@@ -732,8 +742,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           # full history so the PR base and the previous push tip are both real
-          # locally; the explicit base fetch below is the belt-and-braces guard
-          # that a shallow checkout still works, the same shape `changes` uses.
+          # locally, and so the real-history tests can answer ancestry
+          # questions (they FAIL by name on a shallow clone rather than skip).
+          # The base fetch below must not pass `--depth`: into a full clone
+          # that re-shallows it.
           fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
@@ -769,7 +781,13 @@ jobs:
           # to the FULL selection on its own, which is the wanted answer there.
           base_arg=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin \
+            # No `--depth` here. A `--depth=1` fetch into this FULL clone
+            # grafts the base tip, which makes the repository shallow again:
+            # every commit older than that tip then reads as "not an
+            # ancestor" of HEAD, and the real-history tests in
+            # tests/test_landing_witness.py measured six carried entries as
+            # carried by nothing (issue #1434).
+            git fetch --no-tags origin \
               "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
             base_arg="--base origin/${BASE_REF}"
           elif [ -n "${BEFORE_SHA}" ] \

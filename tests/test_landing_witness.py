@@ -195,6 +195,33 @@ def test_a_carried_at_that_is_not_history_of_the_tree_fails(repo):
                                    "test")
 
 
+def test_a_shallow_clone_names_the_missing_history_instead_of_a_verdict(
+        repo, tmp_path):
+    """The `root-suite-affected` red, in miniature. A FULL clone followed by
+    `git fetch --depth=1` of main grafts main's tip, so `carried_at` (older)
+    reads as not an ancestor while every object is still present. The
+    witness must say the checkout is shallow, not that nothing was carried.
+    The control: the same clone, unshallowed, verifies."""
+    r = repo["root"]
+    _commit(r, {"later.py": "x = 1\n"}, "main moves on past carried_at")
+    copy = tmp_path / "copy"
+    subprocess.run(["git", "clone", "-q", "--no-local", str(r), str(copy)],
+                   check=True, capture_output=True)
+    _git(copy, "fetch", "-q", "--no-tags", "--depth=1", "origin",
+         "+refs/heads/main:refs/remotes/origin/main")
+    assert lw.is_shallow(copy)
+    assert subprocess.run(["git", "-C", str(copy), "cat-file", "-e",
+                           f"{repo['carried']}^{{commit}}"]).returncode == 0
+    t = dict(repo, root=copy)
+    report = _audit(t, _good(repo))
+    _only_finding(report, "the checkout is shallow")
+    assert "is not an ancestor" not in "\n".join(report.findings)
+
+    _git(copy, "fetch", "-q", "--unshallow", "origin")
+    assert not lw.is_shallow(copy)
+    _verified(_audit(t, _good(repo)))
+
+
 def test_a_carried_at_that_contains_the_merge_itself_fails(repo):
     """Comparing the merge against a commit that includes it is a tautology.
     (The ancestry audit would also fire; this one says why the witness is
@@ -437,21 +464,37 @@ def test_loading_and_running_the_witness_leaves_process_state_alone(repo):
 _REAL = json.loads(BASELINE.read_text(encoding="utf-8"))["unreachable"]
 
 
-def _have_merges() -> bool:
+def _history_problem() -> str | None:
+    """Why this clone cannot answer the real baseline's questions, or None.
+
+    Both halves matter. A clone can hold every object and still be shallow:
+    `git fetch --depth=1` into a full clone grafts the fetched tip, and every
+    commit older than it then reads as "not an ancestor". That is how the
+    `root-suite-affected` job, which checks out with `fetch-depth: 0`, once
+    reported six real entries as carried by nothing."""
+    if lw.is_shallow(ROOT):
+        return lw.SHALLOW
     shas = [e.get(k) for e in _REAL.values() if isinstance(e, dict)
             for k in ("merge", "carried_at")]
-    return all(chk.object_exists(ROOT, s) for s in shas if s)
+    missing = [s for s in shas if s and not chk.object_exists(ROOT, s)]
+    if missing:
+        return ("this test needs full git history; the clone lacks "
+                + ", ".join(s[:12] for s in missing))
+    return None
 
 
-# Skipped only in a clone that does not hold the merge commits, which is
-# every shallow checkout. The `merged-prs-landed` CI job has full history and
-# runs the same re-measurement with the pinned tests executed, so this skip
-# never stands in for that job.
-real = pytest.mark.skipif(
-    not _have_merges(),
-    reason="this clone lacks the baselined merge or carrying commits (shallow "
-           "checkout); "
-           "the merged-prs-landed CI job measures the real baseline")
+@pytest.fixture
+def full_history():
+    """FAIL, by name, where the history is missing. Not a skip: a skip reads
+    as a pass, and the thing these tests check is exactly what a clone
+    without history cannot see. Every CI job that runs the root suite checks
+    out with `fetch-depth: 0` for this reason."""
+    problem = _history_problem()
+    if problem is not None:
+        pytest.fail(problem, pytrace=False)
+
+
+real = pytest.mark.usefixtures("full_history")
 
 
 def test_every_real_entry_parses():

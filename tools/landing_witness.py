@@ -242,6 +242,23 @@ def is_ancestor(root: Path, older: str, newer: str) -> bool:
                 newer).returncode == 0
 
 
+#: What an ancestry question gets in a shallow repository instead of an
+#: answer. A shallow boundary is a graft: the commit at it reads as having no
+#: parents, so everything older is "not an ancestor" even while its objects
+#: are present. A `git fetch --depth=1` into a FULL clone writes such a
+#: boundary too, which is how a job that checked out with `fetch-depth: 0`
+#: still measured every carried_at on main as foreign.
+SHALLOW = ("this check needs full git history; the checkout is shallow "
+           "(`git rev-parse --is-shallow-repository` prints true), so "
+           "ancestry cannot be judged. Fetch without --depth, or run "
+           "`git fetch --unshallow`")
+
+
+def is_shallow(root: Path) -> bool:
+    proc = _git(root, "rev-parse", "--is-shallow-repository")
+    return proc.returncode == 0 and proc.stdout.decode().strip() == "true"
+
+
 def on_disk(root: Path, path: str) -> bytes | None:
     target = root / path
     return target.read_bytes() if target.is_file() else None
@@ -508,6 +525,8 @@ def _carried_at(e: Entry, root: Path) -> list[str]:
     and must not simply contain the stranded merge itself."""
     if not e.carried_at:
         return []
+    if is_shallow(root):
+        return [f"carried_at {e.carried_at[:12]}: {SHALLOW}"]
     if not is_ancestor(root, e.carried_at, "HEAD"):
         return [f"carried_at {e.carried_at[:12]} is not an ancestor of the "
                 f"tree under test, so nothing was carried by it"]
