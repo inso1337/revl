@@ -340,16 +340,16 @@ def test_cli_recover_over_reused_wal_all_clean_exits_zero(tmp_path, capsys):
     wal.commit_run()
     wal.close()
 
-    # issue #1477: recover has no real world binding, so a clean verdict exits
-    # 0 only when the operator accepts the model run with `--model-only`.
-    # Without it the same clean WAL exits 3, never 1: nothing is owed.
-    rc = main(["recover", "--wal", path, "--json", "--model-only"])
+    rc = main(["recover", "--wal", path, "--json"])
     out = capsys.readouterr().out
 
+    # issue #1477: recover ran against the in-memory model, but this
+    # roll-forward made no call against any world, so the model stood in for
+    # nothing and exit 0 is true of the outside world too.
     assert rc == 0
     report = json.loads(out)
     assert report["verdict"] == "rolled-forward"
     assert report["world"] == "model"
+    assert report["worldCalls"] == 0
     assert report["residue"]["clean"] is True
     assert report["steadyState"]["outstanding"] == []
-    assert main(["recover", "--wal", path, "--json"]) == 3
