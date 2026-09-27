@@ -1427,8 +1427,9 @@ def build_parser() -> argparse.ArgumentParser:
                          help="accept a run against the in-memory model (issue "
                               "#1477). recover has no real world binding yet, so "
                               "every inverse, compensation and re-issue it "
-                              "reports is modelled, not performed, and it exits "
-                              "3 rather than claim reconciliation. With this "
+                              "reports is modelled, not performed, and when the "
+                              "model stood in for any call it exits 3 rather "
+                              "than claim reconciliation. With this "
                               "flag the exit status follows the modelled "
                               "residue instead (0 clean, 1 residue)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")

@@ -397,7 +397,9 @@ re-issued or reclaimed happened to a file, a row or a remote service. The
 output says so:
 
 - the verdict JSON carries `"world": "model"` (or `"real"` for an adapter that
-  declares it), on every verdict, including roll-forward and fork-retired;
+  declares it), on every verdict, including roll-forward and fork-retired,
+  and `"worldCalls"`: how many calls recover made against that world. For a
+  model it is how many calls the model stood in for;
 - the rendered verdict's second line is `world: MODEL. ...`, and every line
   that reports a call against the world ends in `[modelled, not performed]`;
 - the residue proof starts with `world: model.` and its header reads
@@ -407,21 +409,29 @@ Exit status:
 
 | exit | meaning |
 |---|---|
-| `0` | clean, and either the world was real or `--model-only` accepted the model |
+| `0` | clean, and the world was real, or the model stood in for no call (`worldCalls: 0`), or `--model-only` accepted the model |
 | `1` | honest residue remains (in the model it is still residue: the model could not clear it either) |
-| `3` | clean in the model, but the run was against the model and `--model-only` was not given. Nothing out there was reconciled |
+| `3` | clean in the model, the model stood in for at least one call, and `--model-only` was not given. Nothing out there was reconciled |
 
-A model run without `--model-only` also prints `revl recover: not reconciled`
-on stderr. Pass `--model-only` when a model run is what you want, for example
-to read what recovery would do before doing it: the output is the same, still
-marked as modelled, and the exit status then follows the modelled residue.
+A clean roll-forward, or a roll-back whose every effect was moot, makes no call
+against any world. Its exit `0` is as true of the outside world as of the
+model, so it needs no `--model-only`; its JSON still says `"world": "model"`.
 
-What a model run still does to the WAL: the at-most-once fences
-(`replay-fence`, `reissue-fence`, `shared-reclaim-fence`) are written before
-each fenced attempt whatever the world is, so a model run spends them. A later
-run then reports those inverses as `fenced-before-attempt`, even though nothing
-ever reached the outside world. The roll-forward window's `discharge` record
-does not depend on the world and is written as before.
+A model run that stood in for a call and has no `--model-only` also prints
+`revl recover: not reconciled` on stderr. Pass `--model-only` when a model run
+is what you want, for example to read what recovery would do before doing it:
+the output is the same, still marked as modelled, and the exit status then
+follows the modelled residue.
+
+**A model run never spends a fence.** The at-most-once fences
+(`replay-fence`, `reissue-fence`, `shared-reclaim-fence`) say "an attempt
+against the outside world was about to start", so recover writes them only
+against a real world. A model run attempts nothing out there; if it wrote a
+fence, the real recovery after it would find the fence and refuse an inverse
+that never ran anywhere. So any number of model runs leave the WAL's fences as
+they found them. What a model run still writes is world-independent: the
+roll-forward window's `discharge` record and a finalized two-phase admission's
+records, as before.
 
 A real world path, where `revl recover` binds the composition's own externs and
 host bodies and replays the WAL's discharge descriptors against them, is the
