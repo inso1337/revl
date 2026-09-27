@@ -157,8 +157,11 @@ def test_revl_recover_exits_nonzero_on_a_lost_queue(tmp_path, capsys):
 
     balanced = str(tmp_path / "cli-balanced.wal")
     _write_lost_queue_wal(balanced, flush=True)
-    # the control, again at the CLI boundary: a balanced WAL still exits 0.
-    assert main(["recover", "--wal", balanced]) == 0
+    # the control, again at the CLI boundary: a balanced WAL still exits 0
+    # once the operator accepts the model run (issue #1477), and 3, not 1,
+    # without `--model-only`: nothing is owed, nothing out there was touched.
+    assert main(["recover", "--wal", balanced, "--model-only"]) == 0
+    assert main(["recover", "--wal", balanced]) == 3
 
 
 def test_a_balanced_activation_names_its_confirmed_flush(tmp_path):

@@ -122,6 +122,16 @@ def _replay_tier(register: Optional[str], declared_idempotent: bool) -> str:
 # the world an inverse acts on
 # ---------------------------------------------------------------------------
 
+#: issue #1477. The two values of a verdict's ``world`` field. A verdict whose
+#: world is the model describes what an in-memory stand-in did; nothing it
+#: reports as ran, re-issued or reclaimed happened outside the process.
+WORLD_MODEL = "model"
+WORLD_REAL = "real"
+
+#: The phrase every model-run line carries, so no line of a model verdict can be
+#: read as an effect that was undone in the outside world.
+MODELLED = "modelled, not performed"
+
 
 class World:
     """The external state a reconstructed inverse acts on, in a fresh process.
@@ -132,7 +142,16 @@ class World:
     :class:`DictWorld` models it as a set of durable referents (files, rows) so
     the demo and tests are deterministic; a real host would supply an adapter
     over the actual filesystem/database.
+
+    ``kind`` says which of the two an adapter is, and the verdict carries it as
+    ``world`` (issue #1477). ``"model"`` is an in-memory stand-in: what it
+    "applies" never leaves the process. ``"real"`` is an adapter over the actual
+    outside world. The default is ``"model"``, so an adapter that does not
+    declare itself real is reported as a model. That is the direction that
+    under-claims.
     """
+
+    kind = WORLD_MODEL
 
     def key(self, op: dict) -> str:
         args = op.get("args") or []
@@ -302,7 +321,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # recover treats it as RETIRED at k — a terminal, non-live state — and
         # does NOT re-admit it as a callable continuation. The branch (its own
         # distinct WAL) recovers independently to its own fork point.
-        return _fork_retired(wal, frozen)
+        return _with_world(_fork_retired(wal, frozen), world)
     approved = next((r for r in records
                      if r.get("record") == "commit-approved"), None)
     if wal["complete"]:
@@ -354,7 +373,34 @@ def recover(wal_path: str, *, world: Optional[World] = None,
                     + (" | " if residue.get("proof") else "")
                     + f"{len(unclean)} shared reclaim(s) unresolved: "
                     + ", ".join(f"{r['handle']} ({r['outcome']})" for r in unclean))
-    return _with_lineage(report, records)
+    return _with_world(_with_lineage(report, records), world)
+
+
+def world_kind(world: Optional[World]) -> str:
+    """``"real"`` only for an adapter that declares itself real; everything
+    else, including no adapter at all (recover then builds a
+    :class:`DictWorld`), is ``"model"``."""
+    if world is not None and getattr(world, "kind", None) == WORLD_REAL:
+        return WORLD_REAL
+    return WORLD_MODEL
+
+
+def _with_world(report: dict, world: Optional[World]) -> dict:
+    """Stamp the verdict with the world it ran against (issue #1477).
+
+    A model verdict's residue proof is prefixed so the proof itself cannot be
+    read as a claim about the outside world: "N inverse(s) ran and cleared every
+    referent" is true of the model and says nothing about the files, rows or
+    messages the WAL describes. A real-world verdict is left as it was."""
+    kind = world_kind(world)
+    report["world"] = kind
+    residue = report.get("residue")
+    if kind == WORLD_MODEL and residue is not None and "proof" in residue:
+        residue["proof"] = (
+            f"world: model. Every inverse, compensation, re-issue and reclaim "
+            f"counted here was {MODELLED}: it ran against an in-memory model, "
+            f"not the outside world. {residue['proof']}")
+    return report
 
 
 def _with_lineage(report: dict, records: list) -> dict:
@@ -2118,7 +2164,18 @@ def _guarantee() -> str:
 
 
 def render(report: dict) -> str:
-    lines = [f"verdict: {report['verdict'].upper()}", report["decision"], ""]
+    # issue #1477: a model run says so on its second line and on every line
+    # that reports a call against the world, so none of them reads as an effect
+    # undone out there. A verdict with no `world` (a hand-built report) renders
+    # as before.
+    model = report.get("world") == WORLD_MODEL
+    tag = f" [{MODELLED}]" if model else ""
+    lines = [f"verdict: {report['verdict'].upper()}"]
+    if model:
+        lines.append(f"world: MODEL. Recovery ran against an in-memory model; "
+                     f"every call below was {MODELLED}. The outside world was "
+                     f"not touched.")
+    lines += [report["decision"], ""]
     if report["verdict"] == "rolled-forward" and "owedFlushes" in report:
         # item 245's approved-to-discharged window verdict shares the
         # `rolled-forward` name but carries a different body (no
@@ -2135,7 +2192,7 @@ def render(report: dict) -> str:
             under = (f"register {entry.get('register')!r}"
                      + (f", key {key!r}" if key else ""))
             lines.append(f"  re-issued seq {entry['seq']:<3} {entry['referent']} "
-                         f"— auto-fired by the item-440 seam ({under})")
+                         f"— auto-fired by the item-440 seam ({under}){tag}")
         for entry in report.get("owedFlushes") or []:
             lines.append(f"  OWED     seq {entry['seq']:<3} {entry['referent']} "
                          f"— {entry['outcome']}")
@@ -2176,7 +2233,7 @@ def render(report: dict) -> str:
             op = entry.get("op") or {}
             call = (f"{op.get('receiver')}.{op.get('method')}"
                     f"({', '.join(map(repr, op.get('args') or []))})")
-            lines.append(f"  ran      {entry['label']:<22} {call}")
+            lines.append(f"  ran      {entry['label']:<22} {call}{tag}")
         for entry in report.get("moot") or []:
             lines.append(f"  moot     {entry['label']:<22} in-process (memory gone)")
         for entry in report.get("unreconstructible") or []:
@@ -2190,7 +2247,7 @@ def render(report: dict) -> str:
                          f"descriptor, seq {entry['descriptor']}")
         for entry in report.get("transactionalRolledBack") or []:
             lines.append(f"  rolled-back  seq {entry['seq']:<3} transactional inverse "
-                         f"re-issued — {entry['referent']}")
+                         f"re-issued — {entry['referent']}{tag}")
         for entry in report.get("dischargedSkipped") or []:
             tag = "retained (committed)" if entry.get("retained") else "discharged"
             lines.append(f"  skipped   seq {entry['seq']:<3} {tag} — not rolled back: "
@@ -2200,14 +2257,14 @@ def render(report: dict) -> str:
                          f"record names it — ran, not re-issued: {entry['referent']}")
         for entry in report.get("compensationsReissued") or []:
             lines.append(f"  RESIDUE  compensation seq {entry['seq']:<3} re-attempted "
-                         f"best-effort — still out: {entry['referent']}")
+                         f"best-effort — still out: {entry['referent']}{tag}")
         for entry in report.get("fencedDeferred") or []:
             lines.append(f"  FENCED   seq {entry['seq']:<3} undeclared inverse — "
                          f"fenced-before-attempt, will not re-run: {entry['referent']}")
         for entry in report.get("ran") or []:
             if entry.get("replay") == "read":
                 lines.append(f"  read     {entry['label']:<22} re-dispatched freely "
-                             f"— the inverse changes nothing (item 440)")
+                             f"— the inverse changes nothing (item 440){tag}")
     # design 460 §5: one line per un-finalized two-phase admission, in either
     # verdict. Present only when the WAL carried an admission the scan classified,
     # so a session that never admitted renders byte-identically.
@@ -2241,9 +2298,11 @@ def render(report: dict) -> str:
             lines.append(
                 f"  {tag} {entry['handle']:<20} shared last holder gone "
                 f"({entry['basis']}, holders={entry['holders']}) — "
-                f"{entry['outcome']}")
+                f"{entry['outcome']}{tag}")
     residue = report["residue"]
-    lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
+    state = "CLEAN" if residue["clean"] else "RESIDUE"
+    where = " in the model" if model else ""
+    lines += ["", f"residue proof [{state}]{where}:",
               f"  {residue['proof']}"]
     lineage = report.get("lineage")
     if lineage:
