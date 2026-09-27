@@ -1,7 +1,9 @@
 # 539: The model portfolio as a device-profiled, schedulable placement
 
 Roadmap: item 515 (issue #1189), from the 2026-09-19 external review. Slice 1
-is LANDED with this note; slices 2 to 5 are designed here and not written.
+is LANDED with this note. Slice S4, the scheduler against a host's DECLARED
+devices, is LANDED and described in section 10. Slices 2, 3 and 5 are designed
+here and not written.
 
 Number 539 was taken because 531 to 538 are claimed: 531 merged (PR #1220,
 extended by #1243), 532 by PR #1228 and #1242, 533 by #1232, 534 by #1231,
@@ -497,11 +499,13 @@ profile and a residency claim the scheduler can read. Both are provider facts
 demand, what the provider publishes is the residency, and the scheduler is the
 only thing that sees both.
 
-**S4. The scheduler.** Reads a candidate set and picks. It becomes writable
-once S2 and S3 exist, and section 4 says why not before. The refusals of S1 are
-what make it safe: the set is closed, the residence is uniform, and every
-candidate is comparable, so the scheduler chooses within a placement rather
-than about one.
+**S4. The scheduler. LANDED against DECLARED supply (section 10).** Reads a
+candidate set and picks. Section 4 said it needed S2 and S3 first; the part
+that did not is landed: the decision against the devices a placement host
+DECLARES, with its refusal. What still waits on S2 and S3 is recorded in
+section 10.4. The refusals of S1 are what make it safe: the set is closed, the
+residence is uniform, and every candidate is comparable, so the scheduler
+chooses within a placement rather than about one.
 
 **S5. The role in the manifest.** 531's own S5, which this item needs: a role
 declared in the composition manifest and bound to a member by configuration,
@@ -528,7 +532,8 @@ by configuration". S2's provision key is the natural place that binding lands.
 * **That the ten decisions are complete.** They are the ones a declaration and
   a candidate set can be wrong in. The value side is item 514's and has landed
   on its own branch; the crossing side is 512's slice 4 and is open; the
-  scheduler's own decisions are S4's and do not exist.
+  scheduler's own decisions are S4's and are listed separately in section
+  10.2.
 * **Anything about tiers other than the reference.** Nothing in this slice
   reaches an emitter, so there is nothing tier-specific to be right or wrong
   about, but that is an argument from the file list and not a measurement. The
@@ -537,3 +542,80 @@ by configuration". S2's provision key is the natural place that binding lands.
   of the same gate on the same construct, not re-measured here. What was
   re-measured is that no corpus `.rvl` uses the construct, which is what keeps
   the census unmoved.
+
+---
+
+## 10. S4: the scheduler against declared devices
+
+`src/revl/model_schedule.py`, called from `run_placement` in
+`src/revl/placement.py` right after the item-475 TEE check and before any
+seam is wired or process spawned. `docs/model-scheduling.md` is the user-facing
+page and `tests/test_model_schedule_515.py` the executable spec.
+
+### 10.1 Why the supply can be declared after all
+
+Section 4 said the scheduler needs "a published profile to compare the demand
+against (item 538, upstream)". That is still true of the PROVIDER's profile:
+what a member was actually loaded onto. But the roadmap item's exit sentence
+is about a different object: "a placement onto a host whose declared device
+cannot satisfy the profile is refused". A host's declared device is operator
+configuration, exactly as item 119's `[processes.<p>] capabilities = [...]`
+is, and it lives in the same file. So the supply this slice reads is
+`[[processes.<p>.devices]]`, with the keys `name`, `device`, `memory_mib` and
+`quantisation`, the last three spelled as `declared_floor()` spells the
+demand.
+
+This does not contradict section 2.2. The compiler still never compares the
+demand against a machine. The conductor compares two declarations, one in the
+program and one in the placement file, and neither is evidence about
+hardware. The provider's published profile, and the `placement_digest` over
+it, remain the only statement about what was loaded.
+
+### 10.2 The decisions
+
+| # | The decision | Direction |
+| - | ------------ | --------- |
+| 11 | a candidate fits a device when the class is equal, the role's `quant` is in the device's list, and the device has the memory free | closed: an `npu` never stands in for a `gpu` |
+| 12 | a role arm is placed on ONE of its candidates, in written order; devices in declared order | the written order is the preference |
+| 13 | a council arm is placed only when EVERY member is | a council asks every member |
+| 14 | a role is loaded once per host; a later step choosing it reuses its device and memory | the issue's "share one provision rather than loading twice", at the schedule level |
+| 15 | the search backtracks, and the first complete assignment in that order is the answer | deterministic; an earlier action gets its preference first |
+| 16 | no assignment exists: refused, naming host, action, origin, and why each candidate missed | closed: no "any free device" |
+| 17 | a host with no `devices` offers none | closed, item 119's rule for capabilities |
+| 18 | a malformed `devices` table is refused by name, on every host | closed: an omitted field is not read as offering anything |
+| 19 | the search stops after `SEARCH_BUDGET` attempts and refuses | closed: an unfinished search is not an admission |
+
+An `off_device` role and an unprofiled single-candidate role reserve nothing,
+and the schedule reports both rather than omitting them.
+
+Decision 14 is the one test that shows sharing changing the answer: two
+components routing to one 6144 MiB role both fit an 8192 MiB GPU, and the
+control, the same two components on two different 6144 MiB roles, sends the
+second to its CPU fallback. Decision 15 has its own test: greedy first-fit
+would refuse a placement the search finds.
+
+### 10.3 Why this is not a rule module
+
+The scheduler refuses a PLACEMENT of an admitted composition, never a program.
+Nothing under `compile_files` imports it (measured: running the compiler over
+all 238 `.rvl` files under `examples/` leaves `revl.model_schedule` out of
+`sys.modules`), so its bytes cannot move the frontend's refusal set. It is classified in
+`attest.NOT_A_RULE` beside `deploy` and `distribute`, and it cites no
+guarantee code. `G-MODEL-PLACE` is a compile-time code about the declaration;
+a device fit is decided later, against a file the compiler never reads.
+
+### 10.4 What S4 does not do, and which slice owns it
+
+* **Nothing is loaded.** The decision is printed and refused on, and not
+  passed to the child processes. The provision keyed by role, with one load,
+  one unload and `no_residue` for N consumers, is S2. The issue's exit
+  evidence is S2's and is not claimed here.
+* **No cost model.** Candidates rank by written order, not by load cost or
+  residency over time. S3 owns both.
+* **No published profile.** The declared supply is not checked against what a
+  provider loaded. Item 538 owns that comparison.
+* **The `[tiers]` form has no devices.** Its processes are synthesized, so a
+  profiled program placed with it is refused as placed on a host with no
+  devices. Tested.
+* **A single-process run is not scheduled.** With no placement file there is
+  no host to schedule against.
