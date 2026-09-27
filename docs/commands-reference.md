@@ -1918,6 +1918,9 @@ compiler's.
     compiler-derived `readOnly`/`emission` hints, and the gate FRONTIER the face
     was projected under. The face is LOCAL contract only - it makes no safety
     claim about any callee it in turn reaches - and binds loopback by default.
+    Requests are served one at a time against the one live session (issue
+    #1488): concurrent requests all complete, but a slow operation delays every
+    request queued behind it.
 - `--host HOST` - `--http` bind address (default: `127.0.0.1`). Any address
   other than loopback needs `--tls-cert` and `--tls-key`, or the server refuses
   to start.

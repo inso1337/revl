@@ -554,6 +554,12 @@ revl serve --http --port 8080 examples/user_cache.rvl
 # POST /revl/cache/get   ["k9"]   -> {"ok": true, "value": ...}
 ```
 
+Requests are served **one at a time** (issue #1488). The composition runs in
+one live session, which drives a single event loop, so the face serializes
+dispatch with the same lock the MCP HTTP transport uses. Concurrent requests all
+complete, each with its own answer, but a slow operation delays every request
+queued behind it: throughput is one call at a time.
+
 The reply shape is the placement bridge's own, `{"ok": true, "value":
 <encoded>}`, so a value marshals the same bytes here as over the placement seam,
 and a `revl export client` TS client (whose types *are* that encoding) reads it
