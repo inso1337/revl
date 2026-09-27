@@ -593,6 +593,11 @@ the register's statement and no longer the caller's.
 use (a window taken before a promotion cannot land after it), and a window a
 revert superseded.
 
+A revert invalidates the evidence, not the candidate. A window is identified
+by a digest of its sealed records, `recorded_at` included, so the supersede
+check stops a replay of the reverted window, and a fresh re-drive is new
+evidence that lands only if it meets the threshold again on its own.
+
 ### 17.3. What a revert does
 
 | layer | what happens | how it is checked |
