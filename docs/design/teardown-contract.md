@@ -613,6 +613,31 @@ attempt fenced, and reports a descriptor whose call names nothing it can
 resolve (or whose `args` are `null`) as `unresolved`. A service-call
 descriptor needs the live provider for its key, which the caller supplies.
 
+### A compensation names the emission it offsets (py tier)
+
+A compensation's discharge descriptor also carries `"offsets": <seq>`, the
+seq of the `effect` record of the emission it offsets. The link lives on the
+descriptor because the emission's `effect` record is written AHEAD of the host
+body and the descriptor only after it returns, so the effect record cannot
+know the descriptor's seq, and its `compensated` flag is written before the
+compensation exists. The frame pairs the compensation with the recorded
+emission when it registers it: by source adjacency, or, for a compensation an
+extern declares, by the crossing's name. An emission the recorder never saw
+(one in expression position) is left unpaired rather than paired with a
+neighbour.
+
+`revl recover` reads it three ways:
+
+- an emission is `offset`, not residue, exactly when its compensation's
+  descriptor seq is settled, meaning a `discharge` or `aborted` record names it;
+- a compensation an `aborted` record names (an in-process abort, or
+  `runtime.replay_descriptors`) is reported as settled and not re-issued;
+- the timeline's own `compensation` record for a compensation that has a
+  descriptor is reported through the descriptor, not a second time as
+  closure-only.
+
+An emission with no compensation is still out.
+
 ### Owned deliverable: the recovery.py/replay.py WAL migration (py tier, landed)
 
 The WAL discharge-descriptor, the discharge record, discharged-seq skipping, the

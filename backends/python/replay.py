@@ -403,7 +403,7 @@ class Step:
     __slots__ = ("index", "kind", "label", "effect", "file", "lineno", "source",
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
                  "compensation", "note", "error", "scope", "undo_idempotent",
-                 "inverse_op")
+                 "inverse_op", "wal_seq")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -423,6 +423,9 @@ class Step:
         self.undone_by: Optional[str] = None
         self.crossed = False          # an emission the unwind stepped over
         self.compensation: Optional[int] = None  # index of its compensation
+        # the `seq` of this step's `effect` record, once the WAL has it: what a
+        # compensation's discharge descriptor names as the emission it offsets
+        self.wal_seq: Optional[int] = None
         self.error: Optional[str] = None
         # item 250 (session branching): the recorded CAPABILITY SCOPE of a
         # boundary-crossing inverse, the axis the scope-gated fork rewind keys on
@@ -551,7 +554,31 @@ class Timeline:
 
     def _wal_append(self, step: Step) -> None:
         if self._wal is not None:
-            self._wal.append_step(step, self.component)
+            step.wal_seq = self._wal.append_step(step, self.component)["seq"]
+
+    def emission_for(self, compensation: Any, crossing: Optional[str] = None
+                     ) -> Optional[Step]:
+        """The recorded emission a compensation being registered offsets, or
+        None. First by source adjacency, the rule `record_yield` has always
+        used (the registration sits on the line after the emission); then, for
+        a compensation an extern DECLARES, whose thunk lives with the extern
+        rather than beside the call, by the crossing's name: the newest
+        emission of that extern not yet paired with a compensation. None when
+        nothing matches: a crossing the recorder never saw (an emission in
+        expression position) is left unpaired rather than paired with a
+        neighbour, which would report the neighbour as offset."""
+        file, lineno = _code_site(_unguarded(compensation))
+        if lineno:
+            adjacent = self._emission_sites.get((file, lineno - 1))
+            if adjacent is not None and adjacent.compensation is None:
+                return adjacent
+        if crossing is None:
+            return None
+        for step in reversed(self.steps):
+            if step.kind == KIND_EMISSION and step.compensation is None \
+                    and (step.detail or {}).get("key") == crossing:
+                return step
+        return None
 
     # -- recording ---------------------------------------------------------
 
@@ -642,7 +669,8 @@ class Timeline:
                                           evidence_refused=evidence_refused)
         return sink
 
-    def record_yield(self, value: Any, effect_label: Optional[str]) -> tuple:
+    def record_yield(self, value: Any, effect_label: Optional[str],
+                     emission: Optional[Step] = None) -> tuple:
         """Classify one yield out of a recorded effect generator.
 
         Returns ``(step, value_to_yield)``.  For anything with an inverse the
@@ -700,7 +728,15 @@ class Timeline:
             self._wal_append(step)
             return step, value
         else:
-            emission = self._emission_sites.get((file, lineno - 1)) if lineno else None
+            if emission is None:
+                # a runtime compensation entry already names the emission it
+                # offsets (issue #1369); an activation-body entry is yielded
+                # as the `_Compensation` object, whose source line is not the
+                # registration's, so adjacency alone never paired it
+                emission = getattr(entry, "emission_step", None)
+            if emission is None:
+                emission = (self._emission_sites.get((file, lineno - 1))
+                            if lineno else None)
             if emission is not None:
                 step = self._add(
                     KIND_COMPENSATION, f"compensate {emission.label}", effect_label,
@@ -2232,7 +2268,8 @@ class WriteAheadLog:
             origin: Optional[dict] = None, witness: Any = None,
             idempotency: Optional[str] = None,
             undo_idempotent: bool = False,
-            register: Optional[str] = None) -> dict:
+            register: Optional[str] = None,
+            offsets: Optional[int] = None) -> dict:
         """Append the WAL discharge-descriptor for one witnessed (`transactional`)
         inverse or one `compensation` (docs/design/teardown-contract.md, "WAL
         descriptor"; owned by the witnessed-wal-recover slice on the py tier).
@@ -2286,6 +2323,12 @@ class WriteAheadLog:
             # byte-identical: only written when the author declared it.
             **({"undo_idempotent": True} if undo_idempotent else {}),
             **({"register": register} if register else {}),
+            # issue #1369: a compensation names the `seq` of the emission's
+            # `effect` record it offsets. The link lives here, not on the effect
+            # record, because that record is written AHEAD of the host body and
+            # this one only after it returns. Recovery counts the emission as
+            # offset exactly when this descriptor's seq is settled or ran.
+            **({"offsets": offsets} if offsets is not None else {}),
             # design 460 §4: the admission this inverse was registered under, when
             # one is open. Absent otherwise, so a pre-460 descriptor is byte-identical.
             **self._admit_tag(),
