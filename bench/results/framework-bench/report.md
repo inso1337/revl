@@ -7,10 +7,9 @@ better one.
 
 ## What this report is not
 
-- **the third host**: named and justified as `@modelcontextprotocol/sdk` 1.30.0, not yet run. Running it needs an MCP host harness that registers a tool per brief, calls remove(), and hands the result to a residue probe, plus a pinned-model generation pass over the 30 briefs in MCP form. Neither exists, so every framework cell is not-run rather than a number. Naming a host is not running one and the report distinguishes the two.
 - **column: tokens-to-green**: not measured in this report. pass --tokens-from <run label>
 - **column: admission-latency**: not measured in this report. pass --measure-latency to time the gate on this machine
-- **a pinned-model run across all three hosts**: the pinned model produced injection-escape; every other cell is a re-score of a corpus another model generated, or not run. the raw-ts and framework hosts have not been generated with the pinned model
+- **a pinned-model run across all three hosts**: the pinned model produced injection-escape; every other cell is a re-score of a corpus another model generated, or not run. no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day
 - **independent reproduction**: every claim stands at the 'measured' rung and none at 'demonstrated'. the ladder's 'demonstrated' rung requires a reproduction by a party that is not the generator; nobody outside this repository has run the suite
 - **a throughput measurement on an idle machine**: the throughput figures were taken with the server accounting for only 21% of each request's wall clock. no idle machine was available during this run; the figure does not reproduce the quoted one and a contended measurement is a weak refutation either way
 - **publication**: nothing here is published outside this repository. the artifacts are files in bench/results/framework-bench/
@@ -32,7 +31,7 @@ better one.
 | gate API | 1.0.0 |
 | language | 2.0.0 |
 | checker frontier | `reference-full:2.0.0` |
-| compiler commit | `9af4b3606c80d4dd78cb09c006560e925f0d4836` |
+| compiler commit | `6b0f09aa180c7c3c9f8df04c0260586697913528` |
 | report schema | EVAL-REPORT-1 |
 
 Measured throughput: **24.3 t/s** generation (sd 1.0, n=5 warm samples), 83.9 t/s prompt.
@@ -205,6 +204,10 @@ apart rather than folded into a containment figure.
 
 `tests/test_adversarial_gate.py (docs/threat-model.md)` is still not the source of this cell. still not sourced from the attack suite: that measures our gate against attacks we wrote for it.
 
+## One model, three hosts, one run
+
+**not run.** no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day
+
 ## The third host
 
 **`@modelcontextprotocol/sdk` 1.30.0**, from npm, third party (not this repository).
@@ -251,13 +254,36 @@ Every claim in that table is checked against the published artifact rather than 
 
 What that check says and does not say: a confirmed claim means the symbol is in the published file. It says nothing about what calling it releases, which is the residue probe's question and is why the framework residue cell is not-run rather than filled from the survey.
 
+### The harness
+
+bench/mcp_host/probe.mjs builds one McpServer at the pinned version, connects
+a Client to it over the SDK's in-memory transport, and installs and unloads
+the generated pack N times on that one server. It reads four categories,
+each from something public: registry (what the Client can list), resources
+(host.Pool / host.Map / host.Job handles still open, the same set the
+TypeScript backend's no-residue check reads), listeners (on process), and
+timers (created and neither fired nor cleared). A category leaks when its
+final value differs from the baseline taken before the first install.
+
+**The unload convention is this benchmark's, not the SDK's.**
+
+Unload is remove() on every registration handle the pack obtained while
+install ran, which is the framework's own per-registration retirement, and
+then the function install returned, if it returned one. The SDK has no
+per-registration teardown callback, so without that return convention a
+careful pack would have nowhere to release what it acquired and the host
+would score maximally badly by construction. The convention is stated in
+the prompt, so the model is told the unload protocol exactly as the raw-ts
+prompt tells it Cordis's.
+The SDK also refuses to register a capability once a transport is
+connected, so the probe opens tools, resources and prompts before
+connecting, through one registration of each that it removes again. That
+is what any host that loads packs while serving has to do.
+
 ### Why its cells are still empty
 
-Running it needs an MCP host harness that registers a tool per brief, calls
-remove(), and hands the result to a residue probe, plus a pinned-model
-generation pass over the 30 briefs in MCP form. Neither exists, so every
-framework cell is not-run rather than a number. Naming a host is not running
-one and the report distinguishes the two.
+The harness runs and is tested; no pinned-model generation for this host is
+committed. The report's three-host row says exactly what that run needs.
 
 ## Claims and their rung
 
