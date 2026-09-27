@@ -1623,13 +1623,11 @@ def _read_json(path) -> Any:
 
 
 def _write_json(path, payload) -> None:
-    from pathlib import Path  # noqa: PLC0415
+    """Atomic: a reader sees the whole old file or the whole new one. Callers
+    that read-modify-write pool state also hold `pool_state.locked`."""
+    from . import pool_state  # noqa: PLC0415 (lazy)
 
-    target = Path(path)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "w", encoding="utf-8") as handle:
-        json.dump(payload, handle, indent=2, sort_keys=True)
-        handle.write("\n")
+    pool_state.write_json(path, payload)
 
 
 def load_pool(directory) -> tuple[dict, Roster]:
@@ -1807,6 +1805,7 @@ def pool_command(args) -> int:
 
     Every verb prints a receipt and exits nonzero on a refusal, so an operator
     script reads the exit status and an operator reads the named link."""
+    from . import pool_state  # noqa: PLC0415 (lazy)
     from .attest import resolve_key  # noqa: PLC0415 (lazy)
     from .errors import RevlError  # noqa: PLC0415
 
@@ -1855,19 +1854,21 @@ def pool_command(args) -> int:
         return 0
 
     if verb == "register":
-        identities = load_directory(args.dir)
-        public = peer_identity.load_public_identity(args.public)
-        pinned = identities.register(public)
-        save_directory(args.dir, identities)
+        with pool_state.locked(args.dir):
+            identities = load_directory(args.dir)
+            public = peer_identity.load_public_identity(args.public)
+            pinned = identities.register(public)
+            save_directory(args.dir, identities)
         print(f"pinned {pinned.key_id} for peer {pinned.peer_id} "
               f"at {pinned.not_before}")
         return 0
 
     if verb == "rotate":
-        identities = load_directory(args.dir)
-        public = peer_identity.load_public_identity(args.public)
-        old, new = identities.rotate(public, reason=args.reason)
-        save_directory(args.dir, identities)
+        with pool_state.locked(args.dir):
+            identities = load_directory(args.dir)
+            public = peer_identity.load_public_identity(args.public)
+            old, new = identities.rotate(public, reason=args.reason)
+            save_directory(args.dir, identities)
         print(f"peer {public.peer_id}: active key is now {new.key_id}\n"
               f"  superseded {old.key_id if old else '(none)'} "
               f"-- it still verifies everything it signed and authorises "
@@ -1875,10 +1876,11 @@ def pool_command(args) -> int:
         return 0
 
     if verb == "revoke-key":
-        identities = load_directory(args.dir)
-        revoked = identities.revoke(args.peer_id, args.key_id,
-                                    reason=args.reason)
-        save_directory(args.dir, identities)
+        with pool_state.locked(args.dir):
+            identities = load_directory(args.dir)
+            revoked = identities.revoke(args.peer_id, args.key_id,
+                                        reason=args.reason)
+            save_directory(args.dir, identities)
         print(f"revoked {revoked.key_id} for peer {revoked.peer_id} "
               f"at {revoked.not_after}\n"
               f"  it confers no authority; the records it signed are still "
@@ -1935,19 +1937,21 @@ def pool_command(args) -> int:
             trust_floor=args.trust_floor,
             identity_mode=args.identity)
         record = sign_charter(charter, key)
-        _write_json(f"{args.dir}/{CHARTER_FILE}", record)
-        roster = Roster(charter.pool_id, canonical_digest(record))
-        save_roster(args.dir, roster)
-        identities = load_directory(args.dir)
-        # An attesting key named in the charter is pinned in the DIRECTORY too.
-        # Naming a fingerprint says who may attest; the directory is what holds
-        # the public half a verdict is checked against, and without both an
-        # attestation is refused on `attestation-signature` for a key the
-        # charter itself authorised. The operator introduces it here, which
-        # keeps the rule that no record introduces the key it is checked under.
-        for path in (getattr(args, "attest_identity", None) or ()):
-            identities.register(peer_identity.load_public_identity(path))
-        save_directory(args.dir, identities)
+        with pool_state.locked(args.dir):
+            _write_json(f"{args.dir}/{CHARTER_FILE}", record)
+            roster = Roster(charter.pool_id, canonical_digest(record))
+            save_roster(args.dir, roster)
+            identities = load_directory(args.dir)
+            # An attesting key named in the charter is pinned in the DIRECTORY
+            # too. Naming a fingerprint says who may attest; the directory is
+            # what holds the public half a verdict is checked against, and
+            # without both an attestation is refused on
+            # `attestation-signature` for a key the charter itself authorised.
+            # The operator introduces it here, which keeps the rule that no
+            # record introduces the key it is checked under.
+            for path in (getattr(args, "attest_identity", None) or ()):
+                identities.register(peer_identity.load_public_identity(path))
+            save_directory(args.dir, identities)
         print(render_status(record, roster, identities))
         return 0
 
@@ -1998,43 +2002,61 @@ def pool_command(args) -> int:
             print(f"error: {error}", file=sys.stderr)
             return 2
 
-    charter_record, roster = load_pool(args.dir)
-    identities = load_directory(args.dir)
+    return _gate_command(args, verb, key=key, identity=identity)
 
-    if verb == "join":
-        join_record = _read_json(args.join)
-        peer_keys = {}
-        if getattr(args, "peer_key", None):
-            peer_keys = {join_record.get("peer_id", ""):
-                         resolve_key(args.peer_key)}
-        receipt = admit(charter_record, join_record, charter_key=key,
-                        peer_keys=peer_keys, directory=identities,
-                        admitting_key_id=key_id(key), roster=roster)
-    elif verb == "withdraw":
-        # The delivery ledger is what KNOWS a peer's outstanding work (item
-        # 524's dispatch slice). Reading it here is what turns `orphaned` from
-        # a shape with no populator into the set a real deployment reports; the
-        # gate itself is unchanged and still takes the roster it is handed.
-        from .pool_dispatch import load_ledger, save_ledger  # noqa: PLC0415
-        ledger = load_ledger(args.dir)
-        roster.outstanding = ledger.outstanding()
-        receipt = withdraw(charter_record, args.peer, args.reason,
-                           charter_key=key, roster=roster,
-                           directory=identities,
-                           revoking_identity=identity,
-                           revoking_key_id=None if identity is not None
-                           else key_id(key))
-    else:  # pragma: no cover - argparse constrains the verb set
-        raise AssertionError(f"unknown pool verb {verb!r}")
 
-    print(json.dumps(receipt, indent=2, sort_keys=True))
-    if receipt["verdict"] == REFUSE:
-        return 1
-    if verb == "withdraw":
-        # Only now, and only for the tasks the receipt actually named: the
-        # ledger records what the withdrawal decided rather than deciding it.
-        ledger.orphan(args.peer, reason=args.reason)
-        save_ledger(args.dir, ledger)
-    save_roster(args.dir, roster)
-    save_directory(args.dir, identities)
-    return 0
+def _gate_command(args, verb: str, *, key: bytes, identity) -> int:
+    """`pool join` and `pool withdraw`: one decision by the gate, and the state
+    it changes, under the pool lock.
+
+    The lock is held from the read the gate decides on to the last write, so
+    no other operator process can change the roster, the directory or the
+    ledger in between and have its change overwritten by this one (issue
+    #1198: a dispatch finishing after a withdrawal used to put the withdrawn
+    peer back)."""
+    from . import pool_state  # noqa: PLC0415 (lazy)
+    from .attest import resolve_key  # noqa: PLC0415
+
+    with pool_state.locked(args.dir):
+        charter_record, roster = load_pool(args.dir)
+        identities = load_directory(args.dir)
+
+        if verb == "join":
+            join_record = _read_json(args.join)
+            peer_keys = {}
+            if getattr(args, "peer_key", None):
+                peer_keys = {join_record.get("peer_id", ""):
+                             resolve_key(args.peer_key)}
+            receipt = admit(charter_record, join_record, charter_key=key,
+                            peer_keys=peer_keys, directory=identities,
+                            admitting_key_id=key_id(key), roster=roster)
+        elif verb == "withdraw":
+            # The delivery ledger is what KNOWS a peer's outstanding work
+            # (item 524's dispatch slice). Reading it here is what turns
+            # `orphaned` from a shape with no populator into the set a real
+            # deployment reports; the gate itself is unchanged and still takes
+            # the roster it is handed.
+            from .pool_dispatch import load_ledger, save_ledger  # noqa: PLC0415
+            ledger = load_ledger(args.dir)
+            roster.outstanding = ledger.outstanding()
+            receipt = withdraw(charter_record, args.peer, args.reason,
+                               charter_key=key, roster=roster,
+                               directory=identities,
+                               revoking_identity=identity,
+                               revoking_key_id=None if identity is not None
+                               else key_id(key))
+        else:  # pragma: no cover - argparse constrains the verb set
+            raise AssertionError(f"unknown pool verb {verb!r}")
+
+        print(json.dumps(receipt, indent=2, sort_keys=True))
+        if receipt["verdict"] == REFUSE:
+            return 1
+        if verb == "withdraw":
+            # Only now, and only for the tasks the receipt actually named: the
+            # ledger records what the withdrawal decided rather than deciding
+            # it.
+            ledger.orphan(args.peer, reason=args.reason)
+            save_ledger(args.dir, ledger)
+        save_roster(args.dir, roster)
+        save_directory(args.dir, identities)
+        return 0

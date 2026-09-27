@@ -215,9 +215,17 @@ dispatch is exactly the failure the refusal exists to prevent.
 3. **A multi-file artifact.** A task pins ONE artifact by hash. Two files are
    refused on `multi-file-artifact` rather than silently hashing the first; a
    bundle digest is what that needs.
-4. **Concurrency.** The ledger is a JSON file with no concurrency control, the
-   same limit the roster carries and for the same assumed deployment: one
-   operator writing.
+4. **Concurrency.** Closed since (issue #1198). Every writer of the pool
+   directory holds `pool_state.locked` for its whole read-modify-write, and
+   every file is replaced atomically. `dispatch_one` is two transactions, one
+   before the send and one after it, and the second READS THE STATE AGAIN
+   rather than writing back what it read before the send. Before that, a
+   withdrawal made while a task was in flight was undone when the dispatch
+   finished: the peer was back in the roster and its orphaned task read
+   `delivered`. `tests/test_pool_state_concurrency_1198.py` forces that
+   interleaving with two real processes. The late answer is now refused
+   (`receipt-refused`, because the withdrawal revoked the key that signed it)
+   and the task stays `orphaned`.
 
 ## Self-host
 
