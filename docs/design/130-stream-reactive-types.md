@@ -16,8 +16,7 @@ subscribe/next/close bracket, `merge`, `every … in` and `on … as`. §4.5's
 provider-declared `replay(n)`/`replay(from: <durable>)` and the §4.9
 reconstructible crash-recovery case it gates have since landed on py, the tier
 that owns the WAL. The last-n `replay(n)` backlog, which makes no recovery
-claim, has since landed on ts, go and java as well; rust refuses it by name
-until its lowering lands with a gate-crate regeneration, and every tier but py
+claim, has since landed on ts, go, java and rust as well, and every tier but py
 refuses the durable cursor by name. So has the
 required-`Stream[T]` coeffect (§6c): `requires <k>: Stream[T]` on py, refused by
 name on every other tier, and with it the handler that resolves its source from
@@ -298,8 +297,7 @@ own reason, because a program that compiles and answers differently from the
 reference is worse than one that refuses.
 
 On go the only stream refusal left is the durable `replay(from: …)` cursor;
-java refuses the cursor and the `drain` window; rust refuses the window and,
-until its last-n lowering lands, both `replay` forms.
+rust and java refuse the cursor and the `drain` window.
 
 **A policy and a chain on one subscription share one signal.** The acceptance a
 `deliver` answers is the same boolean a `take(n)` link counts, and `take(n)`
@@ -370,14 +368,15 @@ silent skip.
 buffer the provider holds, and the reference itself makes no recovery claim for
 it: a last-n subscription registers the ordinary closure-only bracket, so after
 a crash it is the same `unreconstructible` residue a plain subscription is. So a
-tier can give the reference's whole answer for it without a WAL, and ts, go and
-java now do. Each holds the declared backlog on the provider (recorded before
+tier can give the reference's whole answer for it without a WAL, and ts, go,
+java and rust now do. Each holds the declared backlog on the provider (recorded before
 delivery, whether or not anyone listens), and a request replays the newest k
 items through the provider's own forward path before any live item, traced
 `stream.replay <item>`, exactly as the py reference's `Stream.subscribe` does.
 The spellings are `host.Stream.source({ replay: n })` and a `replay: k` entry in
 the subscribe options on ts, `StreamSource(n)` and `StreamSubscribeReplay` on
-go, and `Stream.source(n)` and `Stream.subscribeReplay` on java. The blocking
+go, `Stream.source(n)` and `Stream.subscribeReplay` on java, and
+`Stream::source_replay(n)` and `Stream::subscribe_replay` on rust. The blocking
 tiers add one property the single-threaded reference cannot need: the subscribe
 and the replay run under a per-provider emission lock, taken only by a provider
 that declared a backlog, so a live item emitted on another thread lands before
@@ -385,12 +384,13 @@ the subscribe (and so inside the backlog) or after the whole backlog, never in
 the middle of it. Each tier runs the reference's own replay cases plus that
 race, and the race test fails when the lock is removed.
 
-rust is the exception for now, and for a reason outside the stream design: its
-emitter, `backends/rust/emit.py`, is a digest input of the native gate crate
-(`tools/build_gate_crate.py`), so lowering the backlog there moves the crate's
-digest and has to land with a crate regeneration. Until then rust refuses both
-forms by name. Its self-host port, `selfhost/emit_rust.rvl`, names both ends of
-a replay document with markers and emits no subscription for it.
+On rust the backlog lives in a side table keyed by stream id, and `emit` gains
+its two hooks (the lock and the hold) only in a document that declares a
+backlog, so every other stream document's crate is byte-identical to before.
+That matters because `selfhost/emit_rust.rvl` carries the replay-free stream
+runtime byte for byte; it does not port the backlog yet, and names both ends of
+a replay document with markers rather than emitting a subscription that would
+drop it.
 
 The durable `replay(from: …)` cursor stays the py reference tier's. ts, go, rust
 and java REFUSE it by name, at the declaration as well as at the request: the

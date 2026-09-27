@@ -3485,3 +3485,98 @@ def test_stream_runtime_on_real_cordis_rs(tmp_path):
     result = _cargo("test", tmp_path, "--", "--test-threads=1")
     assert result.returncode == 0, result.stderr + result.stdout
     assert "24 passed" in result.stdout
+
+
+# ---------------------------------------------------------------------------
+# item 130 §4.5: the provider-declared last-n backlog on cordis-rs. Lowered;
+# the durable `replay(from: …)` cursor stays refused by name (§4.9 is the py
+# tier's WAL).
+# ---------------------------------------------------------------------------
+
+# Inline rather than a `.rvl` under backends/rust/scenarios on purpose: every
+# `.rvl` under backends/ is a gate/reference census case, and the native gate
+# (built from selfhost/lower.rvl) false-rejects any document carrying
+# `replay(…)`. scenarios/stream_replay.rs drives `replayed()`.
+_STREAM_REPLAY_RVL = """
+service Sink { emission fn write(v: Str) }
+
+component Replayed requires sink: Sink {
+  let src = effect Stream.source() replay(3) undo src.close()
+  let sub = subscribe src replay(3) undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
+
+def test_a_declared_last_n_backlog_lowers_on_both_ends():
+    """The provider's `replay(3)` opens a source that holds three items, and the
+    request opens through `subscribe_replay`, which delivers that backlog before
+    any live item. The subscription is still the ordinary closure bracket."""
+    src = emit.emit(compile_source(_STREAM_REPLAY_RVL))
+    assert "let src = Arc::new(Stream::source_replay(3usize));" in src
+    assert ('let sub = Arc::new(Stream::subscribe_replay(&src, 3usize, "error", '
+            '0usize));') in src
+    assert ('ctx.effect("Replayed.sub.undo", move || { sub_undo.close(); '
+            'Ok(()) })?;') in src
+    # the runtime carries the backlog and `emit` its two hooks
+    assert "pub fn subscribe_replay(" in src
+    assert "revl_stream_replay_hold(self.inner.id, &item);" in src
+
+
+def test_a_replay_free_stream_crate_is_unchanged_by_the_replay_block():
+    """Only a document that declares a backlog pays for it. Every other stream
+    document emits the runtime exactly as before, which `selfhost/emit_rust.rvl`
+    carries byte for byte (`test_the_stream_surface_is_carried_byte_for_byte`)."""
+    src = _stream_src()
+    assert "subscribe_replay" not in src
+    assert "revl_stream_replay_hold" not in src
+    assert "RevlStreamHold" not in src
+    assert "".join(emit._stream_host_rust(False)) == "".join(emit._STREAM_HOST_RUST)
+    hooked = emit._stream_host_rust(True)
+    assert len(hooked) == (len(emit._STREAM_HOST_RUST)
+                           + len(emit._STREAM_EMIT_GATE_LINES)
+                           + len(emit._STREAM_EMIT_HOLD_LINES)), (
+        "each `emit` hook must land exactly once, or the anchors moved")
+
+
+def test_a_durable_cursor_is_refused_by_name_at_both_ends():
+    for head in ("", 'replay(from: "orders")'):
+        ir = compile_source(
+            "component C {\n"
+            '  let src = effect Stream.source() replay(from: "orders") '
+            "undo src.close()\n"
+            f"  let sub = subscribe src {head} undo sub.close()\n"
+            "  await sub.next()\n"
+            "}\n")
+        with pytest.raises(emit.EmitError) as excinfo:
+            emit.emit(ir)
+        msg = str(excinfo.value)
+        assert "durable stream `replay(from: …)` cursor is not lowered" in msg
+        assert "cordis-rs" in msg and "§4.9" in msg
+
+
+@needs_cargo
+def test_stream_replay_runtime_on_real_cordis_rs(tmp_path):
+    """Definition of done for §4.5's last-n backlog on this tier: the emitted
+    crate RUNS on real cordis-rs and gives the py reference's answers: a late
+    subscriber receives the newest k held items oldest first and before any
+    live item, the backlog takes the chain, the buffer and the `error` policy
+    like a live item, a declaration nobody asks for changes nothing, the
+    undeclared control sees no backlog, a live emission on another thread never
+    lands inside the backlog, and the emitted component still tears down with no
+    residue."""
+    here = Path(__file__).resolve().parent
+    ir = compile_source(_STREAM_REPLAY_RVL)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(emit.emit(ir), encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_stream_replay_scn"),
+                                         encoding="utf-8")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests" / "stream_replay.rs").write_text(
+        (here / "scenarios" / "stream_replay.rs").read_text(encoding="utf-8"),
+        encoding="utf-8")
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, result.stderr + result.stdout
+    assert "8 passed" in result.stdout

@@ -980,22 +980,32 @@ def test_the_stream_surface_is_carried_byte_for_byte(emitted, reference):
         assert marker not in got, f"{marker} is back: the boundary reopened"
 
 
-# item 130 §4.5 / §6b (issue #81): the two stream surfaces the REFERENCE refuses
-# on this tier, and which this port answered in silence.
+# item 130 §4.5 / §6b (issue #81): the stream surfaces this port does NOT carry,
+# and which it once answered in silence.
 # ---------------------------------------------------------------------------
 #
-# The section above pins the surface the port CARRIES. These two pin the
-# surfaces it does not, and they are the sharper half: what the port dropped
-# here was ITSELF A REFUSAL. A tier limit the reference states in an `EmitError`
-# came back from its port as a crate that looks complete, which is the same
-# shape as #1130 and #1183 and the one direction the byte-agreement oracle
-# exists to rule out. There is no byte agreement to protect in either case --
-# the reference emits nothing at all -- so the marker is free.
+# The section above pins the surface the port CARRIES. These pin the surfaces
+# it does not. Two of them, the durable cursor and the required coeffect, are
+# tier limits the reference states in an `EmitError`, and the port once
+# answered them with a crate that looks complete, which is the same shape as
+# #1130 and #1183 and the one direction the byte-agreement oracle exists to
+# rule out. The reference emits nothing at all for those, so the marker is
+# free. The third, the last-n backlog, the reference LOWERS; the port names it
+# by marker until it is ported (see the first case below for why that waits
+# on a gate-crate regen).
 
 _REPLAY_DOC = """
 component C {
   let src = effect Stream.source() replay(4) undo src.close()
   let sub = subscribe src replay(2) undo sub.close()
+  await sub.next()
+}
+"""
+
+_CURSOR_DOC = """
+component C {
+  let src = effect Stream.source() replay(from: "orders") undo src.close()
+  let sub = subscribe src replay(from: "orders") undo sub.close()
   await sub.next()
 }
 """
@@ -1019,24 +1029,54 @@ def _refused_doc(tmp_path, source: str, reference):
     return ir, str(excinfo.value)
 
 
-def test_a_replay_declaration_the_reference_refuses_is_named_here_too(
+def test_a_last_n_backlog_the_reference_lowers_is_named_by_the_port(
         emitted, reference, tmp_path):
-    """§4.5: a provider-declared backlog, refused on this tier because the
-    recovery surface that makes the claim worth anything is the WAL's.
+    """§4.5's last-n backlog: the reference LOWERS it on this tier now
+    (`Stream::source_replay` / `Stream::subscribe_replay`, plus the replay host
+    block and `emit`'s two hooks), and this port does not carry it yet.
 
-    The port carried markers for both ends of it already -- `<<DEFER-host-
-    replay>>` at the declaration and `<<DEFER-stream-replay>>` at the request --
-    and neither could ever fire: both were spelled `value_bool(value_field(node,
-    "replay"))`, and a replay declaration is a RECORD in the interchange IR
-    (`{"count": 4}`, `{"cursor": "orders"}`), never a bool. So the port answered
-    a document the reference refuses by name with a 29,022-byte crate that
-    emitted a subscription and silently dropped the backlog -- delivering only
-    live items and calling it replay, which is the exact divergence the
-    reference's refusal text names.
+    That is the ordinary boundary the port's markers exist for, and the case
+    that matters is the one this pins: the port must not answer with the
+    replay-free crate. A crate that opened the subscription and dropped the
+    backlog would deliver only live items and call it replay, which is the
+    divergence both halves of this oracle are written against. So the port
+    names both ends -- `<<DEFER-host-replay>>` at the declaration and
+    `<<DEFER-stream-replay>>` at the request -- and emits no subscription.
+
+    Porting it needs `selfhost/emit_rust.rvl`, which is a digest input of the
+    gate crate (`tools/build_gate_crate.py`), so it lands with a crate regen.
+    Every document that declares no backlog still agrees byte for byte
+    (`test_the_stream_surface_is_carried_byte_for_byte`), because the reference
+    emits the replay machinery only for a document that declares one.
     """
-    ir, message = _refused_doc(tmp_path, _REPLAY_DOC, reference)
-    assert "a stream `replay(…)` is not lowered" in message, (
-        "the reference no longer refuses replay by name: this case has moved"
+    path = tmp_path / "doc.rvl"
+    path.write_text(_REPLAY_DOC)
+    ir = compile_files([str(path)])
+    want = reference.emit(ir)
+    assert "Stream::source_replay(4usize)" in want, (
+        "the reference no longer lowers the last-n declaration: this case moved")
+    assert 'Stream::subscribe_replay(&src, 2usize, "error", 0usize)' in want
+    got = emitted["emit_rust_src"](ir)
+    assert "<<DEFER-host-replay>>" in got, "the provider's declaration"
+    assert "<<DEFER-stream-replay>>" in got, "the consumer's request"
+    assert "Stream::subscribe(" not in got, (
+        "the port emitted a replay-free subscription for a replay document")
+
+
+def test_a_durable_cursor_the_reference_refuses_is_named_here_too(
+        emitted, reference, tmp_path):
+    """§4.5/§4.9: the durable cursor, refused on this tier because the recovery
+    surface that makes it worth anything is the py reference tier's WAL.
+
+    The port's markers could once never fire: both were spelled
+    `value_bool(value_field(node, "replay"))`, and a replay declaration is a
+    RECORD in the interchange IR (`{"count": 4}`, `{"cursor": "orders"}`),
+    never a bool. So the port answered a document the reference refuses by name
+    with a crate that emitted a subscription and silently dropped the claim.
+    """
+    ir, message = _refused_doc(tmp_path, _CURSOR_DOC, reference)
+    assert "durable stream `replay(from: …)` cursor is not lowered" in message, (
+        "the reference no longer refuses the cursor by name: this case has moved"
     )
     got = emitted["emit_rust_src"](ir)
     assert "<<DEFER-host-replay>>" in got, "the provider's declaration"

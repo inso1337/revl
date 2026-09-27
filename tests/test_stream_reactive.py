@@ -673,10 +673,8 @@ def test_replay_may_not_be_declared_twice_on_a_subscribe():
 
 
 # ---------------------------------------------------------------------------
-# Replay emission: py, ts, go and java lower the last-n backlog (rust refuses
-# it by name until its lowering lands with a gate-crate regeneration); the
-# durable cursor is py's alone, and every other tier REFUSES IT BY NAME
-# (§4.5, §4.9)
+# Replay emission: every emitting tier lowers the last-n backlog; the durable
+# cursor is py's alone, and every other tier REFUSES IT BY NAME (§4.5, §4.9)
 # ---------------------------------------------------------------------------
 
 def test_python_emits_the_declaration_the_request_and_the_durable_disposer():
@@ -710,6 +708,8 @@ _LAST_N_SPELLING = {
     "typescript": ("host.Stream.source({ replay: 4 })",
                    'host.Stream.subscribe(src, "error", ctx, { replay: 2 })'),
     "go": ("StreamSource(4)", 'StreamSubscribeReplay(src, 2, "error", 0)'),
+    "rust": ("Stream::source_replay(4usize)",
+             'Stream::subscribe_replay(&src, 2usize, "error", 0usize)'),
     "java": ("Stream.source(4)", 'Stream.subscribeReplay(src, 2, "error", 0)'),
 }
 
@@ -769,6 +769,7 @@ def test_a_last_n_backlog_lowers_beside_a_policy_the_tier_lowers(tier, policy):
     assert (f'"{policy}", 2' in code                       # go / java / rust
             or f'"{policy}", ctx, {{ capacity: 2, replay: 2 }}' in code)  # ts
     assert ("StreamSubscribeReplay(src, 2," in code
+            or "Stream::subscribe_replay(&src, 2usize," in code
             or "Stream.subscribeReplay(src, 2," in code
             or "replay: 2 }" in code)
 
@@ -805,19 +806,17 @@ def test_the_same_head_without_replay_still_lowers_its_policy(tier, policy):
             or f'"{policy}", ctx, {{ capacity: 2 }}' in code)  # ts
 
 
-@pytest.mark.parametrize("tier", ["go", "java"])
+@pytest.mark.parametrize("tier", ["go", "rust", "java"])
 def test_the_cursor_refusal_outranks_the_drain_refusal_on_a_blocking_tier(tier):
     """A durable cursor (§4.5) and a `drain` window (§8) on one head.
 
-    On java both halves are unlowered and either message would be honest, so
-    the point is that WHICH one is stable: the two refusals are about different
+    On rust and java both halves are unlowered and either message would be
+    honest, so the point is that WHICH one is stable: the two refusals are about different
     things (the window about the clock, the cursor about the recovery surface),
     and a silent flip would send an author to fix the wrong half of their
     `subscribe`. On go only the cursor is left to refuse, and the same assertion
     holds for the plainer reason that the window lowers there; keeping go in the
-    list is what would catch a regression that brought its window refusal back.
-    rust holds the same order under its own message, pinned in
-    `test_rust_still_refuses_both_replay_forms_by_name`."""
+    list is what would catch a regression that brought its window refusal back."""
     emit = _tier_emit(tier)
     head = 'policy block buffer 2 drain 10ms replay(from: "orders")'
     with pytest.raises(emit.EmitError) as excinfo:
@@ -828,7 +827,7 @@ def test_the_cursor_refusal_outranks_the_drain_refusal_on_a_blocking_tier(tier):
     assert "`drain` window is not lowered" not in message
 
 
-@pytest.mark.parametrize("tier", ["java"])
+@pytest.mark.parametrize("tier", ["rust", "java"])
 def test_a_last_n_backlog_does_not_hide_the_drain_refusal(tier):
     """With the backlog lowered, a head carrying a last-n `replay(…)` and a
     `drain` window on a tier with no shared clock is refused for the WINDOW,
@@ -839,32 +838,6 @@ def test_a_last_n_backlog_does_not_hide_the_drain_refusal(tier):
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(_declared("replay(4)", head), "s.rvl"))
     assert "`drain` window is not lowered" in str(excinfo.value)
-
-
-@pytest.mark.parametrize("decl, head", [
-    ("replay(4)", "replay(2)"),
-    ("replay(4)", ""),
-    ("replay(4)", "policy drop_oldest buffer 2 replay(2)"),
-    ("replay(4)", "policy block buffer 2 drain 10ms replay(2)"),
-    ('replay(from: "orders")', 'replay(from: "orders")'),
-    ('replay(from: "orders")', 'policy block buffer 2 drain 10ms replay(from: "orders")'),
-])
-def test_rust_still_refuses_both_replay_forms_by_name(decl, head):
-    """cordis-rs is the one emitting tier this landing leaves on its refusal.
-    Its emitter, `backends/rust/emit.py`, is a digest input of the native gate
-    crate (`tools/build_gate_crate.py`), so lowering the last-n backlog there
-    moves the crate's digest and lands together with a crate regeneration.
-    Until then the tier refuses BOTH forms by name, at the declaration and at
-    the request, and the refusal wins over a head it shares: a lowered policy
-    must not carry the program past a backlog it then drops, and the replay
-    refusal outranks the `drain` one so an author is sent to the same half of
-    their `subscribe` every time."""
-    emit = _tier_emit("rust")
-    with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_declared(decl, head), "s.rvl"))
-    message = str(excinfo.value)
-    assert "a stream `replay(…)` is not lowered on the cordis-rs tier" in message
-    assert "`drain` window is not lowered" not in message
 
 
 def test_wasm_still_refuses_a_replay_program_as_a_stream_program():
@@ -3310,7 +3283,7 @@ component C {
 #: three durability surfaces (§4.5's last-n backlog, §4.5/§4.9's durable
 #: cursor, and §6c's required coeffect), which the exit holds to the same rule.
 #: §4.5 was one row, "replay declaration", until its two forms parted: the
-#: last-n backlog lowers on py, ts, go and java, and the durable cursor is still
+#: last-n backlog lowers on every emitting tier, and the durable cursor is still
 #: the py reference tier's alone, so one row could no longer name one answer.
 _EXIT_SURFACES = {
     "subscription bracket": _CONSUMER,
@@ -3339,15 +3312,10 @@ _EXIT_REFUSALS = {
     ("rust", "drain window"): "a `drain` window is not lowered",
     ("java", "drain window"): "a `drain` window is not lowered",
     # §4.5/§4.9: the durable cursor, whose recovery surface is the WAL's. The
-    # last-n backlog lowers on py, ts, go and java.
+    # last-n backlog lowers on every emitting tier.
     **{(tier, "durable replay cursor"):
        "a durable stream `replay(from: …)` cursor is not lowered"
-       for tier in ("typescript", "go", "java")},
-    # rust refuses both §4.5 forms under its older message until its last-n
-    # lowering lands with a gate-crate regeneration (its emitter is a digest
-    # input of crates/revl-gate).
-    ("rust", "last-n replay"): "a stream `replay(…)` is not lowered",
-    ("rust", "durable replay cursor"): "a stream `replay(…)` is not lowered",
+       for tier in ("typescript", "go", "rust", "java")},
     # §6b: a requirement resolves against a SERVICE on every non-reference tier.
     **{(tier, "required Stream[T] coeffect"):
        "a required `Stream[T]` coeffect is not lowered"

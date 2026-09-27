@@ -2701,28 +2701,47 @@ def _emit_host_stubs(ir: dict) -> list[str]:
     # `revl_stream_record`, so the stream host runtime comes with it.
     stream_event = _uses_stream_event(ir)
     if "Stream" in used or stream_event:
-        out.extend(_stream_host_rust())
+        replay = _uses_stream_replay(ir)
+        out.extend(_stream_host_rust(replay))
         # Gated so a plain `every … in` program's emitted crate stays
         # byte-identical.
         if stream_event:
             out.extend(_stream_event_host_rust())
+        # Gated the same way, and for a second reason: `selfhost/emit_rust.rvl`
+        # carries the replay-free stream runtime byte for byte, so a document
+        # that declares no backlog must emit exactly the crate it always has.
+        if replay:
+            out.extend(_STREAM_REPLAY_HOST_RUST)
     return out
 
 
-def _stream_host_rust() -> list[str]:
+def _stream_host_rust(replay: bool = False) -> list[str]:
     """The stream host runtime. In `_SECRET_MODE`, `revl_stream_record` — the ONE
     choke point every stream host trace mark passes through, and the one that
     interpolates a free-form `emit`ted item (`stream.emit {item}`) — first reads
     the mark through the registry, so a held `Secret[T]` an item quotes never
     reaches `revl_stream_marks()`. Byte-identical to before outside secret mode
-    (the golden oracle and the selfhost mirror both run with it off)."""
-    if not _SECRET_MODE:
+    (the golden oracle and the selfhost mirror both run with it off).
+
+    With `replay` (a document that declares a §4.5 last-n backlog), `emit`
+    also records each item in its provider's declared backlog before delivery
+    and serialises against a late subscriber's replay; see
+    `_STREAM_REPLAY_HOST_RUST`. Every other document gets the runtime
+    unchanged."""
+    if not _SECRET_MODE and not replay:
         return _STREAM_HOST_RUST
     out: list[str] = []
+    in_emit = False
     for line in _STREAM_HOST_RUST:
+        if replay and in_emit and line == _STREAM_EMIT_FORWARD_LINE:
+            out.extend(_STREAM_EMIT_HOLD_LINES)
+            in_emit = False
         out.append(line)
-        if line == "fn revl_stream_record(mark: String) {":
+        if _SECRET_MODE and line == "fn revl_stream_record(mark: String) {":
             out.append("    let mark = revl_redact_text(mark);")
+        if replay and line == _STREAM_EMIT_HEAD_LINE:
+            out.extend(_STREAM_EMIT_GATE_LINES)
+            in_emit = True
     return out
 
 
@@ -3732,6 +3751,157 @@ def _stream_event_host_rust() -> list[str]:
     return _STREAM_EVENT_HOST_RUST
 
 
+# item 130 §4.5: the last-n backlog on cordis-rs.
+#
+# A provider that declares `replay(<n>)` holds its newest n items whether or
+# not anyone listens, and a subscription that asks for k of them receives them
+# through the provider's own forward path before any live item, so a replayed
+# item takes the combinator chain, the declared buffer and the overflow policy
+# exactly as a live one does (the py reference's `Stream.subscribe`, statement
+# for statement). The durable `replay(from: …)` cursor is refused by name in
+# `_refuse_unlowered_stream_surface`: its worth is §4.9's crash recovery, which
+# is the py reference tier's WAL.
+#
+# The backlog lives in a side table keyed by stream id rather than on
+# `StreamInner`, and `emit` gains its two hooks only in a document that
+# declares a backlog. That keeps every other stream document's crate
+# byte-identical, which matters beyond tidiness: `selfhost/emit_rust.rvl`
+# carries the replay-free runtime byte for byte and names a replay document
+# with a marker instead.
+_STREAM_EMIT_HEAD_LINE = "    pub fn emit(&self, item: String) -> bool {"
+_STREAM_EMIT_FORWARD_LINE = "        let accepted = self.inner.forward(&item);"
+_STREAM_EMIT_GATE_LINES = [
+    "        // item 130 §4.5: a provider that DECLARED a backlog serialises an",
+    "        // emission against a late subscriber's replay, so a live item can",
+    "        // never overtake the backlog. An undeclared provider has no gate.",
+    "        let _revl_replay_gate = revl_stream_replay_gate(self.inner.id);",
+    "        let _revl_replay_held = _revl_replay_gate",
+    "            .as_ref()",
+    "            .map(|g| g.lock().unwrap_or_else(|e| e.into_inner()));",
+]
+_STREAM_EMIT_HOLD_LINES = [
+    "        // §4.5: the declared backlog is recorded BEFORE delivery and whether",
+    "        // or not anyone is listening (the py reference's `_hold`).",
+    "        revl_stream_replay_hold(self.inner.id, &item);",
+]
+_STREAM_REPLAY_HOST_RUST = r'''
+/// item 130 §4.5: one provider's declared last-n backlog. `cap` is the
+/// `replay(<n>)` the provider declared, `backlog` its newest `cap` items oldest
+/// first, and `gate` the lock `emit` and `subscribe_replay` share so a live
+/// item lands before the subscribe (inside the backlog) or after the whole
+/// backlog, never in the middle of it.
+struct RevlStreamHold {
+    cap: usize,
+    backlog: std::collections::VecDeque<String>,
+    gate: std::sync::Arc<std::sync::Mutex<()>>,
+}
+
+static REVL_STREAM_HOLDS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::HashMap<u64, RevlStreamHold>>,
+> = std::sync::OnceLock::new();
+
+fn revl_stream_holds<R>(
+    f: impl FnOnce(&mut std::collections::HashMap<u64, RevlStreamHold>) -> R,
+) -> R {
+    let cell = REVL_STREAM_HOLDS
+        .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+    let mut guard = cell.lock().unwrap_or_else(|e| e.into_inner());
+    f(&mut guard)
+}
+
+fn revl_stream_replay_gate(id: u64) -> Option<std::sync::Arc<std::sync::Mutex<()>>> {
+    revl_stream_holds(|h| h.get(&id).map(|x| x.gate.clone()))
+}
+
+fn revl_stream_replay_hold(id: u64, item: &str) {
+    revl_stream_holds(|h| {
+        if let Some(x) = h.get_mut(&id) {
+            x.backlog.push_back(item.to_string());
+            while x.backlog.len() > x.cap {
+                x.backlog.pop_front();
+            }
+        }
+    });
+}
+
+impl Stream {
+    /// Open a provider that DECLARES `replay(<n>)`: it holds its newest `n`
+    /// items for a consumer that subscribes later (design §4.5).
+    pub fn source_replay(n: usize) -> Self {
+        let s = Self::source();
+        revl_stream_holds(|h| {
+            h.insert(
+                s.inner.id,
+                RevlStreamHold {
+                    cap: n,
+                    backlog: std::collections::VecDeque::new(),
+                    gate: std::sync::Arc::new(std::sync::Mutex::new(())),
+                },
+            );
+        });
+        s
+    }
+
+    /// `subscribe <src> replay(<n>)`: the subscription `subscribe` opens,
+    /// followed by the newest `n` items the provider holds, each traced
+    /// `stream.replay <item>` and delivered through the PROVIDER's own forward
+    /// path before any live item. `src` may be a combinator chain; the backlog
+    /// lives on the provider at its root. The frontend refuses a replay on a
+    /// `merge(a, b)` fan-in, so the walk up the chain ends at one source.
+    pub fn subscribe_replay(src: &Stream, n: usize, policy: &str, capacity: usize) -> Subscription {
+        let mut root = src.inner.clone();
+        loop {
+            let up = {
+                let st = root.st.lock().unwrap();
+                if root.kind == "stage" && st.up.len() == 1 {
+                    Some(st.up[0].clone())
+                } else {
+                    None
+                }
+            };
+            match up {
+                Some(u) => root = u,
+                None => break,
+            }
+        }
+        let gate = revl_stream_replay_gate(root.id);
+        let _held = gate.as_ref().map(|g| g.lock().unwrap_or_else(|e| e.into_inner()));
+        let sub = Subscription::open(src.inner.clone(), policy, capacity);
+        let backlog: Vec<String> = revl_stream_holds(|h| {
+            h.get(&root.id)
+                .map(|x| {
+                    let skip = x.backlog.len().saturating_sub(n);
+                    x.backlog.iter().skip(skip).cloned().collect()
+                })
+                .unwrap_or_default()
+        });
+        for item in backlog {
+            revl_stream_record(format!("stream.replay {}", item));
+            root.forward(&item);
+        }
+        sub
+    }
+}
+'''.splitlines()
+
+
+def _uses_stream_replay(ir: dict) -> bool:
+    """True when a component declares or requests a §4.5 last-n backlog, the
+    only thing that needs the replay host block and `emit`'s two hooks. A
+    durable cursor never gets this far: it is refused by name."""
+    def walk(node) -> bool:
+        if isinstance(node, dict):
+            replay = node.get("replay")
+            if isinstance(replay, dict) and "count" in replay:
+                return True
+            return any(walk(v) for v in node.values())
+        if isinstance(node, list):
+            return any(walk(v) for v in node)
+        return False
+    return any(walk(comp.get("body") or [])
+               for comp in ir.get("components") or [])
+
+
 def _uses_stream_event(ir: dict) -> bool:
     """True when the document holds an `on <Event> as … in <sub>` handler — the
     only thing that needs the `EventContract` runtime. A plain `every … in`
@@ -3778,22 +3948,29 @@ def _refuse_unlowered_stream_surface(node, tier: str) -> None:
     window clock the whole PROCESS shares, which this tier does not have and
     which the thread-local design is a deliberate choice against.
 
-    §4.5's `replay(…)` is the other one, and it is refused for a reason of its
-    own rather than for the clock. Replay is a DURABILITY claim, and the half
-    that makes it worth anything is §4.9's: a durable cursor is what turns a
-    crashed subscription from residue into a re-issuable descriptor, and that
-    recovery surface is the WAL's, which lives on the py reference tier. A tier
-    that emitted a subscription while silently dropping the backlog would
-    deliver only live items and call it replay. Refused at the provider's
-    declaration as well as at the consumer's request, because a declared backlog
-    nothing holds is the same vacuous claim one end earlier."""
-    if node.get("replay"):
+    §4.5's last-n `replay(<n>)` is lowered: `Stream::source_replay` holds the
+    declared backlog and `Stream::subscribe_replay` delivers it through the
+    provider's forward path before any live item (see
+    `_STREAM_REPLAY_HOST_RUST`). The py reference makes no recovery claim for
+    that form either, so the two tiers agree in full.
+
+    The durable `replay(from: "<name>")` cursor is refused, for a reason of its
+    own rather than for the clock. What makes it worth anything is §4.9: a
+    durable cursor is what turns a crashed subscription from residue into a
+    re-issuable descriptor, and that recovery surface is the WAL's, which lives
+    on the py reference tier. A tier that resumed an in-memory position and
+    called it durable would make a claim nothing backs. Refused at the
+    provider's declaration as well as at the consumer's request, and ahead of
+    the window, so a head carrying both names the same half every time."""
+    replay = node.get("replay")
+    if replay and "cursor" in replay:
         raise EmitError(
-            f"a stream `replay(…)` is not lowered on the {tier} tier; replay is "
-            "a durability claim — the provider holds the backlog, and a durable "
-            "cursor is what makes a crashed subscription reconstructible rather "
-            "than residue — and that recovery surface is the py reference "
-            "tier's (item 130 §4.5, §4.9) — try `--backend py`")
+            f"a durable stream `replay(from: …)` cursor is not lowered on the "
+            f"{tier} tier; a durable cursor is what makes a crashed subscription "
+            "reconstructible rather than residue, and that recovery surface is "
+            "the py reference tier's WAL (item 130 §4.5, §4.9). The last-n "
+            "`replay(<n>)` form does lower here; try `--backend py` for the "
+            "cursor")
     if node.get("drain") is not None:
         raise EmitError(
             f"a `drain` window is not lowered on the {tier} tier; the `block` "
@@ -6592,11 +6769,11 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # component dialect: `Pool.open(..)` -> `Pool::open(..)`.
         fn = node.get("fn")  # e.g. "Pool.open"
         if node.get("replay"):
-            # item 130 §4.5: a provider-side `replay(…)` declaration this tier
-            # cannot honour. Refused rather than dropped — a declared backlog
-            # nothing holds is the same vacuous durability claim the consumer's
-            # request would be, one end earlier.
+            # item 130 §4.5: a provider-side `replay(…)` declaration. The
+            # durable cursor is refused by name rather than dropped; the
+            # last-n form opens a source that holds that many items.
             _refuse_unlowered_stream_surface(node, "cordis-rs")
+            return f"Stream::source_replay({int(node['replay']['count'])}usize)"
         host, _, method = fn.partition(".")
         rendered = [_render_expr(a, ctx, rename) for a in node.get("args") or []]
         return f"{host}::{_mname(method)}({', '.join(rendered)})"
@@ -6611,6 +6788,13 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         capacity = int(node.get("buffer") or 0)
         stream = _stream_chain(node.get("stream") or {},
                                node.get("stages") or [], ctx, rename)
+        replay = node.get("replay")
+        if replay:
+            # §4.5: a last-n request delivers the provider's held backlog
+            # ahead of any live item (the cursor was refused just above).
+            return (f"Stream::subscribe_replay(&{stream}, "
+                    f"{int(replay['count'])}usize, {_string(policy)}, "
+                    f"{capacity}usize)")
         return (f"Stream::subscribe(&{stream}, {_string(policy)}, "
                 f"{capacity}usize)")
 
