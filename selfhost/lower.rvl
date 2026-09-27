@@ -1704,6 +1704,125 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   return mk_srun([mkstmt("expr", r2.e)], r2.i)
 }
 
+// ------------------------------------------------- block statements, by nesting
+//
+// `if (<c>) <arm> [else <arm>]`, `while (<c>) <arm>` and `for (<x> of <e>) <arm>`,
+// where an arm is a brace block or one statement (parser.py `component_if`,
+// `_method_if`, `_method_while`, `_method_for`). The reader used to have no case
+// for any of them. A head line fell through to `expr_at`, parsed as a bad
+// expression and was skipped to its end, and what happened next depended on the
+// LAYOUT, not on the program:
+//
+//   * written over several lines, the body's lines were read as if they were the
+//     enclosing body's, until the line holding the block's `}`. `p_stmts` and
+//     `p_comp_body` both stopped at a `}` that began a line, so a guard's closing
+//     brace ended the COMPONENT (every `provide` after it went unread) and an
+//     `if`'s closing brace ended the METHOD (every statement after it went
+//     unread);
+//   * written on one line, the whole block was the skipped line, so nothing in
+//     its body, and nothing in its condition, was read at all.
+//
+// Either way the unread statements were unchecked, and the reference's G1 and
+// G4 refusals over them came back as no objection. The block is now read to its
+// MATCHING brace by nesting depth (`close_brace`), its condition is walked as an
+// expression, and its arms are read out inline the way a timer body is: to this
+// walk the statements of a branch are more statements of the body that holds it.
+//
+// Inline, but not unscoped. A name an arm binds goes out of scope where the arm
+// ends, so `if (c) { let slot = … }` followed by `let slot = …` is legal in the
+// reference, and a G6 rebind walk over a flat list would refuse it. Each arm is
+// therefore bracketed by a `scope_open` / `scope_close` pair (`scope_stmt`),
+// which carries no expression and no binding, so every walk that does not ask
+// about scope passes over it as it passes over any inert statement.
+type StmtBlk = { ss: List[Stmt], i: Int, ok: Bool }
+
+fn blk_no() -> StmtBlk { return { ss: [], i: 0, ok: false } }
+
+fn scope_stmt(kind: Str) -> Stmt { return mkstmt(kind, expr_bind_only()) }
+
+fn scoped(ss: List[Stmt]) -> List[Stmt] {
+  let open: List[Stmt] = [scope_stmt("scope_open")]
+  return append_stmts(open, ss).push(scope_stmt("scope_close"))
+}
+
+// One arm's statements, unbracketed: a brace block read to its matching brace,
+// or a single statement.
+fn p_block_arm(ts: List[Token], k: Int) -> StmtBlk {
+  if (atk(ts, k, "{")) {
+    let e = close_brace(ts, k)
+    if (e == 0 - 1) { return blk_no() }
+    return { ss: p_stmts(ts, k + 1, e - 1, []), i: e, ok: true }
+  }
+  if (k >= ts.length() || atk(ts, k, "eof") || atk(ts, k, "}")) { return blk_no() }
+  let le = line_end(ts, k, ts.length())
+  let r = p_run(ts, k, le)
+  return { ss: stamp_lines(r.ss, tkc(ts, k).line), i: r.i > k ? r.i : le,
+           ok: true }
+}
+
+// `( <cond> )` at k: the condition, walked as an expression statement, because
+// the heads in it resolve exactly as the heads in the body do.
+fn p_block_cond(ts: List[Token], k: Int) -> StmtBlk {
+  if (!atk(ts, k, "(")) { return blk_no() }
+  let c = expr_at(ts, k + 1)
+  if (is_bad(c.e) || !atk(ts, c.i, ")")) { return blk_no() }
+  return { ss: stamp_lines([mkstmt("expr", c.e)], tkc(ts, k).line), i: c.i + 1,
+           ok: true }
+}
+
+// The `else` tail of an `if` whose then-arm ended at k. A malformed tail keeps
+// what was read and stops at the `else`, which the caller then reads as it
+// always did.
+fn p_else_tail(ts: List[Token], k: Int, acc: List[Stmt]) -> StmtBlk {
+  if (!atw(ts, k, "else")) { return { ss: acc, i: k, ok: true } }
+  if (atw(ts, k + 1, "if")) {
+    let ei = p_block_stmt(ts, k + 1)
+    if (!ei.ok) { return { ss: acc, i: k, ok: true } }
+    return { ss: append_stmts(acc, ei.ss), i: ei.i, ok: true }
+  }
+  let el = p_block_arm(ts, k + 1)
+  if (!el.ok) { return { ss: acc, i: k, ok: true } }
+  return { ss: append_stmts(acc, scoped(el.ss)), i: el.i, ok: true }
+}
+
+fn p_block_stmt(ts: List[Token], lo: Int) -> StmtBlk {
+  if (atw(ts, lo, "if") || atw(ts, lo, "while")) {
+    let c = p_block_cond(ts, lo + 1)
+    if (!c.ok) { return blk_no() }
+    let body = p_block_arm(ts, c.i)
+    if (!body.ok) { return blk_no() }
+    let ss = append_stmts(c.ss, scoped(body.ss))
+    if (atw(ts, lo, "while")) { return { ss: ss, i: body.i, ok: true } }
+    return p_else_tail(ts, body.i, ss)
+  }
+  // `for (<x> of <iterable>)`: the iterable is an expression, and the element
+  // name is a declared name inside the body, bound the way `every <x> in` binds.
+  if (atw(ts, lo, "for") && atk(ts, lo + 1, "(") && atk(ts, lo + 2, "ident")
+      && atw(ts, lo + 3, "of")) {
+    let it = expr_at(ts, lo + 4)
+    if (is_bad(it.e) || !atk(ts, it.i, ")")) { return blk_no() }
+    let body2 = p_block_arm(ts, it.i + 1)
+    if (!body2.ok) { return blk_no() }
+    let ln = tkc(ts, lo).line
+    let elem: List[Stmt] = stamp_lines(
+      [mkstmtb("expr", expr_bind_only(), tkc(ts, lo + 2).text)], ln)
+    let head: List[Stmt] = stamp_lines([mkstmt("expr", it.e)], ln)
+    return { ss: append_stmts(head, scoped(append_stmts(elem, body2.ss))),
+             i: body2.i, ok: true }
+  }
+  return blk_no()
+}
+
+// One statement run, a block statement included. `hi` bounds a non-block run
+// only: a block runs to its matching brace, wherever that is.
+fn p_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
+  if (atw(ts, lo, "if") || atw(ts, lo, "while") || atw(ts, lo, "for")) {
+    let b = p_block_stmt(ts, lo)
+    if (b.ok) { return mk_srun(b.ss, b.i) }
+  }
+  return p_stmt_run(ts, lo, hi)
+}
+
 fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
   var out = a
   var i = 0
@@ -1718,13 +1837,16 @@ fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
 // SOURCE line, so a body refusal can report the line the reference's diagnostic
 // carries. `p_stmt_run` collapses `effect X undo Y` on one line into two
 // statements; both are on the same source line, so one line stamps the run.
+// A statement that already carries a line keeps it: a block's arms are read by
+// their own `p_stmts` and stamped there, with the lines they are written on.
 fn stamp_lines(ss: List[Stmt], ln: Int) -> List[Stmt] {
   var out: List[Stmt] = []
   var i = 0
   while (i < ss.length()) {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
-                     spawnTarget: s.spawnTarget, awaited: s.awaited, line: ln,
+                     spawnTarget: s.spawnTarget, awaited: s.awaited,
+                     line: s.line == 0 ? ln : s.line,
                      inTimer: s.inTimer, bindTy: s.bindTy })
     i += 1
   }
@@ -1754,10 +1876,16 @@ fn mark_timer(ss: List[Stmt]) -> List[Stmt] {
   return out
 }
 
+// A body's statements, over `[lo, hi)`. `hi` is the body's own closing brace,
+// found by nesting depth, so a `}` met before it closes some inner block the
+// reader entered without recognising (a form with no case above). It is stepped
+// over, never taken for the end of the body: stopping there left every
+// statement after the inner block unread.
 fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
-  if (lo >= hi || atk(ts, lo, "}")) { return acc }
+  if (lo >= hi) { return acc }
+  if (atk(ts, lo, "}")) { return p_stmts(ts, lo + 1, hi, acc) }
   let le = line_end(ts, lo, hi)
-  let r = p_stmt_run(ts, lo, le)
+  let r = p_run(ts, lo, le)
   let nx = r.i > lo ? r.i : le
   return p_stmts(ts, nx, hi, append_stmts(acc, stamp_lines(r.ss, tkc(ts, lo).line)))
 }
@@ -2607,8 +2735,16 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                reqh: List[Bind], cname: Str, provs: List[Provide],
                setup: List[Stmt], iso: List[ProvKey], rts: List[Route],
                icept: List[Str], hoff: Bind, action: Bool) -> ProvR {
-  if (i >= end || atk(ts, i, "}")) {
+  if (i >= end) {
     return mk_provr_h(provs, setup, iso, rts, hoff, i)
+  }
+  // `end` is the component's own closing brace, found by nesting depth, so a
+  // `}` before it closes an inner block and is stepped over (see `p_stmts`).
+  // Taking it for the component's end is what let a multi-line guard hide every
+  // `provide` written after it.
+  if (atk(ts, i, "}")) {
+    return p_comp_body(ts, i + 1, end, provh, reqh, cname, provs, setup, iso,
+                       rts, icept, hoff, action)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
@@ -2776,9 +2912,10 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
   }
   // component setup: a statement run (item 168: ended at a structural boundary,
   // not only a newline) — G4/A1/G1 gate setup too, and the statement makes this
-  // an action (later prelude decls are refused).
+  // an action (later prelude decls are refused). A guard (`if (…) { … }`) is
+  // read to its matching brace, so its arms are setup too.
   let le = line_end(ts, i, end)
-  let r = p_stmt_run(ts, i, le)
+  let r = p_run(ts, i, le)
   let nx = r.i > i ? r.i : le
   return p_comp_body(ts, nx, end, provh, reqh, cname, provs,
                      append_stmts(setup, r.ss), iso, rts, icept, hoff, true)
@@ -5948,14 +6085,29 @@ fn has_use_decl(ts: List[Token]) -> Bool {
 // to descend, this walk needs the block snapshot `fb_walk` already does for a
 // module `fn` body.
 fn mth_rebind(pm: ProvM, scope: List[Str], i: Int) -> Verd {
+  return mth_rebind_in(pm, scope, [], i)
+}
+
+// `marks` holds the scope's length at each open block arm (`scoped`): a name
+// bound inside an arm leaves scope where the arm ends, so the next binding of
+// the same name after the block is a fresh one, not a rebind.
+fn mth_rebind_in(pm: ProvM, scope: List[Str], marks: List[Int], i: Int) -> Verd {
   if (i >= pm.body.length()) { return no_verd() }
   let s = pm.body[i]
-  if (s.bind == "") { return mth_rebind(pm, scope, i + 1) }
+  if (s.kind == "scope_open") {
+    return mth_rebind_in(pm, scope, marks.push(scope.length()), i + 1)
+  }
+  if (s.kind == "scope_close" && marks.length() > 0) {
+    let m = marks[marks.length() - 1]
+    return mth_rebind_in(pm, scope.slice(0, m),
+                         marks.slice(0, marks.length() - 1), i + 1)
+  }
+  if (s.bind == "") { return mth_rebind_in(pm, scope, marks, i + 1) }
   if (contains(scope, s.bind)) {
     return mk_verd(tagged("G6", "`".concat(s.bind)
       .concat("` is already bound in `").concat(pm.name).concat("`")), s.line)
   }
-  return mth_rebind(pm, scope.push(s.bind), i + 1)
+  return mth_rebind_in(pm, scope.push(s.bind), marks, i + 1)
 }
 
 // G4 + A1 over one component. `no_verd()` = admitted, else a tagged refusal
