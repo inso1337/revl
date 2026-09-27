@@ -308,11 +308,12 @@ supply the generation to resume.
 
 ```
 verdict: ROLLED-FORWARD
+world: MODEL. Recovery ran against an in-memory model; every call below was modelled, not performed. ...
   committed effects (all balanced): 6
   components: PgDatabase, UserCache
-residue proof [CLEAN]:
-  a completed activation left the accumulator balanced; there is nothing
-  half-done to roll back.
+residue proof [CLEAN] in the model:
+  world: model. ... a completed activation left the accumulator balanced;
+  there is nothing half-done to roll back.
 ```
 
 This `[CLEAN]` verdict holds when the log also carries `run-complete` (an
@@ -330,15 +331,16 @@ outlives it) is **still out in the world**; an in-process crossing is **moot**.
 
 ```
 verdict: ROLLED-FORWARD
+world: MODEL. ...
   committed effects (all balanced): 4
   components: UserCache
   RESIDUE  db.execute             steady-state crossing — still out …
-residue proof [RESIDUE]:
+residue proof [RESIDUE] in the model:
   RESIDUE: 1 boundary crossing(s) committed AFTER activation-complete with no
   `run-complete` shutdown marker — the run was `kill -9`'d in steady state …
 ```
 
-`revl recover` exits `1` here, as for any honest residue. Recovery does not
+`revl recover` exits `1` here, as for any honest residue (section 5b). Recovery does not
 auto-reverse a steady-state crossing (it was committed, intended work, not a
 half-run activation); it reports it so an operator reconciles it or resumes the
 generation.
@@ -360,11 +362,13 @@ three lanes:
 
 ```
 verdict: ROLLED-BACK
-  ran      create scratch         fs.unlink('/var/db/PeerWall/gen7.scratch')
+world: MODEL. Recovery ran against an in-memory model; every call below was modelled, not performed. The outside world was not touched.
+  ran      create scratch         fs.unlink('/var/db/PeerWall/gen7.scratch') [modelled, not performed]
   moot     provide cache          in-process (memory gone)
   RESIDUE  db.execute             closure-only — still out: db:execute:(…)
-residue proof [RESIDUE]:
-  RESIDUE: 1 boundary inverse(s) were closure-only and could not be
+residue proof [RESIDUE] in the model:
+  world: model. Every inverse, compensation, re-issue and reclaim counted here
+  was modelled, not performed: ... RESIDUE: 1 boundary inverse(s) were closure-only and could not be
   reconstructed, so 1 durable referent(s) are still out in the world (…).
   Reported honestly — the WAL never claimed a dead closure ran. Declare a
   reconstructible inverse (an `extern acquire … undo …` / an emission
@@ -375,8 +379,53 @@ The verdict is **checked**, not asserted: recovery seeds a `World` (a `DictWorld
 by default; a real host supplies an adapter over the actual filesystem/database)
 with every durable referent the WAL says was created, runs the reconstructible
 inverses against it, and the **residue proof** is the set of referents still
-present afterward. Clean iff that set is empty. `revl recover` exits `0` on a
-clean recovery, `1` when honest residue remains.
+present afterward. Clean iff that set is empty. The `World` is the catch:
+`revl recover` has no way to bind a real one yet, so today every CLI run is a
+model run, and the proof is a proof about the model. Section 5b says what that
+means for the output and the exit status.
+
+### 5b. The model is not the world (issue #1477)
+
+Every inverse, compensation, re-issue and shared reclaim recover performs goes
+through a `World` adapter. The adapter declares what it is with `kind`:
+`"model"` for an in-memory stand-in, `"real"` for an adapter over the actual
+outside world. The default is `"model"`, and `DictWorld` is one.
+
+`revl recover` has no way to supply a real adapter yet, so the CLI always runs
+against `DictWorld`. Nothing it reports as ran, rolled back, re-attempted,
+re-issued or reclaimed happened to a file, a row or a remote service. The
+output says so:
+
+- the verdict JSON carries `"world": "model"` (or `"real"` for an adapter that
+  declares it), on every verdict, including roll-forward and fork-retired;
+- the rendered verdict's second line is `world: MODEL. ...`, and every line
+  that reports a call against the world ends in `[modelled, not performed]`;
+- the residue proof starts with `world: model.` and its header reads
+  `residue proof [CLEAN] in the model:` (or `[RESIDUE] in the model:`).
+
+Exit status:
+
+| exit | meaning |
+|---|---|
+| `0` | clean, and either the world was real or `--model-only` accepted the model |
+| `1` | honest residue remains (in the model it is still residue: the model could not clear it either) |
+| `3` | clean in the model, but the run was against the model and `--model-only` was not given. Nothing out there was reconciled |
+
+A model run without `--model-only` also prints `revl recover: not reconciled`
+on stderr. Pass `--model-only` when a model run is what you want, for example
+to read what recovery would do before doing it: the output is the same, still
+marked as modelled, and the exit status then follows the modelled residue.
+
+What a model run still does to the WAL: the at-most-once fences
+(`replay-fence`, `reissue-fence`, `shared-reclaim-fence`) are written before
+each fenced attempt whatever the world is, so a model run spends them. A later
+run then reports those inverses as `fenced-before-attempt`, even though nothing
+ever reached the outside world. The roll-forward window's `discharge` record
+does not depend on the world and is written as before.
+
+A real world path, where `revl recover` binds the composition's own externs and
+host bodies and replays the WAL's discharge descriptors against them, is the
+rest of issue #1477.
 
 ### Recovering a session that was forked (item 250)
 
