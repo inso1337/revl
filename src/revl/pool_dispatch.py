@@ -813,7 +813,8 @@ class PeerRunner:
         if pool_health.is_probe(record):
             return pool_health.answer_probe(
                 record, charter_record=self.charter_record,
-                identity=self.identity, operator_public=self.operator_public)
+                identity=self.identity, operator_public=self.operator_public,
+                network_exposed=self.network_exposed)
         shape = _task_shape(record)
         if shape:
             return _refusal(LINK_TASK_SHAPE, f"not a task: {shape}")

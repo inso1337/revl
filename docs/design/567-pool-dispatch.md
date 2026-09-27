@@ -158,6 +158,8 @@ peer signs a receipt for every task it is sent and the operator signs every task
 and attestation, and the pure-Python signer's timing depends on the secret
 nonce. A non-loopback `serve` refuses before it binds and a dispatch to a
 non-loopback peer refuses before the ledger is touched, each naming the extra.
+The liveness probe (`revl pool probe`) and the heartbeat that answers it share
+this channel and follow the same rule.
 
 **What the tests do not reach, stated rather than implied.** The two ends in
 every test are two OS processes on one machine over loopback, not two machines.
