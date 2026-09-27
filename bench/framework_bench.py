@@ -398,6 +398,171 @@ def column_residue(run: str) -> dict:
     }
 
 
+# The three hosts of one run, by the variant `bench/run.py` writes for each.
+THREE_HOST_VARIANTS = (("revl", "v2"), ("raw-ts", "raw-ts"), ("framework", "mcp"))
+
+# What the committed report is missing when no three-host corpus is named.
+# Everything in it is a fact about this repository or about a measurement
+# already committed (the per-call time is design note 562's, section 6.4).
+THREE_HOST_NEEDS = (
+    "no corpus from one model across all three hosts is committed. It is one "
+    "command, `python3 bench/run.py --runner local --base-url "
+    "http://127.0.0.1:11434/v1 --model <the pinned tag> --variants "
+    "v2,raw-ts,mcp --timeout 3600 --label <label>`, then "
+    "`python3 bench/framework_bench.py --three-host-from <label> --write`. It "
+    "needs the pinned weights on a local endpoint that nothing else is using, "
+    "`npm ci` in backends/typescript and in bench/mcp_host, and time: up to "
+    "five generations per spec (three revl attempts, one per probed host) at "
+    "roughly nine minutes each for this model on a contended machine, so a "
+    "five-spec pilot is hours and all thirty specs is most of a day")
+
+
+def _run_rows(run_dir: Path) -> list[dict]:
+    path = run_dir / "results.jsonl"
+    if not path.is_file():
+        return []
+    rows = []
+    for line in path.read_text().splitlines():
+        if line.strip():
+            try:
+                rows.append(json.loads(line))
+            except json.JSONDecodeError:
+                continue
+    return rows
+
+
+def _revl_outcomes(run_dir: Path, specs: list[str], compiler_root: Path) -> dict:
+    """First-pass and within-iterations admission, re-scored now.
+
+    Re-scored against the current checker rather than read off the run's
+    records, for the reason the admits column gives: the report freezes the
+    checker it states, and a verdict recorded under an older checker is a fact
+    about that checker.
+    """
+    import rescore  # noqa: PLC0415
+
+    compile_source, RevlError, classify = rescore.load_compiler(compiler_root)
+    out = {}
+    for spec in specs:
+        cell_dir = run_dir / spec / "v2"
+        attempts = sorted(cell_dir.glob("attempt-*.rvl"),
+                          key=lambda p: int(p.stem.split("-")[1]))
+        rescore.assert_model_free([(spec, "v2", p) for p in attempts],
+                                  compile_source, RevlError, classify)
+        verdicts = [rescore.score_one(p, compile_source, RevlError, classify)["ok"]
+                    for p in attempts]
+        out[spec] = {
+            "attempts": len(verdicts),
+            "first_pass": bool(verdicts and verdicts[0]),
+            "admitted": any(verdicts),
+        }
+    return out
+
+
+def column_three_host(run: str | Path | None, pin: dict,
+                      compiler_root: Path) -> dict:
+    """One model, one task set, three hosts, from ONE run's records.
+
+    This is the comparison issue #1267 names. Every other column in this report
+    is assembled from a different corpus; this one is the only place the three
+    hosts answer the same briefs from the same model, so it is computed from a
+    single run directory and refuses to mix. The task set is the intersection
+    of the specs each host produced, and a spec one host is missing is named.
+
+    revl is scored on admission, the other two on residue, and the cell keeps
+    them in separate fields rather than one rate: they are different questions.
+    The cross-host count that matters most is the refused one: briefs revl did
+    not admit within its attempts that another host loaded and ran.
+    """
+    if run is None:
+        return {"status": NOT_RUN, "blocked_on": THREE_HOST_NEEDS}
+    run_dir = Path(run) if isinstance(run, Path) else BENCH / "results" / run
+    rows = _run_rows(run_dir)
+    if not rows:
+        return {"status": NOT_RUN,
+                "blocked_on": f"no records at {_rel(run_dir / 'results.jsonl')}"}
+
+    finals = {}
+    models: dict[str, list[str]] = {}
+    unanswered: dict[str, list[str]] = {}
+    for row in rows:
+        variant, spec = row.get("variant"), row.get("spec")
+        model = row.get("model")
+        if isinstance(model, str) and model:
+            seen = models.setdefault(variant, [])
+            if model not in seen:
+                seen.append(model)
+        if row.get("answer_from_reasoning"):
+            unanswered.setdefault(variant, []).append(spec)
+        if row.get("summary"):
+            finals[(variant, spec)] = row
+
+    specs_by_host = {host: sorted(s for (v, s) in finals if v == variant)
+                     for host, variant in THREE_HOST_VARIANTS}
+    missing_host = [host for host, specs in specs_by_host.items() if not specs]
+    if missing_host:
+        return {"status": NOT_RUN,
+                "blocked_on": (f"{_rel(run_dir)} holds no cells for "
+                               f"{', '.join(missing_host)}; a three-host row "
+                               f"needs all three from one run")}
+    common = sorted(set.intersection(*(set(s) for s in specs_by_host.values())))
+    # A brief whose answer came from the reasoning channel on any host was not
+    # answered on that host, so it leaves the common set rather than being
+    # scored off a draft on one side of the comparison.
+    dropped = sorted({s for specs in unanswered.values() for s in specs})
+    common = [s for s in common if s not in dropped]
+
+    revl = _revl_outcomes(run_dir, common, compiler_root)
+    probed = {}
+    for host, variant in THREE_HOST_VARIANTS[1:]:
+        cells = {s: finals[(variant, s)] for s in common}
+        probed[host] = {
+            "n": len(cells),
+            "clean": sorted(s for s, r in cells.items() if r.get("status") == "clean"),
+            "leaked": {s: r.get("leaked_categories") or []
+                       for s, r in sorted(cells.items()) if r.get("status") == "leaked"},
+            "could_not_load": sorted(s for s, r in cells.items()
+                                     if r.get("status") == "error"),
+        }
+    refused = sorted(s for s, v in revl.items() if not v["admitted"])
+    loaded_elsewhere = sorted(
+        s for s in refused
+        if any(s not in probed[h]["could_not_load"] for h in probed))
+
+    all_models = sorted({m for host, variant in THREE_HOST_VARIANTS
+                         for m in models.get(variant, [])})
+    pinned = ((pin.get("model") or {}).get("resolved")
+              if pin.get("present") else None)
+    return {
+        "status": "measured",
+        "corpus": _rel(run_dir),
+        "n": len(common),
+        "specs": common,
+        "specs_by_host": specs_by_host,
+        "dropped_no_answer_within_cap": dropped,
+        "models": all_models,
+        "same_model_on_every_host": len(all_models) == 1,
+        "is_pinned_model": bool(pinned) and all_models == [pinned],
+        "revl": {
+            "n": len(common),
+            "first_pass_admitted": sum(1 for v in revl.values() if v["first_pass"]),
+            "admitted_within_attempts": sum(1 for v in revl.values() if v["admitted"]),
+            "refused": refused,
+            "per_spec": revl,
+        },
+        "raw-ts": probed["raw-ts"],
+        "framework": probed["framework"],
+        "refused_by_revl_loaded_by_another_host": loaded_elsewhere,
+        "note": ("revl is scored on admission and the other two hosts on residue "
+                 "after load-unload cycles. The fields are kept apart because "
+                 "they answer different questions; a reader comparing a revl "
+                 "admission count to a residue count is comparing the "
+                 "questions."),
+        "reprobe": (f"python3 bench/score_raw_ts.py --run {run_dir.name}; "
+                    f"python3 bench/score_mcp.py --run {run_dir.name}"),
+    }
+
+
 def column_admission_latency(measure: bool, iters: int) -> dict:
     if not measure:
         return {"status": NOT_RUN,
@@ -700,6 +865,7 @@ def build_report(args) -> dict:
     latency = column_admission_latency(args.measure_latency, args.latency_iters)
     tokens_col = column_tokens_to_green(args.tokens_from, compiler_root, pin)
     injection = column_injection_escape(args.injection_from)
+    three = column_three_host(args.three_host_from, pin, compiler_root)
     survey = load_unload_survey()
     unload = column_unload_paths(survey)
 
@@ -784,6 +950,24 @@ def build_report(args) -> dict:
             "public": True,
             "evidence": dict(evidence, run=tokens_col["corpus"]),
         })
+    if three.get("status") == "measured":
+        origin = (f"generated by the pinned model {three['models'][0]}"
+                  if three["is_pinned_model"] else
+                  f"generated by {', '.join(three['models']) or 'an unrecorded model'}"
+                  f", NOT the pinned model")
+        rv, rt, fw = three["revl"], three["raw-ts"], three["framework"]
+        claims.append({
+            "text": (f"one model, three hosts, over the same {three['n']} briefs "
+                     f"({origin}): revl admitted {rv['admitted_within_attempts']} "
+                     f"and refused {len(rv['refused'])}; raw Cordis TypeScript "
+                     f"left residue in {len(rt['leaked'])} and could not load "
+                     f"{len(rt['could_not_load'])}; the MCP host left residue in "
+                     f"{len(fw['leaked'])} and could not load "
+                     f"{len(fw['could_not_load'])} (n={three['n']} per host)"),
+            "rung": "measured",
+            "public": True,
+            "evidence": dict(evidence, run=three["corpus"]),
+        })
     if injection.get("status") == "measured":
         for host, block in (injection.get("summary") or {}).items():
             claims.append({
@@ -836,6 +1020,7 @@ def build_report(args) -> dict:
             "injection-escape": injection,
             "tokens-to-green": tokens_col,
             "admission-latency": latency,
+            "three-host": three,
         },
         "briefs": briefs,
         "claims": claims,
@@ -858,6 +1043,9 @@ def remaining_gates(hosts: dict, report_columns: dict, pin: dict) -> list[dict]:
             "why": framework.get("blocked_on"),
         })
     for name, cell in report_columns.items():
+        # The three-host row has a gate of its own below, which says more.
+        if name == "three-host":
+            continue
         if cell.get("status") == NOT_RUN:
             gates.append({"gate": f"column: {name}",
                           "what": "not measured in this report",
@@ -866,14 +1054,23 @@ def remaining_gates(hosts: dict, report_columns: dict, pin: dict) -> list[dict]:
                           if cell.get("is_pinned_model")
                           or (cell.get("status") == "measured"
                               and name == "injection-escape"))
-    if pinned_cells:
+    three = report_columns.get("three-host") or {}
+    total_specs = (hosts.get("tasks") or {}).get("n")
+    if three.get("status") == "measured" and three.get("is_pinned_model"):
+        if total_specs and three["n"] < total_specs:
+            gates.append({
+                "gate": "a pinned-model run across all three hosts",
+                "what": (f"run over {three['n']} of {total_specs} briefs"),
+                "why": ("the rest of the task set has not been generated; "
+                        "every three-host number carries n=" + str(three["n"])),
+            })
+    elif pinned_cells:
         gates.append({
             "gate": "a pinned-model run across all three hosts",
             "what": (f"the pinned model produced {', '.join(pinned_cells)}; every "
                      "other cell is a re-score of a corpus another model "
                      "generated, or not run"),
-            "why": ("the raw-ts and framework hosts have not been generated with "
-                    "the pinned model"),
+            "why": THREE_HOST_NEEDS,
         })
     else:
         gates.append({
@@ -881,7 +1078,7 @@ def remaining_gates(hosts: dict, report_columns: dict, pin: dict) -> list[dict]:
             "what": ("no cell in this report was produced by the pinned model; the "
                      "admission and token cells are re-scores of corpora generated "
                      "by other models"),
-            "why": "the three-host generation run has not been executed",
+            "why": THREE_HOST_NEEDS,
         })
     gates.append({
         "gate": "independent reproduction",
@@ -1052,9 +1249,56 @@ def _third_host_section(framework: dict | None, survey: dict) -> list:
         ]
     else:
         lines += [f"No unload survey is committed: {survey.get('reason', '')}.", ""]
-    blocked = framework.get("blocked_on")
+    harness = framework.get("harness")
+    if harness:
+        lines += ["### The harness", ""] + list(harness.get("what") or []) + [""]
+        convention = harness.get("unload_convention")
+        if convention:
+            lines += ["**The unload convention is this benchmark's, not the "
+                      "SDK's.**", ""] + list(convention) + [""]
+    blocked = framework.get("blocked_on") or framework.get("not_yet_run")
     if blocked:
         lines += ["### Why its cells are still empty", ""] + list(blocked) + [""]
+    return lines
+
+
+def _three_host_section(cell: dict) -> list:
+    """The one row where the three hosts answered the same briefs from the
+    same model, or the exact command that would produce it."""
+    lines = ["## One model, three hosts, one run", ""]
+    if cell.get("status") != "measured":
+        lines += ["**not run.** " + str(cell.get("blocked_on", "")), ""]
+        return lines
+    origin = ("the pinned model" if cell["is_pinned_model"]
+              else "NOT the pinned model")
+    lines += [f"Corpus `{cell['corpus']}`, {cell['n']} briefs answered by every "
+              f"host, model(s) `{', '.join(cell['models'])}` ({origin}).", ""]
+    rv, rt, fw = cell["revl"], cell["raw-ts"], cell["framework"]
+    lines += [
+        "| host | scored on | n | refused | admitted / clean | residue | "
+        "could not load |",
+        "|---|---|---|---|---|---|---|",
+        f"| revl | admission | {rv['n']} | **{len(rv['refused'])}** | "
+        f"{rv['admitted_within_attempts']} (first pass "
+        f"{rv['first_pass_admitted']}) | not applicable | not applicable |",
+        f"| raw Cordis / TypeScript | residue | {rt['n']} | not applicable | "
+        f"{len(rt['clean'])} | {len(rt['leaked'])} | {len(rt['could_not_load'])} |",
+        f"| @modelcontextprotocol/sdk | residue | {fw['n']} | not applicable | "
+        f"{len(fw['clean'])} | {len(fw['leaked'])} | {len(fw['could_not_load'])} |",
+        "",
+        cell["note"], "",
+    ]
+    if cell["refused_by_revl_loaded_by_another_host"]:
+        lines += ["Refused by revl and loaded by another host, which is the cost "
+                  "of the guarantee in this run:", ""]
+        lines += [f"- `{s}`" for s in cell["refused_by_revl_loaded_by_another_host"]]
+        lines += [""]
+    if cell["dropped_no_answer_within_cap"]:
+        lines += ["Dropped from every host because one host's answer came from "
+                  "the reasoning channel: "
+                  + ", ".join(f"`{s}`" for s in cell["dropped_no_answer_within_cap"])
+                  + ".", ""]
+    lines += [f"Re-probe without the model: `{cell['reprobe']}`.", ""]
     return lines
 
 
@@ -1345,6 +1589,7 @@ def render(report: dict) -> str:
                   f"`{inj['nearest_existing']}` is still not the source of this "
                   "cell. " + inj["note"] + ".", ""]
 
+    lines += _three_host_section(cols.get("three-host") or {})
     lines += _third_host_section(framework, report.get("unload_survey") or {})
 
     lines += ["## Claims and their rung", "",
@@ -1382,6 +1627,10 @@ def build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--injection-from", default="injection-ornith",
                     help="committed bench/injection_escape.py run label "
                          "for the injection-escape column ('none' to skip)")
+    ap.add_argument("--three-host-from", default=None,
+                    help="a bench/run.py run label holding v2, raw-ts and mcp "
+                         "cells from one model: the three-host row "
+                         "('none' or omitted to leave it not-run)")
     ap.add_argument("--attempt", type=int, default=1)
     ap.add_argument("--compiler-root", default=None,
                     help="score against a different checkout's compiler")
@@ -1405,6 +1654,8 @@ def main(argv: list[str] | None = None) -> int:
         args.admits_from = None
     if args.injection_from == "none":
         args.injection_from = None
+    if args.three_host_from == "none":
+        args.three_host_from = None
 
     report = build_report(args)
 

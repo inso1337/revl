@@ -219,6 +219,7 @@ class _Args:
     residue_from = "hand-corpus"
     tokens_from = None
     injection_from = None
+    three_host_from = None
     attempt = 1
     compiler_root = None
     pin = None
@@ -1072,3 +1073,202 @@ def test_no_bench_module_reaches_its_runner_through_a_bare_import():
             if stripped.startswith(("import run", "from run import")):
                 offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, offenders
+
+
+# ---------------------------------------------------------------------------
+# The third host's harness, and the one-model three-host row
+# ---------------------------------------------------------------------------
+
+score_mcp = _load_by_path("framework_test_score_mcp", BENCH / "score_mcp.py")
+
+_MCP_HOST = BENCH / "mcp_host"
+
+
+def _mcp_host_installed() -> bool:
+    return not score_mcp.prerequisites()
+
+
+def test_the_framework_host_is_runnable_and_carries_its_harness(hosts):
+    fw = next(h for h in hosts["hosts"] if h["id"] == "framework")
+    assert fw["runnable"] is True
+    assert (ROOT / fw["prompt"]).is_file()
+    harness = fw["harness"]
+    for key in ("probe", "scorer", "pinned_by"):
+        assert (ROOT / harness[key]).is_file(), harness[key]
+    # The convention that is ours and not the SDK's is stated in the registry,
+    # where a reader swapping the host looks.
+    assert "not the SDK" in " ".join(harness["what"] + harness["unload_convention"]) \
+        or "convention" in " ".join(harness["unload_convention"])
+    assert fw["prompt_authored_by"] == "this repository"
+
+
+def test_the_sdk_version_the_registry_names_is_the_one_the_lock_pins(hosts):
+    fw = next(h for h in hosts["hosts"] if h["id"] == "framework")
+    manifest = json.loads((_MCP_HOST / "package.json").read_text())
+    lock = json.loads((_MCP_HOST / "package-lock.json").read_text())
+    assert manifest["dependencies"][fw["name"]] == fw["version"], (
+        "an exact version, not a range: a range is not a pin")
+    locked = lock["packages"][f"node_modules/{fw['name']}"]
+    assert locked["version"] == fw["version"]
+    assert locked["integrity"].startswith("sha512-")
+
+
+def test_the_prompt_states_the_unload_the_probe_performs():
+    """The model is told the unload protocol, and it is the one the probe runs.
+    A prompt that described a different unload would measure the prompt."""
+    prompt = (BENCH / "prompts" / "mcp.md").read_text()
+    probe = (_MCP_HOST / "probe.mjs").read_text()
+    assert "remove()" in prompt and "returned a function" in prompt
+    assert "handle.remove()" in probe
+    assert "typeof teardown === 'function'" in probe
+    for method in ("registerTool", "registerResource", "registerPrompt"):
+        assert method in prompt and f"'{method}'" in probe
+
+
+def test_a_probe_report_is_scored_on_its_categories_only():
+    clean = json.dumps({"leakedCategories": [], "leaks": {}, "registered": 2,
+                        "returnedTeardown": True})
+    rec = score_mcp.parse_report(clean, "", 0, 5)
+    assert rec["status"] == "clean" and rec["registered"] == 2
+    leaky = json.dumps({"leakedCategories": ["timers", "resources"],
+                        "leaks": {"resources": {"baseline": [], "final": ["m"]}},
+                        "registered": 1})
+    rec = score_mcp.parse_report(leaky, "", 1, 5)
+    assert rec["status"] == "leaked"
+    # Reported in the fixed category order, not the order the probe printed.
+    assert rec["leaked_categories"] == ["resources", "timers"]
+
+
+def test_a_pack_the_probe_could_not_run_is_an_error_and_never_clean():
+    rec = score_mcp.parse_report("", "mcp-probe: module x has no exported "
+                                 "function \"install\"\n", 2, 5)
+    assert rec["status"] == "error" and rec["leaked"] is True
+    assert "install" in rec["error"]
+
+
+@pytest.mark.skipif(not _mcp_host_installed(),
+                    reason="bench/mcp_host or backends/typescript not npm-installed")
+def test_the_mock_packs_run_through_the_real_sdk_and_probe():
+    """The run.py mock for the mcp host: the clean pack is clean and the leaky
+    one leaks its Map, through the pinned SDK and the probe, end to end."""
+    clean = score_mcp.probe_source(
+        bench_run._mock_mcp({"id": "01-x"}), cycles=2, name="test-mock-clean")
+    leaky = score_mcp.probe_source(
+        bench_run._mock_mcp({"id": "03-x"}), cycles=2, name="test-mock-leaky")
+    assert clean["status"] == "clean", clean
+    assert leaky["status"] == "leaked" and leaky["leaked_categories"] == ["resources"]
+
+
+def _three_host_run(tmp_path: Path, *, model: str, revl: dict, probed: dict,
+                    reasoning: tuple = ()) -> Path:
+    """A synthetic bench/run.py directory: v2 attempt files plus records."""
+    run_dir = tmp_path / "three"
+    rows = []
+    good = "service S {\n  fn a(x: Int) -> Int\n}\n"
+    bad = "component {\n"
+    for spec, attempts in revl.items():
+        d = run_dir / spec / "v2"
+        d.mkdir(parents=True)
+        for i, ok in enumerate(attempts, 1):
+            (d / f"attempt-{i}.rvl").write_text(good if ok else bad)
+            rows.append({"spec": spec, "variant": "v2", "model": model,
+                         "attempt": i, "ok": ok,
+                         "answer_from_reasoning": (spec, "v2") in reasoning})
+        rows.append({"spec": spec, "variant": "v2", "model": model,
+                     "summary": True})
+    for (spec, variant), status in probed.items():
+        rows.append({"spec": spec, "variant": variant, "model": model,
+                     "summary": True, "status": status,
+                     "leaked": status != "clean",
+                     "leaked_categories": ["resources"] if status == "leaked" else [],
+                     "answer_from_reasoning": (spec, variant) in reasoning})
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "results.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows))
+    return run_dir
+
+
+_PIN = {"present": True, "model": {"resolved": "pinned:tag"}}
+
+
+@pytest.fixture
+def synthetic_results(tmp_path, monkeypatch):
+    """Point the no-self-score guard at the synthetic corpus. The guard refuses
+    to grade anything outside the committed results directory, which is right
+    for a real run and is the one thing a synthetic run has to move."""
+    import rescore  # noqa: PLC0415
+
+    monkeypatch.setattr(rescore, "RESULTS", tmp_path)
+    return tmp_path
+
+
+def test_the_three_host_row_is_computed_from_one_run(synthetic_results):
+    tmp_path = synthetic_results
+    run_dir = _three_host_run(
+        tmp_path, model="pinned:tag",
+        revl={"01": [True], "02": [False, False, False], "03": [False, True]},
+        probed={("01", "raw-ts"): "clean", ("02", "raw-ts"): "leaked",
+                ("03", "raw-ts"): "error",
+                ("01", "mcp"): "clean", ("02", "mcp"): "clean",
+                ("03", "mcp"): "leaked"})
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["status"] == "measured" and cell["n"] == 3
+    assert cell["is_pinned_model"] is True and cell["same_model_on_every_host"]
+    assert cell["revl"]["first_pass_admitted"] == 1
+    assert cell["revl"]["admitted_within_attempts"] == 2
+    assert cell["revl"]["refused"] == ["02"]
+    assert cell["raw-ts"]["could_not_load"] == ["03"]
+    assert list(cell["raw-ts"]["leaked"]) == ["02"]
+    assert list(cell["framework"]["leaked"]) == ["03"]
+    # The cost of the guarantee, in this run: refused by revl, and loaded by at
+    # least one other host.
+    assert cell["refused_by_revl_loaded_by_another_host"] == ["02"]
+
+
+def test_a_different_model_is_named_as_not_the_pin(synthetic_results):
+    tmp_path = synthetic_results
+    run_dir = _three_host_run(
+        tmp_path, model="some:other",
+        revl={"01": [True]},
+        probed={("01", "raw-ts"): "clean", ("01", "mcp"): "clean"})
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["is_pinned_model"] is False
+    assert "NOT the pinned model" in "\n".join(
+        framework_bench._three_host_section(cell))
+
+
+def test_a_run_missing_a_host_is_not_a_three_host_row(synthetic_results):
+    tmp_path = synthetic_results
+    run_dir = _three_host_run(
+        tmp_path, model="pinned:tag", revl={"01": [True]},
+        probed={("01", "raw-ts"): "clean"})
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["status"] == framework_bench.NOT_RUN
+    assert "framework" in cell["blocked_on"]
+
+
+def test_a_brief_answered_from_reasoning_leaves_every_host(synthetic_results):
+    tmp_path = synthetic_results
+    """Scoring a draft on one side of a comparison is how a comparison comes
+    out flattering by accident, so the brief leaves all three."""
+    run_dir = _three_host_run(
+        tmp_path, model="pinned:tag",
+        revl={"01": [True], "02": [True]},
+        probed={("01", "raw-ts"): "clean", ("02", "raw-ts"): "clean",
+                ("01", "mcp"): "clean", ("02", "mcp"): "leaked"},
+        reasoning=(("02", "mcp"),))
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["specs"] == ["01"]
+    assert cell["dropped_no_answer_within_cap"] == ["02"]
+
+
+def test_without_a_run_the_row_says_exactly_what_it_needs(report):
+    cell = report["columns"]["three-host"]
+    assert cell["status"] == framework_bench.NOT_RUN
+    needs = cell["blocked_on"]
+    assert "--variants v2,raw-ts,mcp" in needs
+    assert "--three-host-from" in needs
+    assert "npm ci" in needs
+    gate = next(g for g in report["remaining_gates"]
+                if g["gate"] == "a pinned-model run across all three hosts")
+    assert gate["why"] == framework_bench.THREE_HOST_NEEDS
