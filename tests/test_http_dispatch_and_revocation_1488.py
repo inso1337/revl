@@ -20,6 +20,7 @@ import json
 import os
 import sys
 import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -172,14 +173,100 @@ def from_file(tmp_path, monkeypatch):
     transport.stop()
 
 
+SETTLE_S = 0.3   # a little more than live_profile.ProfileSource.SETTLE_NS
+
+
+def _settle(port, who="alice"):
+    """The first request after an edit sees the new content once and is refused
+    ("changing"); one SETTLE later the second identical read adopts it."""
+    status, body = _list(port, who)
+    assert status == 503 and "changing" in body["error"]["message"], (status, body)
+    time.sleep(SETTLE_S)
+
+
 def test_a_revocation_takes_effect_on_the_next_request(from_file):
     path, port = from_file
     assert _list(port, "bob")[0] == 200
     path.write_text(_profile({"bob": "operator bob revoked"}), encoding="utf-8")
+    # bob is NOT served under the old profile while the edit settles
+    _settle(port, "bob")
     status, body = _list(port, "bob")
     assert status == 401
     assert "REVOKED" in body["error"]["message"]
     assert _list(port, "alice")[0] == 200, "only bob was revoked"
+
+
+def test_a_profile_truncated_before_a_deny_is_never_served(from_file, monkeypatch):
+    """The realistic race: the profile is written in two steps, and the first
+    step stops just before a `may not` line. Served as it stands, it would widen
+    alice's grant. No request is ever served under it, nor under the old
+    profile once the edit has begun, and the completed profile is adopted."""
+    from revl.mcp.live_profile import ProfileSource
+
+    path, port = from_file
+    # the rule under test is unchanged; the window is widened from 250 ms so a
+    # loaded machine cannot stretch the 100 ms gap between the writes past it
+    monkeypatch.setattr(ProfileSource, "SETTLE_NS", 1_000_000_000)
+    # the edit adds a grant and, after it, the deny that bounds it
+    deny = "operator alice may not lease on *\n"
+    complete = _profile({}) + "operator alice may snapshot on *\n" + deny
+    truncated = complete[:complete.index(deny)]
+    assert truncated != _profile({}), "the truncated write is a real change"
+    assert _lease(port, "alice", "SecretBefore")["ok"] is True, "the old grant"
+
+    path.write_text(truncated, encoding="utf-8")
+    outcomes = []
+    stop = threading.Event()
+
+    def hammer():
+        i = 0
+        while not stop.is_set():
+            i += 1
+            outcomes.append(_lease_status(port, "alice", f"Secret{i}"))
+
+    attacker = threading.Thread(target=hammer)
+    attacker.start()
+    first_write = time.monotonic()
+    time.sleep(0.1)
+    path.write_text(complete, encoding="utf-8")
+    gap = time.monotonic() - first_write
+    assert gap < 1.0, f"the second write came {gap:.2f}s later: not the race under test"
+    time.sleep(1.5)
+    stop.set()
+    attacker.join(timeout=30)
+
+    served = [o for o in outcomes if o[0] == 200 and o[1].get("ok") is True]
+    assert served == [], f"a Secret lease was granted mid-edit: {served[:3]}"
+    assert any(o[0] == 503 for o in outcomes), "the edit window refused requests"
+    refused = _lease(port, "alice", "SecretAfter")
+    assert refused["ok"] is False and refused["authority"]["allowed"] is False
+    assert _lease(port, "bob", "Other")["ok"] is True, "the completed profile is in force"
+
+
+def _lease_status(port, who, component):
+    body = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "revl_lease",
+                       "arguments": {"action": "claim", "component": component},
+                       "_meta": {
+                           "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
+                           "io.modelcontextprotocol/clientCapabilities": {}}}}
+    conn = http.client.HTTPConnection("127.0.0.1", port, timeout=30)
+    conn.request("POST", "/mcp", body=json.dumps(body).encode(), headers={
+        "Content-Type": "application/json", "MCP-Protocol-Version": PROTOCOL_VERSION,
+        "Mcp-Method": "tools/call", "Mcp-Name": "revl_lease",
+        "Authorization": f"Bearer {SECRETS[who]}"})
+    response = conn.getresponse()
+    payload = json.loads(response.read() or b"null")
+    conn.close()
+    if response.status == 200:
+        return 200, payload["result"]["structuredContent"]
+    return response.status, payload
+
+
+def _lease(port, who, component):
+    status, payload = _lease_status(port, who, component)
+    assert status == 200, (status, payload)
+    return payload
 
 
 def test_an_edit_the_stat_signature_cannot_see_is_still_read(from_file, monkeypatch):
@@ -187,7 +274,7 @@ def test_an_edit_the_stat_signature_cannot_see_is_still_read(from_file, monkeypa
     one tick can leave mtime, ctime and size all unchanged. The stat below is
     frozen to exactly that, and the edit must still be seen, because the file's
     mtime is within `RACY_NS` of the last read."""
-    from revl.mcp import http_transport
+    from revl.mcp import live_profile
 
     path, port = from_file
     assert _list(port, "bob")[0] == 200
@@ -199,11 +286,12 @@ def test_an_edit_the_stat_signature_cannot_see_is_still_read(from_file, monkeypa
             return frozen
         return real_stat(target, *args, **kwargs)
 
-    monkeypatch.setattr(http_transport.os, "stat", stat)
+    monkeypatch.setattr(live_profile.os, "stat", stat)
     original = "operator bob may lease on *"
     revoked = "operator bob revoked".ljust(len(original))
     path.write_text(path.read_text(encoding="utf-8").replace(original, revoked),
                     encoding="utf-8")
+    _settle(port, "bob")
     assert _list(port, "bob")[0] == 401
 
 
@@ -216,12 +304,15 @@ def test_a_broken_profile_refuses_every_request_and_names_why(from_file, breakag
     else:
         path.write_text(_profile({}) + "operator alice key sha256:not-a-digest\n",
                         encoding="utf-8")
+        _settle(port)
     for who in ("alice", "bob"):
         status, body = _list(port, who)
         assert status == 503, (who, status)
         assert "operator profile" in body["error"]["message"]
+        assert "changing" not in body["error"]["message"]
     # fixing the file restores service without a restart
     path.write_text(_profile({}), encoding="utf-8")
+    _settle(port)
     assert _list(port, "alice")[0] == 200
 
 
@@ -231,3 +322,114 @@ def test_a_profile_that_cannot_load_at_start_refuses_to_start(tmp_path):
     with pytest.raises(TransportError):
         HttpTransport(ServerDispatcher(server), exposure=Exposure("127.0.0.1", 0),
                       server_module=server, profile_path=str(path))
+
+
+# ---------------------------------------------------------------- 3: stdio too
+
+_SHOUT = (
+    "extern emission fn announce(sink: Str, msg: Str) = @py {\n"
+    "    with open(sink, 'a') as _f:\n"
+    "        _f.write('announce:' + msg + '\\n')\n"
+    "    return\n"
+    "}\n"
+    "service Ops {\n"
+    "  emission fn shout(sink: Str, msg: Str)\n"
+    "}\n"
+    "component Agent provides ops: Ops {\n"
+    "  provide ops {\n"
+    "    fn shout(sink, msg) { emit announce(sink, msg) }\n"
+    "  }\n"
+    "}\n"
+)
+
+CASTERS = {"alice": "alice-secret-2", "bob": "bob-secret-3", "carol": "carol-secret-4"}
+
+
+def _cast_profile(revoked=()):
+    lines = []
+    for token, secret in CASTERS.items():
+        lines.append(f"operator {token} key sha256:{_digest(secret)}")
+        lines.append(f"operator {token} may call, approve on *")
+        if token in revoked:
+            lines.append(f"operator {token} revoked")
+    return "\n".join(lines) + "\n"
+
+
+def _rpc_line(rid, name, arguments):
+    return json.dumps({"jsonrpc": "2.0", "id": rid, "method": "tools/call",
+                       "params": {"name": name, "arguments": arguments}}) + "\n"
+
+
+@needs_cordis
+def test_on_stdio_a_revoked_caster_is_refused_after_a_file_edit(tmp_path, monkeypatch):
+    """One mechanism: the stdio server re-binds its session to the live profile
+    before each message, so a `revoked` line reaches the quorum-cast registry
+    with no restart."""
+    import io
+
+    from revl.mcp.live_profile import ProfileSource, StdioBinding
+    from revl.mcp.operator import parse_profile
+    from revl.mcp.session import Session
+    from revl.policy import ApprovalRule, Policy
+
+    session = Session()
+    session._wal_path = str(tmp_path / "stdio.wal")
+    monkeypatch.setattr(server, "SESSION", session)
+    path = tmp_path / "ops.profile"
+    path.write_text(_cast_profile(), encoding="utf-8")
+    registry = parse_profile(path.read_text(encoding="utf-8"))
+    session.operator, session.operator_registry = registry.get("alice"), registry
+    session.approval_policy = "auto"
+    session.load(compile_source(_SHOUT, "shout.rvl"), record=True,
+                 origin={"source": _SHOUT})
+    session.sandbox = Policy(approval_rules=(
+        ApprovalRule("announce", None, 2, tuple(CASTERS)),))
+    binding = StdioBinding(ProfileSource(str(path)), server, "alice")
+    sink = str(tmp_path / "sink.log")
+    call = {"key": "ops", "method": "shout", "args": [sink, "q"]}
+
+    # alice proposes: the class-(c) call raises the quorum ticket
+    asked = server.handle(json.loads(_rpc_line(1, "revl_call", call)))
+    ticket = asked["result"]["structuredContent"]["ticket"]
+
+    def cast(rid, who):
+        return _rpc_line(rid, "revl_approve", {
+            "hash": ticket["hash"], "asToken": who, "asSecret": CASTERS[who]})
+
+    def stdin():
+        yield cast(2, "carol")                               # carol counts
+        path.write_text(_cast_profile(revoked=("bob",)), encoding="utf-8")
+        yield _rpc_line(3, "revl_state", {})                 # the edit is settling
+        time.sleep(SETTLE_S)
+        yield cast(4, "bob")                                 # bob, now revoked
+
+    out = io.StringIO()
+    server.serve(stdin=stdin(), stdout=out, before=binding)
+    replies = {json.loads(line)["id"]: json.loads(line) for line in out.getvalue().splitlines()}
+
+    assert replies[2]["result"]["structuredContent"]["ok"] is True, "carol counted"
+    assert "changing" in replies[3]["error"]["message"], "refused while settling"
+    refused = replies[4]["result"]["structuredContent"]
+    assert refused["ok"] is False
+    assert "REVOKED" in refused["diagnostics"][0]["message"]
+    records = [json.loads(line) for line in
+               Path(session._wal_path).read_text(encoding="utf-8").splitlines()]
+    assert any(r.get("record") == "quorum-refused" and r.get("reason") == "revoked-credential"
+               for r in records)
+    assert not os.path.exists(sink), "the crossing never fired"
+    session.unload()
+
+
+def test_a_stdio_refusal_is_a_json_rpc_error_and_nothing_is_handled(monkeypatch):
+    import io
+
+    handled = []
+    monkeypatch.setattr(server, "handle", lambda message: handled.append(message))
+    out = io.StringIO()
+    server.serve(stdin=[json.dumps({"jsonrpc": "2.0", "id": 9, "method": "tools/list"}),
+                        json.dumps({"jsonrpc": "2.0", "method": "notifications/x"})],
+                 stdout=out, before=lambda: "profile changing")
+    assert handled == []
+    assert [json.loads(line) for line in out.getvalue().splitlines()] == [
+        {"jsonrpc": "2.0", "id": 9,
+         "error": {"code": -32603, "message": "profile changing"}}]

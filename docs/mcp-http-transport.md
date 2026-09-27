@@ -81,22 +81,34 @@ Two ways to authenticate, one per server (`--auth`):
 An operator's `until` is checked on every request, so an expired credential is
 refused the moment it lapses.
 
-**Profile changes take effect on the next request.** The server checks the
-profile file on every request with one `stat`, and re-reads it when its stat
-signature (mtime, ctime, size, inode) changed, or when its mtime is within two
-seconds of the last read, where two writes in one timestamp tick could leave the
-signature unchanged. A new content digest is parsed. So adding `operator bob
-revoked`, removing an operator, or narrowing a grant applies to the very next
-request, with no restart.
+**Profile changes take effect without a restart** (`src/revl/mcp/live_profile.py`,
+one mechanism for HTTP and stdio). The server checks the profile file on every
+request with one `stat`, and re-reads it when its stat signature (mtime, ctime,
+size, inode) changed, or when its mtime is within two seconds of the last read,
+where two writes in one timestamp tick could leave the signature unchanged.
+
+**New content is adopted only once it has settled:** it must read identical
+twice, at least 250 ms apart. A profile caught mid-write can still parse, and one
+cut off just before a `may not` line would widen a grant, so an unsettled
+profile is never used. While the content is settling, every request is answered
+`503` ("the operator profile is changing"). The previous profile is not used in
+that window either: the edit in progress may be a revocation, and serving the
+old grants would delay it. So adding `operator bob revoked`, removing an
+operator, or narrowing a grant is refused-then-applied within about a quarter
+of a second, and never served under a half-written file.
 
 A profile that can no longer be read or parsed **fails closed**: every request
-is answered `503` with an error naming the profile problem, until the file is
-fixed. The server never keeps serving under the previous profile, because the
-edit that broke it may have been the revocation. Write the file atomically
-(write a temporary file, then rename it over the profile) so no request sees a
-half-written one.
+is answered `503` naming the problem, until the file is fixed.
 
-Over stdio the profile is still read once, at start.
+Both refusals cover every verb, `revl_estop` included. The server prints its
+E-Stop latch path at start (`revl estop --latch <path>`), which halts it with no
+request at all.
+
+Over stdio (`revl mcp serve`, `revl mcp proxy`) the same file is re-read before
+each message: the session's own operator and the registry quorum casts are
+checked against are the file as it is now, with the same settling rule, and a
+message is answered with a JSON-RPC error while the profile is changing or
+broken.
 
 ## One identity at a time
 
@@ -191,9 +203,10 @@ can.
 4. An E-Stop lands while another request holds the session.
 5. A non-loopback listener is TLS or does not start, and a request with a
    foreign `Host` or `Origin` is refused before it is read.
-6. An edit to the operator profile file applies to the next request, and a
-   profile that no longer parses refuses every request rather than serving
-   under the old one.
+6. An edit to the operator profile file applies without a restart, is never
+   applied while half-written, and until it has settled every request is
+   refused rather than served under either the old or the new version. A
+   profile that no longer parses refuses every request.
 
 ## What it does not guarantee
 
@@ -201,7 +214,8 @@ can.
 2. Per-caller transactions. Commit and abort are session-wide: one operator's
    `revl_abort` reverts another's witnessed calls unless a lease fences it.
 3. Revocation of a request already being dispatched. A profile change applies
-   from the next request on.
+   from the first request after it has settled (about 250 ms), and requests in
+   between are refused.
 4. Concurrency. See the one lock above.
 5. Delivery of notifications or progress. There is no stream in this slice.
 6. The OAuth 2.1 profile of the MCP spec (slice 3).

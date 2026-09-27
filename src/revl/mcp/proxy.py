@@ -713,7 +713,9 @@ class Proxy:
         except (SessionError, ApprovalRequired):
             pass
 
-    def serve(self, stdin=None) -> int:
+    def serve(self, stdin=None, before=None) -> int:
+        """The stdio loop. `before` is `server.serve`'s: None to go on, or a
+        reason to refuse the message (the live operator profile)."""
         stdin = stdin or sys.stdin
         for line in stdin:
             line = line.strip()
@@ -726,6 +728,11 @@ class Proxy:
                 continue
             if not isinstance(message, dict):
                 self._send(_error(None, -32600, "invalid request"))
+                continue
+            refusal = before() if before is not None else None
+            if refusal is not None:
+                if message.get("id") is not None:
+                    self._send(_error(message["id"], -32603, refusal))
                 continue
             response = self.handle(message)
             if response is not None:
@@ -801,10 +808,12 @@ class _Discard:
 
 def run(command: list[str], *, undo: dict | None = None,
         trust_read_only: bool = False, timeout: float = 120.0,
-        stdin=None, stdout=None, stderr=None, http: dict | None = None) -> int:
+        stdin=None, stdout=None, stderr=None, http: dict | None = None,
+        live=None) -> int:
     """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin, or,
     with `http` (`{"exposure", "auth", and "profile_path" or "registry"}`),
-    until interrupted."""
+    until interrupted. `live` is the stdio loop's per-message hook
+    (`live_profile.StdioBinding`)."""
     stderr = stderr or sys.stderr
     upstream = Upstream(command, timeout=timeout)
     proxy = Proxy(upstream, undo=undo, trust_read_only=trust_read_only,
@@ -844,7 +853,7 @@ def run(command: list[str], *, undo: dict | None = None,
                 return 1
             code = transport.serve_forever(stderr=stderr)
         else:
-            code = proxy.serve(stdin)
+            code = proxy.serve(stdin, before=live)
         _abort_at_exit(proxy, stderr)
         return code
     finally:
