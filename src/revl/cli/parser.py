@@ -246,7 +246,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="a TOML/JSON placement map: also print the item-411 sandbox "
              "envelope per sandboxed process: the fs/net grant, the effective "
              "reach of each seam-served key, and the externs the [sandbox.needs] "
-             "table vouches (claimed, unverified). Human output only.")
+             "table vouches (claimed, unverified); and each model role's "
+             "binding per host with the model bindings digest (item 515). "
+             "Human output only.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
