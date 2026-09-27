@@ -1704,7 +1704,8 @@ def _outstanding_note(roster: Roster, peer_id: str) -> str:
 
 
 def render_status(charter_record: Mapping[str, Any], roster: Roster,
-                  directory: Optional[IdentityDirectory] = None) -> str:
+                  directory: Optional[IdentityDirectory] = None,
+                  health: Optional[Mapping[str, str]] = None) -> str:
     """The operator view: who is in, at what tier, holding what, the authority
     view naming who may admit, revoke and attest, and HOW EACH MEMBER PROVED WHO
     IT IS.
@@ -1712,7 +1713,11 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster,
     The identity column is not decoration. A pool in the middle of the move to
     key pairs has members of both kinds, and the one line that matters is the
     one naming the members whose joins are still forgeable by a secret
-    holder."""
+    holder.
+
+    ``health`` maps a member to the liveness fragment `pool_health` renders
+    for it. It sits on the member's row, beside what the member owes, because
+    those are the two facts an operator weighs before a withdrawal."""
     charter = charter_from_record(charter_record)
     census = identity_census(roster)
     lines = [f"pool {charter.pool_id}",
@@ -1741,7 +1746,8 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster,
             f"identity={member.identity}"
             f"{'/' + member.key_id if member.key_id else ''} "
             f"caps={', '.join(sorted(member.caps)) or '(none)'}"
-            f"{_outstanding_note(roster, peer_id)}")
+            f"{_outstanding_note(roster, peer_id)}"
+            f"{(health or {}).get(peer_id, '')}")
     if roster.revoked:
         lines.append(f"  withdrawn {', '.join(sorted(roster.revoked))}")
     if directory is not None and directory.keys:
@@ -1753,6 +1759,46 @@ def render_status(charter_record: Mapping[str, Any], roster: Roster,
                 f"revoked={row['revoked']}")
     lines.append(f"  events    {len(roster.events)}")
     return "\n".join(lines)
+
+
+def _status_command(args) -> int:
+    """`revl pool status`: the operator view, with each member's liveness.
+
+    ``--require-live SECONDS`` turns the view into a health check: exit 1,
+    naming the members, when any member was not verified live within the
+    window. It reads; it withdraws nobody. Removing a peer stays `pool
+    withdraw` under the charter's revoke authority."""
+    import sys  # noqa: PLC0415
+
+    from . import pool_health  # noqa: PLC0415 (lazy)
+
+    charter_record, roster = load_pool(args.dir)
+    identities = load_directory(args.dir)
+    try:
+        health = pool_health.load_health(args.dir)
+    except pool_health.HealthError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    if getattr(args, "json", False):
+        print(json.dumps({"charter": charter_record,
+                          "roster": roster.as_dict(),
+                          "identities": identities.as_dict(),
+                          "identity_census": identity_census(roster),
+                          "health": health.as_dict()},
+                         indent=2, sort_keys=True))
+    else:
+        notes = {peer: pool_health.health_note(health.row(peer))
+                 for peer in roster.members}
+        print(render_status(charter_record, roster, identities, notes))
+    window = getattr(args, "require_live", None)
+    if window is None:
+        return 0
+    stale = pool_health.not_live(health, roster.members, within=window)
+    if stale:
+        print(f"not live within {window:g}s: {', '.join(stale)}",
+              file=sys.stderr)
+        return 1
+    return 0
 
 
 def pool_command(args) -> int:
@@ -1773,17 +1819,14 @@ def pool_command(args) -> int:
     # secret that admits, so `pool status` is safe to put in a dashboard or a
     # health check.
     if verb == "status":
-        charter_record, roster = load_pool(args.dir)
-        identities = load_directory(args.dir)
-        if getattr(args, "json", False):
-            print(json.dumps({"charter": charter_record,
-                              "roster": roster.as_dict(),
-                              "identities": identities.as_dict(),
-                              "identity_census": identity_census(roster)},
-                             indent=2, sort_keys=True))
-        else:
-            print(render_status(charter_record, roster, identities))
-        return 0
+        return _status_command(args)
+
+    # `probe` asks members to prove they are there. It changes no authority,
+    # so it resolves no admitting key: it signs with the operator identity a
+    # task is signed with, which the peer already pinned (`pool_health`).
+    if verb == "probe":
+        from .pool_health import probe_command  # noqa: PLC0415 (lazy)
+        return probe_command(args)
 
     # `serve` is the PEER side and `ledger` is a read, so neither resolves the
     # operator's admitting key: a peer that held it could admit itself, and a
