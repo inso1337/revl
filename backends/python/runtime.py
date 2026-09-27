@@ -2098,6 +2098,13 @@ def _named_call_method(undo: Callable[[Any], Any]) -> str:
     return getattr(undo, "__name__", None) or "undo"
 
 
+def _emission_for(timeline: Any, fn: Callable, crossing: Optional[str]) -> Any:
+    """The recorded emission a compensation offsets (`Timeline.emission_for`),
+    or None for a timeline that cannot say (an older or hand-built one)."""
+    finder = getattr(timeline, "emission_for", None)
+    return finder(fn, crossing) if callable(finder) else None
+
+
 def _descriptor_call(call: Optional[dict], fn: Callable, receiver: str,
                      args: list) -> tuple:
     """`(receiver, method, args)` for a WAL discharge descriptor.
@@ -2363,7 +2370,8 @@ class _Compensation:
 
     # `_estop_stranded`: see `_Transactional.__slots__` (item 443).
     __slots__ = ("frame", "fn", "discharged", "ran", "failed", "error", "seq",
-                 "_escrowed", "component", "method", "stamp", "_estop_stranded")
+                 "_escrowed", "component", "method", "stamp", "_estop_stranded",
+                 "emission_step")
 
     def __init__(self, frame: "Frame", fn: Callable[[], Any],
                  method: Optional[str] = None) -> None:
@@ -2390,6 +2398,10 @@ class _Compensation:
         # item 247 second-pass (F5): process-monotonic registration index, so an
         # escrow with no WAL (every seq is None) still replays LIFO.
         self.stamp = next(_ENTRY_STAMP)
+        # issue #1369: the recorded emission this compensation offsets, when
+        # the recorder saw it. The recorder pairs the yielded entry by this
+        # rather than by the entry's own source line, which it does not have.
+        self.emission_step: Any = None
 
     def __call__(self) -> Any:
         if _hold_for_session(self):
@@ -2508,7 +2520,8 @@ class _CallScope:
         the same `Frame.compensation_method` a site-spelled one uses."""
         if compensate is None or self.frame._halted:
             return
-        entry = self.frame.compensation_method(compensate, call=call)
+        entry = self.frame.compensation_method(compensate, call=call,
+                                               crossing=label)
         self.labels[id(entry)] = label
 
 
@@ -3651,7 +3664,8 @@ class Frame:
         self._aborting = True
 
     def compensation(self, fn: Callable[[], Any], *,
-                     call: Optional[dict] = None) -> "_Compensation":
+                     call: Optional[dict] = None,
+                     crossing: Optional[str] = None) -> "_Compensation":
         """Register an `emit ... compensate ...` step's offsetting call as a
         COMPENSATION entry on the SAME per-activation LIFO disposer stack as
         every bracket and transactional entry (item 247, docs/design/
@@ -3684,6 +3698,9 @@ class Frame:
         receiver, method, args = _descriptor_call(call, fn, self.name, [])
         _estop_check(f"{self.name}.{method}")   # item 443
         entry = _Compensation(self, fn, method=method)
+        timeline = getattr(self.ctx, "_revl_timeline", None)
+        if timeline is not None:
+            entry.emission_step = _emission_for(timeline, fn, crossing)
         self._compensations.append(entry)
         wal = self._wal()
         if wal is not None:
@@ -3694,12 +3711,14 @@ class Frame:
                 args=args,
                 origin={"phase": "activation", "key": self.name},
                 witness=None,
+                offsets=getattr(entry.emission_step, "wal_seq", None),
             )
             entry.seq = record["seq"]
         return entry
 
     def compensation_method(self, fn: Callable[[], Any], *,
-                            call: Optional[dict] = None) -> "_Compensation":
+                            call: Optional[dict] = None,
+                            crossing: Optional[str] = None) -> "_Compensation":
         """Register a PROVIDE-METHOD `emit ... compensate ...` step's offsetting
         call as a COMPENSATION entry on THIS component's activation frame (the
         item-247 method-body compensate remainder, docs/design/teardown-contract.md).
@@ -3746,8 +3765,14 @@ class Frame:
         receiver, method_name, args = _descriptor_call(call, fn, self.name, [])
         _estop_check(f"{self.name}.{method_name}")   # item 443
         timeline = getattr(self.ctx, "_revl_timeline", None)
+        offsets = None
         if timeline is not None:
-            _step, fn = timeline.record_yield(fn, f"{self.name}/compensate")
+            # issue #1369: pair the compensation with the emission it offsets
+            # BEFORE `record_yield` marks that emission paired
+            emission = _emission_for(timeline, fn, crossing)
+            offsets = getattr(emission, "wal_seq", None)
+            _step, fn = timeline.record_yield(fn, f"{self.name}/compensate",
+                                              emission=emission)
         entry = _Compensation(self, fn, method=method_name)
         self._compensations.append(entry)
         self._deferred_compensations.append(entry)
@@ -3763,6 +3788,7 @@ class Frame:
                 args=args,
                 origin={"phase": "call", "key": self.name},
                 witness=None,
+                offsets=offsets,
             )
             entry.seq = record["seq"]
         return entry
