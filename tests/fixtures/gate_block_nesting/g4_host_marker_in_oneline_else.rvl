@@ -1,18 +1,19 @@
-// REFUSED G4 (provider upper bound): `K.f` is declared plain but reaches `zz_write()`.
+// REFUSED G4 (marker, issue #1437): the host extern `zz_write` is an emission
+// crossed without `emit`.
 //
-// The arm is a single statement with no braces, which the reader has to read
-// as the arm rather than skip with the head line.
+// The crossing is INSIDE the `else` arm of a block written on one line.
 //
 // One document per rule and block form, so the gate/reference census measures
 // each (tools/gate_reference_census.py). The file name's prefix is the
 // expected verdict; tests/test_gate_reference_census.py holds it.
 
 extern emission[net] fn zz_write(t: Str) -> Int = @py { return 1 }
-service K { fn f(k: Str) -> Int }
+extern pure fn zz_undo(t: Str) -> Int = @py { return 1 }
+service K { emission[net] fn f(k: Str) -> Int }
 component C provides k: K {
   provide k {
     fn f(k) {
-      if (k == "a") return emit zz_write(k)
+      if (k == "a") { let z = 1 } else { let q = zz_write(k) }
       return 0
     }
   }
