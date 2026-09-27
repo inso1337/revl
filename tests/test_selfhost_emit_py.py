@@ -180,6 +180,25 @@ CORPUS = [
     "../emit_ts_corpus/async_effects.rvl",
     "../emit_ts_corpus/cas_runtime.rvl",
     "../erase_receipt.rvl",
+    # item 391: the last py byte divergences in the whole-tree survey, each
+    # added FAILING FIRST against the port that diverged on it:
+    #   emit_py_builtin_shadow.rvl - a user `fn len` / `fn bytes` and the
+    #     `len_`/`sorted_` ladder. The port escaped Python keywords only, so
+    #     its `def len` rebound the builtin every emitted `.length()` calls:
+    #     `count([1, 2, 3])` answered 99 (test_builtin_shadowing_* below runs
+    #     it). It sits beside emit_py_corpus/ because selfhost/lower.rvl does
+    #     not reproduce the frontend's own renaming of these names, which
+    #     tests/test_selfhost_lower_ir.py (which globs that directory) would
+    #     report as a lower gap;
+    #   maps.rvl - the #957 `Map` subscript through `_revl_map_index`;
+    #   extern_config.rvl - a config extern's `_revl_extern_config` helper and
+    #     its `_revl_config` first local;
+    #   stdlib/fs.rvl - an extern carrying a host `ref` opens the module's
+    #     `import inspect` / `_REVL_REFS` header.
+    "../emit_py_builtin_shadow.rvl",
+    "maps.rvl",
+    "extern_config.rvl",
+    "../../../stdlib/fs.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -613,7 +632,6 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     # unvalidated model response.
     ("tests/fixtures/emit_ts_refusals/validated_emission_operation.rvl",
      "_revl_validate(", "<<UNSUPPORTED-COMPONENT:validated Model.complete>>"),
-    ("stdlib/fs.rvl", "_REVL_REFS = {}", None),
     ("examples/lifecycle_wasm.rvl", "REVL_TESTS = []", None),
     ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
     ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
@@ -682,6 +700,58 @@ def test_selfhosted_emitter_renders_a_commutative_service(emitted, reference, tm
     want, got = reference.emit(ir), emitted["emit_py_src"](ir)
     assert "    'Tally': {\n        'commutative': True,\n" in want
     assert got == want
+
+
+# The builtin-shadow guard is a VALUE property, not only a byte one: run the
+# port's module and ask for the length the user's `fn len` would hijack.
+def test_builtin_shadowing_leaves_the_emitted_length_alone(emitted):
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_py_builtin_shadow.rvl")])
+    namespace: dict = {}
+    exec(compile(emitted["emit_py_src"](ir), "builtin_shadow.py", "exec"), namespace)
+    assert namespace["count"]([1, 2, 3]) == 3
+    assert namespace["len_"]([1, 2, 3]) == 99
+    assert namespace["total"]([1, 2, 3]) == 17
+
+
+# Capability-bound secrets (item 256 Slice 1) on an emission extern. Not a
+# CORPUS document: the self-host gate refuses the top-level `secret ... for`
+# declaration ("unexpected token at top level"), which the gate/reference
+# census would report as a false reject for any census-directory document.
+EXTERN_SECRETS_SRC = """secret openai_key for model.complete
+extern emission[model.complete] fn complete(p: Str) -> Str = @py { return p + openai_key[:0] }
+extern emission[model.complete] fn embed(p: Str) -> Str = @py {
+  return p
+}
+extern pure fn note(p: Str) -> Str = @py { return p }
+"""
+
+
+def test_selfhosted_emitter_binds_an_extern_secret(emitted, reference, tmp_path):
+    path = tmp_path / "secrets.rvl"
+    path.write_text(EXTERN_SECRETS_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert want.count("openai_key = _revl_secret('openai_key')") == 2
+    assert got == want
+
+
+# A `@py ref` extern with no inline body is a lazy import thunk in the
+# reference (item 396 option B). The port refuses it by name rather than emit a
+# `def ... pass` that would return None for every call.
+def test_a_py_ref_extern_is_named_not_emitted_empty(emitted, reference, tmp_path):
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "engine.py").write_text("def do_engine(x):\n    return x\n")
+    path = tmp_path / "ref.rvl"
+    path.write_text('extern pure fn engine(x: Str) -> Str\n'
+                    '    = @py ref do_engine from "host/engine.py"\n')
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert "from host.engine import do_engine as _f" in want
+    assert "<<UNSUPPORTED-EXTERN:py-ref engine>>" in got
+    assert "def engine(" not in got
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-EXTERN:py-ref engine>>")
+    assert reason is None, reason
 
 
 # The activation-body half of the deferred-emission refusal (the method-body
