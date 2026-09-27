@@ -47,7 +47,8 @@ import time
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler
 
-from .http_guard import Exposure, ExposureError, Listener, request_refusal
+from .http_guard import (DispatchLock, Exposure, ExposureError, Listener,
+                         request_refusal)
 
 PROTOCOL_VERSION = "2026-07-28"
 SUPPORTED_VERSIONS = (PROTOCOL_VERSION,)
@@ -99,74 +100,172 @@ def _common_name(cert) -> str | None:
     return None
 
 
+class ProfileSource:
+    """The operator profile FILE, re-read when it changes, so an edit (a
+    `revoked` line, a removed operator, a narrowed grant) takes effect on the
+    next request rather than at restart.
+
+    Checked on every request and cheap: one `stat`. The file is read and
+    hashed only when its stat signature (mtime, ctime, size, inode, device)
+    changed, or when its mtime is within `RACY_NS` of the last read, where a
+    second write in the same timestamp tick could otherwise hide behind an
+    unchanged signature (git's "racy clean" rule). A new digest is parsed.
+
+    Fail CLOSED: a profile that cannot be read or parsed leaves NO registry, and
+    every request is refused naming the error until the file is fixed. It never
+    keeps serving under the previous profile, because the edit that broke it may
+    have been the revocation."""
+
+    RACY_NS = 2_000_000_000
+
+    def __init__(self, path: str) -> None:
+        self.path = os.path.abspath(path)
+        self._lock = threading.Lock()
+        self._signature = None
+        self._digest: str | None = None
+        self._read_at_ns = 0
+        self.registry = None
+        self.error: str | None = None
+        self.refresh()
+        if self.error is not None:
+            raise TransportError(self.error)
+
+    def refresh(self) -> None:
+        from .operator import ProfileError, parse_profile  # noqa: PLC0415
+
+        with self._lock:
+            try:
+                st = os.stat(self.path)
+            except OSError as error:
+                self._fail(None, f"cannot read the operator profile {self.path}: {error}")
+                return
+            signature = (st.st_mtime_ns, st.st_ctime_ns, st.st_size, st.st_ino, st.st_dev)
+            racy = st.st_mtime_ns >= self._read_at_ns - self.RACY_NS
+            if signature == self._signature and not racy and self.error is None:
+                return
+            try:
+                with open(self.path, "rb") as handle:
+                    data = handle.read()
+            except OSError as error:
+                self._fail(None, f"cannot read the operator profile {self.path}: {error}")
+                return
+            self._signature = signature
+            self._read_at_ns = time.time_ns()
+            digest = hashlib.sha256(data).hexdigest()
+            if digest == self._digest and self.error is None:
+                return
+            try:
+                registry = parse_profile(data.decode("utf-8"), source=self.path)
+            except (UnicodeDecodeError, ProfileError) as error:
+                self._fail(digest, f"the operator profile {self.path} no longer "
+                                   f"parses, so every request is refused until it "
+                                   f"does: {error}")
+                return
+            self.registry, self.error, self._digest = registry, None, digest
+
+    def _fail(self, digest, message: str) -> None:
+        self.registry, self.error, self._digest = None, message, digest
+
+    def current(self):
+        """`(registry, None)`, or `(None, why every request is refused)`."""
+        self.refresh()
+        return self.registry, self.error
+
+
+class _StaticProfile:
+    """A registry that never changes (a profile passed in memory)."""
+
+    def __init__(self, registry) -> None:
+        self.registry = registry
+        self.error = None
+
+    def current(self):
+        return self.registry, None
+
+
 class Authenticator:
     """Binds one request to one operator of the profile, or says why not."""
 
-    def __init__(self, registry, mode: str = "bearer") -> None:
-        if registry is None:
-            raise TransportError("HTTP mode needs --operator-profile: every request "
-                                 "is bound to one of its operators, and there is no "
-                                 "process operator to fall back to")
+    def __init__(self, registry=None, mode: str = "bearer", *, source=None) -> None:
+        if source is None:
+            if registry is None:
+                raise TransportError("HTTP mode needs --operator-profile: every "
+                                     "request is bound to one of its operators, and "
+                                     "there is no process operator to fall back to")
+            source = _StaticProfile(registry)
         if mode not in AUTH_MODES:
             raise TransportError(f"--auth must be one of {', '.join(AUTH_MODES)}")
-        self.registry = registry
+        self.source = source
         self.mode = mode
-        if mode == "bearer" and not any(o.vote_key for o in registry.operators.values()):
+        if mode == "bearer" and not any(o.vote_key
+                                        for o in source.registry.operators.values()):
             raise TransportError(
                 "no operator in the profile declares `key sha256:<digest>`, so no "
                 "caller could authenticate with a bearer secret. Declare one, or "
                 "use --auth mtls")
 
-    def authenticate(self, headers, peer_cert) -> tuple[object | None, str]:
+    @property
+    def registry(self):
+        """The registry the last request was checked against (None while the
+        profile file is broken)."""
+        return self.source.registry
+
+    def authenticate(self, headers, peer_cert) -> tuple[object | None, str, int]:
+        """`(operator, "", 200)`, or `(None, why, status)`: 401 for the caller's
+        credential, 503 when the profile itself cannot be read."""
+        registry, broken = self.source.current()
+        if registry is None:
+            return None, broken or "no operator profile is loaded", 503
         authorizations = _header_values(headers, "Authorization")
         if self.mode == "mtls":
             if authorizations:
                 return None, ("this server authenticates by client certificate; an "
                               "Authorization header as well would be a second "
-                              "identity, so the request is refused")
+                              "identity, so the request is refused"), 401
             token = _common_name(peer_cert)
-            operator = self.registry.get(token) if token else None
+            operator = registry.get(token) if token else None
             if operator is None:
-                return None, "the client certificate names no operator of the profile"
+                return None, "the client certificate names no operator of the profile", 401
         else:
             if len(authorizations) != 1:
-                return None, "send exactly one `Authorization: Bearer <secret>` header"
+                return None, "send exactly one `Authorization: Bearer <secret>` header", 401
             scheme, _, secret = authorizations[0].strip().partition(" ")
             secret = secret.strip()
             if scheme.lower() != "bearer" or not secret:
-                return None, "the Authorization header must be `Bearer <secret>`"
+                return None, "the Authorization header must be `Bearer <secret>`", 401
             digest = hashlib.sha256(secret.encode("utf-8")).hexdigest()
-            matches = [o for o in self.registry.operators.values()
+            matches = [o for o in registry.operators.values()
                        if o.vote_key and hmac.compare_digest(digest, o.vote_key)]
             if len(matches) != 1:
                 return None, ("the bearer secret matches no operator of the profile"
                               if not matches else
                               "the bearer secret matches more than one operator, so "
-                              "it identifies none of them")
+                              "it identifies none of them"), 401
             operator = matches[0]
         from .quorum import _lifetime_refusal  # noqa: PLC0415 - one lifetime rule
 
         lapsed = _lifetime_refusal(operator, _now_ms())
         if lapsed is not None:
-            return None, lapsed.message
-        return operator, ""
+            return None, lapsed.message, 401
+        return operator, "", 200
 
 
 class CallerBinding:
     """Serializes dispatch and binds the session to the caller for one request."""
 
-    def __init__(self, server_module, registry) -> None:
+    def __init__(self, server_module, registry_of) -> None:
         from .operator import Operator  # noqa: PLC0415
 
         self._server = server_module
-        self._registry = registry
-        self.lock = threading.Lock()
+        # the registry is read per request: the profile file can change
+        self._registry_of = registry_of
+        self.lock = DispatchLock()   # shared with http_face (issue #1488)
         self.sentinel = Operator(token=NO_CALLER)
         self._saved: list = []
 
     def _apply(self, session, operator) -> None:
         session.operator = operator
-        session.operator_registry = self._registry
+        session.operator_registry = self._registry_of()
         session.operator_bound_by = BOUND_BY_TRANSPORT
 
     def install(self) -> None:
@@ -196,7 +295,7 @@ class CallerBinding:
     def as_caller(self, operator, *, blocking: bool = True, before=None):
         """Hold the dispatch lock with the session bound to `operator`. With
         `blocking=False`, yields None instead of waiting when the lock is held."""
-        if not self.lock.acquire(blocking=blocking):
+        if not self.lock.acquire(blocking):
             yield None
             return
         try:
@@ -436,8 +535,9 @@ def _reserved_meta_key(key: str) -> bool:
 class HttpTransport:
     """One `POST /mcp` endpoint over a dispatcher, with per-request identity."""
 
-    def __init__(self, dispatcher, *, registry, exposure: Exposure,
-                 auth: str = "bearer", server_module=None) -> None:
+    def __init__(self, dispatcher, *, registry=None, exposure: Exposure,
+                 auth: str = "bearer", server_module=None,
+                 profile_path: str | None = None) -> None:
         if server_module is None:
             from . import server as server_module  # noqa: PLC0415
         if auth == "mtls" and not exposure.tls_client_ca:
@@ -446,8 +546,9 @@ class HttpTransport:
         self.dispatcher = dispatcher
         self.server = server_module
         self.exposure = exposure
-        self.authenticator = Authenticator(registry, auth)
-        self.binding = CallerBinding(server_module, registry)
+        source = ProfileSource(profile_path) if profile_path else None
+        self.authenticator = Authenticator(registry, auth, source=source)
+        self.binding = CallerBinding(server_module, lambda: self.authenticator.registry)
         self.latch = HaltLatch()
         self.listener: Listener | None = None
         self._thread: threading.Thread | None = None
@@ -516,7 +617,9 @@ class HttpTransport:
                 [("Allow", "POST"), close]
         peer = request.request.getpeercert() \
             if hasattr(request.request, "getpeercert") else None
-        operator, why = self.authenticator.authenticate(request.headers, peer)
+        operator, why, status = self.authenticator.authenticate(request.headers, peer)
+        if operator is None and status == 503:
+            return 503, _rpc_error(None, -32603, why), [close]
         if operator is None:
             challenge = ('Bearer realm="revl", error="invalid_token"'
                          if self.authenticator.mode == "bearer" else 'Bearer realm="revl"')

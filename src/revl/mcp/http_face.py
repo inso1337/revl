@@ -44,7 +44,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from ..gate import gate_version
 from .approval import ApprovalRequired, two_step_payload
-from .http_guard import Exposure, Listener, check_exposure, request_refusal
+from .http_guard import (DispatchLock, Exposure, Listener, check_exposure,
+                         request_refusal)
 from .composed import ComposedServer
 from .session import SessionError
 
@@ -330,6 +331,10 @@ class HttpComposedServer:
         self.composition = composition
         self._composed = ComposedServer(session, composition=composition)
         self.session = session
+        # issue #1488: the session serves one call at a time (one asyncio loop),
+        # and the listener is threaded, so dispatch is serialized. The same lock
+        # the MCP HTTP transport uses (`http_guard.DispatchLock`).
+        self.dispatch_lock = DispatchLock()
         # `decode` rebuilds native ADT/Result case instances from the canonical
         # wire encoding, needed only to construct a typed `Request` (the escape
         # hatch) whose `method`/`body` are variants. Identity by default so the
@@ -1065,7 +1070,8 @@ def _make_handler(server: HttpComposedServer, exposure=None):
             # item 457: `dispatch_http` honours `route` clauses first (with the
             # request headers and query, for bearer/path/query binding) and falls
             # back to the canonical fourth-quadrant dispatch otherwise.
-            reply = server.dispatch_http(method, self.path, body, self.headers)
+            with server.dispatch_lock:
+                reply = server.dispatch_http(method, self.path, body, self.headers)
             self._write(reply)
 
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler API)

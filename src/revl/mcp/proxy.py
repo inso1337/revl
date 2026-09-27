@@ -803,7 +803,8 @@ def run(command: list[str], *, undo: dict | None = None,
         trust_read_only: bool = False, timeout: float = 120.0,
         stdin=None, stdout=None, stderr=None, http: dict | None = None) -> int:
     """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin, or,
-    with `http` (`{"exposure", "auth", "registry"}`), until interrupted."""
+    with `http` (`{"exposure", "auth", and "profile_path" or "registry"}`),
+    until interrupted."""
     stderr = stderr or sys.stderr
     upstream = Upstream(command, timeout=timeout)
     proxy = Proxy(upstream, undo=undo, trust_read_only=trust_read_only,
@@ -833,7 +834,8 @@ def run(command: list[str], *, undo: dict | None = None,
 
             try:
                 transport = HttpTransport(ProxyDispatcher(proxy),
-                                          registry=http["registry"],
+                                          registry=http.get("registry"),
+                                          profile_path=http.get("profile_path"),
                                           exposure=http["exposure"],
                                           auth=http.get("auth", "bearer"),
                                           server_module=proxy.server)

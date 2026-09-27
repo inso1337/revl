@@ -79,8 +79,24 @@ Two ways to authenticate, one per server (`--auth`):
   refused: two identities are none.
 
 An operator's `until` is checked on every request, so an expired credential is
-refused the moment it lapses. `revoked` and every other profile change take
-effect when the server restarts: the profile is read once, at start.
+refused the moment it lapses.
+
+**Profile changes take effect on the next request.** The server checks the
+profile file on every request with one `stat`, and re-reads it when its stat
+signature (mtime, ctime, size, inode) changed, or when its mtime is within two
+seconds of the last read, where two writes in one timestamp tick could leave the
+signature unchanged. A new content digest is parsed. So adding `operator bob
+revoked`, removing an operator, or narrowing a grant applies to the very next
+request, with no restart.
+
+A profile that can no longer be read or parsed **fails closed**: every request
+is answered `503` with an error naming the profile problem, until the file is
+fixed. The server never keeps serving under the previous profile, because the
+edit that broke it may have been the revocation. Write the file atomically
+(write a temporary file, then rename it over the profile) so no request sees a
+half-written one.
+
+Over stdio the profile is still read once, at start.
 
 ## One identity at a time
 
@@ -133,7 +149,8 @@ transport uses that one; otherwise it arms a private one for its lifetime.
 
 ## The one lock, a known limit
 
-Every other request waits while one is dispatched. A proxied call that blocks for
+Every other request waits while one is dispatched (`http_guard.DispatchLock`,
+the same lock `revl serve --http` takes, issue #1488). A proxied call that blocks for
 its full `--upstream-timeout` (120 s by default) blocks every other caller for
 that long, except `revl_estop`. This is slice 1's bound; per-request concurrency
 needs a session that can run more than one call at a time.
@@ -174,13 +191,17 @@ can.
 4. An E-Stop lands while another request holds the session.
 5. A non-loopback listener is TLS or does not start, and a request with a
    foreign `Host` or `Origin` is refused before it is read.
+6. An edit to the operator profile file applies to the next request, and a
+   profile that no longer parses refuses every request rather than serving
+   under the old one.
 
 ## What it does not guarantee
 
 1. That an operator is one person. A shared or stolen secret is that operator.
 2. Per-caller transactions. Commit and abort are session-wide: one operator's
    `revl_abort` reverts another's witnessed calls unless a lease fences it.
-3. Immediate revocation. `revoked` needs a restart.
+3. Revocation of a request already being dispatched. A profile change applies
+   from the next request on.
 4. Concurrency. See the one lock above.
 5. Delivery of notifications or progress. There is no stream in this slice.
 6. The OAuth 2.1 profile of the MCP spec (slice 3).

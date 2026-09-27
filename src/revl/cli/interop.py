@@ -285,9 +285,9 @@ def _run_mcp(args) -> int:
 
             try:
                 transport = HttpTransport(ServerDispatcher(_server),
-                                          registry=_server.SESSION.operator_registry,
                                           exposure=exposure, auth=args.auth,
-                                          server_module=_server)
+                                          server_module=_server,
+                                          profile_path=args.operator_profile)
             except TransportError as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
@@ -360,7 +360,7 @@ def _run_mcp_proxy(args) -> int:
         return refused
     if args.http:
         http = {"exposure": exposure, "auth": args.auth,
-                "registry": SESSION.operator_registry}
+                "profile_path": args.operator_profile}
     if args.wal:
         SESSION._wal_path = args.wal
     return proxy.run(command, undo=undo,
