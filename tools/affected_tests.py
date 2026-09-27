@@ -96,6 +96,9 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_inprocess_gate_rust.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
+    # Issue #1461: loads `bench/run.py` by path and checks that the bench
+    # endpoint clients send through the runtime adapters.
+    "tests/test_model_providers_1461.py",
     "tests/test_rescore_no_self_score.py",
     # Does not READ bench. Its synthetic tree mirrors the real suffix
     # collision between `backends/typescript/runtime.ts` and
