@@ -1,10 +1,10 @@
 # The progress term in the self-evolution reward (roadmap item 545, issue #1224)
 
 **Status:** implemented. `tools/evolution_progress.py`,
-`tests/test_evolution_progress.py`. Companion: `docs/design/534-evolution-reward.md`
-and `tools/evolution_reward.py` (roadmap item 536, issue #1206), which own the
-conservation half. This document owns the progress half and the generation rule
-above it.
+`tests/test_evolution_progress.py`, registered as the `progress` component of
+`tools/evolution_reward.py`. Companion: `docs/design/534-evolution-reward.md`
+(roadmap item 536, issue #1206), which owns the conservation half. This document
+owns the progress half.
 
 ## 1. The defect
 
@@ -19,185 +19,235 @@ signal learns caution, not capability, and the cheapest policy that satisfies it
 is to propose nothing.
 
 The fix is not to weaken any of the eight. Each is correct and each is necessary.
-The fix is that the reward has a second half and the repository already maintains
-the numbers it needs.
+The fix is a component that rises, read off numbers the repository already
+maintains.
 
-## 2. The counters
+## 2. The decision: retention requires an improvement
 
-Three counters, each read out of a checked-in artifact with `git show`, on both
-sides of a change. None of them reads a candidate's prose, a commit message or a
-self-report, which is item 536's first requirement.
+The `progress` component verifies only when every counter was read on both sides,
+none regressed, **and at least one strictly improved**. It is one more conjunct in
+the same `all()`, so:
 
-| counter | value | universe | on `origin/main` at 9cf5e0ca |
+* the empty diff fails `progress` and is not retained;
+* a candidate that improves one counter and regresses another fails `progress`;
+* a candidate that improves a counter and fails any other component is not
+  retained, and that component is the blocker. Progress is added to
+  preservation, never traded against it.
+
+This reverses the first slice of this document, which made `progress` a
+non-regression check and put the improvement requirement one level up, as an
+existential over a generation (`promote`). The product owner decided on issue
+#1224 that retention itself must require an improvement. The first slice's
+argument against doing so (a correct refactor becomes unretainable, and the
+easiest counter becomes the target) is real, and section 6 prices it rather than
+waving it away. The argument for: a reward whose per-candidate maximum is still
+the empty diff still teaches the per-candidate policy "propose nothing", whatever
+a generation rule says afterwards.
+
+`promote` stays. Every candidate the scorer retains has now improved a counter by
+construction, so over real scorecards it reduces to "some candidate was
+retained". It still re-reads the serialised counter directions rather than
+trusting `retained`, so a scorecard from an older scorer, or one assembled by
+hand, cannot promote a generation on the strength of a flag. The scorecard
+carries the counter ledger under `progress` for exactly that read.
+
+## 3. The counters
+
+Three counters, each read out of a checked-in artifact on both sides of a
+change. None of them reads a candidate's prose, a commit message or a
+self-report, which is item 536's first requirement. Each is a pair of SETS: the
+failing members over the measured surface.
+
+| counter | failing members | surface | at `f1443de3` |
 |---|---|---|---|
-| `census-allowance` | case ids in `tools/gate_reference_census_baseline.json` | `.rvl` documents in the census corpus | 9 over 557 |
-| `native-chain-residual` | entries in `LOWER_GAP_DOCS` (`tests/test_selfhost_compile.py`) | that residual plus every `*_DOCS` corpus table beside it | 41 over 179 |
-| `reach-gaps` | emitter entries in `tests/fixtures/oracle_construct_reach_ledger.json` | reference dispatches in `backends/<tier>/emit.py` | 238 over 686 |
+| `census-allowance` | case ids in `tools/gate_reference_census_baseline.json` | `.rvl` documents in the census corpus | 0 over 588 |
+| `native-chain-residual` | `tier:path` pairs in `LOWER_GAP_DOCS` (`tests/test_selfhost_compile.py`) | `tier:path` pairs in every `tests/test_selfhost_emit_<tier>.py` `CORPUS` | 11 over 261 |
+| `reach-gaps` | `oracle:construct` pairs in the emitter half of `tests/fixtures/oracle_construct_reach_ledger.json` | reference dispatches in each `backends/<tier>/emit.py` | 238 over 686 |
 
-Each was already monotone before this work, and already enforced by a tool rather
-than by an operator's discipline:
+The native-chain surface changed in this slice. The first slice summed the
+`*_DOCS` tables beside `LOWER_GAP_DOCS` (149 at `f1443de3`), which are other
+tests' inputs. The ratchet recomputes the residual over each tier's oracle
+`CORPUS`, so that is the surface now.
 
-* the census `--check` fails on a divergence that is not baselined **and** on a
-  baseline entry that no longer diverges, so the allowance "can only shrink in a
-  diff somebody reads";
-* `tests/test_selfhost_compile.py` recomputes the residual set rather than
-  sampling it, so a stale entry is a red and a document leaves the table the day
-  `selfhost/lower.rvl` grows the surface it needed;
-* the construct-reach ledger (issue #1203) reds both on a new unreached construct
-  and on a listed entry that is no longer unreached, whose fix is to delete the
-  line.
+The census allowance is **at its floor**. It is 0, so it cannot improve and can
+witness nothing until something regresses it. Only two counters can move today.
 
-None of the three was a reward component before this change.
+## 4. Progress cannot be bought cheaply
 
-### 2.1 Why every counter is a pair
+A reward that padding can satisfy is a gate that cannot fire, pointed the other
+way. The first slice compared counts, and a count is defeated by a substitution:
+delete a failing document, add any passing one, and the value falls while the
+universe holds. The rules are now on member identity, in this order:
 
-Each of these numbers falls when the work is done **and** falls when the measured
-surface is deleted. A bare value would pay for the deletion, so the value is
-always reported over a universe and a counter advances only when the value
-strictly fell and the universe did not shrink.
+1. **No base member may leave the surface.** Deleting, renaming or moving a
+   document, a corpus entry or a dispatch arm is a regression, whatever else
+   moved.
+2. **No member may newly fail.** Retiring two entries while adding one is a
+   regression, not a net improvement of one.
+3. **An improvement is a crossing**: a base-failing member that is now passing,
+   and therefore still on the surface.
+4. **The crossing document must be byte-identical on both sides.** Gutting a
+   failing document until it passes is deleting it in place.
+5. **The instruments must hold still.** A counter measures a distance from a
+   reference, with a tool, under a test harness. When any of them changed in the
+   same diff that shrank the failing set, the counter reads `unreadable`: it
+   cannot tell a better system from a weaker measurement. The instruments are
+   `src/revl/` (the reference compiler), the pytest configuration files and
+   `conftest.py`, and per counter the census tool; the reference emitters, the
+   ratchet file and the tier oracle files; or the reach tool, the coverage tool
+   and the reach test. Where a table lives inside an instrument file, its
+   literal may change and nothing else in that file may.
+6. **The scorer's own code reads both sides.** The reach surface is sized by the
+   scorer's copy of `tools/selfhost_coverage.py`. The first slice loaded the
+   candidate's copy into the scoring process, where candidate code could reach
+   every other component's verdict.
 
-The universe is chosen so that the only move that improves a counter is moving a
-document, or a construct, across the line:
+Rule 5 costs something: an instrument change and the improvement it enables
+cannot land in one candidate. Land the instrument change first; it is
+`unchanged` on its own and blocks nothing in this component.
 
-* deleting a divergent `.rvl` retires an allowance entry and drops the census
-  corpus count;
-* deleting a residual document drops `LOWER_GAP_DOCS` and the chain corpus by
-  one each, because the universe is defined as their sum;
-* deleting an unreached dispatch arm shortens the reach ledger and shortens the
-  reference table it was drawn from.
+### 4.1 Each cheap move, and what refuses it
 
-The third is the one that needs the pair most. An arm nothing reaches emits
-nothing, so deleting it breaks no golden and changes no test: `artifact-stability`
-and `tests` both stay green. The universe is the only thing that sees it.
+Every row is a test in `tests/test_evolution_progress.py`.
 
-### 2.2 What each counter's reading does not cover
+| cheap move | census | native chain | reach | refused by |
+|---|---|---|---|---|
+| delete the failing member | regressed | regressed | regressed | rule 1 |
+| delete it and add a filler so the count holds | regressed | regressed | regressed | rule 1 (census: also rule 4) |
+| rename it | regressed | regressed | regressed | rule 1 |
+| repoint `CORPUS_DIR` at easier documents | n/a | regressed | n/a | rule 1 (members are resolved paths) |
+| gut the failing document, then retire its entry | regressed | regressed | n/a | rule 4 |
+| weaken the reference until it agrees | unreadable | unreadable | unreadable | rule 5 |
+| drop a hand-written census program and its entry | unreadable | n/a | n/a | rule 5 (the corpus walk never counted it) |
+| edit the ratchet, or deselect it in `pyproject.toml` | n/a | unreadable | unreadable | rule 5 |
+| add a no-op corpus document | unchanged | unchanged | unchanged | surface growth is not a crossing |
+| add a test that asserts nothing | unchanged | unchanged | unchanged | no counter reads tests |
+| **delete a failing table entry with nothing fixed** | **improved** | **improved** | **improved** | **another component** |
 
-`reach-gaps` is read over the six emitter oracles only. The reach tool's
-`lower_ir` and `compile` tables are built by private helpers that hardcode the
-repository root, so they cannot be sized at `base` without a second checkout;
-they are excluded from both halves of the counter rather than counted on one side
-only. That leaves 7 of the tree's 245 named gaps outside this counter. Bringing
-them in means giving those two tables a path-taking reader, which is a change to
-`tools/oracle_construct_reach.py` and is deliberately not made here.
+The last row is the limit of this component. The tables are the artifacts, so a
+table edited to a lie looks exactly like a fix. Each table is held to the tree by
+a ratchet another component runs:
 
-The census universe is the corpus walk, computed from `CORPUS_DIRS` and
-`_SKIP_DIRS` read out of the census tool's own source by `ast`. It does not count
-the tool's hand-written boundary programs or `ADMISSION_PROGRAMS`, which live in
-the tool source rather than in the corpus directories. The census run reports 848
-programs where this walk reports 557 for that reason. Deleting one of those
-hand-written programs would lower the census's own count without lowering this
-universe. It would also delete the only inputs in the tree written to sit on a
-guarantee boundary, from a file whose covering test runs on every change to it.
+* census: `tools/gate_reference_census.py --check`, run by `no-new-false-admits`,
+  fails on a divergence that is not baselined;
+* native chain: `tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter`,
+  run by `tests`. Measured: removing `component_edges.rvl` from
+  `LOWER_GAP_DOCS["rust"]` makes this counter read `11 to 10, improved`, and the
+  ratchet's `[rust]` case fails in 10 seconds. `tools/affected_tests.py` selects
+  that file for the change;
+* reach: `tests/test_oracle_construct_reach.py::test_the_committed_ledger_matches_this_tree`,
+  run by `tests`.
 
-## 3. How progress composes with a conjunction
+That is why progress is a conjunct and not the reward.
 
-`tools/evolution_reward.py` decided conjunction, not scalar, with a measured
-argument: a candidate on a machine with no cargo scores seven of eight and clears
-any threshold, so a scalar rewards the fail-open shape. It exports no top-level
-number and a test asserts it.
+### 4.2 One cheap move that is still open
 
-A progress component that could be traded against a conservation component would
-undo that. So progress enters at two levels, with two different quantifiers, and
-at neither level is a number compared against a bar.
+`reach-gaps` credits a construct when a corpus document reaches it.
+`selfhost_coverage.corpus_documents` reads a tier's corpus with a regular
+expression over the `CORPUS` block, so a document named only in a COMMENT inside
+that block is counted as reaching, while the emitter oracle, which executes the
+list, never runs it. A candidate could add a document that reaches an unreached
+construct, name it in a comment, and delete the ledger line: the reach ledger's
+own check agrees, and the construct is credited without any oracle checking the
+document. Today the regular-expression set and the literal set are identical on
+all six tiers. What would close it: `corpus_documents` reading `CORPUS` with
+`ast.literal_eval`, as this module does. That is a change to the reach tool and
+is not made here.
 
-**At the candidate level it is a non-regression predicate.** The `progress`
-component verifies exactly when every counter was read on both sides and none
-regressed. That is a conservation check like the other eight, it is a ninth
-conjunct in the same `all()`, and it cannot be traded, because a conjunction has
-nothing to trade with. It carries the same four fields as every other verdict
-(`component`, `verified`, `reason`, `evidence`), so registering it in that
-module's `PROBES` table needs no adaptation.
+## 5. Which base
 
-**At the generation level it is an existential over the retained candidates.** A
-generation is promoted when at least one candidate was retained (every component
-verified, the ninth included) and that same candidate improved at least one
-counter. A quantifier over a set, not a weighted sum over components.
+Progress is judged against the candidate's own base: `git merge-base HEAD
+<base>`, not the named ref's tip at scoring time.
 
-The two levels are what keeps progress out of the trade. A candidate's
-improvement is never summed with, subtracted from or compared against its
-conservation verdicts: it is consulted only for candidates that already passed
-every one of them. A candidate that improves three counters and breaks the census
-is not retained, witnesses nothing, and the generation is no more promoted for
-its existence than if it had never run.
+* **The trunk moved on after the fork**, carrying an improvement the candidate
+  lacks. Against the tip, the candidate reads as a regression of a counter it
+  never touched. Against the merge base, it is judged on its own diff.
+* **The candidate merged the trunk**, carrying somebody else's improvement into
+  its tree. Against its fork point it would be credited for that work. Against
+  the merge base, that work is on both sides and credits nobody.
 
-### 3.1 What the alternatives would have permitted
+Both are tests, each with the wrong reading computed beside the right one so the
+test cannot pass vacuously. The resolved sha is recorded in the ledger.
 
-**A scalar with weight on progress.** The census allowance on `origin/main` is
-nine entries. A candidate that retires two of them and introduces one new
-`false-admit` moves a progress counter down by two and fails exactly one
-conservation component, so under any weighting with positive progress weight it
-outscores a clean no-op. The census `--check` is a hard exit 1 on that candidate.
-A reward satisfiable in a way the underlying gate is not is a defect, which is
-the same argument item 536 made about the cargo case.
+What this cannot see: a record whose `base` names an OLDER commit than the newest
+trunk commit its tree contains moves the merge base back and credits the
+difference. Nothing here can tell that a named commit is stale. The record's
+`base` must be written by the loop, never by the candidate. The other nine components
+still read `candidate.base` verbatim. Against a moving ref, their errors run
+toward failing (for example, `scope` would count the trunk's changes as the
+candidate's), and no other component credits anything. That is why only
+`progress` resolves the merge base.
 
-**Advancement as a tenth conjunct**, i.e. requiring every candidate to improve a
-counter. Then a correct refactor, a documentation fix and a bug fix that closes
-no counter are all unretainable, and the cheapest way to be retained is to pick
-whichever counter is easiest to move rather than to do the work that matters. The
-existential sits at the generation level precisely so that a generation of ten
-honest non-advancing candidates and one real advance is promoted, and a
-generation of eleven empty diffs is recorded as a generation that did not
-advance.
+## 6. What the counters cannot see
 
-## 4. Failure direction
+A candidate that makes a real improvement no counter measures is now **rejected**.
+This is the cost of the decision in section 2, written down so it is not
+discovered later. The counters see the census allowance, the native-chain
+residual and the construct-reach gaps. They do not see:
 
-Fail-closed, with no third value. A counter is in exactly one of four directions
-and only two of them satisfy the ninth conjunct:
+* a bug fix whose reproducer was not already a named entry in one of them;
+* a performance improvement (allocation and time budgets are in no ledger);
+* a new language feature, stdlib function or tier construct: new surface grows
+  a universe, and growth is `unchanged`;
+* a new test, a new corpus document the chain already reproduces, a new formal
+  theorem, a documentation correction;
+* a refactor, dead-code removal or a clearer diagnostic;
+* a security fix that is not a census divergence;
+* any improvement to a measuring tool (rule 5);
+* a reach-gap document the native chain cannot lower yet: the document must also
+  enter `LOWER_GAP_DOCS`, which is a newly failing member (rule 2), so the
+  candidate regresses one counter to improve another.
+
+Also, the census allowance is at zero (section 3), so census work cannot be
+credited at all today.
+
+The way to lower this cost is to add counters (a performance ledger, the formal
+theorem ledger read as a rising set, the named-gap tables of the other oracles),
+not to relax the rule.
+
+## 7. Failure direction
+
+Fail-closed, with no third value.
 
 | direction | when |
 |---|---|
-| `improved` | universe did not shrink and value strictly fell |
-| `unchanged` | universe did not shrink and value did not change |
-| `regressed` | value rose, **or** the universe shrank, whatever the value did |
-| `unreadable` | either side could not be read at all |
+| `improved` | a base-failing member crossed; none left; none newly failed; its document is unedited; no instrument moved |
+| `unchanged` | same failing set; no base member left the surface |
+| `regressed` | a base member left the surface, a member newly failed, or a crossing document was edited |
+| `unreadable` | either side could not be read, the merge base does not exist, or an instrument moved in the diff that shrank the failing set |
 
-`unreadable` is not `unchanged`. A progress term that read "I could not measure
-this" as "nothing got worse" would be the fail-open shape this repository has
-already measured eleven times: a check that ran on every pull request and could
-not fail. A missing artifact, a malformed one, an artifact absent at `base`, a
-ledger with its entries deleted and a counter that raised are all `unreadable`,
-which fails the component and can witness no promotion.
+`unreadable` is not `unchanged`. A missing artifact, a malformed one, an artifact
+absent at the base, a ledger with its entries deleted and a counter that raised
+are all `unreadable`, which fails the component.
 
-A universe that grew with an unmoved value is `unchanged`, not `improved`. Adding
-corpus documents that all pass is good work, but it is not this counter moving,
-and crediting it would make "add passing fixtures" the cheapest available advance.
+## 8. Non-vacuity
 
-The promotion rule is fail-closed in the same way. `retained` must be the literal
-`true`; a string, a number or a truthy artefact of whoever serialised the record
-is not a retention. Advancement is recomputed from the recorded counter
-directions and never read off a boolean the producer wrote, because a rule that
-verified a claim rather than a measurement is the failure item 536 named first.
+Mutations applied to the rules, each run against `tests/test_evolution_progress.py`
+and `tests/test_evolution_reward.py`:
 
-## 5. Non-vacuity
-
-`tests/test_evolution_progress.py` builds real git repositories in `tmp_path`
-holding all three artifacts, and drives each counter through four cases: a tree
-where it improved, a tree where it regressed, a tree where it is flat while
-another counter moves, and a tree where the value fell only because the measured
-surface was deleted. The empty-diff case is asserted directly: every counter
-flat, the component verified, nothing advanced.
-
-The rules were then mutated to check the tests see them:
-
-| mutation | result |
+| mutation | tests failed |
 |---|---|
-| universe guard removed from the direction rule | 4 failed |
-| `unreadable` folded into `unchanged` | 8 failed |
-| `retained` coerced with `bool()` instead of `is True` | 1 failed |
+| the component does not require an improvement | 10 |
+| the surface compared by count, not identity | 5 |
+| the edited-document rule removed | 2 |
+| the instrument rule removed | 8 |
+| the base read verbatim instead of the merge base | 2 |
+| rename detection left on in the changed-file read | 1 |
+| table literal edits treated as instrument moves | 3 |
+| a newly failing member allowed | 7 |
+| `progress` removed from `COMPONENTS` | 4 |
 
-The counters are also read against this repository itself, with each value
-required to sit inside a strictly larger universe, so a counter that silently
-answered zero over zero would satisfy every rule above and still red.
+The counters are also read against this repository itself, each failing set a
+strict subset of its surface, so a counter that silently answered nothing over
+nothing would still red. Every instrument pattern is required to match a tracked
+file, so an instrument that guards nothing reds too.
 
-## 6. What this does not do
+## 9. What this does not do
 
-* It does not edit `tools/evolution_reward.py`. That module is on an open branch
-  (pull request #1231) and not on `main`. Registering `progress_verdict` in its
-  `PROBES` table is one line and is the step that makes the ninth conjunct part
-  of retention in fact rather than in shape; the test here pins the verdict
-  vocabulary so that line cannot silently stop fitting.
-* It does not implement the four components item 536 left unimplemented
-  (`compiles`, `tests`, `conformance`, `formal`). They still fail, which is the
-  honest state.
-* It does not close the 7 named gaps `reach-gaps` cannot size at `base`
-  (see §2.2).
+* It does not close the 7 named gaps `reach-gaps` cannot size at the base: the
+  reach tool's `lower_ir` and `compile` tables are built by helpers that
+  hardcode the repository root. Bringing them in means a path-taking reader in
+  `tools/oracle_construct_reach.py`.
+* It does not close the comment-in-`CORPUS` path in section 4.2.
+* It does not detect a stale `base` named in a candidate record (section 5).
+* It does not add counters. Section 6 is the list of what they would be for.
