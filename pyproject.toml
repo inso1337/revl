@@ -48,9 +48,19 @@ classifiers = [
 # not rely on the module agreeing with itself. It imports `cryptography` HARD:
 # behind an `importorskip` the one independent check on the quote verifier's
 # crypto would report SKIPPED, which is the same colour as a pass, on every
-# machine that happens not to have the library (issue #266). Nothing in
-# `src/revl` imports it, and tests/test_ecdsa_differential.py asserts that.
-test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=42.0"]
+# machine that happens not to have the library (issue #266). The one module in
+# `src/revl` that imports it is the optional signing backend below, and
+# tests/test_1460_signing_backend.py asserts that; the differentials pin that
+# backend off so they still compare two implementations.
+test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=44.0"]
+# `crypto`: constant-time ECDSA SIGNING (issue #1460). The pure-Python signer in
+# src/revl/tee_quote.py takes time that depends on the secret nonce, so with this
+# extra installed `ecdsa_sign` goes through OpenSSL instead (src/revl/
+# _ecdsa_backend.py), byte-for-byte the same RFC 6979 signatures. A signer that
+# is exposed to a network refuses without it. Verification never needs it. 44 is
+# the first release with deterministic ECDSA. revl still has no REQUIRED runtime
+# dependency.
+crypto = ["cryptography>=44.0"]
 # OpenTelemetry export for causal lifecycle traces (revl.otel, item 120). Kept
 # out of the base install so it stays dependency-light; absent, revl.otel
 # degrades to a no-op / span-mapping dump rather than a hard import error.

@@ -153,6 +153,12 @@ is roadmap item 118's mTLS work (`revl deploy`, issue #79), whose pinned host
 key, bundle staging and far-side runner are built; this module is deliberately
 its caller rather than a second implementation of it.
 
+Off loopback, both ends also need the `revl[crypto]` extra (issue #1460). The
+peer signs a receipt for every task it is sent and the operator signs every task
+and attestation, and the pure-Python signer's timing depends on the secret
+nonce. A non-loopback `serve` refuses before it binds and a dispatch to a
+non-loopback peer refuses before the ledger is touched, each naming the extra.
+
 **What the tests do not reach, stated rather than implied.** The two ends in
 every test are two OS processes on one machine over loopback, not two machines.
 What a second machine adds is the network. Nothing here proves anything about a

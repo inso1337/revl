@@ -195,10 +195,66 @@ honest:
   reddens instead of quietly verifying nothing;
 * signing is deterministic (RFC 6979), which is what makes a committed fixture
   reproducible from the repository;
-* scalar multiplication is not constant time, and deliberately so: every scalar
-  multiplied here is public (a verification scalar, or a fixture key that signs
-  nothing secret), so there is no secret to leak and no reason to hand-roll a
-  hardened ladder in a compiler.
+* scalar multiplication is not constant time. For verification that is
+  harmless, because every scalar there is public. For signing it is not, and the
+  next section says what is done about it.
+
+## Signing: the `revl[crypto]` extra
+
+The same module now signs with real private keys: peer identity records
+(`revl.peer_identity`), pool tasks, receipts and attestations
+(`revl.pool_dispatch`, `revl.pool_receipt`) and quorum casts
+(`revl.mcp.quorum.sign_cast`). The pure signer is double-and-add over Python
+integers, so the time one signature takes depends on the bits of the secret
+RFC 6979 nonce. Timed signatures leak nonce bits, and lattice attacks recover the
+private key from a modest number of them (issue #1460).
+
+So signing has two backends:
+
+* **`cryptography`**, when it is installed: `pip install 'revl[crypto]'`. It
+  signs through OpenSSL with deterministic nonces (RFC 6979, `cryptography` 44
+  or later), and derives public keys there too. An installed `cryptography` that
+  cannot sign deterministically is treated as absent.
+* **pure Python** otherwise, unchanged.
+
+The two are byte-compatible: RFC 6979 on both sides, so the same key and message
+give the same `R || S`, and every committed fixture and pinned digest is the same
+whichever backend built it. `tests/test_1460_signing_backend.py` checks that on
+P-256 and P-384 with three hashes, and `tests/test_ecdsa_vectors.py` checks both
+signers against the RFC's own vectors. `revl.tee_quote.signing_backend()` says
+which one this machine uses. Verification stays pure Python whatever is
+installed: its inputs are public, so its timing has nothing to leak, and the
+differential tests keep comparing it with OpenSSL.
+
+**A network-exposed signer refuses without the extra**, and the refusal names
+it. The line is drawn per caller, from what the code does with the signature:
+
+| signer | exposed? | why |
+| --- | --- | --- |
+| `revl pool serve` on a non-loopback `--host` | yes | it signs a receipt for every task a remote party sends, which is a timing oracle on demand; it refuses before it binds |
+| `revl run --pool private` to a non-loopback `--peer-addr` | yes | the task and the attestation are signed by the operator's keys for a peer the pool does not trust; it refuses before the ledger is touched |
+| `revl.mcp.quorum.sign_cast` | yes, by default | a proof exists to cross the MCP transport to a session the quorum does not trust, and an automated voter signs as questions arrive; pass `network_exposed=False` for a local session |
+| `revl pool serve` on loopback, a dispatch to loopback | no | only this machine can reach it; tunnelling that port elsewhere makes it exposed, and then you need the extra |
+| `revl pool request`, `revl pool withdraw` | no | the record is written to a file, once, by the operator |
+| `build_tdx_quote`, `build_sev_snp_report`, `sign_endorsement`, `identity_from_seed` | no | the reference attester and fixtures; no production caller |
+
+A library caller states its own exposure: `ecdsa_sign(..., network_exposed=True)`
+or `peer_identity.sign_record(..., network_exposed=True)` refuses with
+`SigningBackendUnavailable` when the backend is missing, before it derives or
+signs anything; `pool_dispatch.signer_exposure(host, purpose)` gives the flag for
+a host and raises `DispatchError` naming the extra when it would refuse.
+
+**What the pure path does not protect against**, when you sign locally without
+the extra: anyone who can measure how long many signatures under one key take
+(a co-tenant on the same machine, a profiler, a process that can trigger signing
+and watch the clock) learns bits of each nonce, and enough of those recover the
+key. It is fine for fixtures and one-off records. It is not fine for a key that
+signs on demand for somebody else.
+
+`tools/ecdsa_timing_demo.py` is a demonstration of the difference, not a proof
+and not a test: it picks messages whose nonce has few or many set bits and times
+both backends signing them. On one loaded machine it measured the pure path
+about 8% slower on the high-weight nonces and the backend within 0.3%.
 
 ## The fixtures
 
