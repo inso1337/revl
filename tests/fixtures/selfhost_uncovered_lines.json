@@ -49,11 +49,11 @@
   ],
   "_budget": {
     "reference": {
-      "go": 3348,
-      "java": 986,
+      "go": 3357,
+      "java": 991,
       "py": 663,
       "rust": 1200,
-      "ts": 542,
+      "ts": 547,
       "wasm": 1558
     },
     "selfhost": {
@@ -72,7 +72,7 @@
         "After the covered linearity eligibility test, residual paths recognize push/set/remove self-rebinding and emit destructive append/map writes. Those pure stdlib builtin families are deferred together with their ordinary helper rendering.": {
           "_go_v3_self_rebind": 13
         },
-        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every … in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on … as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 §8's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the §4.5 `replay(…)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
+        "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every … in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on … as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 §8's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the §4.5 `replay(…)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead. Item 130 §4.5's last-n backlog is LOWERED on this tier now, so `_refuse_unlowered_stream_surface` (2) is gone and `_replay_count` (6) replaces it: it reads the `replay(<n>)` declaration and request and refuses the durable `replay(from: …)` cursor. `_expr` rises by 5 for the `StreamSource(n)` and `StreamSubscribeReplay` arms. All of it is on the stream-holding path, and a cursor refusal document is no way out: every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Executed by backends/go/test_stream_exec_130.py.": {
           "_document_holds_stream": 6,
           "_flag_stream": 1,
           "_flag_stream_drain": 3,
@@ -80,7 +80,7 @@
           "_is_stream_next": 7,
           "_raw_go_ident": 3,
           "_refuse_required_stream": 3,
-          "_refuse_unlowered_stream_surface": 2,
+          "_replay_count": 6,
           "_stream_chain": 13,
           "_stream_head": 4,
           "_stream_stage_arrow": 16
@@ -301,7 +301,7 @@
           "_comp_infer": 76,
           "_construction_case": 15,
           "_emit_return": 32,
-          "_expr": 168,
+          "_expr": 173,
           "_format": 50,
           "_format.flush_text": 4,
           "_go_comp_match": 52,
@@ -343,7 +343,7 @@
     "java": {
       "statements": 2793,
       "uncovered": {
-        "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every … in` / `on … as` loop (`_emit_stream_iter`), the `on … as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead.": {
+        "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every … in` / `on … as` loop (`_emit_stream_iter`), the `on … as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead. Item 130 §4.5's last-n backlog is LOWERED on this tier now: `_refuse_unlowered_stream_surface` goes from 4 to 5 because its replay arm now tells the durable `replay(from: …)` cursor (refused) from the last-n count (lowered), and `_expr` rises by 4 for the `Stream.source(n)` and `Stream.subscribeReplay` arms. A cursor refusal document is no way out: every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Executed by backends/java/test_stream_exec_java_130.py.": {
           "_body_holds_stream": 1,
           "_body_holds_stream_event": 7,
           "_document_holds_stream": 1,
@@ -354,7 +354,7 @@
           "_java_event_field": 14,
           "_r1_marker_lines": 12,
           "_refuse_required_stream": 1,
-          "_refuse_unlowered_stream_surface": 4,
+          "_refuse_unlowered_stream_surface": 5,
           "_stream_chain": 11,
           "_stream_head": 4,
           "_stream_stage_arrow": 9
@@ -506,7 +506,7 @@
           "_empty_map_decl_type": 2
         },
         "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered, and so, since item 429's java blind-spot closure, are the builtin/len and sized-length arms (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_expr": 28
+          "_expr": 32
         },
         "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value.": {
           "_finite_float": 1
@@ -1118,7 +1118,7 @@
           "_refuse_validated_emissions": 8
         },
         "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_expr": 43,
+          "_expr": 46,
           "_fn_call": 2,
           "_ts_builtin": 1
         },
@@ -1143,8 +1143,8 @@
           "_emit_ts_lifecycle_tests": 59,
           "_emit_ts_tests": 14
         },
-        "Item 130 §4.5 replay refusal: backends/typescript/emit.py::_refuse_unlowered_replay refuses a `replay(…)` declaration or request this tier does not lower. It is a refusal, so no successful corpus document can reach it — a document that did would fail to emit rather than compare bytes. Pinned by tests/test_stream_reactive.py.": {
-          "_refuse_unlowered_replay": 1
+        "Item 130 §4.5 replay: backends/typescript/emit.py::_replay_count reads a last-n `replay(<n>)` declaration or request, which this tier now lowers, and refuses the durable `replay(from: …)` cursor, which it does not. Both arms are reached only by a component that holds a stream, and no ts corpus document can hold one because selfhost/emit_ts.rvl ports no stream lowering; a cursor REFUSAL document cannot stand in either, because every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Replaces `_refuse_unlowered_replay` (1), and `_expr` (in the expression-residuals group) rises by 3 for the `host.Stream.source({ replay: n })` and `replay: k` arms. Pinned by tests/test_stream_reactive.py and run under plain node by backends/typescript/test_stream_ts.py.": {
+          "_replay_count": 3
         },
         "Literal and Float-shape invariants: `_finite_float` rejects NaN/Infinity; `_float_literal` returns None for non-float values; `_is_float_expr`'s unstamped literal/unary inference handles legacy IR; `_literal` maps null and rejects foreign Python values. Typed finite source literals carry canonical stamps and are covered": {
           "_finite_float": 1,

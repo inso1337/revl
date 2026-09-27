@@ -15,7 +15,10 @@ streams by design, having no async host seam — now lowers the type, the
 subscribe/next/close bracket, `merge`, `every … in` and `on … as`. §4.5's
 provider-declared `replay(n)`/`replay(from: <durable>)` and the §4.9
 reconstructible crash-recovery case it gates have since landed on py, the tier
-that owns the WAL; every other tier refuses `replay` by name. So has the
+that owns the WAL. The last-n `replay(n)` backlog, which makes no recovery
+claim, has since landed on ts, go and java as well; rust refuses it by name
+until its lowering lands with a gate-crate regeneration, and every tier but py
+refuses the durable cursor by name. So has the
 required-`Stream[T]` coeffect (§6c): `requires <k>: Stream[T]` on py, refused by
 name on every other tier, and with it the handler that resolves its source from
 the declaration instead of naming a subscription. Those two together close §4.9
@@ -294,8 +297,9 @@ there is nothing to fire a window on. Those two refuse by name, each naming its
 own reason, because a program that compiles and answers differently from the
 reference is worse than one that refuses.
 
-`_refuse_unlowered_stream_surface` is now a single `replay` check on go, and a
-`replay` plus a `drain` check on rust and java.
+On go the only stream refusal left is the durable `replay(from: …)` cursor;
+java refuses the cursor and the `drain` window; rust refuses the window and,
+until its last-n lowering lands, both `replay` forms.
 
 **A policy and a chain on one subscription share one signal.** The acceptance a
 `deliver` answers is the same boolean a `take(n)` link counts, and `take(n)`
@@ -362,19 +366,46 @@ from never claims an item the consumer did not take, and a cursor the provider
 has already trimmed past is a `Faulted("replay gap")` terminal rather than a
 silent skip.
 
-ts, go, rust and java REFUSE `replay` by name, at the declaration as well as at
-the request: the half of the claim that makes it worth anything is §4.9's, which
-is the WAL's, and a tier that delivered a backlog while calling it durable would
-run and quietly disagree with the reference. This is now the only unlowered half
-a `subscribe` head can carry alongside lowered ones — those tiers lower the
-combinator chain and all four §4.4 policies — so the refusal has to WIN over a
-head it shares. A tier that lowered the policy and let the backlog fall off the
-end would emit a program that runs, drops items by the rule the author declared,
-and never replays what the author also declared. Where a head carries both an
-unlowered `replay` and an unlowered `drain` window, the replay refusal is the
-one reported: the two are refused for different reasons, the window for the
-clock coeffect and replay for the recovery surface, and a stable answer is what
-keeps an author from fixing the wrong half.
+**The two forms part on the other tiers.** The last-n backlog is an in-memory
+buffer the provider holds, and the reference itself makes no recovery claim for
+it: a last-n subscription registers the ordinary closure-only bracket, so after
+a crash it is the same `unreconstructible` residue a plain subscription is. So a
+tier can give the reference's whole answer for it without a WAL, and ts, go and
+java now do. Each holds the declared backlog on the provider (recorded before
+delivery, whether or not anyone listens), and a request replays the newest k
+items through the provider's own forward path before any live item, traced
+`stream.replay <item>`, exactly as the py reference's `Stream.subscribe` does.
+The spellings are `host.Stream.source({ replay: n })` and a `replay: k` entry in
+the subscribe options on ts, `StreamSource(n)` and `StreamSubscribeReplay` on
+go, and `Stream.source(n)` and `Stream.subscribeReplay` on java. The blocking
+tiers add one property the single-threaded reference cannot need: the subscribe
+and the replay run under a per-provider emission lock, taken only by a provider
+that declared a backlog, so a live item emitted on another thread lands before
+the subscribe (and so inside the backlog) or after the whole backlog, never in
+the middle of it. Each tier runs the reference's own replay cases plus that
+race, and the race test fails when the lock is removed.
+
+rust is the exception for now, and for a reason outside the stream design: its
+emitter, `backends/rust/emit.py`, is a digest input of the native gate crate
+(`tools/build_gate_crate.py`), so lowering the backlog there moves the crate's
+digest and has to land with a crate regeneration. Until then rust refuses both
+forms by name. Its self-host port, `selfhost/emit_rust.rvl`, names both ends of
+a replay document with markers and emits no subscription for it.
+
+The durable `replay(from: …)` cursor stays the py reference tier's. ts, go, rust
+and java REFUSE it by name, at the declaration as well as at the request: the
+half of the claim that makes it worth anything is §4.9's, which is the WAL's,
+and a tier that resumed an in-memory position while calling it durable would run
+and quietly disagree with the reference after the first restart. The refusal has
+to WIN over a head it shares, since those tiers lower the combinator chain and
+all four §4.4 policies. A tier that lowered the policy and let the cursor fall
+off the end would emit a program that runs and never resumes what the author
+declared. Where a head carries both an unlowered cursor and an unlowered `drain`
+window, the cursor refusal is the one reported: the two are refused for
+different reasons, the window for the clock coeffect and the cursor for the
+recovery surface, and a stable answer is what keeps an author from fixing the
+wrong half. A last-n backlog beside an unlowered window is refused for the
+window, by name, so lowering the backlog did not turn that refusal into a drop.
 
 The `"replay"` slot §5 reserves is threaded only when declared, so a replay-free
 program's IR is byte-identical.
