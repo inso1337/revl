@@ -23,8 +23,9 @@ rather than trusted. It needs a running local server and is never run by CI.
     python3 bench/structured_output_bench.py --model <tag> \\
         --arms none,json-schema,gbnf --n 3 --write
 
-With `--write` it writes `bench/results/structured-output/<model>-<case>.json`
-and a markdown summary beside it, stamped with the machine and the model's
+With `--write` it writes
+`bench/results/structured-output/<model>-<case>-<arms>.json` and a markdown
+summary beside it, stamped with the machine and the model's
 digest from the server's `/api/tags` when it has one (Ollama).
 """
 
@@ -265,6 +266,9 @@ def main(argv=None) -> int:
     except ProviderError:
         server = None
 
+    # pinned BEFORE the run: a server that restarts mid-run must not leave the
+    # record without the identity of the weights that answered
+    pin = _model_digest(args.base_url, args.model)
     rows = []
     for arm in [a.strip() for a in args.arms.split(",") if a.strip()]:
         rows += run_arm(case, ir, placement, arm, args, recogniser)
@@ -273,8 +277,7 @@ def main(argv=None) -> int:
         "date": datetime.date.today().isoformat(),
         "machine": _machine(), "load_average": load,
         "base_url": args.base_url, "server": server,
-        "model": args.model, "model_pin": _model_digest(args.base_url,
-                                                       args.model),
+        "model": args.model, "model_pin": pin,
         "case": args.case, "n": args.n, "max_tokens": args.max_tokens,
         "grammar_digest": entry["digest"],
         "wire_schema_digest": entry["wire_schema"]["digest"],
@@ -283,9 +286,22 @@ def main(argv=None) -> int:
     }
     print()
     print(render(doc))
+    unreached = [r for r in rows
+                 if (r.get("fault") or "").startswith("ProviderError")]
+    if args.write and unreached:
+        # a sample that never reached the model is not a measurement, and a
+        # results file is read as one; nothing is written
+        print(f"not written: {len(unreached)} of {len(rows)} samples never "
+              f"got an answer from the server (first: "
+              f"{unreached[0]['fault'][:160]})", file=sys.stderr)
+        return 1
     if args.write:
         RESULTS.mkdir(parents=True, exist_ok=True)
-        stem = f"{args.model.replace('/', '_').replace(':', '-')}-{args.case}"
+        # the arms are in the name, so a run split across invocations (a
+        # call can take minutes on a local model) does not overwrite itself
+        arms = "+".join(a.strip() for a in args.arms.split(",") if a.strip())
+        stem = (f"{args.model.replace('/', '_').replace(':', '-')}-"
+                f"{args.case}-{arms}")
         (RESULTS / f"{stem}.json").write_text(json.dumps(doc, indent=2) + "\n",
                                               encoding="utf-8")
         (RESULTS / f"{stem}.md").write_text(render(doc), encoding="utf-8")
