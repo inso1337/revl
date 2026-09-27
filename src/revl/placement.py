@@ -2108,6 +2108,21 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
     return None
 
 
+def _model_schedule_problem(files, processes: dict) -> str | None:
+    """Schedule the routed model actions onto each host's declared devices
+    (item 515, `revl.model_schedule`). Prints the decision, one line per
+    placement, and returns the refusal text when a host cannot satisfy it."""
+    from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
+    try:
+        schedules = model_schedule.placement_schedules(files, processes)
+    except model_schedule.ScheduleRefusal as exc:
+        return str(exc)
+    for host in schedules:
+        for line in host.lines():
+            print(f"  {line}", flush=True)
+    return None
+
+
 # --------------------------------------------------------------------------
 # named-instance placement (roadmap item 10 — the placement horizon)
 # --------------------------------------------------------------------------
@@ -3681,6 +3696,16 @@ def run_placement(files, placement_path: str, once: bool = False,
     tee_problem = tee_placement_diagnostic(placement)
     if tee_problem:
         return abort(tee_problem)
+
+    # --- model scheduling (item 515, slice S4): a process may declare the
+    # devices it offers (`[[processes.<p>.devices]]`), and every routed model
+    # action of a component placed there is scheduled onto one of its declared
+    # candidates. No candidate fitting is a refusal here, before anything
+    # spawns. A composition with no `route model` block schedules nothing and
+    # prints nothing (docs/model-scheduling.md).
+    model_problem = _model_schedule_problem(files, processes)
+    if model_problem:
+        return abort(model_problem)
 
     if placement.get("report_colocation"):
         for advice in colocation_advice(processes, placed, ir):
