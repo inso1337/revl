@@ -1035,15 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**575 .rvl files -> 446 components -> 1165 statements = 331 modeled +
-216 componentless + 28 refused at parse**, and **6382 verdicts compared
-(331 files + 446 components + 130 provide methods + 19 spawn edges + 28
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1165
-confinements + 1165 surfaces + 348 teardowns + 336 provide-clause
-components + 81 config fields + 446 A2 bodies), 6382 agree, 0
+**581 .rvl files -> 455 components -> 1185 statements = 337 modeled +
+216 componentless + 28 refused at parse**, and **6462 verdicts compared
+(337 files + 455 components + 133 provide methods + 20 spawn edges + 28
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1185
+confinements + 1185 surfaces + 351 teardowns + 345 provide-clause
+components + 81 config fields + 455 A2 bodies), 6462 agree, 0
 mismatches**.
 
-Checker alignment over the 331 modeled files. Every bucket recording a
+Checker alignment over the 337 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1081,7 +1081,7 @@ layer.
 | `out-of-fragment` | 57 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
-| `out-of-fragment-approval` | 15 | ratcheted |
+| `out-of-fragment-approval` | 21 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1097,8 +1097,14 @@ buckets are:
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
 - `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_method.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_other_edge.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_helper_reach.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_scoped_extern.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_alias.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_method.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_value_form_method.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl`
