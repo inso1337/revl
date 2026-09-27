@@ -1167,6 +1167,12 @@ fn splitlines(s: Str) -> List[Str] {
 // dedented + split into indented lines. An async extern's `async def` header is
 // reproduced faithfully; the await-seed / awaited call sites it needs are
 // DEFERRED to slice 5 (so an async extern is excluded from the cross-check).
+// The extern classes whose host body crosses a boundary (issue #1504), the
+// reference's `_GATED_EXTERN_CLASSES`.
+fn gated_extern_class(cls: Str) -> Bool {
+  return cls == "emission" || cls == "witnessed" || cls == "acquire"
+}
+
 fn emit_externs(externs: List[Any]) -> List[Str] {
   var out = []
   for (ext of externs) {
@@ -1184,6 +1190,11 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     // marking of its own (the host trace an operator console prints) scrub it.
     // Emitted ONLY for a `Secret[T]`-returning extern, so every other module is
     // byte-identical.
+    // issue #1504: an extern whose body crosses a boundary checks the E-Stop
+    // before its body runs; the gate is the outermost decorator.
+    if (gated_extern_class(value_str(value_field(ext, "class")))) {
+      out = out.push(`@${runtime_ref("estop_gated")}(${py_repr(value_str(value_field(ext, "name")))})`)
+    }
     if (value_bool(value_field(ext, "secret_return"))) {
       out = out.push("@".concat(runtime_ref("secret_result")))
     }
@@ -1470,6 +1481,7 @@ fn runtime_ref(name: Str) -> Str {
   // the `ConfigSchema` argument list and needs no name of its own.
   if (name == "mark_secret") { return "_revl_mark_secret" }
   if (name == "secret_result") { return "_revl_secret_result" }
+  if (name == "estop_gated") { return "_revl_estop_gated" }
   // item 414 (ported per item 429(d)): the recording seam a DIRECT host-extern
   // emission fires through. The alias is the one the reference's `_IMPORT_ALIAS`
   // carries, so the `from runtime import` line and the call site that references
@@ -2992,8 +3004,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     if (body_has_receiver_secret_witness(value_list(value_field(c, "body")), value_list(value_field(ir, "externs")))) { need_mark_secret = true }
   }
   var need_secret_result = false
+  var need_estop_gated = false
   for (e of value_list(value_field(ir, "externs"))) {
     if (value_bool(value_field(e, "secret_return"))) { need_secret_result = true }
+    if (gated_extern_class(value_str(value_field(e, "class")))) { need_estop_gated = true }
   }
   // Collect the needed imports in any order; `list_sort` fixes the canonical
   // codepoint order below. Each alias-bearing name carries its `_revl_` alias.
@@ -3009,6 +3023,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
   if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
   if (need_secret_result) { imports = imports.push("secret_result as _revl_secret_result") }
+  if (need_estop_gated) { imports = imports.push("estop_gated as _revl_estop_gated") }
   if (imports.length() > 0) {
     let sorted_imports = list_sort(list_dedup(imports))
     out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
