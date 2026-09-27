@@ -49,7 +49,6 @@ byte-compare) lives in `tests/test_gate_crate_drift.py` and needs no toolchain.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
@@ -122,6 +121,7 @@ from revl.run_rust import rust_runtime_reason  # noqa: E402
 # oracle so the crate is measured against the same programs and the same
 # guarantee vocabulary the oracle uses. A copy here would be free to drift.
 import test_selfhost_lower as oracle  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
 _RUST_REASON = rust_runtime_reason()
 pytestmark = pytest.mark.skipif(
@@ -1676,11 +1676,9 @@ def _crate_emits(binary: Path, tier: str, documents: list[str]) -> list[dict]:
 def _reference_rust_emitter():
     """`backends/rust/emit.py`, loaded by path the way the backends' own tests
     load it, so the comparison is against the emitter under test."""
-    spec = importlib.util.spec_from_file_location(
-        "revl_rust_emit_for_gate_crate", ROOT / "backends" / "rust" / "emit.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "revl_rust_emit_for_gate_crate",
+        ROOT / "backends" / "rust" / "emit.py")
     return module
 
 
@@ -1688,12 +1686,9 @@ def _declared_emit_corpus() -> set[str]:
     """The port's own coverage declaration — `test_selfhost_emit_rust.py::
     CORPUS`, read from the file rather than restated here, so the crate oracle
     and the port's byte-exact oracle cannot drift apart."""
-    spec = importlib.util.spec_from_file_location(
+    module = load_by_path(
         "revl_selfhost_emit_rust_declaration",
         ROOT / "tests" / "test_selfhost_emit_rust.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
     declared = set(module.CORPUS)
     assert declared, "the port declares no covered corpus"
     return declared
@@ -1817,11 +1812,9 @@ def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
     code, same message. A divergence means the cheap gate on every PR is
     measuring something other than the artifact that ships.
     """
-    spec = importlib.util.spec_from_file_location(
-        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
-    census = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = census
-    spec.loader.exec_module(census)
+    census = load_by_path(
+        "gate_reference_census",
+        ROOT / "tools" / "gate_reference_census.py")
 
     cases = [(cid, src) for cid, src in census.load_corpus(oracle)
              if cid not in _CROSS_CHECK_EXCLUSIONS]
