@@ -49,7 +49,7 @@ from http.server import BaseHTTPRequestHandler
 
 from .http_guard import (DispatchLock, Exposure, ExposureError, Listener,
                          request_refusal)
-from .live_profile import ProfileSource, ProfileUnavailable
+from .live_profile import DEFAULT_SETTLE_MS, ProfileSource, ProfileUnavailable, is_estop
 
 PROTOCOL_VERSION = "2026-07-28"
 SUPPORTED_VERSIONS = (PROTOCOL_VERSION,)
@@ -139,12 +139,15 @@ class Authenticator:
         profile file is broken)."""
         return self.source.registry
 
-    def authenticate(self, headers, peer_cert) -> tuple[object | None, str, int]:
+    def authenticate(self, headers, peer_cert, *, registry=None) -> tuple[object | None, str, int]:
         """`(operator, "", 200)`, or `(None, why, status)`: 401 for the caller's
-        credential, 503 when the profile itself cannot be read."""
-        registry, broken = self.source.current()
+        credential, 503 when the profile itself cannot be read. `registry`
+        authenticates against a given registry instead of the live one (the
+        E-Stop fallback)."""
         if registry is None:
-            return None, broken or "no operator profile is loaded", 503
+            registry, broken = self.source.current()
+            if registry is None:
+                return None, broken or "no operator profile is loaded", 503
         authorizations = _header_values(headers, "Authorization")
         if self.mode == "mtls":
             if authorizations:
@@ -466,7 +469,8 @@ class HttpTransport:
 
     def __init__(self, dispatcher, *, registry=None, exposure: Exposure,
                  auth: str = "bearer", server_module=None,
-                 profile_path: str | None = None) -> None:
+                 profile_path: str | None = None,
+                 profile_settle_ms: int = DEFAULT_SETTLE_MS) -> None:
         if server_module is None:
             from . import server as server_module  # noqa: PLC0415
         if auth == "mtls" and not exposure.tls_client_ca:
@@ -476,8 +480,9 @@ class HttpTransport:
         self.server = server_module
         self.exposure = exposure
         try:
-            source = ProfileSource(profile_path) if profile_path else None
-        except ProfileUnavailable as error:
+            source = (ProfileSource(profile_path, settle_ms=profile_settle_ms)
+                      if profile_path else None)
+        except (ProfileUnavailable, ValueError) as error:
             raise TransportError(str(error)) from error
         self.authenticator = Authenticator(registry, auth, source=source)
         self.binding = CallerBinding(server_module, lambda: self.authenticator.registry)
@@ -521,8 +526,9 @@ class HttpTransport:
         print(f"revl mcp: MCP {PROTOCOL_VERSION} on {scheme}://{host}:{port}{ENDPOINT} "
               f"(auth: {self.authenticator.mode}; one request at a time)", file=stderr)
         if self.latch.path:
-            # a broken or changing profile refuses every request, revl_estop
-            # included; the latch is the way to halt that needs no request
+            # revl_estop is accepted even while the profile settles or is broken
+            # (under the last adopted profile); the latch halts with no request
+            # at all, the one path that needs no adopted profile
             print(f"revl mcp: out-of-band E-Stop: revl estop --latch {self.latch.path}",
                   file=stderr)
         try:
@@ -555,9 +561,7 @@ class HttpTransport:
         peer = request.request.getpeercert() \
             if hasattr(request.request, "getpeercert") else None
         operator, why, status = self.authenticator.authenticate(request.headers, peer)
-        if operator is None and status == 503:
-            return 503, _rpc_error(None, -32603, why), [close]
-        if operator is None:
+        if operator is None and status != 503:
             challenge = ('Bearer realm="revl", error="invalid_token"'
                          if self.authenticator.mode == "bearer" else 'Bearer realm="revl"')
             return 401, _rpc_error(None, -32600, why), \
@@ -572,7 +576,22 @@ class HttpTransport:
             message = json.loads(body.decode("utf-8"))
         except (UnicodeDecodeError, ValueError):
             return 400, _rpc_error(None, -32700, "parse error"), []
+        if operator is None:
+            # the profile is settling or broken: every request is refused except
+            # an E-Stop from an operator authorized under the LAST ADOPTED
+            # profile. E-Stop is never fenced, and it only stops things.
+            operator = self._estop_fallback(message, request.headers, peer)
+            if operator is None:
+                return 503, _rpc_error(None, -32603, why), [close]
         return self.process(message, operator, request.headers)
+
+    def _estop_fallback(self, message, headers, peer):
+        last = getattr(self.authenticator.source, "last_adopted", None)
+        if not is_estop(message) or last is None:
+            return None
+        operator, _why, _status = self.authenticator.authenticate(
+            headers, peer, registry=last)
+        return operator
 
     def process(self, message, operator, headers) -> tuple[int, dict | None, list]:
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" \

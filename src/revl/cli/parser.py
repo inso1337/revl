@@ -40,6 +40,15 @@ def _add_exposure_arguments(sub) -> None:
                           "is refused; one with no Origin is not a browser page")
 
 
+def _add_profile_settle_argument(sub) -> None:
+    sub.add_argument("--profile-settle-ms", type=int, default=1000, metavar="MS",
+                     help="adopt an edited --operator-profile only once it reads "
+                          "identical twice this far apart (default: 1000). "
+                          "Requests are refused while it settles, except "
+                          "revl_estop. 0 removes the protection against "
+                          "adopting a half-written file")
+
+
 def _add_mcp_http_arguments(sub) -> None:
     """`--http HOST:PORT` and its identity options for `revl mcp serve` and
     `revl mcp proxy` (docs/mcp-http-transport.md)."""
@@ -989,6 +998,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 "the directory the server was started in; anything "
                                 "outside is refused before it is read")
     _add_mcp_http_arguments(mcp_serve)
+    _add_profile_settle_argument(mcp_serve)
     mcp_schema = mcp_sub.add_parser("schema",
                                     help="project provided services to MCP tool definitions")
     mcp_schema.add_argument("files", nargs="+")
@@ -1049,6 +1059,7 @@ def build_parser() -> argparse.ArgumentParser:
                                 "resource value is written to the durable approval "
                                 "log (default: withheld)")
     _add_mcp_http_arguments(mcp_proxy)
+    _add_profile_settle_argument(mcp_proxy)
 
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")

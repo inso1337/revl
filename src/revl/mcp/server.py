@@ -3776,9 +3776,10 @@ def _error(request_id, code: int, message: str) -> dict:
 def serve(stdin=None, stdout=None, before=None) -> int:
     """Read newline-delimited JSON-RPC from stdin until EOF.
 
-    `before`, when given, runs before each message and returns None to go on or
-    a reason to refuse that message (issue #1463: `live_profile.StdioBinding`
-    re-binds the session to the operator profile file as it is now)."""
+    `before(message)`, when given, runs before each message and returns None to
+    go on or a reason to refuse that message (issue #1463:
+    `live_profile.StdioBinding` re-binds the session to the operator profile
+    file as it is now)."""
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for line in stdin:
@@ -3791,7 +3792,7 @@ def serve(stdin=None, stdout=None, before=None) -> int:
             stdout.write(json.dumps(_error(None, -32700, "parse error")) + "\n")
             stdout.flush()
             continue
-        refusal = before() if before is not None else None
+        refusal = before(message) if before is not None else None
         if refusal is not None:
             if isinstance(message, dict) and message.get("id") is not None:
                 stdout.write(json.dumps(_error(message["id"], -32603, refusal)) + "\n")

@@ -729,7 +729,7 @@ class Proxy:
             if not isinstance(message, dict):
                 self._send(_error(None, -32600, "invalid request"))
                 continue
-            refusal = before() if before is not None else None
+            refusal = before(message) if before is not None else None
             if refusal is not None:
                 if message.get("id") is not None:
                     self._send(_error(message["id"], -32603, refusal))
@@ -845,6 +845,8 @@ def run(command: list[str], *, undo: dict | None = None,
                 transport = HttpTransport(ProxyDispatcher(proxy),
                                           registry=http.get("registry"),
                                           profile_path=http.get("profile_path"),
+                                          profile_settle_ms=http.get("profile_settle_ms",
+                                                                     1000),
                                           exposure=http["exposure"],
                                           auth=http.get("auth", "bearer"),
                                           server_module=proxy.server)
