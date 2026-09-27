@@ -492,6 +492,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
         # in services_host.rvl go through the native chain byte-exact.
         "services_host_stream.rvl",
+        # item 391: the placement shapes selfhost/emit_py.rvl used to drop. The
+        # EMITTER half is byte-exact on the reference IR; the native IR producer
+        # drops three things the reference IR carries: the `routes` entry of a
+        # routed require (so no router, no `realm_label`, and the key back in
+        # the inject gate), every operation declared with a `commutative` or
+        # `idempotent` modifier (the Ledger service comes out empty), and the
+        # `undo_captures` pin on a method-body effect.
+        "../emit_py_placement.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at
