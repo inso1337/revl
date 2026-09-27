@@ -179,11 +179,15 @@ def route_table():
 # sealed evidence, from `revl.model_evidence` itself
 # ==========================================================================
 
-def seal(*, step_index, role, placement, answer, prompt):
+def seal(*, step_index, role, placement, answer, prompt, recorded_at=None):
     """One item 517 record, sealed by the real sealer and verified by the
     real verifier. Slice 2 built these locally against a stub; the shape is
     what must not drift and this file holds a composition, so it pays the
-    real thing."""
+    real thing.
+
+    ``recorded_at`` is the sealer's own default, the wall clock to the second,
+    unless a caller pins it. A caller that compares two drives byte for byte
+    has to pin it, or the two drives differ whenever they straddle a second."""
     return me.seal(
         KEY, component=COMPONENT, step_index=step_index, role=role,
         residence="off_device", model_digest=MODEL_DIGEST,
@@ -192,7 +196,7 @@ def seal(*, step_index, role, placement, answer, prompt):
                         "value": me.digest(prompt), "reason": None},
         origins=["input"], candidates=[answer], chosen=0,
         outcome="validated", sampling=dict(SAMPLING), policy_digest=POLICY,
-        fallback_depth=0)
+        fallback_depth=0, recorded_at=recorded_at)
 
 
 def answer_digest(text):

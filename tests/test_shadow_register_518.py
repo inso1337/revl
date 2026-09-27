@@ -55,6 +55,16 @@ def moved_ir():
     return compile_source(live.CANDIDATE_MOVED_SRC, "candidate_moved.rvl")
 
 
+#: Every record this file seals carries this time. `window_id` digests the
+#: sealed records whole, `recorded_at` included, so a test that drives the
+#: composition twice and expects the same window has to hold the clock still:
+#: with the sealer's wall-clock default, two drives that straddle a second
+#: boundary are two different windows. That is what reddened
+#: `test_the_window_that_promoted_cannot_land_again_after_a_revert` on a slow
+#: runner.
+RECORDED_AT = "2026-01-01T00:00:00+00:00"
+
+
 def register():
     return reg.PromotionRegister({SUMMARIZE: INCUMBENT, CLASSIFY: INCUMBENT})
 
@@ -78,7 +88,8 @@ def sides(incumbent_ir, candidate_ir, route, *, disagree_at=None):
             step_index=step, role=route.incumbent_role,
             placement=PLACEMENT[route.incumbent_role],
             answer=live.answer_digest(f"said-{step}"),
-            prompt=f"asked-{step}"))
+            prompt=f"asked-{step}",
+            recorded_at=RECORDED_AT))
 
     def candidate(crossing):
         step = crossing[1]
@@ -97,7 +108,8 @@ def sides(incumbent_ir, candidate_ir, route, *, disagree_at=None):
         return srt.answered(candidate_ir, live.COMPONENT, live.seal(
             step_index=step, role=route.candidate_role,
             placement=PLACEMENT[route.candidate_role],
-            answer=live.answer_digest(said), prompt=f"asked-{step}"))
+            answer=live.answer_digest(said), prompt=f"asked-{step}",
+            recorded_at=RECORDED_AT))
 
     return incumbent, candidate, calls
 
@@ -272,8 +284,9 @@ def test_the_window_that_promoted_cannot_land_again_after_a_revert(
     assert again.refusal[0] == reg.WINDOW_SUPERSEDED
     assert the_register.arm(SUMMARIZE) == INCUMBENT
 
-    # The composition is deterministic, so a second full drive reproduces the
-    # superseded window byte for byte and is refused as the same evidence.
+    # The composition is deterministic and the sealer's clock is pinned
+    # (RECORDED_AT), so a second full drive reproduces the superseded window
+    # byte for byte and is refused as the same evidence.
     replayed, replayed_ledger, _c = land(the_register, SUMMARIZE,
                                          incumbent_ir, same_ir)
     assert reg.window_id(replayed_ledger.entries) == landed.arm.window
