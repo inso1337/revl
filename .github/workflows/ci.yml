@@ -601,6 +601,16 @@ jobs:
       # tests/test_backend_suite_roots_combine.py, which needs no toolchain and
       # so covers the tiers this job cannot install.
       - run: cd backends/python && .venv/bin/pytest ../wasm/ tests/ -q
+      # Issue #1465: tck/tests/test_tck.py was collected in NO CI job (it sits
+      # outside tests/, so the root `pytest tests/ -q` runs never touch it, and
+      # no other job named it either). tck/README.md documents exactly this
+      # invocation -- `backends/python/.venv/bin/python -m pytest
+      # tck/tests/test_tck.py -q` -- run under the cordis-py venv this job
+      # already built above, because the kit's own worked-example test
+      # (test_py_reference_run_is_ok_and_a8_async_now_conforms) drives the real
+      # cordis-py runtime and otherwise just skips. Verified locally: 6 passed
+      # 1 skipped without cordis-py, 7 passed with the pinned fork installed.
+      - run: backends/python/.venv/bin/python -m pytest tck/tests/test_tck.py -q
 
   # The root `tests/` suite, WITH the cordis-py runtime.
   #
