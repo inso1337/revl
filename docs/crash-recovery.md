@@ -116,8 +116,10 @@ acknowledged is on disk before the effect it describes is allowed to matter —
 the write-ahead discipline). Three record shapes:
 
 ```jsonc
-// 1. header (first line)
-{"record": "header", "walVersion": 1, "generation": 7, "guarantee": "…"}
+// 1. header (first line). `composition` is the digest of the IR the log was
+//    opened with (issue #1477); `revl recover --composition` checks it.
+{"record": "header", "walVersion": 1, "generation": 7, "guarantee": "…",
+ "composition": "sha256:…"}
 
 // 2. one per committed effect, written as it commits
 {"record": "effect", "seq": 3, "component": "UserCache", "stepIndex": 4,
@@ -380,9 +382,9 @@ by default; a real host supplies an adapter over the actual filesystem/database)
 with every durable referent the WAL says was created, runs the reconstructible
 inverses against it, and the **residue proof** is the set of referents still
 present afterward. Clean iff that set is empty. The `World` is the catch:
-`revl recover` has no way to bind a real one yet, so today every CLI run is a
-model run, and the proof is a proof about the model. Section 5b says what that
-means for the output and the exit status.
+without `--composition`, `revl recover` runs against the model, and the proof
+is a proof about the model. Section 5b says what that means for the output and
+the exit status, and section 5c how to recover against the real world.
 
 ### 5b. The model is not the world (issue #1477)
 
@@ -391,10 +393,9 @@ through a `World` adapter. The adapter declares what it is with `kind`:
 `"model"` for an in-memory stand-in, `"real"` for an adapter over the actual
 outside world. The default is `"model"`, and `DictWorld` is one.
 
-`revl recover` has no way to supply a real adapter yet, so the CLI always runs
-against `DictWorld`. Nothing it reports as ran, rolled back, re-attempted,
-re-issued or reclaimed happened to a file, a row or a remote service. The
-output says so:
+Without `--composition` (section 5c), the CLI runs against `DictWorld`.
+Nothing it reports as ran, rolled back, re-attempted, re-issued or reclaimed
+happened to a file, a row or a remote service. The output says so:
 
 - the verdict JSON carries `"world": "model"` (or `"real"` for an adapter that
   declares it), on every verdict, including roll-forward and fork-retired,
@@ -433,9 +434,64 @@ they found them. What a model run still writes is world-independent: the
 roll-forward window's `discharge` record and a finalized two-phase admission's
 records, as before.
 
-A real world path, where `revl recover` binds the composition's own externs and
-host bodies and replays the WAL's discharge descriptors against them, is the
-rest of issue #1477.
+### 5c. Recovering against the real world (issue #1477)
+
+```
+revl recover --wal run.wal --composition agent.rvl [--config config.toml]
+```
+
+`--composition` names the composition that wrote the WAL, as passed to `revl
+run`, and `--config` the config it ran with. Recover then:
+
+1. **Checks the composition against the log.** A WAL opened with an IR carries
+   the IR's digest in its header (`composition`, a sha256 over the canonical
+   IR with each `.rvl` path reduced to its basename, so the working directory
+   does not matter). Recover compiles the files and refuses, naming both
+   digests, when they differ. It also refuses a WAL whose header carries no
+   digest: one written before this change, or opened without an IR. Replaying a
+   log through another composition would call the wrong host bodies with the
+   right arguments.
+2. **Loads the composition's emitted module without activating it**, through
+   the driver's own plug seam, so extern config and bound secrets are
+   installed and no activation body runs again.
+3. **Boots only the providers the open descriptors call through.** A
+   descriptor whose `call.receiver` is a required-service key needs the live
+   provider. Recover boots the components that provide those keys, and what
+   they require, and names them in the verdict (`binding.booted`): booting a
+   provider runs its activation. A second recover with nothing open boots
+   nothing.
+4. **Replays the open discharge descriptors through the runtime's own abort
+   path** (`runtime.replay_descriptors`): witnessed inverses newest first with
+   their fences, then compensations newest first under the Phase-2 budget.
+   The runtime appends an `aborted` record naming every seq that ran, which
+   settles it: a later recover, real or model, finds it settled.
+
+The verdict carries `"world": "real"` and a `binding` object (`composition`,
+`digest`, `booted`). Per descriptor:
+
+| runtime outcome | in the verdict |
+|---|---|
+| `ran` | a transactional inverse in `transactionalRolledBack`; a compensation in `compensationsRan` (performed, its host body returned; not residue) |
+| `settled` | `settledByReplay`: an earlier replay already settled it, nothing re-run |
+| `failed` | residue (`restore-residue` or `compensation-residue`, outcome `failed`) |
+| `fenced` | residue (`fenced-residue`): an earlier attempt spent the at-most-once fence |
+| `unresolved` | residue (`unresolved-residue`): the call names no host body in this binding |
+| `stranded` | residue (`stranded-residue`): an E-Stop is in force, nothing ran |
+
+A descriptor whose arguments were not captured at registration (`args: null`,
+a compensation whose argument is itself a call) or were redacted as
+`Secret[T]` is never handed to the runtime: recover never guesses an argument.
+It is residue, named by its call, for example `a.y(<not captured>)`.
+
+The binding re-issues discharge descriptors and nothing else. A legacy
+boundary inverse (`record_boundary`), an owed deferred emission and a shared
+reclaim are reported as `unbound-residue` (or an unresolved reclaim), not
+attempted, and no fence is spent on them.
+
+What a real recover does not change: a bare emission, and the forward half of
+a compensated one, still crossed the boundary. A compensation offsets it and
+never inverts it, so those `effect` records stay residue in the verdict even
+after their compensation ran. The exit status follows the residue as always.
 
 ### Recovering a session that was forked (item 250)
 

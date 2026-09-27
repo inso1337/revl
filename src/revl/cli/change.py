@@ -550,10 +550,17 @@ def _run_recover(args) -> int:
         if getattr(args, "approval_policy", None):
             session.approval_policy = args.approval_policy
 
+    world = None
     try:
-        report = recover(args.wal, session=session, snapshot=snapshot,
-                         reissue=reissue,
+        # issue #1477: `--composition` binds the REAL world, the composition's
+        # own host bodies and providers, checked against the WAL header's digest.
+        if getattr(args, "composition", None):
+            world = _bind_composition(args)
+        report = recover(args.wal, world=world, session=session,
+                         snapshot=snapshot, reissue=reissue,
                          forward_admissions=getattr(args, "forward", False))
+        if world is not None:
+            report["binding"] = world.describe()
     except (RecoveryError, WALIntegrityError, OSError) as error:
         # A corrupt or unreadable WAL is a diagnostic, not a traceback: recover
         # is the tool an operator reaches for AFTER a crash, so a mid-file
@@ -561,12 +568,28 @@ def _run_recover(args) -> int:
         # print `error:` and exit non-zero, never dump a stack.
         print(f"error: {error}", file=sys.stderr)
         return 1
+    finally:
+        if world is not None:
+            world.close()
 
     if args.json:
         print(json.dumps(report, indent=2))
     else:
         print(render(report))
     return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
+
+
+def _bind_composition(args):
+    """The real world for `revl recover --composition FILE` (issue #1477)."""
+    from ..errors import RevlError  # noqa: PLC0415
+    from ..recover_binding import bind  # noqa: PLC0415
+    from ..recovery import RecoveryError  # noqa: PLC0415
+    from ..run import _load_config  # noqa: PLC0415
+    try:
+        config = _load_config(getattr(args, "config", None))
+    except (RevlError, OSError) as error:
+        raise RecoveryError(f"cannot read config {args.config}: {error}") from None
+    return bind(list(args.composition), args.wal, config=config)
 
 
 #: `revl recover`'s exit status when the modelled residue is clean, the model
