@@ -52,6 +52,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .structured import MODES as STRUCTURED_MODES
+
 #: The wire formats this package speaks. CLOSED, so a typo is a refusal.
 PROVIDERS = ("openai-compatible", "anthropic", "gemini")
 
@@ -62,7 +64,7 @@ RESIDENCES = ("on_device", "off_device")
 
 _COMMON_FIELDS = frozenset({
     "provider", "model", "base_url", "api_key_env", "max_tokens",
-    "temperature", "timeout", "residence", "reaches",
+    "temperature", "timeout", "residence", "reaches", "structured_output",
 })
 _PROVIDER_FIELDS = {
     "openai-compatible": frozenset(),
@@ -118,6 +120,9 @@ class Binding:
     project: str | None = None
     location: str | None = None
     anthropic_version: str = DEFAULT_ANTHROPIC_VERSION
+    #: how a `validated` crossing's grammar is attached (issue #1462);
+    #: `revl.providers.structured.MODES` lists the values per provider
+    structured_output: str = ""
 
     @property
     def endpoint(self) -> str:
@@ -284,6 +289,12 @@ def _binding(role: str, entry, source: str) -> Binding:
                              f"device. The residence of an endpoint can be "
                              f"narrowed by configuration, never widened")
 
+    structured = entry.get("structured_output",
+                           STRUCTURED_MODES[provider][0])
+    if structured not in STRUCTURED_MODES[provider]:
+        raise _refuse(where, f"`structured_output` for {provider} must be one "
+                             f"of {', '.join(STRUCTURED_MODES[provider])}")
+
     reaches = entry.get("reaches", [])
     if not isinstance(reaches, list) or not all(
             isinstance(t, str) and t for t in reaches):
@@ -302,6 +313,7 @@ def _binding(role: str, entry, source: str) -> Binding:
         project=project, location=location,
         anthropic_version=entry.get("anthropic_version",
                                     DEFAULT_ANTHROPIC_VERSION),
+        structured_output=structured,
     )
 
 
