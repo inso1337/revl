@@ -90,6 +90,7 @@ _IMPORT_ALIAS = {
     "clear_session_owner": "_revl_clear_session_owner",
     "mark_secret": "_revl_mark_secret",
     "secret_result": "_revl_secret_result",
+    "estop_gated": "_revl_estop_gated",
     "declare_secret_types": "_revl_declare_secret_types",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
@@ -4212,6 +4213,11 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
     return out
 
 
+#: Extern classes whose host body crosses a boundary (issue #1504). A `pure`
+#: extern is a computation: gating it would stop value code, not a crossing.
+_GATED_EXTERN_CLASSES = frozenset({"emission", "witnessed", "acquire"})
+
+
 def _emit_externs(externs: list) -> "_Lines":
     out = _Lines()
     # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
@@ -4289,6 +4295,11 @@ def _emit_externs(externs: list) -> "_Lines":
         # `Map` the type is spelled out too, because the walk cannot otherwise
         # tell a `Map` from a record — both are a `dict` here — and would skip
         # the map's keys as if they were field names.
+        # issue #1504: an extern whose body crosses a boundary checks the E-Stop
+        # BEFORE its body runs, in whatever position it is called. The gate is
+        # the outermost decorator, so nothing else runs first.
+        if ext.get("class") in _GATED_EXTERN_CLASSES:
+            out.add(0, f"@{_runtime_ref('estop_gated')}({ext['name']!r})")
         if ext.get("secret_return"):
             returns = ext.get("returns")
             needs_shape, _ = _secret_shape_facts([returns], _PY_TYPES)
@@ -5383,6 +5394,9 @@ def emit(ir: dict) -> str:
         # through `emitter.uses`.
         | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
            else set())
+        # issue #1504: the E-Stop gate on every boundary-crossing extern
+        | ({"estop_gated"} if any(ext.get("class") in _GATED_EXTERN_CLASSES
+                                  for ext in externs) else set())
         # item 421 F6: a declared secret type that reaches a `Map` also needs the
         # record field types emitted, so the walk can tell the two apart.
         | ({"declare_secret_types"} if secret_types else set())
