@@ -199,8 +199,11 @@ def test_the_baseline_is_well_formed_and_documented():
     assert isinstance(data.get("comment"), list) and data["comment"]
     entries = data["unreachable"]
     assert entries, "an empty baseline should be deleted, not kept"
-    for num, note in entries.items():
+    for num, entry in entries.items():
         assert num.isdigit(), num
+        # the structured witness is checked by tests/test_landing_witness.py;
+        # this reads only the prose beside it
+        note = entry["note"]
         assert len(note) > 40, f"#{num}: the note says too little: {note!r}"
         assert "agent/" in note or "#" in note, (
             f"#{num}: the note names neither the base branch it went to nor "
