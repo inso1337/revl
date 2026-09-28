@@ -345,12 +345,14 @@ def test_a_remote_dispatch_refuses_before_it_touches_the_pool(config,
     if config == BLOCKED:
         with pytest.raises(pd.DispatchError, match=r"revl\[crypto\]"):
             call("192.0.2.10")
+        assert not pool_dir.exists()
     else:
-        # Past the check, it fails on the pool that does not exist.
+        # Past the check, it fails on the pool that does not exist. (Taking
+        # the pool lock on the way may create the directory, so only the
+        # refusal is asserted to leave nothing behind.)
         with pytest.raises(Exception) as caught:
             call("192.0.2.10")
         assert EXTRA not in str(caught.value)
-    assert not pool_dir.exists()
     assert pd.signer_exposure("127.0.0.1", "x") is False
     assert pd.signer_exposure("localhost", "x") is False
 
@@ -489,6 +491,59 @@ def test_pool_probe_to_a_remote_member_names_the_extra(config, tmp_path,
         assert code == 1, err
         assert EXTRA not in err
         assert connections == [("192.0.2.10", 9)]
+
+
+class _LockTaken(Exception):
+    """Raised by the stub pool lock: the dispatch reached a locked
+    transaction."""
+
+
+def test_a_remote_dispatch_refuses_before_the_pool_lock_and_writes_nothing(
+        config, tmp_path, monkeypatch):
+    """Against a real pool with a member and a ledger on disk. Without the
+    extra, a dispatch to a non-loopback peer refuses BEFORE its first locked
+    transaction (issue #1198's `pool.lock`): the lock is never taken, no lock
+    file appears, and every file in the pool directory, the ledger included,
+    is byte-identical afterwards. With the extra, the same call does reach the
+    lock, which is what makes the first half a statement about ordering and
+    not about a stub that never fires."""
+    from revl import pool_state
+
+    pool_dir, record = _pool_with_one_member(tmp_path)
+    from revl import peer_pool as pp
+
+    pd.save_ledger(pool_dir, pd.DeliveryLedger(record["pool_id"],
+                                               pp.canonical_digest(record)))
+    before = {path.name: path.read_bytes()
+              for path in sorted(pool_dir.iterdir())}
+    assert pd.LEDGER_FILE in before
+    assert pool_state.LOCK_FILE not in before
+
+    taken = []
+
+    @contextlib.contextmanager
+    def lock(directory):
+        taken.append(Path(directory))
+        raise _LockTaken()
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(pool_state, "locked", lock)
+    call = lambda: pd.dispatch_one(  # noqa: E731
+        pool_dir=pool_dir, peer_id="worker", host="192.0.2.10", port=9,
+        source=b"pub fn f() -> Int {\n  return 1\n}\n",
+        runner=pd.RUNNER_TEST_PY, dispatch_identity=PROBE_OPERATOR,
+        attesting_identity=PROBE_OPERATOR, timeout=1.0)
+    if config == BLOCKED:
+        with pytest.raises(pd.DispatchError, match=r"revl\[crypto\]"):
+            call()
+        assert taken == []
+    else:
+        with pytest.raises(_LockTaken):
+            call()
+        assert taken == [pool_dir]
+    after = {path.name: path.read_bytes()
+             for path in sorted(pool_dir.iterdir())}
+    assert after == before
 
 
 def test_pool_probe_on_loopback_keeps_the_pure_path(config, tmp_path, capsys):
