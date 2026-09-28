@@ -32,7 +32,6 @@ checker is an oracle, and a baseline over the tree would red on every unrelated
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -40,15 +39,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _census():
-    spec = importlib.util.spec_from_file_location(
+    module = load_by_path(
         "checker_reference_census",
         ROOT / "tools" / "checker_reference_census.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
     return module
 
 

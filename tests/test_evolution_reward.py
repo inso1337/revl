@@ -34,28 +34,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _load(name, path):
     """The module at `path`, registered as `name`, loaded at most once.
 
-    An entry already registered under `name` from the same file is returned
-    as it is. This used to build a fresh module and REPLACE that entry, and
-    `tools/evolution_controller.py` had already imported `evolution_reward`
-    at collection time: its `Verdict` subclasses the first module's class, and
-    every later `import evolution_reward` got the second. So
+    This used to build a fresh module and REPLACE the `sys.modules` entry,
+    while `tools/evolution_controller.py` had already imported
+    `evolution_reward` at collection time: its `Verdict` subclassed the first
+    module's class and every later `import evolution_reward` got the second, so
     `tests/test_evolution_controller.py::test_the_stage_verdict_inherits_item_536s_rather_than_restating_it`
-    failed whenever this file ran first in a session.
+    failed whenever this file ran first. `tests/_load_by_path.py` reuses an
+    entry loaded from the same file.
     """
-    existing = sys.modules.get(name)
-    if existing is not None and getattr(existing, "__file__", None) and \
-            Path(existing.__file__).resolve() == Path(path).resolve():
-        return existing
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    return load_by_path(name, path)
 
 
 @pytest.fixture(scope="module")

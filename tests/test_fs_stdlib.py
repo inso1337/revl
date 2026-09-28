@@ -131,7 +131,8 @@ def _fs_module():
     """The emitted py module for stdlib/fs.rvl, so the real `write`/`restore`/
     ... `@py` bodies can be called directly. Registered in `sys.modules` before
     exec so the emitted `Ok`/`Err` dataclasses can resolve their annotations."""
-    import emit  # noqa: PLC0415  (backends/python on path)
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     ir = _ir(_component("Probe", [_effect("write", "artifact.txt", "x")]))
     module = types.ModuleType("fs_probe_mod")
     sys.modules["fs_probe_mod"] = module
