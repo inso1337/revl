@@ -955,7 +955,25 @@ LIFO), ending in a checked verdict + residue proof
 - `--wal FILE` - a write-ahead log written by `revl run --wal` (required).
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
-- `--json` - machine-readable output.
+- `--approval-policy auto` - on `--restore`, re-arm the auto-approve policy the
+  snapshot was taken under, so a class-(c) activation crossing re-prompts
+  instead of firing unprompted.
+- `--policy POLICY` - the boundary-policy file. On `--restore` it re-binds the
+  posture the snapshot was taken under; a `recovery may re-issue owed
+  emissions` rule also turns on the item-440 re-issue seam.
+- `--forward` - finalize forward a two-phase admission whose runtime advanced
+  past the crash and whose surface still matches. Without it, recover only
+  reports each un-finalized decision.
+- `--model-only` - accept a run against the in-memory model (see below).
+- `--json` - machine-readable output. The verdict carries `world`.
+
+`revl recover` cannot bind the real outside world yet, so it replays against an
+in-memory model (`DictWorld`). Every call it reports is marked `[modelled, not
+performed]`, the verdict carries `"world": "model"` and `"worldCalls"`, and a
+model run never writes an at-most-once fence to the WAL. Exit status: `0`
+clean (with `--model-only` if the model stood in for any call), `1` honest
+residue, `3` clean in the model after the model stood in for at least one call,
+without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
 
 ### `revl estop`
 
