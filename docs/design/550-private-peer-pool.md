@@ -412,7 +412,9 @@ can drop its packets.
 Limits, stated. A heartbeat proves the member's key is in use at an address
 the operator can reach at that moment; it does not prove the peer will run the
 next task, and it proves nothing about a machine the operator cannot reach.
-`health.json` has the same single-writer limit as the roster and the ledger.
+`health.json` is written under the same pool lock as the roster and the
+ledger, and re-read under it after the exchange, so two probes of two members
+keep both rows.
 A shared-key member has no key pair for a heartbeat to verify under, so it is
 never `live`. It cannot run `pool serve` either, which already needs an
 identity key, so this adds no new gap; it is the same pressure toward
@@ -446,7 +448,10 @@ terms. Refused on `pool-identity`. Pinned by `another-charter`.
 **A5. Join replay.** A captured join record is submitted again, or twice
 concurrently. Refused on `replayed-join` from the roster's spent-nonce ledger,
 and on `duplicate-member` if the nonce ledger were somehow bypassed, so there
-are two independent refusals on the path to a second admission. A refused join
+are two independent refusals on the path to a second admission. Across two
+operator processes this rests on the pool lock: the gate's read of the
+spent-nonce set and its write of the roster are one transaction (issue #1198).
+A refused join
 does NOT spend the nonce, so fixing the cause of a refusal and retrying the same
 request works, which is also tested.
 
@@ -494,9 +499,18 @@ parametrized hostile-input test over ten malformed records.
   closed that: it is now `len(evidence_digests)`, recounted by
   `pool_receipt.count_evidence` from receipts the pool verified, and there is
   no parameter through which a count can be stated.
-* The roster is a JSON file with no concurrency control. Two operators admitting
-  at once on a shared directory would race. A single-writer operator is the
-  assumed deployment and a durable multi-writer roster is not designed here.
+* The roster, the key directory, the ledger and the health record are JSON
+  files in one directory. Since issue #1198's concurrency slice every writer
+  holds an exclusive lock on `pool.lock` in that directory for its whole
+  read-modify-write, never across the network, and every file is replaced
+  atomically (`src/revl/pool_state.py`), so several operator processes on one
+  machine or one shared POSIX filesystem can write the pool at once without
+  losing an update. What that does NOT give: the lock is advisory, so it binds
+  `revl` and not another program editing the files; `flock` over a network
+  filesystem is only as good as that filesystem's locking; and a reader that
+  takes no lock (`pool status`) sees each file whole but may see a roster from
+  one transaction and a ledger from the next. A replicated multi-operator pool
+  is still not designed here.
 * `Roster.outstanding` is populated by whatever dispatches work. That is now
   `pool_dispatch`, so a withdrawal reports the tasks the peer really owed; with
   no dispatcher in the picture it still reports an empty `orphaned` set, which
