@@ -897,8 +897,22 @@ def crate_repo(tiny_repo):
     (crate / "Cargo.toml").write_text(
         "[package]\nname = \"revl-gate\"\nversion = \"0.1.0\"\n"
         "edition = \"2021\"\n\n[workspace]\n")
-    (crate / "src" / "lib.rs").write_text("pub fn admit(n: i64) -> i64 { n }\n")
+    (crate / "src" / "lib.rs").write_text(_LIB_RS % "n")
     return tiny_repo
+
+
+# The fixture crate's source. `%s` is the body of `admit`, so a test can break
+# the unit test without breaking the build.
+_LIB_RS = """pub fn admit(n: i64) -> i64 { %s }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn admits_its_input() {
+        assert_eq!(super::admit(7), 7);
+    }
+}
+"""
 
 
 def _with_matrix(tree, report):
@@ -926,6 +940,21 @@ def test_compiles_fails_on_source_that_does_not_compile(reward, crate_repo):
         _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
     assert verdict.verified is False
     assert "cargo check" in verdict.reason
+
+
+def test_compiles_fails_when_the_crate_builds_but_a_unit_test_fails(
+        reward, crate_repo):
+    """Real rustc, real `cargo test`: the source compiles and the crate's own
+    unit test fails. A check alone verified this crate."""
+    _with_matrix(crate_repo, _matrix_report())
+    (crate_repo / "crates" / "revl-gate" / "src" / "lib.rs").write_text(
+        _LIB_RS % "n + 1")
+    candidate = _candidate(reward, crate_repo, base="HEAD", scope=("**",))
+    check = reward.check_crate(candidate, crate_repo / "crates" / "revl-gate")
+    assert check.ok is True, check.detail
+    verdict = reward.probe_compiles(candidate)
+    assert verdict.verified is False
+    assert "unit tests do not pass" in verdict.reason
 
 
 def test_compiles_fails_on_a_real_emitter_gap_and_passes_a_deliberate_limit(
@@ -1005,8 +1034,9 @@ def test_compiles_fails_when_the_matrix_prints_nothing_readable(
 # under load, past the pre-commit hook's 60s default.
 @pytest.mark.timeout(600)
 def test_compiles_verifies_on_this_tree(reward, real_candidate):
-    """The real artifact: the real gate crate and the real six-tier walk. About
-    twenty seconds, almost all of it a cold `cargo check`.
+    """The real artifact: the real gate crate, its real unit tests and the real
+    six-tier walk. Most of the cost is a cold `cargo check` and a cold
+    `cargo test --lib` build in one scratch target directory.
 
     Gated the way `tests/test_gate_crate_admit.py` gates the same crate: the
     assertion is that this tree compiles, which a machine that cannot resolve
@@ -1045,6 +1075,20 @@ if mode == "broken":
     sys.exit(print(broken, file=sys.stderr) or 101)
 if mode == "cold-then-broken":
     sys.exit(print(broken if fetched.exists() else resolve, file=sys.stderr) or 101)
+if sys.argv[1] == "test":
+    tests = os.environ.get("STUB_CARGO_TESTS", "pass")
+    if tests == "pass":
+        print("test result: ok. 3 passed; 0 failed; 0 ignored")
+    elif tests == "fail":
+        print("test tests::admits ... FAILED")
+        print("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+        sys.exit(101)
+    elif tests == "fail-exit-0":
+        print("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+    elif tests == "none":
+        print("test result: ok. 0 passed; 0 failed; 0 ignored")
+    elif tests == "silent":
+        pass
 sys.exit(0)
 """
 
@@ -1064,6 +1108,79 @@ def stub_cargo(tmp_path, monkeypatch):
     def calls():
         return log.read_text().splitlines() if log.exists() else []
     return (lambda mode: monkeypatch.setenv("STUB_CARGO_MODE", mode)), calls
+
+
+def _stub_build_and_test(reward, tiny_repo, monkeypatch, tests, mode="ok"):
+    monkeypatch.setattr(reward, "_index_reachable", lambda: True)
+    monkeypatch.setenv("STUB_CARGO_MODE", mode)
+    monkeypatch.setenv("STUB_CARGO_TESTS", tests)
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("**",))
+    return reward.build_and_test_crate(candidate, tiny_repo)
+
+
+_CHECK = "check --offline --quiet"
+_TEST = "test --offline --quiet --lib"
+
+
+def test_the_crate_is_checked_then_its_unit_tests_run(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """Issue #1206 named `cargo test --offline --lib`. The unit tests run after
+    the check, and the count they report is carried into the verdict."""
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass")
+    assert run.ok is True, run.detail
+    assert calls() == [_CHECK, _TEST]
+    assert "3 unit test(s) passed" in run.detail
+
+
+def test_a_build_whose_unit_tests_fail_is_not_a_pass(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """The check is green and the crate's own unit tests are not: before this
+    change `compiles` verified exactly this case."""
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "fail")
+    assert run.ok is False
+    assert "unit tests do not pass" in run.detail
+    assert calls() == [_CHECK, _TEST]
+
+
+def test_a_failed_result_line_fails_even_on_exit_0(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, _ = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "fail-exit-0")
+    assert run.ok is False
+    assert "1 failed unit test(s)" in run.detail
+
+
+@pytest.mark.parametrize("tests,why", [
+    ("none", "ran zero unit tests"),
+    ("silent", "no `test result:` line"),
+])
+def test_a_unit_suite_that_ran_nothing_is_not_a_pass(
+        reward, tiny_repo, stub_cargo, monkeypatch, tests, why):
+    _, _ = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, tests)
+    assert run.ok is False
+    assert why in run.detail
+
+
+def test_a_crate_that_does_not_build_never_reaches_its_tests(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass",
+                               mode="broken")
+    assert run.ok is False
+    assert calls() == [_CHECK]
+
+
+def test_the_unit_tests_run_offline_after_a_cold_registry_is_filled(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass",
+                               mode="cold")
+    assert run.ok is True, run.detail
+    assert calls() == [_CHECK, "fetch", _CHECK, _TEST]
+    assert "after `cargo fetch`" in run.detail
 
 
 def _stub_check(reward, tiny_repo, monkeypatch, reachable):
