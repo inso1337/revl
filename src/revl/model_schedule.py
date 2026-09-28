@@ -528,3 +528,85 @@ def placement_schedules(files, processes: dict) -> list:
         if steps:
             schedules.append(schedule(name, hosts[name], roles, steps))
     return schedules
+
+
+# --------------------------------------------------------------------------
+# The handoff: the conductor writes a host's schedule into its child's spec,
+# and the child re-derives it before believing it
+# --------------------------------------------------------------------------
+
+#: The spec key the conductor writes a host's schedule under. It is absent
+#: from the spec of every host with no routed model action, so a composition
+#: with no `route model` block spawns byte for byte as it did before.
+SPEC_KEY = "modelSchedule"
+
+#: The backend tiers whose process runner reads `SPEC_KEY`. A schedule handed
+#: to a runner that ignores it is a decision nothing enforces, so the
+#: conductor refuses to place a scheduled host on any other tier.
+READING_TIERS = ("py",)
+
+
+def handoff(decided: Schedule) -> dict:
+    """The `spec[SPEC_KEY]` entry for one host: its declared devices and the
+    decision. The devices are carried so the child can re-derive the decision
+    from the composition's files instead of believing the entry."""
+    return {
+        "host": decided.host,
+        "devices": [{"name": d.name, "device": d.device,
+                     "memory_mib": d.memory_mib,
+                     "quantisation": list(d.quantisation)}
+                    for d in decided.devices],
+        "schedule": decided.to_dict(),
+    }
+
+
+def verify_handoff(files, host: str, components, entry) -> dict | None:
+    """Re-derive a child's schedule and compare it with the one it was handed.
+
+    Returns `{role: device}` to install, or None when the host routes no model
+    action and was handed nothing. Raises `ScheduleRefusal` when:
+
+    * the host routes a model action and the spec carries no schedule;
+    * the spec carries a schedule for a host that routes nothing;
+    * the entry is malformed, names another host, or differs in any field from
+      the schedule derived from `files`, `components` and the entry's own
+      declared devices.
+    """
+    roles, table = routes_of(composition_program(files))
+    steps = steps_for(table, components)
+    if entry is None:
+        if steps:
+            raise ScheduleRefusal(
+                f"host `{host}` routes model action(s) but its spec carries no "
+                f"model schedule; a process does not run a model it was not "
+                f"scheduled onto ({_DESIGN})")
+        return None
+    if not isinstance(entry, dict) or set(entry) != {"host", "devices", "schedule"}:
+        raise ScheduleRefusal(
+            f"host `{host}`: the model schedule in its spec is malformed")
+    if entry["host"] != host:
+        raise ScheduleRefusal(
+            f"host `{host}` was handed the model schedule of host "
+            f"`{entry['host']}`")
+    if not steps:
+        raise ScheduleRefusal(
+            f"host `{host}` routes no model action but its spec carries a "
+            f"model schedule; a schedule for nothing is refused")
+    expected = schedule(host, parse_devices(host, entry["devices"]), roles,
+                        steps).to_dict()
+    if entry["schedule"] != expected:
+        raise ScheduleRefusal(
+            f"host `{host}`: the model schedule in its spec does not match the "
+            f"one derived from the composition and the host's declared "
+            f"devices ({_describe_difference(entry['schedule'], expected)}); "
+            f"the spec is not believed over the files it names")
+    return dict(expected["resident"])
+
+
+def _describe_difference(handed, expected: dict) -> str:
+    if not isinstance(handed, dict):
+        return "the schedule is not a table"
+    if handed.get("resident") != expected["resident"]:
+        return (f"handed resident {handed.get('resident')!r}, derived "
+                f"{expected['resident']!r}")
+    return "the placements differ"
