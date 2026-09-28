@@ -4603,7 +4603,12 @@ class SessionOwner:
         write the `aborted` completion record naming every seq whose inverse
         actually ran (Decision 5). The absence of `commit-approved` is the
         verdict; this record only lets recover tell a completed abort from a
-        crashed one."""
+        crashed one.
+
+        An inverse that RAISED did not run to completion: it is recorded as
+        `restore-residue` (continue-and-record, issue #1473) and is not named in
+        the `aborted` record, so recover does not read it as done. Every older
+        entry still replays."""
         replayed: list = []
         # escrow replays reverse-seq, in its own two phases (transactional
         # inverses, then owed compensations) — the contract's phase rules.
@@ -4621,9 +4626,27 @@ class SessionOwner:
                         reverse=True)
         transactional = [e for e in escrow if isinstance(e, _Transactional)]
         compensations = [e for e in escrow if isinstance(e, _Compensation)]
+        # issue #1473: continue-and-record, the teardown contract's Phase-1 rule
+        # (teardown-contract.md, "Phase-1 failure"), exactly as a live frame's
+        # `drain` applies it. A raising restore is recorded as `restore-residue`
+        # and the older escrowed entries still replay. Before this the first
+        # raise escaped `Session.abort`: every older undo was skipped and the
+        # session was left loaded, with its owner half settled.
+        failed: set = set()
         for entry in transactional:
-            entry()   # verdict is settled (abort), so this replays
-            if entry.replayed and entry.seq is not None:
+            try:
+                entry()   # verdict is settled (abort), so this replays
+            except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                failed.add(id(entry))
+                self.compensation_residue.append(_residue_record(
+                    entry, kind=_RESTORE_RESIDUE, outcome="failed",
+                    attempted_flag=True, attempted={"phase": 1},
+                    error={"type": type(error).__name__,
+                           "message": str(error)}))
+            # a restore that raised did not run to completion, so the `aborted`
+            # record does not name it as replayed
+            if entry.replayed and entry.seq is not None \
+                    and id(entry) not in failed:
                 replayed.append(entry.seq)
         for entry in compensations:
             entry._run_phase2()
@@ -4640,8 +4663,11 @@ class SessionOwner:
         # collect the seqs the live frames replayed too (their inverses ran
         # during the driver's unload)
         for frame in self._registry:
+            raised = {r.get("seq") for r in frame.compensation_residue
+                      if r.get("kind") == _RESTORE_RESIDUE}
             for entry in frame._transactional:
-                if entry.replayed and entry.seq is not None:
+                if entry.replayed and entry.seq is not None \
+                        and entry.seq not in raised:
                     replayed.append(entry.seq)
         replayed = sorted(set(replayed))
         wal = self._wal()
