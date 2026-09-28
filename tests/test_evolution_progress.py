@@ -31,6 +31,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 TOOL = ROOT / "tools" / "evolution_progress.py"
@@ -38,12 +39,8 @@ TOOL = ROOT / "tools" / "evolution_progress.py"
 
 @pytest.fixture(scope="module")
 def progress():
-    import importlib.util
 
-    spec = importlib.util.spec_from_file_location("evolution_progress", TOOL)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("evolution_progress", TOOL)
     return module
 
 
