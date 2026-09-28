@@ -1254,6 +1254,14 @@ request pins the charter by digest, so a peer agrees to a set of terms rather
 than to a pool name. Every refusal names one lowercase link (`artifact-digest`,
 `replayed-join`, `grant-ceiling`, ...), and the verb exits nonzero on one.
 
+Several operator commands can run against one pool directory at once. Every
+verb that changes pool state (`init`, `register`, `rotate`, `revoke-key`,
+`join`, `withdraw`, `probe`, and `run --pool private`) holds an exclusive lock
+on `pool.lock` in the directory for its read-modify-write, never while waiting
+on a peer, and every state file is replaced atomically, so no update is lost
+and `status` never reads half a file. The lock is advisory: it binds `revl`
+processes, not other programs editing the files.
+
 A peer's identity is an asymmetric key pair by default (issue #1278): the peer
 draws it with `pool keygen`, the operator pins only the public half with `pool
 register`, and a join, an offer and a withdrawal are each verifiable by any

@@ -84,7 +84,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from . import peer_identity, peer_pool
+from . import peer_identity, peer_pool, pool_state
 
 # ---------------------------------------------------------------------------
 # kinds, domains, states, links
@@ -444,19 +444,19 @@ def load_health(pool_dir) -> HealthLog:
 
 
 def save_health(pool_dir, log: HealthLog) -> None:
-    path = Path(pool_dir) / HEALTH_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(log.as_dict(), indent=2, sort_keys=True) + "\n",
-                    encoding="utf-8")
+    """Atomic. A caller that read the record to change it holds
+    `pool_state.locked` from that read to this write."""
+    pool_state.write_json(Path(pool_dir) / HEALTH_FILE, log.as_dict())
 
 
 def note_contact(pool_dir, contact: Contact) -> None:
     """Record one observation made elsewhere (a dispatch). Used by
     `pool_dispatch`, so a delivery verified under the member's key counts as a
     live contact and a dispatch that found nobody counts as unreachable."""
-    log = load_health(pool_dir)
-    log.record(contact)
-    save_health(pool_dir, log)
+    with pool_state.locked(pool_dir):
+        log = load_health(pool_dir)
+        log.record(contact)
+        save_health(pool_dir, log)
 
 
 # ---------------------------------------------------------------------------
@@ -561,8 +561,7 @@ def probe_member(*, pool_dir, peer_id: str, addr: str,
         return _refusal(LINK_NOT_A_MEMBER,
                         f"{peer_id!r} is not a member of pool "
                         f"{charter_record.get('pool_id')!r}", peer_id=peer_id)
-    log = load_health(pool_dir)
-    addr = addr or str(log.row(peer_id).get("addr", ""))
+    addr = addr or str(load_health(pool_dir).row(peer_id).get("addr", ""))
     if not addr:
         return _refusal(LINK_NO_ADDRESS,
                         f"no address is known for {peer_id!r}; pass "
@@ -578,8 +577,13 @@ def probe_member(*, pool_dir, peer_id: str, addr: str,
         answer.get("heartbeat"), probe=probe, member=member,
         charter_record=charter_record,
         directory=peer_pool.load_directory(pool_dir), when=when)
-    settled = _settle(outcome, log, peer_id, addr, when or _utc_now())
-    save_health(pool_dir, log)
+    # The record is read again under the lock, not carried from before the
+    # exchange: another probe or a dispatch may have written a row for some
+    # other member while this one was waiting, and that row must survive.
+    with pool_state.locked(pool_dir):
+        log = load_health(pool_dir)
+        settled = _settle(outcome, log, peer_id, addr, when or _utc_now())
+        save_health(pool_dir, log)
     return settled
 
 
