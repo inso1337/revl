@@ -39,7 +39,16 @@ from revl.lower import (  # noqa: E402
     check_and_lower,
 )
 from revl.parser import Parser  # noqa: E402
-from revl.recovery import recover  # noqa: E402
+from revl.recovery import DictWorld, recover  # noqa: E402
+
+
+class _RealWorld(DictWorld):
+    """An in-memory world that declares itself REAL (issue #1477). recover
+    writes its at-most-once fences only against a real world, because a model
+    run attempts nothing out there; the fence tests below exercise that
+    discipline, so they bind a world that claims to be the outside one."""
+
+    kind = "real"
 
 
 def _lower(src: str) -> dict:
@@ -246,14 +255,14 @@ def test_undeclared_inverse_is_fenced_after_its_single_attempt(tmp_path):
     path = str(tmp_path / "undeclared.wal")
     _witnessed_wal(path, declared=False)
 
-    first = recover(path)
+    first = recover(path, world=_RealWorld())
     [entry] = first["transactionalRolledBack"]
     assert entry["replay"] == "fenced"
     # the fence is now durable on the WAL
     reread = replay.WriteAheadLog.read(path)
     assert any(r.get("record") == "replay-fence" for r in reread["records"])
 
-    second = recover(path)
+    second = recover(path, world=_RealWorld())
     assert second["transactionalRolledBack"] == []
     [fenced] = second["fencedDeferred"]
     assert fenced["referent"] == "db:row#1"
@@ -304,7 +313,7 @@ def test_undeclared_boundary_inverse_applies_once_then_fenced(tmp_path):
     path = str(tmp_path / "boundary-undeclared.wal")
     _boundary_wal(path, declared=False)
 
-    first = recover(path)
+    first = recover(path, world=_RealWorld())
     assert first["verdict"] == "rolled-back"
     [entry] = first["ran"]
     assert entry["op"]["method"] == "refund"
@@ -316,7 +325,7 @@ def test_undeclared_boundary_inverse_applies_once_then_fenced(tmp_path):
     assert any(r.get("record") == "replay-fence" for r in reread["records"])
 
     for _ in range(2):
-        again = recover(path)
+        again = recover(path, world=_RealWorld())
         assert again["verdict"] == "rolled-back"
         assert again["ran"] == []  # NOT re-applied
         [fenced] = again["fencedDeferred"]
