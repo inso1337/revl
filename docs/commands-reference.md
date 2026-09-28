@@ -1841,7 +1841,10 @@ projection cannot express - a resource handle (an `extern acquire` return), a
 generated file also ships an `httpTransport(base)` factory that drops straight
 onto a `revl serve --http` face (below): `base` is the service's route prefix
 `http://host:port/<composition>/<key>`, and each call POSTs its positional
-arguments as a JSON array.
+arguments as a JSON array. That face serves the canonical path only for an
+operation marked public, and none can be yet, so a client of `revl serve
+--http` today reaches the routed operations, which the generated class calls
+at their routes.
 
 `--face webui` projects a different typed boundary from the same IR: the Cordis
 WebUI channel of ONE component (item 457 slice S4, design note 530 Decision B;
@@ -1915,22 +1918,40 @@ array, or a `sourcesContent` whose length does not match `sources`.
 
 Serve a composition's OWN provided operations (the fourth quadrant: hints
 derived by the compiler), over one of two transports. Distinct from `revl mcp
-serve`, which serves the compiler itself. The transport decides nothing: the
-operation set, the checked emission hints and the wire shape are all the
-compiler's.
+serve`, which serves the compiler itself. The checked emission hints and the
+wire shape are the compiler's.
+
+Neither transport ever decodes an authority value from a request (item 569,
+issues #1502 and #1503). An operation with a parameter whose type carries
+`Principal` (directly, inside a generic, or inside a record or variant) or
+whose declared type carries `Trusted[...]` is withheld: it is not served, not
+listed, and a request naming it is refused with the operation, the parameter
+and its type. A `Principal` comes only from the validator that mints it
+(`Auth.validate`, `stdlib/auth.rvl`), and a `Trusted[...]` value only from
+first-party code, so `stdlib/admit.rvl`'s `admission.admit` (whose `granted` is
+`Trusted[List[Str]]`) is never served. `revl serve` prints each withheld
+operation to stderr at start.
 
 - `FILES` (required).
 - One transport (mutually exclusive; required):
-  - `--mcp` - serve over the MCP stdio protocol.
-  - `--http` - serve over HTTP. Each provided operation is
-    `POST /<composition>/<key>/<op>`, with the request and response bodies in
-    the canonical value encoding ([interop-bridge.md](interop-bridge.md)) - the
-    server face `revl export client` pairs with (item 424 gap (c), D-424c.6). A
-    request body is the operation's positional arguments as a JSON array (or an
-    object `{"args": [...]}`, or empty for a no-argument call); a success replies
+  - `--mcp` - serve over the MCP stdio protocol. Every provided operation that
+    is not withheld is a tool.
+  - `--http` - serve over HTTP. The face serves the composition's PUBLIC
+    SURFACE, not its wiring: the routed operations (a `route` clause, item 457)
+    at their declared method and path, plus any operation explicitly marked
+    public at `POST /<composition>/<key>/<op>`. The language has no public
+    marking yet, so today the face serves the routed operations only; a
+    canonical path answers `404`, and a withheld operation's canonical path or
+    route answers `403` naming the parameter. On the canonical path the request
+    and response bodies are the canonical value encoding
+    ([interop-bridge.md](interop-bridge.md)) - the server face
+    `revl export client` pairs with (item 424 gap (c), D-424c.6). A request
+    body is the operation's positional arguments as a JSON array (or an object
+    `{"args": [...]}`, or empty for a no-argument call); a success replies
     `{"ok": true, "value": <encoded result>}`, the exact shape the placement
-    bridge returns. `GET /` returns the manifest: the served operations, their
-    compiler-derived `readOnly`/`emission` hints, and the gate FRONTIER the face
+    bridge returns. `GET /` returns the manifest: exactly the served surface
+    (its canonical operations with their compiler-derived
+    `readOnly`/`emission` hints, and its routes) and the gate FRONTIER the face
     was projected under. The face is LOCAL contract only - it makes no safety
     claim about any callee it in turn reaches - and binds loopback by default.
 - `--host HOST` - `--http` bind address (default: `127.0.0.1`).
