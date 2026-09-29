@@ -1417,7 +1417,7 @@ def _format_cross_tier(dossier: dict, printer) -> None:
         if record["status"] == "executed":
             clean = sum(1 for p in record["points"] if p["status"] == "clean")
             printer(f"  {tier:5} EXECUTED — {clean} fault point(s), all "
-                    f"residue-free")
+                    f"residue-free, every owed compensation run")
         elif record["status"] == "failed":
             printer(f"  {tier:5} RESIDUE  — {record['reason']}")
         elif record["status"] == "diverged":

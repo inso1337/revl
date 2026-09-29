@@ -126,6 +126,12 @@ export function emitFixtures(): void {
   // `generated_coverage.test.ts`'s scan, like the fixtures above.
   const emitA2aAgent = emitFixture
   emitA2aAgent('a2a_agent.ir.json', 'a2a_agent.ts')
+  // issue #1511: an extern that declares its own `compensate`, crossed from a
+  // provide method in every position and from an activation body
+  // (declared_compensate.test.ts). Carries no `test` blocks, so the alias keeps
+  // the pair off `generated_coverage.test.ts`'s scan, like the fixtures above.
+  const emitDeclaredCompensate = emitFixture
+  emitDeclaredCompensate('declared_compensate.ir.json', 'declared_compensate.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone

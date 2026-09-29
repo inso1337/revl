@@ -53,7 +53,7 @@
       "java": 986,
       "py": 667,
       "rust": 1200,
-      "ts": 542,
+      "ts": 576,
       "wasm": 1558
     },
     "selfhost": {
@@ -1092,8 +1092,8 @@
     "ts": {
       "statements": 2208,
       "uncovered": {
-        "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, dispatches the item-130 `stream-iter` step (roadmap #81), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions, timers and the ts reactive-tier stream steps are declared port boundaries": {
-          "_component_step": 44
+        "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, dispatches the item-130 `stream-iter` step (roadmap #81), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions, timers and the ts reactive-tier stream steps are declared port boundaries Issue #1511 adds 7: the activation-body registration of an extern-declared compensation. No corpus document crosses an extern that declares its own `compensate`, and one that did would flip the byte-agreement oracle RED, because selfhost/emit_ts.rvl does not register a declared compensation; the reference half is pinned by backends/typescript/tests/declared_compensate.test.ts.": {
+          "_component_step": 51
         },
         "Canonical type parser fallbacks: `_split_fn_type` rejects missing arrows/unclosed parameter lists; `_split_ts_types` tracks nested generic bracket depth; `_ts_type` and `_ts_v3_type` erase unknown nominal/generic arguments; `_v3_surface_type` retains legacy unstamped literal/name/list inference. Frontend canonical type strings and stamped expressions exercise the supported paths Issue #957's `Map` subscript arm adds two statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_split_fn_type": 2,
@@ -1121,9 +1121,9 @@
           "_refuse_deferred_emissions": 8,
           "_refuse_validated_emissions": 8
         },
-        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
+        "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, routed requirement proxy, legacy-format `$$`, the unported `do` block, and the item-130 `subscribe`/`stream-merge` lowering (roadmap #81) — now emitted in the reference against runtime.ts's Stream, but reached by no self-host corpus document. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. Conditional index/length/optional-field targets are now covered Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1511 adds 1: the hand-off of a declared-compensation call to `_declared_call`. No corpus document crosses an extern that declares its own `compensate`, and one that did would flip the byte-agreement oracle RED, because selfhost/emit_ts.rvl does not register a declared compensation; the reference half is pinned by backends/typescript/tests/declared_compensate.test.ts.": {
           "_expr": 43,
-          "_fn_call": 2,
+          "_fn_call": 3,
           "_ts_builtin": 1
         },
         "Extern host-ref ABI boundary: `_emit_ts_ref_runtime` emits path/cache helpers; `_emit_ts_ref_thunk` emits lazy sync/async import, cache, symbol/type checks and calls; `_mark` wraps secret results; `_ts_extern_config_scaffold` installs extern config. `root=stdlib` and ref/config extern documents reproduce this family; the port intentionally refuses rather than fabricating it": {
@@ -1136,12 +1136,12 @@
           "_emit_ts_externs": 8,
           "_ts_extern_config_bind": 4
         },
-        "Frame allocation invariants and declared transaction paths: `_bracket_yield`'s bare-arrow branch requires a bracket while `_has_bracket` reported false, which cannot occur for lowered activation effects; `_guard_frame_neutral_loop` rejects frame-owning loop steps, but G6 keeps activation effects out of source loop bodies. `_has_bracket.walk`'s timer return is the declared timer boundary and its recursive true return requires an effect inside a component guard, which G6 rejects. `_needs_frame.walk`'s remaining true returns require a witnessed acquisition or compensation nested in such a guard; `_method_body_needs_frame`'s remaining true return requires a witnessed method acquisition. Witnessed transactions are explicitly refused by the port": {
+        "Frame allocation invariants and declared transaction paths: `_bracket_yield`'s bare-arrow branch requires a bracket while `_has_bracket` reported false, which cannot occur for lowered activation effects; `_guard_frame_neutral_loop` rejects frame-owning loop steps, but G6 keeps activation effects out of source loop bodies. `_has_bracket.walk`'s timer return is the declared timer boundary and its recursive true return requires an effect inside a component guard, which G6 rejects. `_needs_frame.walk`'s remaining true returns require a witnessed acquisition or compensation nested in such a guard; `_method_body_needs_frame`'s remaining true return requires a witnessed method acquisition. Witnessed transactions are explicitly refused by the port Issue #1511 adds 1: the Frame for an activation body that crosses a declared compensation. No corpus document crosses an extern that declares its own `compensate`, and one that did would flip the byte-agreement oracle RED, because selfhost/emit_ts.rvl does not register a declared compensation; the reference half is pinned by backends/typescript/tests/declared_compensate.test.ts.": {
           "_bracket_yield": 1,
           "_guard_frame_neutral_loop": 1,
           "_has_bracket.walk": 3,
           "_method_body_needs_frame": 1,
-          "_needs_frame.walk": 2
+          "_needs_frame.walk": 3
         },
         "In-file test harness boundary: `_emit_ts_tests` emits vitest cases and test-mode statements; `_emit_ts_lifecycle_tests` builds Context/fibers and lowers load, unload, call, assert, advance and no-residue steps. The self-host emitter produces application/library modules only; lifecycle constructs and steps are recorded unported Issue #1112 adds the per-test async-context isolation here (the module-entry `AsyncLocalStorage.snapshot()` re-entered around every driver) and the region got SMALLER, 60 to 59: the driver's line emission was folded into one `extend` per region, so a construct no corpus document can reach costs the ledger one statement instead of one per emitted line. It cannot be reached: a corpus document carrying a `lifecycle test` would flip the byte-agreement oracle RED rather than close the gap, and that was MEASURED on such a document rather than assumed -- selfhost/emit_ts.rvl emits no driver section at all for it (reference 3934 bytes, port 2298, 57 diff lines), because in-file `test` / `fault_test` / `lifecycle test` emission is deferred out of every self-host slice by that file's own header. Porting it is the corpus work that retires this entry; the reference half is pinned by backends/typescript/test_lifecycle_async_isolation.py, which executes both drivers on real node under both of node's async-context implementations.": {
           "_emit_ts_lifecycle_tests": 59,
@@ -1222,6 +1222,12 @@
         },
         "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 7
+        },
+        "Extern-declared compensations (issue #1511): `_declared_call` renders every call to an extern that declares its own `compensate` as `Frame.declared(..)` inside a provide method, bare at an activation-body `emit` statement (which `_Ctx.with_declared_statement` marks and `_declared_emit` recognises), and refuses any other component position by name; `_reaches_declared` walks a method body for such a call so the component builds a Frame. No corpus document crosses one, and one that did would flip the byte-agreement oracle RED, because selfhost/emit_ts.rvl does not port the declared path (the py tier's self-host port is deferred the same way). The reference half is pinned by backends/typescript/tests/declared_compensate.test.ts and backends/typescript/test_declared_compensate_ts.py. Porting it to selfhost/emit_ts.rvl with a corpus document is the work that retires this entry.": {
+          "_Ctx.with_declared_statement": 3,
+          "_declared_call": 14,
+          "_declared_emit": 1,
+          "_reaches_declared": 7
         }
       },
       "uncovered_statements": 518
