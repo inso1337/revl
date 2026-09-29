@@ -616,7 +616,9 @@ re-issue then runs once or is refused (`approval_refused`). `revl_estop` on the
 operator listener halts the face: the request in flight is refused at its next
 crossing seam that reads the latch (item 443, extended to every crossing by
 issue #1504), and the face answers `503` `halted` to every request after, including
-one queued behind it. The options are listed under `revl serve` in
+one queued behind it. Without a policy, `--refuse-ungated-emissions` (opt-in)
+refuses such an app request by name (`403` `ungated_emission`) instead of
+letting it fire. The options are listed under `revl serve` in
 [commands-reference.md](commands-reference.md).
 
 ### Import + serve close the loop

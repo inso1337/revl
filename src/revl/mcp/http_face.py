@@ -343,7 +343,7 @@ class HttpComposedServer:
 
     def __init__(self, session, composition: str = "revl", decode=None, *,
                  public=(), declared: DeclaredTypes | None = None,
-                 decoder_for=None) -> None:
+                 decoder_for=None, refuse_ungated_emissions: bool = False) -> None:
         self.composition = composition
         self._composed = ComposedServer(session, composition=composition,
                                         declared=declared)
@@ -367,6 +367,11 @@ class HttpComposedServer:
         # issue #1553: rebuilds `decode` for a session this face starts to
         # follow (`_follow`), whose live module is not the one `decode` read
         self._decoder_for = decoder_for
+        # 569 section 6 (issue #1553): refuse a class-(c) crossing an app request
+        # reaches when no approval policy could hold it. Classified against the
+        # live composition, rebuilt when its IR changes (a swap, a fork).
+        self.refuse_ungated_emissions = refuse_ungated_emissions
+        self._ungated_map = None
         # tool name is `<composition>.<key>.<op>`; index the same routes by the
         # HTTP path `/<composition>/<key>/<op>`, and keep the advertised hints
         # for the manifest so the fourth quadrant's compiler-derived
@@ -447,6 +452,34 @@ class HttpComposedServer:
         if self._halt_probe is not None and self._halt_probe():
             return True
         return bool(getattr(self.session, "halted", False))
+
+    def _ungated_refusal(self, key: str, op: str) -> dict | None:
+        """The named refusal for `key.op` under `--refuse-ungated-emissions`, or
+        None to dispatch it. Only while the session has no approval policy: with
+        one, a class-(c) crossing is held with a ticket instead. An operation
+        whose crossing class cannot be resolved is refused too, as the policy's
+        own per-call decision refuses it (an unresolved class is not class
+        none)."""
+        if not self.refuse_ungated_emissions \
+                or getattr(self.session, "approval_policy", None) is not None:
+            return None
+        reach = self.ungated_class(key, op)
+        if reach == "none":
+            return None
+        return _ungated(key, op, resolved=reach == "c")
+
+    def ungated_class(self, key: str, op: str) -> str:
+        """`"c"`, `"none"` (class none, (a) or (b)) or `"unresolved"` for `key.op`
+        on the live composition, from the checked reach facts (`ClassMap`)."""
+        ir = getattr(self.session, "ir", None) or {}
+        if self._ungated_map is None or self._ungated_map.ir is not ir:
+            from .approval import ClassMap  # noqa: PLC0415 - no runtime
+
+            self._ungated_map = ClassMap(ir)
+        reach = self._ungated_map.classify_call(key, op)
+        if reach is None:
+            return "unresolved"
+        return "c" if reach.get("class") == "c" else "none"
 
     # -- route table (item 457) -------------------------------------------
     def _build_routes(self, ir: dict) -> list["_Route"]:
@@ -548,6 +581,9 @@ class HttpComposedServer:
         if problem is not None:
             return _BAD_REQUEST, _err(problem, code="request")
 
+        ungated = self._ungated_refusal(key, op)
+        if ungated is not None:
+            return _FORBIDDEN, ungated
         try:
             # `raw=True`: this face's contract is the placement bridge's canonical
             # encoding (`_encode_value` below), so it must see the live runtime
@@ -690,6 +726,9 @@ class HttpComposedServer:
         args = [bound.get(pname) for pname in route.param_order]
 
         # 2. run the handler.
+        ungated = self._ungated_refusal(route.key, route.op)
+        if ungated is not None:
+            return HttpReply.json(_FORBIDDEN, ungated)
         try:
             result = self.session.call(route.key, route.op, args, raw=True)
         except ApprovalRefused as exc:
@@ -857,6 +896,16 @@ def _approval_refused(ticket: dict) -> dict:
             "message": ("an operator refused this request, and nothing ran. "
                         "Sending it again asks again"),
             "ticket": {"hash": ticket.get("hash")}}
+
+
+def _ungated(key: str, op: str, *, resolved: bool) -> dict:
+    why = ("reaches an irreversible emission with no checked inverse (a "
+           "class-(c) crossing)" if resolved else
+           "has a crossing class this server cannot resolve")
+    return {"ok": False, "ungatedEmission": True, "code": "ungated_emission",
+            "message": (f"`{key}.{op}` {why}, and this server refuses such a "
+                        f"crossing when no approval policy can hold it "
+                        f"(--refuse-ungated-emissions). Nothing ran")}
 
 
 def _halted() -> dict:
@@ -1256,6 +1305,15 @@ def build_http_server(server: HttpComposedServer, host: str, port: int, *,
     return Listener(exposure, _make_handler(server, exposure))
 
 
+def _served_ops(face: "HttpComposedServer") -> set:
+    """Every `(key, op)` the face serves: its public canonical operations and
+    its routed ones, less the withheld."""
+    ops = {(key, op) for key, op, _params in face._by_path.values()}
+    ops |= {(r.key, r.op) for r in face._routes_457
+            if (r.key, r.op) not in face._withheld_ops}
+    return ops
+
+
 def _live_decoder(session):
     """The live module's canonical-value decoder for `session`, or None.
 
@@ -1282,7 +1340,8 @@ def serve_http(ir: dict, config: dict | None = None, *,
                declared: DeclaredTypes | None = None,
                approval_policy: str | None = None,
                operator: dict | None = None,
-               origin: dict | None = None) -> int:
+               origin: dict | None = None,
+               refuse_ungated_emissions: bool = False) -> int:
     """Boot `ir` into a live session and serve its operations over HTTP.
 
     Booting is admission, so this loads through the same `Session.load` the MCP
@@ -1296,6 +1355,8 @@ def serve_http(ir: dict, config: dict | None = None, *,
     those tickets are answered and the face is halted. `origin` is the load's
     admission inputs (`{"files": [...]}`), kept so the served composition can be
     snapshotted, and so forked from the operator listener.
+    `refuse_ungated_emissions` (569 section 6) refuses, by name, an app request
+    that reaches a class-(c) crossing while no approval policy is loaded.
     """
     from .session import Session  # noqa: PLC0415 — lazy: Session pulls cordis
 
@@ -1322,7 +1383,8 @@ def serve_http(ir: dict, config: dict | None = None, *,
     # `Request` (whose `method`/`body` are variants) sees native case instances.
     decode = _live_decoder(session)
     face = HttpComposedServer(session, composition=composition, decode=decode,
-                              declared=declared, decoder_for=_live_decoder)
+                              declared=declared, decoder_for=_live_decoder,
+                              refuse_ungated_emissions=refuse_ungated_emissions)
     httpd = build_http_server(face, host, port, exposure=exposure)
     if listener is not None:
         listener.face = face
@@ -1345,6 +1407,12 @@ def serve_http(ir: dict, config: dict | None = None, *,
     if listener is not None:
         for line in listener.describe():
             print(f"  {line}", file=sys.stderr)
+    if refuse_ungated_emissions and approval_policy is None:
+        refused = sorted(f"{key}.{op}" for key, op in _served_ops(face)
+                         if face.ungated_class(key, op) != "none")
+        print(f"  --refuse-ungated-emissions: {len(refused)} public operation(s) "
+              f"reach a class-(c) crossing and are refused"
+              + (f": {', '.join(refused)}" if refused else ""), file=sys.stderr)
     if approval_policy is not None and listener is None:
         print("  warning: the approval policy holds every class-(c) crossing an "
               "app request reaches, and without --operator-listen nothing can "

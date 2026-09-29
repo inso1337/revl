@@ -430,6 +430,70 @@ def test_the_app_face_never_serves_an_estop(stack, tmp_path):
     assert status == 403 and body["pendingApproval"] is True
 
 
+# ---------------------------------------------------------------- 569 section 6
+
+@pytest.fixture
+def unpolicied(tmp_path):
+    """A live face with NO approval policy, served over a real socket."""
+    import runtime as rt
+    from revl.mcp.session import Session
+
+    session = Session()
+    session.load(compile_source(SOURCE, "ops_1553.rvl"))
+    started = []
+
+    def serve(**flags):
+        face = HttpComposedServer(session, composition="app", public=PUBLIC,
+                                  **flags)
+        httpd = build_http_server(face, "127.0.0.1", 0)
+        thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+        thread.start()
+        started.append((httpd, thread))
+        return httpd.server_address[1]
+
+    yield serve
+    for httpd, thread in started:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+    session.unload()
+    rt.clear_estop()
+
+
+@needs_cordis
+def test_refuse_ungated_emissions_refuses_a_class_c_crossing_by_name(unpolicied,
+                                                                    tmp_path):
+    port = unpolicied(refuse_ungated_emissions=True)
+    sink = str(tmp_path / "sink.log")
+    status, body = _app(port, "/app/ops/shout", [sink, "hi"])
+    assert status == 403, body
+    assert body["code"] == "ungated_emission" and body["ungatedEmission"] is True
+    assert "`ops.shout`" in body["message"]
+    assert "announce" not in json.dumps(body), "no internal capability named"
+    assert _lines(sink) == [], "nothing fired"
+    # a crossing with a checked inverse (class (a)) is not an ungated emission
+    release, target = tmp_path / "release", tmp_path / "t.txt"
+    release.write_text("go", encoding="utf-8")
+    target.write_text("t", encoding="utf-8")
+    assert _app(port, "/app/ops/slow_stash", [str(release), str(target)])[0] == 200
+
+
+@needs_cordis
+def test_without_the_flag_an_unpolicied_crossing_still_fires(unpolicied, tmp_path):
+    port = unpolicied()
+    sink = str(tmp_path / "sink.log")
+    assert _app(port, "/app/ops/shout", [sink, "hi"]) == \
+        (200, {"ok": True, "value": None})
+    assert _lines(sink) == ["announce:hi"]
+
+
+@needs_cordis
+def test_under_a_policy_the_flag_leaves_the_ticket_to_the_policy(stack, tmp_path):
+    stack.face.refuse_ungated_emissions = True
+    ticket = _ask(stack, str(tmp_path / "sink.log"))
+    assert ticket in stack.session._tickets
+
+
 # ---------------------------------------------------------------- fork
 
 @needs_cordis
@@ -514,6 +578,8 @@ def test_the_cli_refuses_an_operator_listener_it_cannot_serve(tmp_path, capsys):
         assert why in err, (extra, err)
     code = main(["serve", "--mcp", str(app), "--approval-policy", "auto"])
     assert code == 2 and "revl serve --http` only" in capsys.readouterr().err
+    code = main(["serve", "--mcp", str(app), "--refuse-ungated-emissions"])
+    assert code == 2 and "revl serve --http` only" in capsys.readouterr().err
 
 
 ROUTED = '''
@@ -535,13 +601,15 @@ component Crier provides shout: Shout {
 '''
 
 
-def _started_ports(process) -> tuple[int, int]:
-    """The app and operator ports `revl serve --http` prints at start."""
+def _started_ports(process, *, operator=True, lines=None) -> tuple[int, int]:
+    """The app and operator ports `revl serve --http` prints at start (the
+    operator port is 0 when `operator` is False)."""
     import re
 
-    app = op = None
+    app = None
+    op = None if operator else 0
     deadline = time.monotonic() + 120
-    lines = []
+    lines = [] if lines is None else lines
     while (app is None or op is None) and time.monotonic() < deadline:
         line = process.stderr.readline()
         if not line:
@@ -554,8 +622,57 @@ def _started_ports(process) -> tuple[int, int]:
                           line)
         if found:
             op = int(found.group(1))
-    assert app and op, "".join(lines)
+    assert app and op is not None, "".join(lines)
     return app, op
+
+
+def _serve_process(tmp_path, *flags):
+    import subprocess
+
+    app = tmp_path / "crier.rvl"
+    app.write_text(ROUTED, encoding="utf-8")
+    env = {**os.environ, "REVL_1553_SINK": str(tmp_path / "sink.log"),
+           "REVL_WAL_DIR": str(tmp_path / "wal"), "TMPDIR": str(tmp_path),
+           "PYTHONPATH": os.pathsep.join(
+               [str(ROOT / "src")] + ([os.environ["PYTHONPATH"]]
+                                      if os.environ.get("PYTHONPATH") else []))}
+    env.pop("REVL_ESTOP_LATCH", None)
+    return subprocess.Popen(
+        [sys.executable, "-m", "revl", "serve", "--http", str(app), "--port", "0",
+         *flags], cwd=str(tmp_path), env=env, stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, text=True)
+
+
+def _end(process) -> str:
+    """Stop `process` with SIGTERM; the rest of its stderr."""
+    import subprocess
+
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=10)
+    # read through the text wrapper: `_started_ports` may have buffered lines
+    # in it that a raw-fd reader (`communicate`) would skip
+    rest = process.stderr.read()
+    process.stderr.close()
+    return rest
+
+
+@needs_cordis
+def test_revl_serve_http_refuses_ungated_emissions_when_asked(tmp_path):
+    lines = []
+    process = _serve_process(tmp_path, "--refuse-ungated-emissions")
+    try:
+        app_port, _ = _started_ports(process, operator=False, lines=lines)
+        status, body = _app(app_port, "/shout/hi")
+        assert status == 403 and body["code"] == "ungated_emission", body
+        assert _lines(tmp_path / "sink.log") == []
+    finally:
+        lines.append(_end(process))
+    assert "are refused: shout.shout" in "".join(lines), lines
 
 
 @needs_cordis

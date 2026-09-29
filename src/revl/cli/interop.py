@@ -498,7 +498,9 @@ def _run_serve(args) -> int:
                                   # snapshot and fork the served composition
                                   origin=({"files": [os.path.abspath(f)
                                                      for f in args.files]}
-                                          if operator is not None else None))
+                                          if operator is not None else None),
+                                  refuse_ungated_emissions=getattr(
+                                      args, "refuse_ungated_emissions", False))
             except (ExposureError, TransportError) as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
@@ -520,6 +522,8 @@ def _serve_operator_options(args, http: bool):
     profile = getattr(args, "operator_profile", None)
     if not http:
         for flag, value in (("--approval-policy", getattr(args, "approval_policy", None)),
+                            ("--refuse-ungated-emissions",
+                             getattr(args, "refuse_ungated_emissions", False)),
                             ("--operator-listen", listen),
                             ("--operator-profile", profile)):
             if value:

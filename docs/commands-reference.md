@@ -2046,6 +2046,17 @@ options apply to `--http` only; with `--mcp` they are refused.
   durable. Without `--operator-listen` nothing can answer a ticket, so those
   requests stay pending (a warning says so at start). Without this option there
   is no policy, and a class-(c) crossing an app request reaches fires unapproved.
+- `--refuse-ungated-emissions` - opt-in. While no approval policy is loaded,
+  an app request that reaches a class-(c) crossing is refused by name instead
+  of firing: `403` with `{"ok": false, "ungatedEmission": true, "code":
+  "ungated_emission", "message": ...}`, naming the operation (never its
+  capabilities), and nothing runs. An operation whose crossing class cannot be
+  resolved is refused the same way. The class comes from the checked reach
+  facts of the live composition (the same classifier the approval policy uses).
+  At start it lists the public operations it will refuse. With
+  `--approval-policy` it changes nothing: the policy holds such a crossing with
+  a ticket. Without either option, a class-(c) crossing an app request reaches
+  fires unapproved, as before.
 - `--operator-listen HOST:PORT` - also serve operators, on a second address:
   the MCP Streamable HTTP transport ([mcp-http-transport.md](mcp-http-transport.md))
   at `/mcp`, against the same session and the same dispatch lock as the face.

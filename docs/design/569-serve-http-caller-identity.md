@@ -402,9 +402,14 @@ pending. `Session.revoke_ticket` now answers it NO (withdrawing a yes that was
 minted and not yet spent, and closing the round to a later approve), and
 `Session.call` refuses the re-issue it held with `ApprovalRefused`. There is no second approval path.
 
-`--refuse-ungated-emissions` (section 6, B3) was not built. Without a policy a
-class-(c) crossing still fires unapproved, as before; with a policy and no
-operator listener, `revl serve` warns that nothing can answer its tickets.
+`--refuse-ungated-emissions` (section 6, B3) is built as a per-request refusal
+rather than a refusal to start, and it is opt-in (open question 4 stays open
+for the default). With it and no policy, an app request that reaches a class-(c)
+crossing (or one whose class cannot be resolved) is refused `403`
+`ungated_emission`, naming the operation, and nothing fires; the operations it
+will refuse are listed at start. Without it, and without a policy, a class-(c)
+crossing still fires unapproved, as before. With a policy and no operator
+listener, `revl serve` warns that nothing can answer its tickets.
 
 Tests: `tests/test_serve_http_operator_listener_1553.py`.
 

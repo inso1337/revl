@@ -81,6 +81,12 @@ def _add_serve_operator_arguments(serve) -> None:
                             "firing. The app caller gets `pending_approval` and "
                             "the ticket id; an operator answers it on "
                             "--operator-listen. Omit for no policy")
+    serve.add_argument("--refuse-ungated-emissions", action="store_true",
+                       help="--http: while no approval policy is loaded, refuse "
+                            "by name (403 `ungated_emission`) an app request that "
+                            "reaches a class-(c) crossing, instead of letting it "
+                            "fire unapproved. Opt-in; with --approval-policy the "
+                            "policy holds such a crossing instead")
     serve.add_argument("--operator-listen", default=None, metavar="HOST:PORT",
                        help="--http: also serve operators, on a second address, "
                             "over the MCP HTTP transport at /mcp against the same "
