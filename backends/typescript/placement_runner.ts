@@ -222,11 +222,24 @@ for (const [key, info] of Object.entries<any>(spec.proxies || {})) {
   log('proxy', key, `-> ${where}`)
 }
 
-// 2. this process's own components, in IR load order
+// 2. this process's own components, in IR load order.
+//
+// A faulting activation (a `fail` step, or the fault sweep's injected one)
+// rejects the fiber's promise. The emitted apply() has already unwound its own
+// effects and run its frame's Phase-2 compensations by then. Record the load
+// error and go on to the LIFO teardown and the no-residue proof, as the go,
+// java and rust runners do; letting the rejection escape made it FATAL, so the
+// ts tier could not drive a faulting activation at all and the cross-tier
+// sweep skipped it.
 for (const cname of spec.components as string[]) {
   const config = (spec.config || {})[cname]
   const fiber = config ? ctx.plugin(mod[cname], config) : ctx.plugin(mod[cname])
-  await fiber
+  try {
+    await fiber
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    log('load', cname, `load error: ${detail}`)
+  }
   fibers.push([cname, fiber])
   log('load', cname, `state=${fiberStateName(fiber.state)}`)
 }
