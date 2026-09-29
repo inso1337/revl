@@ -984,6 +984,75 @@ jobs:
           echo "    --diff-base $base --count 200"
           exit 1
 
+  # Issue #1572: the committed census artifact (`docs/census-artifact.{md,json}`,
+  # roadmap item 549) had drifted from main with nothing reporting it, because
+  # no step ran its check. A check nobody runs reads as a pass.
+  #
+  # This job keeps the committed copy CURRENT. On a pull request it asks
+  # `census_artifact.py --moved-inputs` whether the diff moves an input of the
+  # artifact: a file its pins name (a deciding file, a reference module the
+  # census run opens, a report input), a program it carries, a new `.rvl` under
+  # a census directory, a gate crate source, or the tool and the artifact
+  # themselves. If one moved, `--verify --strict` re-runs the census (about 20
+  # seconds) and fails unless the committed file reproduces program by program
+  # with no program missing and no report input moved. The fix is to run
+  # `python3 tools/census_artifact.py --write` in the same pull request.
+  #
+  # A diff that moves no input is not checked, and says so. On every other
+  # event (push to main, schedule, dispatch) it always checks, so a merge race
+  # between two regenerating pull requests shows up on main. The filter's exit
+  # 2 (it could not decide) runs the check, never skips it.
+  census-artifact:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - id: decide
+        env:
+          # attacker-controllable text reaches the shell through env: only,
+          # the same rule `changes` and `held-out` follow.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): the committed artifact is checked"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          changed=$(git diff --name-only "origin/${BASE_REF}" HEAD)
+          if [ -z "$changed" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "no changed paths (unresolved base ref?): checking anyway"
+            exit 0
+          fi
+          status=0
+          printf '%s\n' "$changed" \
+            | python3 tools/census_artifact.py --moved-inputs || status=$?
+          if [ "$status" = "1" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "this diff moves no input of the census artifact: not checked"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "the inputs above moved (filter exit $status): checking"
+          fi
+      - if: steps.decide.outputs.run == 'true'
+        run: pip install -e ".[test]"
+      - name: the committed census artifact is current
+        if: steps.decide.outputs.run == 'true'
+        run: python3 tools/census_artifact.py --verify --strict
+
   # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
   # container: a sandboxed process runs inside a boundary whose confinement
   # flags come from its declared envelope, and an in-sandbox boot canary
