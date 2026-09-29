@@ -1344,7 +1344,9 @@ test "a record literal reaches a declared record through an Opt" {
 type MethSig = { name: Str, params: List[ParamN], ret: Str,
                  isEm: Bool, caps: List[Str], isAsync: Bool }
 type SvcD    = { name: Str, methods: List[MethSig] }
-// kind: emit | effect | undo | let | return | expr | skip; bind names a let.
+// kind: emit | effect | undo | let | return | expr | skip, plus the block
+// reader's scope_open | scope_close around an arm and elem for a `for` element;
+// bind names a let (or the element).
 type Stmt    = { kind: Str, bind: Str, e: Expr }
 // `extCaps` is what an extern-declared boundary crossing SEEDS the emission
 // fixed point with: its own name for an `emission`, its declared scope for a
@@ -2171,17 +2173,20 @@ fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
   return out
 }
 
-// One line's worth of tokens as statement(s). `effect X undo Y` on one line
-// yields two statements; `let n = [emit|effect] expr [undo expr]` keeps the
-// binding name for the checker's environment.
-fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
+// One statement run as statement(s), and the index just past what it read (`hi`
+// when the run did not parse, so the caller moves on by the line).
+// `effect X undo Y` on one line yields two statements; `let n = [emit|effect]
+// expr [undo expr]` keeps the binding name for the checker's environment.
+type SRun = { ss: List[Stmt], i: Int }
+
+fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     let nm = tkc(ts, lo + 1).text
     var eq = lo + 2
     if (atk(ts, eq, ":")) { eq = type_at(ts, eq + 1).i }
     if (!atk(ts, eq, "=")) {
-      return [mk_stmt3("skip", nm, int_lit0())]
+      return { ss: [mk_stmt3("skip", nm, int_lit0())], i: hi }
     }
     var j = eq + 1
     var kd = "expr"
@@ -2196,49 +2201,179 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
       }
     }
     let r = expr_at(ts, j)
-    if (is_bad(r.e)) { return [mk_stmt3("skip", nm, r.e)] }
+    if (is_bad(r.e)) { return { ss: [mk_stmt3("skip", nm, r.e)], i: hi } }
     var out: List[Stmt] = [mk_stmt3(kd, nm, r.e)]
+    var endl = r.i
     if (atw(ts, r.i, "undo")) {
       let u = expr_at(ts, r.i + 1)
-      if (!is_bad(u.e)) { out = out.push(mkstmt("undo", u.e)) }
+      if (!is_bad(u.e)) {
+        out = out.push(mkstmt("undo", u.e))
+        endl = u.i
+      }
     }
-    return out
+    return { ss: out, i: endl }
   }
   if (t.kind == "kw" && t.text == "return") {
     let rr = expr_at(ts, lo + 1)
-    if (is_bad(rr.e)) { return [mkstmt("skip", rr.e)] }
-    return [mkstmt("return", rr.e)]
+    if (is_bad(rr.e)) { return { ss: [mkstmt("skip", rr.e)], i: hi } }
+    return { ss: [mkstmt("return", rr.e)], i: rr.i }
   }
   if (t.kind == "kw" && t.text == "emit") {
     let re1 = expr_at(ts, lo + 1)
-    if (is_bad(re1.e)) { return [mkstmt("skip", re1.e)] }
-    return [mkstmt("emit", re1.e)]
+    if (is_bad(re1.e)) { return { ss: [mkstmt("skip", re1.e)], i: hi } }
+    return { ss: [mkstmt("emit", re1.e)], i: re1.i }
   }
   if (t.kind == "kw" && (t.text == "effect" || t.text == "undo")) {
     let rf = expr_at(ts, lo + 1)
-    if (is_bad(rf.e)) { return [mkstmt("skip", rf.e)] }
+    if (is_bad(rf.e)) { return { ss: [mkstmt("skip", rf.e)], i: hi } }
     var out2: List[Stmt] = [mkstmt(t.text, rf.e)]
+    var endl2 = rf.i
     if (atw(ts, rf.i, "undo")) {
       let u2 = expr_at(ts, rf.i + 1)
-      if (!is_bad(u2.e)) { out2 = out2.push(mkstmt("undo", u2.e)) }
+      if (!is_bad(u2.e)) {
+        out2 = out2.push(mkstmt("undo", u2.e))
+        endl2 = u2.i
+      }
     }
-    return out2
+    return { ss: out2, i: endl2 }
   }
   let r2 = expr_at(ts, lo)
-  if (is_bad(r2.e)) { return [mkstmt("skip", r2.e)] }
-  return [mkstmt("expr", r2.e)]
+  if (is_bad(r2.e)) { return { ss: [mkstmt("skip", r2.e)], i: hi } }
+  return { ss: [mkstmt("expr", r2.e)], i: r2.i }
 }
 
+// ------------------------------------------------- block statements, by nesting
+//
+// `if (<c>) <arm> [else <arm>]`, `while (<c>) <arm>` and `for (<x> of <e>) <arm>`,
+// where an arm is a brace block or one statement. The reader had no case for any
+// of them (issue #1453, the checker twin of the `selfhost/lower.rvl` fix in PR
+// #1452). A head line parsed as a bad expression and was skipped, and what
+// happened next depended on the LAYOUT, not on the program:
+//
+//   * written over several lines, the body's lines were read as the enclosing
+//     body's up to the line holding the block's `}`, and `p_stmts` and
+//     `p_comp_body` both stopped there. A guard's closing brace ended the
+//     COMPONENT, so no `provide` after it was checked, and an `if`'s closing
+//     brace ended the METHOD, so no statement after it was checked;
+//   * written on one line, the whole block was the skipped line, so nothing in
+//     its body or its condition was checked.
+//
+// The block is now read to its MATCHING brace by nesting depth (`close_brace`),
+// its condition is walked as an expression statement, and its arms are read out
+// inline: to the checker, the statements of a branch are more statements of the
+// body that holds it. Each arm is bracketed by `scope_open` / `scope_close`, so a
+// name bound in an arm leaves the environment where the arm ends (`check_stmts`).
+type StmtBlk = { ss: List[Stmt], i: Int, ok: Bool }
+
+fn blk_no() -> StmtBlk { return { ss: [], i: 0, ok: false } }
+
+fn scoped(ss: List[Stmt]) -> List[Stmt] {
+  let open: List[Stmt] = [mkstmt("scope_open", int_lit0())]
+  return append_stmts(open, ss).push(mkstmt("scope_close", int_lit0()))
+}
+
+// One arm's statements, unbracketed: a brace block read to its matching brace,
+// or a single statement (itself possibly a block).
+fn p_block_arm(ts: List[Token], k: Int) -> StmtBlk {
+  if (atk(ts, k, "{")) {
+    let e = close_brace(ts, k)
+    if (e == 0 - 1) { return blk_no() }
+    return { ss: p_stmts(ts, k + 1, e - 1, []), i: e, ok: true }
+  }
+  if (k >= ts.length() || atk(ts, k, "eof") || atk(ts, k, "}")) { return blk_no() }
+  let le = line_end(ts, k, ts.length())
+  if (atw(ts, k, "if") || atw(ts, k, "while") || atw(ts, k, "for")) {
+    let nb = p_block_stmt(ts, k)
+    if (nb.ok) { return nb }
+  }
+  let r = p_stmt_run(ts, k, le)
+  return { ss: r.ss, i: r.i > k ? r.i : le, ok: true }
+}
+
+// `( <cond> )` at k: the condition, walked as an expression statement, because
+// a call in it is checked exactly as a call in the body is.
+fn p_block_cond(ts: List[Token], k: Int) -> StmtBlk {
+  if (!atk(ts, k, "(")) { return blk_no() }
+  let c = expr_at(ts, k + 1)
+  if (is_bad(c.e) || !atk(ts, c.i, ")")) { return blk_no() }
+  return { ss: [mkstmt("expr", c.e)], i: c.i + 1, ok: true }
+}
+
+// The `else` tail of an `if` whose then-arm ended at k. A malformed tail keeps
+// what was read and stops at the `else`.
+fn p_else_tail(ts: List[Token], k: Int, acc: List[Stmt]) -> StmtBlk {
+  if (!atw(ts, k, "else")) { return { ss: acc, i: k, ok: true } }
+  if (atw(ts, k + 1, "if")) {
+    let ei = p_block_stmt(ts, k + 1)
+    if (!ei.ok) { return { ss: acc, i: k, ok: true } }
+    return { ss: append_stmts(acc, ei.ss), i: ei.i, ok: true }
+  }
+  let el = p_block_arm(ts, k + 1)
+  if (!el.ok) { return { ss: acc, i: k, ok: true } }
+  return { ss: append_stmts(acc, scoped(el.ss)), i: el.i, ok: true }
+}
+
+fn p_block_stmt(ts: List[Token], lo: Int) -> StmtBlk {
+  if (atw(ts, lo, "if") || atw(ts, lo, "while")) {
+    let c = p_block_cond(ts, lo + 1)
+    if (!c.ok) { return blk_no() }
+    let body = p_block_arm(ts, c.i)
+    if (!body.ok) { return blk_no() }
+    let ss = append_stmts(c.ss, scoped(body.ss))
+    if (atw(ts, lo, "while")) { return { ss: ss, i: body.i, ok: true } }
+    return p_else_tail(ts, body.i, ss)
+  }
+  // `for (<x> of <iterable>)`: the iterable is an expression, and the element
+  // name is bound inside the body with the unknown type "", so a call that
+  // passes it is judged as leniently as the reference judges an unknown.
+  if (atw(ts, lo, "for") && atk(ts, lo + 1, "(") && atk(ts, lo + 2, "ident")
+      && atw(ts, lo + 3, "of")) {
+    let it = expr_at(ts, lo + 4)
+    if (is_bad(it.e) || !atk(ts, it.i, ")")) { return blk_no() }
+    let body2 = p_block_arm(ts, it.i + 1)
+    if (!body2.ok) { return blk_no() }
+    let elem: List[Stmt] = [mk_stmt3("elem", tkc(ts, lo + 2).text, int_lit0())]
+    let head: List[Stmt] = [mkstmt("expr", it.e)]
+    return { ss: append_stmts(head, scoped(append_stmts(elem, body2.ss))),
+             i: body2.i, ok: true }
+  }
+  return blk_no()
+}
+
+// One statement run, a block statement included. `hi` bounds a non-block run,
+// which always ends there: a block runs to its matching brace, wherever that is.
+fn p_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
+  if (atw(ts, lo, "if") || atw(ts, lo, "while") || atw(ts, lo, "for")) {
+    let b = p_block_stmt(ts, lo)
+    if (b.ok) { return { ss: b.ss, i: b.i } }
+  }
+  return { ss: p_stmt_run(ts, lo, hi).ss, i: hi }
+}
+
+// A body's statements, over `[lo, hi)`. `hi` is the body's own closing brace,
+// found by nesting depth, so a `}` met before it closes some inner block the
+// reader entered without recognising. It is stepped over, never taken for the
+// end of the body: stopping there left every statement after the block unread.
 fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
-  if (lo >= hi || atk(ts, lo, "}")) { return acc }
-  let re = line_end(ts, lo, hi)
-  return p_stmts(ts, re, hi, append_stmts(acc, p_stmt_run(ts, lo, re)))
+  if (lo >= hi) { return acc }
+  if (atk(ts, lo, "}")) { return p_stmts(ts, lo + 1, hi, acc) }
+  let le = line_end(ts, lo, hi)
+  let r = p_run(ts, lo, le)
+  let nx = r.i > lo ? r.i : le
+  return p_stmts(ts, nx, hi, append_stmts(acc, r.ss))
 }
 
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                provs: List[Provide], setup: List[Stmt]) -> ProvR {
-  if (i >= end || atk(ts, i, "}")) {
+  if (i >= end) {
     return { provs: provs, setup: setup, i: i, ok: true }
+  }
+  // `end` is the component's own closing brace, found by nesting depth, so a
+  // `}` before it closes an inner block and is stepped over (see `p_stmts`).
+  // Taking it for the component's end is what let a multi-line guard hide every
+  // `provide` written after it.
+  if (atk(ts, i, "}")) {
+    return p_comp_body(ts, i + 1, end, provh, provs, setup)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
@@ -2260,10 +2395,13 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        setup)
   }
   // component setup: one statement run per line, kept for the same call-site
-  // checks a provision body gets — G4 gates setup too (g4_unmarked_emission).
-  let re = line_end(ts, i, end)
-  let ss = p_stmt_run(ts, i, re)
-  return p_comp_body(ts, re, end, provh, provs, append_stmts(setup, ss))
+  // checks a provision body gets (G4 gates setup too: g4_unmarked_emission).
+  // A guard (`if (...) { ... }`) is read to its matching brace, so its arms are
+  // setup too.
+  let le = line_end(ts, i, end)
+  let r = p_run(ts, i, le)
+  let nx = r.i > i ? r.i : le
+  return p_comp_body(ts, nx, end, provh, provs, append_stmts(setup, r.ss))
 }
 
 fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -2861,9 +2999,32 @@ fn ck_ordered(before: Ev, ck: Ck, step: Bool) -> Ck {
 }
 
 fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
+  return check_stmts_in(ss, i, [], ck)
+}
+
+// `marks` holds the environment's length at each open block arm (`scoped`): a
+// name bound inside an arm leaves scope where the arm ends. Without that, a
+// name an arm binds and the body binds again after the block would resolve to
+// the ARM's binding (`lookup_at` takes the first match), and a call passing it
+// would be judged against the wrong type.
+fn check_stmts_in(ss: List[Stmt], i: Int, marks: List[Int], ck: Ck) -> Ck {
   if (i >= ss.length() || ck.msg != "") { return ck }
   let s = ss[i]
-  if (s.kind == "skip") { return check_stmts(ss, i + 1, ck) }
+  if (s.kind == "skip") { return check_stmts_in(ss, i + 1, marks, ck) }
+  if (s.kind == "scope_open") {
+    return check_stmts_in(ss, i + 1, marks.push(ck.env.length()), ck)
+  }
+  if (s.kind == "scope_close") {
+    if (marks.length() == 0) { return check_stmts_in(ss, i + 1, marks, ck) }
+    let m = marks[marks.length() - 1]
+    return check_stmts_in(ss, i + 1, marks.slice(0, marks.length() - 1),
+                          mk_ck2(ck.ctx, ck.env.slice(0, m), ck.ev, ck.msg))
+  }
+  if (s.kind == "elem") {
+    return check_stmts_in(ss, i + 1, marks,
+                          mk_ck2(ck.ctx, ck.env.push({ name: s.bind, ty: "" }),
+                                 ck.ev, ck.msg))
+  }
   var next = ck
   if (s.bind != "") {
     // calls in the value count even though the statement also binds
@@ -2874,11 +3035,12 @@ fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
     if (!inf.ok) { return refuse_ck(next, inf.msg) }
     next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
               ev: next.ev, msg: "" }
-    return check_stmts(ss, i + 1, next)
+    return check_stmts_in(ss, i + 1, marks, next)
   }
   next = walk_expr(s.e, s.kind == "emit", note_host_emission(s, ck))
   if (next.msg != "") { return next }
-  return check_stmts(ss, i + 1, ck_ordered(ck.ev, next, s.kind == "emit"))
+  return check_stmts_in(ss, i + 1, marks,
+                        ck_ordered(ck.ev, next, s.kind == "emit"))
 }
 
 fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {

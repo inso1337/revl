@@ -42,7 +42,8 @@ if str(_BACKEND) not in sys.path:
 # `emit` and `runtime` are imported under their canonical names on purpose: an
 # emitted module does `from runtime import Frame`, so an aliased copy would be a
 # *different* module and this test would exercise nothing (see test_replay).
-import emit as py_emit  # noqa: E402
+from revl._paths import python_backend_emitter  # noqa: E402
+py_emit = python_backend_emitter()
 import replay  # noqa: E402
 import runtime  # noqa: E402,F401
 

@@ -351,9 +351,10 @@ them.
 
 ## Honest limits
 
-* The directory is a JSON file with no concurrency control, the same limit
-  `550` states for the roster. Two operators registering at once on a shared
-  directory would race.
+* The directory is a JSON file. Writers are serialised by the pool lock and
+  each replacement is atomic (issue #1198, `src/revl/pool_state.py`), so two
+  operators registering at once no longer lose one registration. The lock is
+  advisory and binds `revl` processes only.
 * A revoked key stops a peer joining. It does not reach out and stop work the
   peer is already running; that is the dispatcher's problem and
   `Roster.outstanding` is where it plugs in, unchanged from `550`.

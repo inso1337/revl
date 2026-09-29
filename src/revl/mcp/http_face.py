@@ -2,12 +2,13 @@
 
 This is the SERVER face `revl export client` pairs with (D-424c.6). It is the
 same fourth-quadrant projection `revl serve --mcp` makes of a booted
-composition (`composed.py`), put on a different transport: each provided
-operation becomes ``POST /<composition>/<key>/<op>`` and the request/response
-bodies are the CANONICAL VALUE ENCODING the four bridges already speak
-(docs/interop-bridge.md). "revl serve --http adds a transport to an existing
-projection and decides nothing" — the operation set, the checked emission
-hints, and the wire shape are all the compiler's, not this module's.
+composition (`composed.py`), put on a different transport, and narrowed to
+the composition's PUBLIC SURFACE (item 569 B1, `surface.py`): a routed
+operation is served at its declared route, an operation declared public
+becomes ``POST /<composition>/<key>/<op>``, and the request/response bodies
+are the CANONICAL VALUE ENCODING the four bridges already speak
+(docs/interop-bridge.md). Within that surface the checked emission hints and
+the wire shape are the compiler's, not this module's.
 
 Why it round-trips to the placement bridge by construction. The bridge's
 provider dispatch loop replies ``{"ok": True, "value": _encode_value(result)}``
@@ -48,6 +49,7 @@ from .http_guard import (DispatchLock, Exposure, Listener, check_exposure,
                          request_refusal)
 from .composed import ComposedServer
 from .session import SessionError
+from .surface import AUTHORITY_CATEGORY, DeclaredTypes
 
 # HTTP status codes this face speaks. A successful call is 200; a call the
 # SESSION refuses (an unknown key, a runtime fault surfaced as a SessionError)
@@ -320,16 +322,26 @@ class HttpComposedServer:
     Reuses `ComposedServer`'s projection (one source of truth for the canonical
     route table and the compiler-derived hints) and dispatches each ``POST`` onto
     the same `Session.call`. A provided operation that HEADS a `route` clause
-    (item 457) is ALSO reachable at its declared method+path: `dispatch_http`
-    matches routed operations first and falls back to today's
-    ``POST /<composition>/<key>/<op>`` for unrouted ones, so nothing changes for
-    a service with no `route` clause. The wire layer is a pure function of the
-    request (`dispatch`, `dispatch_http`) and is testable with no runtime.
+    (item 457) is reachable at its declared method+path: `dispatch_http`
+    matches routed operations first and falls back to
+    ``POST /<composition>/<key>/<op>`` for the operations declared public.
+
+    The face serves a declared PUBLIC SURFACE, never the composition's wiring
+    (item 569 B1): the routed operations, plus the `public` set of
+    ``(key, op)`` pairs on the canonical path. The language has no public
+    marking yet, so `revl serve --http` passes none and the canonical path
+    serves nothing. An operation with an authority parameter (a `Principal`,
+    or a declared `Trusted[...]`, see `surface.py`) is withheld from both
+    paths whatever `public` says, and a request that reaches it is a 403
+    naming the parameter. The wire layer is a pure function of the request
+    (`dispatch`, `dispatch_http`) and is testable with no runtime.
     """
 
-    def __init__(self, session, composition: str = "revl", decode=None) -> None:
+    def __init__(self, session, composition: str = "revl", decode=None, *,
+                 public=(), declared: DeclaredTypes | None = None) -> None:
         self.composition = composition
-        self._composed = ComposedServer(session, composition=composition)
+        self._composed = ComposedServer(session, composition=composition,
+                                        declared=declared)
         self.session = session
         # issue #1488: the session serves one call at a time (one asyncio loop),
         # and the listener is threaded, so dispatch is serialized. The same lock
@@ -345,13 +357,21 @@ class HttpComposedServer:
         # HTTP path `/<composition>/<key>/<op>`, and keep the advertised hints
         # for the manifest so the fourth quadrant's compiler-derived
         # readOnly/emission classification rides this transport too.
+        public = set(public)
         self._by_path: dict[str, tuple[str, str, list[str]]] = {}
         self._hints: dict[str, dict] = {}
         for tool in self._composed._advertised:
             key, method, params = self._composed._routes[tool["name"]]
+            if (key, method) not in public:
+                continue
             path = f"/{composition}/{key}/{method}"
             self._by_path[path] = (key, method, params)
             self._hints[path] = tool
+        # item 569 B1: withheld operations, by canonical path and by (key, op)
+        self._withheld_ops = {(w.key, w.op): w
+                              for w in self._composed._withheld.values()}
+        self._withheld_paths = {f"/{composition}/{w.key}/{w.op}": w
+                                for w in self._withheld_ops.values()}
         # item 457: the declared HTTP routes, resolved from the IR `route` entry.
         self._routes_457: list[_Route] = self._build_routes(session.ir or {})
         self.frontier = gate_version().get("frontier", "")
@@ -415,6 +435,7 @@ class HttpComposedServer:
                  "key": r.key, "operation": r.op,
                  **({"auth": r.auth} if r.auth else {})}
                 for r in self._routes_457
+                if (r.key, r.op) not in self._withheld_ops
             ],
             # D-424c.8: LOCAL contract only. This face is typed and bounded on
             # THIS side; it makes no safety claim about what any callee it
@@ -439,9 +460,13 @@ class HttpComposedServer:
 
         route = self._by_path.get(clean)
         if route is None:
+            withheld = self._withheld_paths.get(clean)
+            if withheld is not None:
+                return _FORBIDDEN, _err(withheld.message(),
+                                        code=AUTHORITY_CATEGORY)
             return _NOT_FOUND, _err(
-                f"no operation at `{clean}` — GET / for the served operations",
-                code="route")
+                f"no operation at `{clean}` on this face's public surface; "
+                "GET / for the served operations", code="route")
         if method != "POST":
             return _METHOD_NOT_ALLOWED, _err(
                 f"`{clean}` is an operation — call it with POST", code="method")
@@ -506,6 +531,10 @@ class HttpComposedServer:
             matched_path = True
             if route.method != method:
                 continue
+            withheld = self._withheld_ops.get((route.key, route.op))
+            if withheld is not None:
+                return HttpReply.json(_FORBIDDEN, _err(
+                    withheld.message(), code=AUTHORITY_CATEGORY))
             return self._serve_route(route, m, query, body, headers)
         if matched_path:
             allow = sorted({r.method for r in self._routes_457
@@ -1116,7 +1145,8 @@ def build_http_server(server: HttpComposedServer, host: str, port: int, *,
 
 def serve_http(ir: dict, config: dict | None = None, *,
                composition: str = "revl", host: str = "127.0.0.1",
-               port: int = 8080, exposure: Exposure | None = None) -> int:
+               port: int = 8080, exposure: Exposure | None = None,
+               declared: DeclaredTypes | None = None) -> int:
     """Boot `ir` into a live session and serve its operations over HTTP.
 
     Booting is admission, so this loads through the same `Session.load` the MCP
@@ -1147,15 +1177,20 @@ def serve_http(ir: dict, config: dict | None = None, *,
             decode = lambda v: bridge._decode_value(v, module)  # noqa: E731
         except Exception:  # noqa: BLE001 — the escape hatch degrades to identity
             decode = None
-    face = HttpComposedServer(session, composition=composition, decode=decode)
+    face = HttpComposedServer(session, composition=composition, decode=decode,
+                              declared=declared)
     httpd = build_http_server(face, host, port, exposure=exposure)
     bound_host, bound_port = httpd.server_address[:2]
     scheme = "https" if httpd.tls_context is not None else "http"
     print(f"revl serve --http: {composition} on {scheme}://{bound_host}:{bound_port}",
           file=sys.stderr)
     print(f"  gate frontier: {face.frontier}", file=sys.stderr)
-    print(f"  {len(face._by_path)} operation(s); GET / for the manifest. LOCAL "
+    served = len(face._by_path) + sum(
+        (r.key, r.op) not in face._withheld_ops for r in face._routes_457)
+    print(f"  {served} public operation(s); GET / for the manifest. LOCAL "
           "contract only — no safety claim about any callee.", file=sys.stderr)
+    for withheld in face._withheld_ops.values():
+        print(f"  withheld: {withheld.message()}", file=sys.stderr)
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

@@ -1,0 +1,24 @@
+// REFUSED G1: `db` is not a declared requirement of C.
+//
+// Two nested activation-body guards over several lines, then a `provide`
+// block. The crossing is written AFTER the block, so the reader has to find
+// the block's closing brace by nesting depth to reach it.
+//
+// One document per rule and block form, so the gate/reference census measures
+// each (tools/gate_reference_census.py). The file name's prefix is the
+// expected verdict; tests/test_gate_reference_census.py holds it.
+
+service K { fn f() -> Int }
+component C provides k: K {
+  if (true) {
+    if (false) {
+      fail "x"
+    }
+  }
+  provide k {
+    fn f() {
+      emit db.put("a")
+      return 0
+    }
+  }
+}

@@ -65,7 +65,8 @@ def test_concurrent_requests_to_the_face_all_complete_with_their_own_answer():
 
     session = Session()
     session.load(compile_source(_SLOW, "slow.rvl"))
-    face = HttpComposedServer(session, composition="app")
+    face = HttpComposedServer(session, composition="app",
+                              public={("work", "run")})
     httpd = build_http_server(face, "127.0.0.1", 0)
     port = httpd.server_address[1]
     serving = threading.Thread(target=httpd.serve_forever, daemon=True)
