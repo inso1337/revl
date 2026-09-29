@@ -66,7 +66,20 @@ link                         what it means
 ``replayed-task``            this peer already ran that task id. One result per
                              task on the peer side too, so a captured task
                              cannot be re-run for a second receipt
+``bundle-path``              a multi-file task names a file by a path that
+                             would leave the workspace, collide with another,
+                             or read as a flag (`pool_bundle`). Named
+``bundle-missing-file``      the bundle's manifest lists a file the task does
+                             not carry. Named
+``bundle-extra-file``        the task carries a file the manifest does not
+                             list. Named
+``bundle-file-digest``       a carried file's bytes or mode are not the ones
+                             its manifest entry pins. Named
 ============================ =================================================
+
+For a multi-file task ``artifact-digest`` means the MANIFEST does not hash to
+the digest the task pins; the four ``bundle-*`` links are the per-file checks
+that follow it. All of them run before anything is written or run.
 
 The operator side adds four more, on the way back:
 
@@ -133,9 +146,10 @@ import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping, Optional
+from typing import Any, Mapping, Optional, Union
 
-from . import peer_identity, peer_pool, pool_health, pool_receipt, pool_state
+from . import (peer_identity, peer_pool, pool_bundle, pool_health,
+               pool_receipt, pool_state)
 from .lawful_retry import EffectClass
 
 # ---------------------------------------------------------------------------
@@ -211,7 +225,10 @@ LINK_DELIVERED_TWICE = "delivered-twice"
 LINK_LATE_DELIVERY = "late-delivery"
 LINK_UNKNOWN_TASK = "unknown-task"
 LINK_NON_LOOPBACK_BIND = "non-loopback-bind"
-LINK_MULTI_FILE_ARTIFACT = "multi-file-artifact"
+LINK_BUNDLE_PATH = "bundle-path"
+LINK_BUNDLE_MISSING_FILE = "bundle-missing-file"
+LINK_BUNDLE_EXTRA_FILE = "bundle-extra-file"
+LINK_BUNDLE_FILE_DIGEST = "bundle-file-digest"
 LINK_UNSUPPORTED_WITH_POOL = "unsupported-with-pool"
 
 #: Every link this module can refuse on. A test asserts the set is exactly the
@@ -237,7 +254,10 @@ REFUSAL_LINKS: tuple[str, ...] = (
     LINK_LATE_DELIVERY,
     LINK_UNKNOWN_TASK,
     LINK_NON_LOOPBACK_BIND,
-    LINK_MULTI_FILE_ARTIFACT,
+    LINK_BUNDLE_PATH,
+    LINK_BUNDLE_MISSING_FILE,
+    LINK_BUNDLE_EXTRA_FILE,
+    LINK_BUNDLE_FILE_DIGEST,
     LINK_UNSUPPORTED_WITH_POOL,
 )
 
@@ -314,6 +334,48 @@ def artifact_digest(source: bytes) -> str:
     peer computes it on what it received rather than reading what the task
     claims."""
     return hashlib.sha256(bytes(source)).hexdigest()
+
+
+#: What a task carries: one file's bytes, or a multi-file `pool_bundle.Bundle`.
+#: One file keeps the plain sha256 above, so a charter written before bundles
+#: existed still admits what it admitted.
+Artifact = Union[bytes, pool_bundle.Bundle]
+
+
+def digest_of(artifact: Artifact) -> str:
+    """The digest a charter, a join, a task and a receipt pin ``artifact`` by."""
+    if isinstance(artifact, pool_bundle.Bundle):
+        return artifact.digest()
+    return artifact_digest(artifact)
+
+
+def _bundle_of(artifact: Artifact) -> Optional[dict]:
+    """The ``{digest, files}`` block a ledger entry, a receipt and a delivery
+    record carry for a bundle, or ``None`` for one file."""
+    if isinstance(artifact, pool_bundle.Bundle):
+        return artifact.describe()
+    return None
+
+
+def _compile_artifact(artifact: Artifact) -> dict:
+    """Compile what will be sent, to classify it.
+
+    A bundle is written to a scratch directory first and compiled from there,
+    as the peer will run it, so a ``use`` that names a file the bundle does not
+    carry fails HERE instead of resolving against the operator's working
+    directory and passing."""
+    from .compiler import compile_files  # noqa: PLC0415 (lazy)
+
+    if not isinstance(artifact, pool_bundle.Bundle):
+        return compile_files(["artifact.rvl"],
+                             sources={"artifact.rvl": artifact.decode("utf-8")})
+    import tempfile  # noqa: PLC0415
+
+    with tempfile.TemporaryDirectory(prefix="revl-pool-bundle-") as scratch:
+        root = Path(scratch)
+        artifact.materialize(root)
+        return compile_files([str(root.joinpath(*name.split("/")))
+                              for name in artifact.roots()])
 
 
 @dataclass(frozen=True)
@@ -404,28 +466,34 @@ def classify_artifact(ir: Mapping[str, Any]
 
 
 def build_task(*, pool_id: str, charter_digest: str, peer_id: str,
-               task_id: str, artifact: bytes, runner: str,
+               task_id: str, artifact: Artifact, runner: str,
                effect_class: EffectClass,
                at: Optional[datetime] = None) -> dict:
     """The task BODY, before it is signed.
 
-    ``artifact_digest`` is computed here from the bytes rather than accepted as
-    a parameter, so the operator cannot sign a task whose declared digest is
-    not the digest of the artifact it carries."""
-    source = bytes(artifact)
-    return {
+    ``artifact_digest`` is computed here from what is carried rather than
+    accepted as a parameter, so the operator cannot sign a task whose declared
+    digest is not the digest of the artifact it carries. A bundle travels as
+    its manifest and its files, separately, with ``artifact`` empty, so the
+    peer can name a missing, extra or altered file."""
+    body = {
         "kind": TASK_KIND,
         "version": TASK_VERSION,
         "pool_id": pool_id,
         "charter_digest": charter_digest,
         "peer_id": peer_id,
         "task_id": task_id,
-        "artifact_digest": artifact_digest(source),
-        "artifact": source.decode("utf-8"),
+        "artifact_digest": digest_of(artifact),
+        "artifact": "",
         "runner": runner,
         "effect_class": effect_class.value,
         "issued_at": _iso(at or _utc_now()),
     }
+    if isinstance(artifact, pool_bundle.Bundle):
+        body["bundle"] = artifact.to_wire()
+    else:
+        body["artifact"] = bytes(artifact).decode("utf-8")
+    return body
 
 
 def sign_task(body: Mapping[str, Any],
@@ -464,6 +532,8 @@ def _task_shape(record: Any) -> str:
             or task_id in (".", ".."):
         return ("task_id must be 1-64 characters of ASCII letters, digits, "
                 "'-', '_' or '.', because it names a directory on the peer")
+    if "bundle" in record and record["artifact"]:
+        return "a task carries one artifact or one bundle, never both"
     return ""
 
 
@@ -540,10 +610,15 @@ class DeliveryLedger:
         return record
 
     def dispatch(self, *, task_id: str, peer_id: str, artifact_digest: str,
-                 runner: str, effect_class: str) -> dict:
+                 runner: str, effect_class: str,
+                 bundle: Optional[Mapping[str, Any]] = None) -> dict:
         """Record that a task went out. Refuses a task id that was used
         before, so a captured task id cannot open a second slot to deliver
-        into."""
+        into.
+
+        ``bundle`` is the ``{digest, files}`` block of a multi-file task. It
+        is kept on the entry, so the ledger says which files, paths and modes
+        a task ran and not only the digest that covers them."""
         if task_id in self.tasks:
             prior = self.tasks[task_id]
             self._event("dispatch-refused", task_id, link=LINK_REPLAYED_TASK,
@@ -559,8 +634,12 @@ class DeliveryLedger:
             "effect_class": effect_class, "state": STATE_DISPATCHED,
             "dispatched_at": _iso(_utc_now()),
         }
+        detail = {}
+        if bundle is not None:
+            self.tasks[task_id]["bundle"] = dict(bundle)
+            detail["bundle_files"] = len(bundle.get("files") or ())
         self._event("dispatched", task_id, peer_id=peer_id,
-                    artifact_digest=artifact_digest)
+                    artifact_digest=artifact_digest, **detail)
         return {"ok": True, "task_id": task_id, "state": STATE_DISPATCHED}
 
     def deliver(self, *, task_id: str, peer_id: str, result_digest: str,
@@ -719,28 +798,49 @@ def _scrub(text: str, workspace: Path) -> list[str]:
     return [line for line in replaced.splitlines()]
 
 
-def execute(runner: str, source: bytes, workspace: Path,
+def _runner_argv(runner: str, names: list[str]) -> list[str]:
+    """The runner's command line, with ``{artifact}`` standing for every file
+    it is handed. `-P` is issue #317's safety bit and it is load-bearing HERE
+    rather than merely conventional: the working directory is a scratch
+    directory the artifact is written into, so without it that directory would
+    be on `sys.path` for the interpreter that runs the artifact."""
+    argv = [sys.executable, "-P", "-m", "revl"]
+    for part in RUNNERS[runner]:
+        argv.extend(names if part == "{artifact}" else [part])
+    return argv
+
+
+def execute(runner: str, source: Artifact, workspace: Path,
             *, timeout: float = 300.0) -> dict:
     """Run one artifact in one workspace and return the result record.
 
     The artifact is written under ``workspace`` and named RELATIVELY on the
     command line, with ``workspace`` as the working directory, so no absolute
     path reaches the process's output and the result is the same wherever the
-    workspace happens to be."""
+    workspace happens to be. A bundle is written into a fresh directory of its
+    own under ``workspace``, each file at its bundle path with its mode, and
+    the runner is handed its ``.rvl`` files in path order."""
     if runner not in RUNNERS:
         raise DispatchError(f"unknown runner {runner!r}")
     workspace.mkdir(parents=True, exist_ok=True)
-    artifact = workspace / "artifact.rvl"
-    artifact.write_bytes(bytes(source))
-    # `-P` is issue #317's safety bit and it is load-bearing HERE rather than
-    # merely conventional: the working directory is a scratch directory the
-    # artifact is written into, so without it that directory would be on
-    # `sys.path` for the interpreter that runs the artifact.
-    argv = [sys.executable, "-P", "-m", "revl"] + [
-        part.format(artifact=artifact.name) for part in RUNNERS[runner]]
+    if isinstance(source, pool_bundle.Bundle):
+        import tempfile  # noqa: PLC0415
+
+        workspace = Path(tempfile.mkdtemp(prefix="bundle-", dir=workspace))
+        source.materialize(workspace)
+        names = source.roots()
+    else:
+        artifact = workspace / "artifact.rvl"
+        artifact.write_bytes(bytes(source))
+        names = [artifact.name]
+    argv = _runner_argv(runner, names)
     try:
+        # No stdin: the runner reads nothing from the peer process, so a
+        # runner that would prompt gets end-of-file instead of waiting on
+        # whatever `pool serve` was started with.
         done = subprocess.run(argv, cwd=str(workspace), capture_output=True,
-                              text=True, timeout=timeout, check=False)
+                              stdin=subprocess.DEVNULL, text=True,
+                              timeout=timeout, check=False)
         code, out, err = done.returncode, done.stdout, done.stderr
     except subprocess.TimeoutExpired:
         code, out, err = 124, "", f"the runner exceeded {timeout:g}s"
@@ -749,6 +849,38 @@ def execute(runner: str, source: bytes, workspace: Path,
     return {"kind": RESULT_KIND, "version": RESULT_VERSION, "runner": runner,
             "exit_code": code, "stdout": _scrub(out, workspace),
             "stderr": _scrub(err, workspace)}
+
+
+def _receive_bundle(record: Mapping[str, Any], task_id: str
+                    ) -> tuple[Optional[pool_bundle.Bundle], Optional[dict]]:
+    """The carried bundle checked against the digest the task pins, or the
+    refusal naming what is wrong with it. Nothing is written until this
+    passes."""
+    bundle, problem = pool_bundle.receive(record["bundle"],
+                                          record["artifact_digest"])
+    if problem is None:
+        return bundle, None
+    named = list(problem.paths)
+    if problem.kind == pool_bundle.PROBLEM_PATH:
+        return None, _refusal(LINK_BUNDLE_PATH, problem.reason,
+                              paths=named, task_id=task_id)
+    if problem.kind == pool_bundle.PROBLEM_DIGEST:
+        return None, _refusal(LINK_ARTIFACT_DIGEST,
+                              f"{problem.reason}; the peer runs what it "
+                              f"hashed, never what the task declared",
+                              task_id=task_id)
+    if problem.kind == pool_bundle.PROBLEM_MISSING:
+        return None, _refusal(LINK_BUNDLE_MISSING_FILE, problem.reason,
+                              paths=named, task_id=task_id)
+    if problem.kind == pool_bundle.PROBLEM_EXTRA:
+        return None, _refusal(LINK_BUNDLE_EXTRA_FILE, problem.reason,
+                              paths=named, task_id=task_id)
+    if problem.kind == pool_bundle.PROBLEM_FILE_DIGEST:
+        return None, _refusal(LINK_BUNDLE_FILE_DIGEST, problem.reason,
+                              paths=named, task_id=task_id)
+    return None, _refusal(LINK_TASK_SHAPE,
+                          f"not a bundle: {problem.reason}",
+                          paths=named, task_id=task_id)
 
 
 class PeerRunner:
@@ -812,8 +944,13 @@ class PeerRunner:
                             f"the task is addressed to "
                             f"{record['peer_id']!r} and this peer is "
                             f"{self.identity.peer_id!r}", task_id=task_id)
-        source = record["artifact"].encode("utf-8")
-        actual = artifact_digest(source)
+        if "bundle" in record:
+            source, refused = _receive_bundle(record, task_id)
+            if refused is not None:
+                return refused
+        else:
+            source = record["artifact"].encode("utf-8")
+        actual = digest_of(source)
         if actual != record["artifact_digest"]:
             return _refusal(
                 LINK_ARTIFACT_DIGEST,
@@ -843,7 +980,8 @@ class PeerRunner:
                          timeout=self.timeout)
         receipt = pool_receipt.issue_receipt(
             pool_id=record["pool_id"], task_id=task_id,
-            artifact_digest=actual, result=result, identity=self.identity)
+            artifact_digest=actual, result=result, identity=self.identity,
+            bundle=_bundle_of(source))
         self.seen[task_id] = pool_receipt.receipt_digest(receipt)
         return {"ok": True, "task_id": task_id, "receipt": receipt,
                 "result": result}
@@ -1040,7 +1178,7 @@ def _note_contact(pool_dir, peer_id: str, state: str, host: str, port: int,
         addr=f"{host}:{port}", **detail))
 
 
-def _prepare(*, pool_dir, peer_id: str, source: bytes, runner: str,
+def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
              task_id: str) -> dict:
     """Everything before the task leaves, as one transaction under the pool
     lock: the checks, and the dispatch written into the ledger.
@@ -1048,8 +1186,6 @@ def _prepare(*, pool_dir, peer_id: str, source: bytes, runner: str,
     Returns the refusal, or ``{"ok": True, ...}`` with what the send and the
     settlement need. Holds the lock only for local work (the checks and a
     compile), never across the network."""
-    from .compiler import compile_files  # noqa: PLC0415 (lazy)
-
     with pool_state.locked(pool_dir):
         charter_record, roster = peer_pool.load_pool(pool_dir)
         ledger = load_ledger(pool_dir)
@@ -1060,13 +1196,15 @@ def _prepare(*, pool_dir, peer_id: str, source: bytes, runner: str,
                             f"{peer_id!r} is not a member of pool "
                             f"{charter_record.get('pool_id')!r}; a task is "
                             f"dispatched to an admitted peer or not at all")
-        digest = artifact_digest(source)
+        digest = digest_of(source)
+        bundle = _bundle_of(source)
         if digest != member.artifact_digest:
             return _refusal(
                 LINK_ARTIFACT_DIGEST,
                 f"the artifact hashes to {digest[:16]} and {peer_id!r} was "
                 f"admitted for {member.artifact_digest[:16]}; the candidate "
-                f"a peer runs is the candidate it was admitted with")
+                f"a peer runs is the candidate it was admitted with",
+                **({"bundle": bundle} if bundle is not None else {}))
         if digest not in (charter_record.get("artifact_digests") or ()):
             return _refusal(LINK_ARTIFACT_DIGEST,
                             f"artifact {digest[:16]} is not one the charter "
@@ -1076,8 +1214,7 @@ def _prepare(*, pool_dir, peer_id: str, source: bytes, runner: str,
                             f"runner {runner!r} is not one of "
                             f"{', '.join(sorted(RUNNERS))}")
 
-        ir = compile_files(["artifact.rvl"],
-                           sources={"artifact.rvl": source.decode("utf-8")})
+        ir = _compile_artifact(source)
         effect_class, reason, surface = classify_artifact(ir)
         if effect_class is None:
             return _refusal(LINK_EFFECT_CLASS_UNPROVEN, reason,
@@ -1092,7 +1229,8 @@ def _prepare(*, pool_dir, peer_id: str, source: bytes, runner: str,
         task_id = task_id or secrets.token_hex(8)
         written = ledger.dispatch(task_id=task_id, peer_id=peer_id,
                                   artifact_digest=digest, runner=runner,
-                                  effect_class=effect_class.value)
+                                  effect_class=effect_class.value,
+                                  bundle=bundle)
         if not written.get("ok"):
             return written
         roster.outstanding = ledger.outstanding()
@@ -1100,7 +1238,7 @@ def _prepare(*, pool_dir, peer_id: str, source: bytes, runner: str,
         save_ledger(pool_dir, ledger)
     return {"ok": True, "charter_record": charter_record, "member": member,
             "digest": digest, "effect_class": effect_class,
-            "surface": surface, "task_id": task_id}
+            "surface": surface, "task_id": task_id, "bundle": bundle}
 
 
 def _settle(*, pool_dir, peer_id: str, task_id: str,
@@ -1163,7 +1301,7 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
 
 
 def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
-                 source: bytes, runner: str,
+                 source: Artifact, runner: str,
                  dispatch_identity: peer_identity.PeerIdentity,
                  attesting_identity: peer_identity.PeerIdentity,
                  task_id: str = "", timeout: float = 300.0) -> dict:
@@ -1178,7 +1316,10 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
 
     The two writes are two transactions under the pool lock, and the send
     between them holds no lock, so a slow peer stalls no other operator
-    command and nothing written in the meantime is lost."""
+    command and nothing written in the meantime is lost.
+
+    ``source`` is one file's bytes or a `pool_bundle.Bundle`; the digest, the
+    ledger entry, the task and the receipt all follow from it."""
     prepared = _prepare(pool_dir=pool_dir, peer_id=peer_id, source=source,
                         runner=runner, task_id=task_id)
     if not prepared.get("ok"):
@@ -1203,19 +1344,22 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
         return outcome
     _note_contact(pool_dir, peer_id, pool_health.HEALTH_LIVE, host, port,
                   key_id=str((answer.get("receipt") or {}).get("key_id", "")))
-    return {"ok": True, "kind": "revl.pool-delivery", "version": "1.0",
-            "pool_id": str(charter_record.get("pool_id", "")),
-            "peer_id": peer_id, "task_id": task_id,
-            "artifact_digest": prepared["digest"], "runner": runner,
-            "effect_class": effect_class.value,
-            "tier": prepared["member"].tier,
-            "boundary": prepared["surface"].as_dict(),
-            "result_digest": outcome["result_digest"],
-            "receipt_digest": outcome["receipt_digest"],
-            "counts_as_evidence": outcome["counts"],
-            "result": answer.get("result"),
-            "receipt": answer.get("receipt"),
-            "attestation": outcome["attestation"]}
+    delivery = {"ok": True, "kind": "revl.pool-delivery", "version": "1.0",
+                "pool_id": str(charter_record.get("pool_id", "")),
+                "peer_id": peer_id, "task_id": task_id,
+                "artifact_digest": prepared["digest"], "runner": runner,
+                "effect_class": effect_class.value,
+                "tier": prepared["member"].tier,
+                "boundary": prepared["surface"].as_dict(),
+                "result_digest": outcome["result_digest"],
+                "receipt_digest": outcome["receipt_digest"],
+                "counts_as_evidence": outcome["counts"],
+                "result": answer.get("result"),
+                "receipt": answer.get("receipt"),
+                "attestation": outcome["attestation"]}
+    if prepared["bundle"] is not None:
+        delivery["bundle"] = prepared["bundle"]
+    return delivery
 
 # ---------------------------------------------------------------------------
 # the CLI
@@ -1300,6 +1444,10 @@ def ledger_command(args) -> int:
                 f"state={entry.get('state', '')} "
                 f"runner={entry.get('runner', '')} "
                 f"effects={entry.get('effect_class', '')}")
+        if isinstance(entry.get("bundle"), Mapping):
+            files = entry["bundle"].get("files") or ()
+            line += (f" bundle={str(entry['bundle'].get('digest', ''))[:16]}"
+                     f" ({len(files)} files)")
         if entry.get("result_digest"):
             line += f" result={entry['result_digest'][:16]}"
         if entry.get("link"):
@@ -1310,6 +1458,44 @@ def ledger_command(args) -> int:
         detail = event.get("link") or event.get("peer_id") or ""
         print(f"    {event.get('at', '')}  {event.get('event', '')} "
               f"{event.get('task_id', '')} {detail}".rstrip())
+    return 0
+
+
+def read_artifact(files) -> Artifact:
+    """What the command line names: one file's bytes, or a bundle of several.
+
+    One file stays one file, so its digest is the plain sha256 a charter
+    written before bundles pinned. Two or more are a `pool_bundle.Bundle`,
+    each named by its path relative to the working directory."""
+    if len(files) == 1:
+        return Path(files[0]).read_bytes()
+    return pool_bundle.from_paths(files)
+
+
+def digest_command(args) -> int:
+    """`revl pool digest`: the digest to pin with `pool init --artifact` and
+    `pool request --artifact` for what `run --pool private` would send.
+
+    Same reading of the command line as `run --pool private`, so the two
+    cannot disagree about which digest a set of files has."""
+    try:
+        artifact = read_artifact(args.files)
+    except pool_bundle.BundleError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1 if error.kind == pool_bundle.PROBLEM_PATH else 2
+    except OSError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
+    bundle = _bundle_of(artifact)
+    if getattr(args, "json", False):
+        print(json.dumps({"digest": digest_of(artifact),
+                          "form": "bundle" if bundle else "file",
+                          "files": bundle["files"] if bundle else None},
+                         indent=2, sort_keys=True))
+        return 0
+    print(digest_of(artifact))
+    for entry in (bundle or {}).get("files", ()):
+        print(f"  {entry['mode']}  {entry['digest'][:16]}  {entry['path']}")
     return 0
 
 
@@ -1343,16 +1529,23 @@ def run_pool_command(args) -> int:
             f"peer's side is chosen with --pool-runner",
             flags=ignored), indent=2, sort_keys=True))
         return 1
-    if len(args.files) != 1:
+    try:
+        source = read_artifact(args.files)
+    except pool_bundle.BundleError as error:
+        if error.kind != pool_bundle.PROBLEM_PATH:
+            print(f"error: {error}", file=sys.stderr)
+            return 2
         print(json.dumps(_refusal(
-            LINK_MULTI_FILE_ARTIFACT,
-            f"a pool task pins ONE artifact by hash and {len(args.files)} "
-            f"files were given; a multi-file artifact needs a bundle digest, "
-            f"which this slice does not build"), indent=2, sort_keys=True))
+            LINK_BUNDLE_PATH,
+            f"{error}; a bundle names each file by its path relative to the "
+            f"working directory, so run from the composition's root",
+            paths=list(error.paths)), indent=2, sort_keys=True))
         return 1
+    except OSError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     try:
         host, port = _split_addr(args.peer_addr)
-        source = Path(args.files[0]).read_bytes()
         dispatch_identity = peer_identity.load_private_identity(
             args.dispatch_identity)
         attesting_identity = peer_identity.load_private_identity(

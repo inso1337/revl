@@ -1984,6 +1984,19 @@ def build_parser() -> argparse.ArgumentParser:
     pool_ledger.add_argument("--json", action="store_true",
                              help="the whole ledger as JSON")
 
+    pool_digest = pool_sub.add_parser(
+        "digest",
+        help="print the artifact digest to pin with `pool init --artifact` "
+             "and `pool request --artifact` for the files `run --pool "
+             "private` would send: one file's sha256, or for several files "
+             "a bundle digest over every file, its path and its mode")
+    pool_digest.add_argument("files", nargs="+", metavar="FILE",
+                             help="the composition's files, named relative "
+                                  "to the working directory as `run --pool "
+                                  "private` will name them")
+    pool_digest.add_argument("--json", action="store_true",
+                             help="the digest and the bundle manifest as JSON")
+
     attest_cmd = sub.add_parser(
         "attest",
         help="cryptographic attestation of a verified composition (item 127): "
