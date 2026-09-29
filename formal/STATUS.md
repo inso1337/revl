@@ -48,7 +48,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G1** declared access | partial | 2 | no | `declared_only_access` is real and witnessed, but its content is the shape of `Typed`/`ReachIn`: it says an undeclared access cannot be *written*, not that the checker *visits* every statement of a real component body. **Modelling limit** — L0 has no component bodies |
 | **G2** provision disjointness | full | 4 | **yes** (V rows, 2 agree-G2) | stated over `(key, realm)` slots from the incremental `LinkOK`, and the oracle bites: change `Manifest.needs` to ignore the realm and four corpus files mismatch |
 | **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
-| **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 | **yes** (182 G rows, 25 P rows, 6 agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits |
+| **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 + 10 | **yes** (182 G rows, 25 P rows, 6 agree-G4; one AP row per marked crossing for the approval floor, whose 21 refusals file under agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits. The approval floor (item 246, issue #1455) is `RevL.G4Approval.CrossingOK` over three exported facts: the approval-required capability TOKENS (`AR`, keyed by token as `lower._approval_index` keys them), the tokens one marked crossing reaches (`AX`, as `lower._approval_crossed_caps` resolves them, a `compensate` slot's crossings included) and its `with` edge (`AE`, none for the value form); `crossingB_iff` bridges the printed verdict, and `approval_coverage` fails the gate unless the corpus carries a covered crossing, one refused under another edge, one refused with no edge and an unrequired one admitted. Not modelled there: a `[...]` class in a glob scope, an edge the exporter cannot name (read as none, fail-closed), and a required token declared in a `use`d module |
 | **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 15 | **yes** (one U5 row per effect statement; the generated census below carries the count) | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. The oracle now reconstructs the file's `RevL.Lemmas.Prog` from the `EX`/`FN`/`PG` rows and decides `registrations` over each effect's inverse body (`Oracle.registrationsB`, `registrationsB_iff`); the reference recomputes the same reach fold independently from the TSV, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries a clean teardown (count 0) AND a caught crossing (`examples/rejections/g5_undo_fn_emission.rvl`, an `undo` reaching an emission through a `fn`), and `g5_row_not_vacuous` proves the count flips to 0 when the wrapping fn stops calling the emission. First-class dispatch (`star`) is `n/a` on both sides, outside the model as in G4 |
 | **G6** purity outside effect forms | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 | **yes** (one C row per reconstructed statement; the generated census below carries the count) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on every one of them. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe |
 | **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
@@ -303,6 +303,16 @@ Three summary readings of that map:
 | `RevL.A2.fixture_release_before_withdrawal` | A2 — the converse, computed | **proved** | `propext` | on the fixture's stack every settling verdict runs a release BEFORE the withdrawal: the window `docs/rejections.md#a2` describes |
 | `RevL.A2.fixture_opens_the_window` | A2 — the converse | **proved** | `propext` | the fixture's pass violates the ordering claim, so the `A2OK` hypothesis excludes a real body rather than nothing |
 | `RevL.A2.a2_not_vacuous` | A2 — non-vacuity | **proved** | `propext, Quot.sound` | `[acquire, provide]`: admitted by fold and rule, stack `[release, withdrawal]`, commit and abort passes `[withdrawal, release]`, halted pass empty |
+| `RevL.G4Approval.coversB_iff` | G4 approval floor — coverage (issue #1455) | **proved** | `propext, Classical.choice, Quot.sound` | `coversB scope token = true ↔ Covers scope token`: exact match, or the glob scope matches (`lower._approval_covers`) |
+| `RevL.G4Approval.edgeCoversB_iff` | G4 approval floor — the edge | **proved** | `propext, Classical.choice, Quot.sound` | no edge covers nothing; an edge covers exactly what its scope covers |
+| `RevL.G4Approval.crossingB_iff` | G4 approval floor — the bridge | **proved** | `propext, Classical.choice, Quot.sound` | `crossingB required c = true ↔ CrossingOK required c`: the printed `AP` verdict is exactly the rule |
+| `RevL.G4Approval.no_edge_iff_nothing_required` | G4 approval floor — the value form | **proved** | `propext, Classical.choice, Quot.sound` | a crossing with no edge is admitted exactly when it reaches no approval-required token, so `let r = emit charge(1)` is refused for an approval-required `charge` however it is written |
+| `RevL.G4Approval.uncovered_required_refused` | G4 approval floor — the refusal | **proved** | `propext, Classical.choice, Quot.sound` | a required token the edge does not cover refuses the crossing, whatever else it reaches |
+| `RevL.G4Approval.unrequired_needs_no_edge` | G4 approval floor — keyed by token | **proved** | `propext, Classical.choice, Quot.sound` | a crossing that reaches no required token needs no edge, whichever extern or operation it goes through |
+| `RevL.G4Approval.covering_edge_admits` | G4 approval floor — admission | **proved** | `propext, Classical.choice, Quot.sound` | an edge covering every required token the crossing reaches admits it |
+| `RevL.G4Approval.globMatch_star_any` | G4 approval floor — the prefix glob | **proved** | `propext` | a trailing `*` matches any rest, the shape of `approval["production.*"]` |
+| `RevL.G4Approval.approval_not_vacuous` | G4 approval floor — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | `g4_approval_scoped_extern.rvl` refused, admitted under the exact and the glob edge, refused under `staging.*`; `g4_approval_compensate_other_edge.rvl`'s head admitted and compensation refused; an unrequired head admitted with no edge |
+| `RevL.G4Approval.approval_row_not_vacuous` | G4 approval floor — the row | **proved** | `propext, Classical.choice, Quot.sound` | the verdict moves with the edge alone, the required set alone and the token alone, so each of `AE`, `AR` and `AX` is load-bearing |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -863,6 +873,25 @@ Verdicts:
   `missed-A2 1 FATAL` on the fixture before the row was trusted, while
   blinding `a2OKB` itself never reached the row — `a2OKB_iff` stopped
   elaborating, the same layer that catches D-row model drift.
+- **AP rows (per marked crossing, the G4 approval floor, issue #1455)**:
+  `Oracle.approvalRowB` — `RevL.G4Approval.crossingB` — over the tokens
+  the crossing reaches (`AX`), its `with` edge (`AE`, absent for the value
+  form) and the file's approval-required tokens (`AR`), with
+  `approvalRowB_iff` proving the printed Bool is exactly
+  `RevL.G4Approval.CrossingOK`. The reference recomputes it from the same
+  rows with the shipped `lower._approval_covers`. The exporter resolves
+  the tokens the way `lower._approval_crossed_caps` does, and a SCOPED
+  host emission carries its scope (`extern emission[pay] fn charge` is
+  `pay`), both here and in the F row's bound column, where it used to read
+  the extern's name (or `*` through a `fn`). Before this row the 21
+  approval fixtures sat in a ratcheted `out-of-fragment-approval` bucket;
+  they file under `agree-G4` now and the bucket is gone. Blinding the
+  printed verdict (`ok` for every crossing) was seen to produce 21
+  `approval` mismatches and `missed-G4 21 FATAL`; making the model's
+  missing edge cover everything stops `approval_not_vacuous` from
+  elaborating. `approval_coverage` fails the gate unless the corpus
+  carries a covered crossing, one refused under another edge, one refused
+  with no edge and an unrequired one admitted.
 
 ### The G7 row, and what it is evidence of
 
@@ -1036,12 +1065,12 @@ printed 1. Nothing compared the two, in either direction.
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
 **581 .rvl files -> 455 components -> 1185 statements = 337 modeled +
-216 componentless + 28 refused at parse**, and **6462 verdicts compared
+216 componentless + 28 refused at parse**, and **6487 verdicts compared
 (337 files + 455 components + 133 provide methods + 20 spawn edges + 28
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1185
 confinements + 1185 surfaces + 351 teardowns + 345 provide-clause
-components + 81 config fields + 455 A2 bodies), 6462 agree, 0
-mismatches**.
+components + 81 config fields + 455 A2 bodies + 25 approval crossings),
+6487 agree, 0 mismatches**.
 
 Checker alignment over the 337 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
@@ -1052,15 +1081,14 @@ not that it disagrees.
 
 An absence cannot disagree, so the two buckets aimed at a row the model
 does carry are `ratcheted` instead: `out-of-fragment-G5` and
-`out-of-fragment-G6` and `out-of-fragment-approval` are held to the
-names in `formal/out_of_fragment_ledger.json`, which shrinks only. A
-file that JOINS one fails the gate, and a line no longer in its bucket
-fails it until it is deleted. So a new `undo` shape the `Prog` cannot
-resolve, or a new G6 fixture, cannot arrive while the model stays silent
-about it. `agree-*` and the generic `out-of-fragment` stay
-informational; that one collects every code the model states no row
-about at all, so it grows with corpus work that never touched this
-layer.
+`out-of-fragment-G6` are held to the names in
+`formal/out_of_fragment_ledger.json`, which shrinks only. A file that
+JOINS one fails the gate, and a line no longer in its bucket fails it
+until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
+a new G6 fixture, cannot arrive while the model stays silent about it.
+`agree-*` and the generic `out-of-fragment` stay informational; that one
+collects every code the model states no row about at all, so it grows
+with corpus work that never touched this layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1068,7 +1096,7 @@ layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 64 | informational |
+| `agree-G4` | 85 | informational |
 | `agree-G5` | 2 | informational |
 | `agree-accept` | 176 | informational |
 | `formal-found-other` | 0 | **FATAL** |
@@ -1081,7 +1109,6 @@ layer.
 | `out-of-fragment` | 57 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
-| `out-of-fragment-approval` | 21 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1097,27 +1124,6 @@ buckets are:
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
 - `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_method.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_other_edge.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_helper_reach.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_scoped_extern.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_alias.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_method.rvl`
-- `out-of-fragment-approval`: `examples/rejections/g4_approval_value_form_method.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_guard_setup.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_if.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_while.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_braceless_if.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_multiline_if.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl`
-- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.
@@ -1254,8 +1260,24 @@ Known fidelity limits of the shaped model, deliberately not papered over:
 
 - An emission reached through a spawn handle, an emission extern, or a
   transitively-emitting named function contributes the unnameable `*`
-  capability rather than a resolved boundary. That mirrors the checker's
-  own `*`, but it is coarse: `*` is covered only by `*`.
+  capability to the ATTENUATION fold rather than a resolved boundary. That
+  mirrors the checker's own `*` (`_emit_step_caps_pairs`), but it is
+  coarse: `*` is covered only by `*`. The provide-method BOUND column
+  reads the capability tokens the call reaches instead, as the checker's
+  `_emitting_capabilities` names them (issue #1455): a scoped extern is
+  its scope, an unscoped one its name, a `fn` the union of what it
+  reaches. A spawn handle stays `*` in both.
+- The attenuation fold reads a child's `emit` STEPS and value forms alike
+  (the `A`/`F` rows), while the checker's `_collect_emit_caps_pairs` reads
+  `emit` steps only. So a spawned child whose provide method writes
+  `let r = emit charge(n)` is refused by the model and admitted by the
+  checker, which lands in `formal-strict`; no corpus file has that shape
+  today. The model is the fail-closed side of that difference.
+- The approval floor (`AP` row) reads an edge the exporter can name: a
+  `let a = await approval[C]`, an `Approval[C]`-typed parameter or
+  annotated `let`, and a `let` alias of one. Any other edge reads as none,
+  the fail-closed direction. Glob scopes are modelled for `*` and `?`
+  only, and the required tokens come from the file's own externs.
 - Capability **ceilings** are modeled on both sides now (the model's
   `CeilingOK`, the checker's `split_ceilings`), but the corpus exercises
   neither: no file declares an integer-valued capability parameter, so

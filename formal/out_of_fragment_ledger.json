@@ -1,12 +1,11 @@
 {
   "_about": [
-    "The corpus files the checker refuses G5, G6 or with the G4 approval",
-    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
-    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
+    "The corpus files the checker refuses G5 or G6 and the model has NO",
+    "fact about: `out-of-fragment-G5` and `out-of-fragment-G6` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "",
-    "Each bucket records an absence, so none can disagree with anything",
-    "and none could fail the gate on its own (issue #1169). This ledger",
+    "Both buckets record an absence, so neither can disagree with anything",
+    "and neither could fail the gate on its own (issue #1169). This ledger",
     "is what makes them fire: MEMBERSHIP is checkable even when the",
     "contents are not. A file that joins a bucket without a line here is a",
     "gate failure, and a line that is no longer in its bucket is a gate",
@@ -34,28 +33,5 @@
   ],
   "out-of-fragment-G6": [
     "examples/rejections/g6_method_local_shadows_component.rvl"
-  ],
-  "out-of-fragment-approval": [
-    "examples/rejections/g4_approval_compensate.rvl",
-    "examples/rejections/g4_approval_compensate_method.rvl",
-    "examples/rejections/g4_approval_compensate_other_edge.rvl",
-    "examples/rejections/g4_approval_helper_reach.rvl",
-    "examples/rejections/g4_approval_scoped_extern.rvl",
-    "examples/rejections/g4_approval_spawn_handle.rvl",
-    "examples/rejections/g4_approval_spawn_handle_alias.rvl",
-    "examples/rejections/g4_approval_spawn_handle_method.rvl",
-    "examples/rejections/g4_approval_value_form_method.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_after_guard_setup.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_after_if.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_after_while.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_braceless_if.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_multiline_if.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl"
   ]
 }

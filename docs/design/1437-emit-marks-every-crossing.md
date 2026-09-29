@@ -266,7 +266,10 @@ gate's twin of `_instance_get_call`.
   `_emit_crossed_caps`.
 - **`undo` slots.** A bracket's `undo` that reaches an emission is refused
   under G5 before any approval question arises.
-- **The formal model** carries no fact about approvals. The approval
-  documents sit in the ratcheted `out-of-fragment-approval` bucket
-  (`formal/out_of_fragment_ledger.json`) rather than being judged against the
-  marker rule's `G` row. Modelling approval is its own issue.
+- **The formal model** states the floor since issue #1455
+  (`formal/RevL/Theorems/G4_ApprovalFloor.lean`): the exporter carries each
+  marked crossing's capability tokens, its `with` edge and the file's
+  approval-required tokens, and the oracle's `AP` row decides
+  `RevL.G4Approval.CrossingOK` per crossing. The approval documents file
+  under `agree-G4`; the ratcheted `out-of-fragment-approval` bucket that held
+  them before is gone.

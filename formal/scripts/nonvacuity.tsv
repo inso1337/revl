@@ -226,3 +226,13 @@ RevL.A2.fixture_refused	concrete	-	the fold refuses [acquire, provide, acquire],
 RevL.A2.fixture_release_before_withdrawal	concrete	-	the fixture's proof pass under commit and abort runs a release before the withdrawal: the window docs/rejections.md#a2 describes
 RevL.A2.fixture_opens_the_window	necessity	RevL.A2.fixture_release_before_withdrawal,RevL.A2.a2_not_vacuous	the refused pass is computed, and the refusal is not universal: okBody's pass satisfies the ordering claim
 RevL.A2.a2_not_vacuous	concrete	-	okBody = [acquire, provide]: admitted by the fold and the rule, stack [release, withdrawal], commit and abort passes [withdrawal, release], halted pass empty
+RevL.G4Approval.coversB_iff	instance	RevL.G4Approval.approval_not_vacuous	the coverage decider: true on the exact and the glob scope over production.payment, false on staging.*
+RevL.G4Approval.edgeCoversB_iff	instance	RevL.G4Approval.approval_not_vacuous	the edge decider: false on no edge (scopedNoEdge), true on a covering edge (scopedExactEdge)
+RevL.G4Approval.crossingB_iff	instance	RevL.G4Approval.approval_not_vacuous,RevL.G4Approval.approval_row_not_vacuous	the per-crossing decision the oracle prints: false on the scoped-extern and other-edge fixtures, true on their covered twins
+RevL.G4Approval.no_edge_iff_nothing_required	instance	RevL.G4Approval.approval_not_vacuous	both sides inhabited with no edge: scopedNoEdge reaches a required token and is refused, unrequiredHead reaches none and is admitted
+RevL.G4Approval.uncovered_required_refused	necessity	RevL.G4Approval.approval_not_vacuous	the three hypotheses hold together on otherEdgeCompensation (pay required, edge mail); with a covering edge instead (scopedExactEdge) the crossing is admitted
+RevL.G4Approval.unrequired_needs_no_edge	instance	RevL.G4Approval.approval_not_vacuous	unrequiredHead: notify reaches no required token and is admitted with no edge
+RevL.G4Approval.covering_edge_admits	instance	RevL.G4Approval.approval_not_vacuous	scopedGlobEdge: production.* covers production.payment, the one required token reached
+RevL.G4Approval.globMatch_star_any	instance	RevL.G4Approval.approval_not_vacuous	the trailing star the glob fixture's scope ends in; scopedWrongGlob shows a star does not cover a different prefix
+RevL.G4Approval.approval_not_vacuous	concrete	-	the scoped-extern fixture refused and admitted under the exact and the glob edge, refused under another glob; the other-edge fixture's head admitted and compensation refused; an unrequired head admitted with no edge
+RevL.G4Approval.approval_row_not_vacuous	concrete	-	the verdict moves with the edge alone, the required set alone and the token alone: the AE, AR and AX rows are each load-bearing
