@@ -342,7 +342,8 @@ class HttpComposedServer:
     """
 
     def __init__(self, session, composition: str = "revl", decode=None, *,
-                 public=(), declared: DeclaredTypes | None = None) -> None:
+                 public=(), declared: DeclaredTypes | None = None,
+                 decoder_for=None) -> None:
         self.composition = composition
         self._composed = ComposedServer(session, composition=composition,
                                         declared=declared)
@@ -363,6 +364,9 @@ class HttpComposedServer:
         # common path — scalars, records, the bearer record — stays runtime-free;
         # `serve_http` wires the live module's decoder for the escape hatch.
         self._decode = decode or (lambda v: v)
+        # issue #1553: rebuilds `decode` for a session this face starts to
+        # follow (`_follow`), whose live module is not the one `decode` read
+        self._decoder_for = decoder_for
         # tool name is `<composition>.<key>.<op>`; index the same routes by the
         # HTTP path `/<composition>/<key>/<op>`, and keep the advertised hints
         # for the manifest so the fourth quadrant's compiler-derived
@@ -411,13 +415,30 @@ class HttpComposedServer:
     @contextmanager
     def dispatching(self):
         """Hold the dispatch lock (and, with an operator listener, bind the app
-        caller) for one request."""
+        caller) for one request.
+
+        With an operator listener there is ONE session reference for both
+        listeners: the one the binding yields under the shared lock (the
+        compiler server's `SESSION`). A `revl_fork_confirm` on the operator
+        listener replaces it with the confirmed branch, and freezes the parent,
+        inside that same lock, so the face follows it here before it dispatches
+        anything: the branch is the only live continuation (item 250)."""
         if self._binding is None:
             with self.dispatch_lock:
                 yield
             return
-        with self._binding.as_caller(self._app_caller, before=self._before):
+        with self._binding.as_caller(self._app_caller,
+                                     before=self._before) as session:
+            self._follow(session)
             yield
+
+    def _follow(self, session) -> None:
+        if session is None or session is self.session:
+            return
+        self.session = session
+        self._composed.session = session
+        if self._decoder_for is not None:
+            self._decode = self._decoder_for(session) or (lambda v: v)
 
     def halted(self) -> bool:
         """Whether an operator halted this face (E-Stop): the session says so,
@@ -1235,12 +1256,33 @@ def build_http_server(server: HttpComposedServer, host: str, port: int, *,
     return Listener(exposure, _make_handler(server, exposure))
 
 
+def _live_decoder(session):
+    """The live module's canonical-value decoder for `session`, or None.
+
+    Lazy import: the backend decoder is only reachable on the live path (Session
+    already pulled cordis), keeping the pure wire layer decoupled; the escape
+    hatch degrades to identity when it cannot be built."""
+    module = getattr(session, "_module", None)
+    if module is None:
+        return None
+    try:
+        from .._paths import backends_root  # noqa: PLC0415
+        backend_dir = backends_root() / "python"
+        if str(backend_dir) not in sys.path:
+            sys.path.insert(0, str(backend_dir))
+        import bridge  # noqa: PLC0415 - backend import after path setup
+        return lambda v: bridge._decode_value(v, module)
+    except Exception:  # noqa: BLE001 - the escape hatch degrades to identity
+        return None
+
+
 def serve_http(ir: dict, config: dict | None = None, *,
                composition: str = "revl", host: str = "127.0.0.1",
                port: int = 8080, exposure: Exposure | None = None,
                declared: DeclaredTypes | None = None,
                approval_policy: str | None = None,
-               operator: dict | None = None) -> int:
+               operator: dict | None = None,
+               origin: dict | None = None) -> int:
     """Boot `ir` into a live session and serve its operations over HTTP.
 
     Booting is admission, so this loads through the same `Session.load` the MCP
@@ -1251,7 +1293,9 @@ def serve_http(ir: dict, config: dict | None = None, *,
     a class-(c) crossing an app request reaches is held with a ticket instead of
     firing. `operator` opens the operator listener beside the face
     (`operator_listener.OperatorListener`, its keyword arguments), the one place
-    those tickets are answered and the face is halted.
+    those tickets are answered and the face is halted. `origin` is the load's
+    admission inputs (`{"files": [...]}`), kept so the served composition can be
+    snapshotted, and so forked from the operator listener.
     """
     from .session import Session  # noqa: PLC0415 — lazy: Session pulls cordis
 
@@ -1273,25 +1317,12 @@ def serve_http(ir: dict, config: dict | None = None, *,
     session.approval_policy = approval_policy
     # an approval policy needs its spend durable (item 246, Decision 2)
     session.load(ir, config or {}, record=approval_policy is not None,
-                 origin=None)
+                 origin=origin)
     # item 457: wire the live module's decoder so a routed handler binding a typed
     # `Request` (whose `method`/`body` are variants) sees native case instances.
-    # Lazy import: the backend decoder is only reachable on the live path (Session
-    # already pulled cordis above), keeping the pure wire layer decoupled.
-    decode = None
-    module = getattr(session, "_module", None)
-    if module is not None:
-        try:
-            from .._paths import backends_root  # noqa: PLC0415
-            backend_dir = backends_root() / "python"
-            if str(backend_dir) not in sys.path:
-                sys.path.insert(0, str(backend_dir))
-            import bridge  # noqa: PLC0415 — backend import after path setup
-            decode = lambda v: bridge._decode_value(v, module)  # noqa: E731
-        except Exception:  # noqa: BLE001 — the escape hatch degrades to identity
-            decode = None
+    decode = _live_decoder(session)
     face = HttpComposedServer(session, composition=composition, decode=decode,
-                              declared=declared)
+                              declared=declared, decoder_for=_live_decoder)
     httpd = build_http_server(face, host, port, exposure=exposure)
     if listener is not None:
         listener.face = face

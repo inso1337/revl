@@ -57,7 +57,7 @@ SECRETS = {"ops": "ops-secret-0", "reader": "reader-secret-1"}
 
 
 def _profile() -> str:
-    grants = {"ops": "approve, estop, call", "reader": "lease"}
+    grants = {"ops": "approve, estop, call, fork", "reader": "lease"}
     lines = []
     for token, verbs in grants.items():
         digest = hashlib.sha256(SECRETS[token].encode("utf-8")).hexdigest()
@@ -177,7 +177,8 @@ class _Stack:
         self.session = Session()
         self.session._wal_path = str(tmp_path / "session.wal")
         self.session.approval_policy = "auto"
-        self.session.load(compile_source(SOURCE, "ops_1553.rvl"), record=True)
+        self.session.load(compile_source(SOURCE, "ops_1553.rvl"), record=True,
+                          origin={"source": SOURCE})
         self.face = HttpComposedServer(self.session, composition="app",
                                        public=PUBLIC)
         self.httpd = build_http_server(self.face, "127.0.0.1", 0)
@@ -200,8 +201,9 @@ class _Stack:
         self.httpd.server_close()
         self._serving.join(timeout=5)
         try:
-            if self.session.loaded and not self.session.halted:
-                self.session.unload()
+            live = self.face.session   # the confirmed branch after a fork
+            if live.loaded and not live.halted:
+                live.unload()
         finally:
             rt.clear_estop()
             rt._LIVE_FRAMES.clear()
@@ -426,6 +428,39 @@ def test_the_app_face_never_serves_an_estop(stack, tmp_path):
     status, body = _app(stack.app_port, "/app/ops/shout",
                         [str(tmp_path / "sink.log"), "hi"])
     assert status == 403 and body["pendingApproval"] is True
+
+
+# ---------------------------------------------------------------- fork
+
+@needs_cordis
+def test_after_a_fork_on_the_operator_listener_the_face_serves_the_branch(
+        stack, tmp_path):
+    """`revl_fork_confirm` freezes the parent and makes the branch the only live
+    continuation. The face follows the session the operator listener holds, so
+    an app request after the fork runs on the branch, not the frozen parent."""
+    release = tmp_path / "release"
+    release.write_text("go", encoding="utf-8")
+    first = tmp_path / "first.txt"
+    first.write_text("1", encoding="utf-8")
+    assert _app(stack.app_port, "/app/ops/slow_stash",
+                [str(release), str(first)])[0] == 200
+    report = _operator(stack.op_port, "ops", "revl_fork", {"at": 1})
+    assert report["ok"] is True and report.get("hash"), report
+    confirmed = _operator(stack.op_port, "ops", "revl_fork_confirm",
+                          {"hash": report["hash"]})
+    assert confirmed["ok"] is True and confirmed["forked"] is True, confirmed
+    branch = server.SESSION
+    assert branch is not stack.session and stack.session._frozen
+
+    sink = str(tmp_path / "sink.log")
+    ticket = _ask(stack, sink)
+    assert stack.face.session is branch
+    assert ticket in branch._tickets, "the branch raised the ticket"
+    assert ticket not in stack.session._tickets
+    # and the branch is the session the operator answers on
+    assert _operator(stack.op_port, "ops", "revl_approve", {"hash": ticket})["ok"]
+    assert _app(stack.app_port, "/app/ops/shout", [sink, "hi"])[0] == 200
+    assert _lines(sink) == ["announce:hi"]
 
 
 # ---------------------------------------------------------------- wiring

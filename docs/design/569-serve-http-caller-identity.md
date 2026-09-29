@@ -371,6 +371,12 @@ lock. Each app request is bound, for that request only, to the operator token
 `http_guard` refuses every request carrying an `Origin`; it refuses the app
 face's port; and like every revl listener it refuses a non-loopback address
 without TLS.
+Both listeners hold one session reference: the one the binding yields under
+the shared lock. A `revl_fork_confirm` on the operator listener freezes the
+parent and makes the branch the only live continuation (item 250), and the face
+follows it before its next dispatch rather than serving the frozen parent. That
+was chosen over refusing `revl_fork_confirm` there, because a fork's point is to
+continue on the branch, and the parent is non-callable after it.
 
 **B2, E-Stop.** `revl_estop` on the operator listener, never fenced and never
 queued: while an app request holds the session it arms the transport's latch.

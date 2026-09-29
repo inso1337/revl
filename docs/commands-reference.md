@@ -2062,6 +2062,12 @@ options apply to `--http` only; with `--mcp` they are refused.
   `--allow-origin`, so any request carrying an `Origin` header is refused
   (`403`): no browser page can reach it. It prints its own E-Stop latch path
   (`revl estop --latch <path>`).
+  Both listeners hold ONE session reference, changed only under the shared
+  lock: after `revl_fork_confirm` on the operator listener freezes the parent
+  and makes the branch the live session (item 250), the next app request is
+  served by the branch. With an operator listener the served composition keeps
+  its source files as its admission inputs, so it can be snapshotted and
+  forked.
 - `--operator-profile PROFILE` - the operator profile the operator listener
   authenticates against (a `key sha256:` line per operator for bearer auth) and
   gates by (item 55). Re-read when it changes, adopted once it settles

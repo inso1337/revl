@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -492,7 +493,12 @@ def _run_serve(args) -> int:
                                   declared=declared,
                                   approval_policy=getattr(args, "approval_policy",
                                                           None),
-                                  operator=operator)
+                                  operator=operator,
+                                  # the sources, so the operator listener can
+                                  # snapshot and fork the served composition
+                                  origin=({"files": [os.path.abspath(f)
+                                                     for f in args.files]}
+                                          if operator is not None else None))
             except (ExposureError, TransportError) as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
