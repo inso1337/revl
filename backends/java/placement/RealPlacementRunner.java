@@ -474,7 +474,7 @@ public final class RealPlacementRunner {
     // --- key resolution across realms (issue #1567) --------------------------
     //
     // `placements` is key -> [{component, realm}] for this process's own
-    // provisions (src/revl/placement.py::_java_placements). A served or probed
+    // provisions (src/revl/placement.py::_process_placements). A served or probed
     // key used to be read with a shared-realm `ctx.get`, so a provider placed
     // with `isolate kv in realm("wa")` answered `no provider`. The order is the
     // py tier's `resolve_key`: the shared realm when the key is provided there,

@@ -54,6 +54,11 @@ type probe struct {
 	Args   []string `json:"args"`
 }
 
+type placement struct {
+	Component string  `json:"component"`
+	Realm     *string `json:"realm"`
+}
+
 type spec struct {
 	Name       string                     `json:"name"`
 	Components []string                   `json:"components"`
@@ -62,6 +67,10 @@ type spec struct {
 	Proxies    map[string]proxyInfo       `json:"proxies"`
 	Probe      []probe                    `json:"probe"`
 	Serve      *serveInfo                 `json:"serve"`
+	// Placements (issue #1567): key -> the provisions this process makes of
+	// it, each with the realm an `isolate` publishes it in ("" for the shared
+	// realm). A served or probed key resolves through `resolveIn`.
+	Placements map[string][]placement `json:"placements"`
 	// Once (revl run --backend go --once) replaces the hold-until-stopped
 	// loop with the boot -> LIFO teardown -> no-residue-proof -> exit
 	// round-trip, the same driver contract the rust/java/wasm tiers run.
@@ -246,7 +255,7 @@ func main() {
 				// never main's defer. `args` is where a declared `Secret[T]`
 				// travels, and a panicking frame's value quotes what it held.
 				defer guard(&name)()
-				return emitted.RevlInvoke(root, key, method, args)
+				return invokeIn(root, s.Placements, key, method, args)
 			})
 			log("serve", strings.Join(s.Serve.Keys, ", "), "-> "+s.Serve.Socket)
 		}
@@ -260,7 +269,7 @@ func main() {
 			args[i] = b
 		}
 		label := pr.Key + "." + pr.Method + "(...)"
-		value, err := emitted.RevlInvoke(root, pr.Key, pr.Method, args)
+		value, err := invokeIn(root, s.Placements, pr.Key, pr.Method, args)
 		if err != nil {
 			log("probe", label, "ERROR "+err.Error())
 			continue
@@ -404,4 +413,37 @@ func main() {
 		}
 	}
 	fmt.Printf("[%s] DOWN\n", name)
+}
+
+// invokeIn dispatches a served or probed call against the provision `key`
+// resolves to, in the py tier's `resolve_key` order (issue #1567): the shared
+// realm when the key is provided there (or this process does not provide it at
+// all: a proxy), else its one isolated realm. A key isolated in two or more
+// realms has no single provider for a call that names only the key, so it is
+// refused naming each provider and realm.
+func invokeIn(root *stc.Context, placements map[string][]placement, key, method string,
+	args []json.RawMessage) (any, error) {
+	at := placements[key]
+	shared := len(at) == 0
+	for _, p := range at {
+		if p.Realm == nil {
+			shared = true
+		}
+	}
+	if shared {
+		return emitted.RevlInvoke(root, key, method, args)
+	}
+	if len(at) == 1 {
+		ctx, ok := emitted.RevlRealmContext(root, key, *at[0].Realm)
+		if !ok {
+			return nil, fmt.Errorf("key %q: no realm context for realm %q", key, *at[0].Realm)
+		}
+		return emitted.RevlInvoke(ctx, key, method, args)
+	}
+	where := make([]string, len(at))
+	for i, p := range at {
+		where[i] = fmt.Sprintf("`%s` in realm `%s`", p.Component, *p.Realm)
+	}
+	return nil, fmt.Errorf("key '%s' is provided in %d realms (%s); a call names a key, "+
+		"not a realm, so it has no single provider to reach", key, len(at), strings.Join(where, ", "))
 }

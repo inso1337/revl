@@ -10460,6 +10460,30 @@ def _emit_go_bridge(ir: dict) -> list[str]:
     out.append("}")
     out.append("")
 
+    # issue #1567: the context an ISOLATED provision is read through. A key a
+    # component isolates (`isolate kv in realm("wa")`) is published in that
+    # realm only, so `RevlInvoke(root, ..)` could neither serve nor probe it.
+    # The runner picks the realm (the py tier's `resolve_key` order, off the
+    # spec's `placements`); this hands back a child context bound to it, the
+    # way `Load<Comp>` binds an isolating component. Every document emits it,
+    # so the runner always links; one that isolates nothing answers false.
+    realm_keys = sorted({key for comp in ir.get("components", [])
+                         for key in (comp.get("isolate") or {}) if key in provided})
+    out.append("// RevlRealmContext returns a child of ctx with `key` isolated in the")
+    out.append("// named realm, so a provision placed there resolves through it.")
+    out.append("func RevlRealmContext(ctx *stc.Context, key, realm string) (*stc.Context, bool) {")
+    if realm_keys:
+        out.append("	switch key {")
+        for key in realm_keys:
+            out.append("	case %s:" % _go_string(key))
+            out.append("		child := ctx.Child()")
+            out.append("		child.Isolate(%s, %s(realm))" % (_key_var(key), _realm_helper_name()))
+            out.append("		return child, true")
+        out.append("	}")
+    out.append("	return nil, false")
+    out.append("}")
+    out.append("")
+
     # component name -> loaded Fiber, building typed config from the placement
     # spec's `config` object (keyed by PascalCase component name).
     out.append("// RevlLoad loads a component by name with config from the spec.")
