@@ -20,10 +20,13 @@ baseline diff.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
+import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -31,14 +34,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    """The module at `path`, registered as `name`, loaded at most once.
+
+    This used to build a fresh module and REPLACE the `sys.modules` entry,
+    while `tools/evolution_controller.py` had already imported
+    `evolution_reward` at collection time: its `Verdict` subclassed the first
+    module's class and every later `import evolution_reward` got the second, so
+    `tests/test_evolution_controller.py::test_the_stage_verdict_inherits_item_536s_rather_than_restating_it`
+    failed whenever this file ran first. `tests/_load_by_path.py` reuses an
+    entry loaded from the same file.
+    """
+    return load_by_path(name, path)
 
 
 @pytest.fixture(scope="module")
@@ -58,9 +68,20 @@ def _candidate(mod, tree, base="origin/main", scope=("**",), **extra):
     return mod.load_candidate(record)
 
 
+def _git_env():
+    """The environment without `GIT_*`. The pre-commit hook runs this file with
+    `GIT_DIR` and `GIT_INDEX_FILE` exported, and a fixture's `git init`, `git
+    config` and `git add` then write into the committing repository instead of
+    the fixture: it flipped `core.bare`, set `user.name`, and replaced the
+    worktree's index. `test_a_hook_environment_cannot_reach_another_repo`
+    holds it."""
+    return {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+
+
 def _git(tree, *args):
     return subprocess.run(["git", "-C", str(tree)] + list(args),
-                          capture_output=True, text=True, check=True)
+                          capture_output=True, text=True, check=True,
+                          env=_git_env())
 
 
 @pytest.fixture
@@ -80,6 +101,35 @@ def tiny_repo(tmp_path):
     _git(tree, "add", "-A")
     _git(tree, "commit", "-qm", "base")
     return tree
+
+
+def test_a_hook_environment_cannot_reach_another_repo(
+        reward, tmp_path, monkeypatch):
+    """The environment a git hook runs in: `GIT_DIR` and `GIT_INDEX_FILE` point
+    at the committing repository. Neither the fixtures nor the scorer may read
+    or write it. `bystander` stands in for that repository."""
+    bystander = tmp_path / "bystander"
+    _git(tmp_path, "init", "-q", str(bystander))
+    config_before = (bystander / ".git" / "config").read_text()
+    monkeypatch.setenv("GIT_DIR", str(bystander / ".git"))
+    monkeypatch.setenv("GIT_INDEX_FILE", str(bystander / ".git" / "index"))
+
+    tree = tmp_path / "fixture"
+    tree.mkdir()
+    _git(tmp_path, "init", "-q", str(tree))
+    _git(tree, "config", "user.email", "fixture@example.com")
+    _git(tree, "config", "user.name", "fixture")
+    (tree / "README.md").write_text("base\n")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", "base")
+
+    assert (bystander / ".git" / "config").read_text() == config_before
+    assert not (bystander / ".git" / "index").exists()
+    ok, out = reward.run_git(
+        _candidate(reward, tree, base="HEAD"), ["log", "--format=%s", "-1"])
+    assert ok and out.strip() == "base", out
+    assert reward.base_refusal(_candidate(reward, tree, base="HEAD")) is None
+    assert not any(k.startswith("GIT_") for k in reward.candidate_env())
 
 
 # --------------------------------------------------------------------------
@@ -104,8 +154,8 @@ def test_retention_requires_every_component(reward):
         assert one_bad.blockers == (victim,)
 
 
-def test_seven_of_eight_is_not_retained(reward):
-    """The case a weighted score would have kept: 7/8 is 0.875, and 0.875 is
+def test_all_but_one_is_not_retained(reward):
+    """The case a weighted score would have kept: 8 of 9 is 0.889, and 0.889 is
     above every threshold anybody would pick. The conjunction says no."""
     card = reward.Scorecard(
         _candidate(reward, "/nowhere"),
@@ -146,6 +196,24 @@ def test_every_component_of_item_536_is_present(reward):
             "artifact-stability", "formal", "scope", "documentation"} \
         <= set(reward.COMPONENTS)
     assert set(reward.PROBES) == set(reward.COMPONENTS)
+
+
+def test_every_component_carries_a_probe_not_a_placeholder(reward):
+    """The close condition for issue #1206.
+
+    Slice 1 shipped five real probes and four placeholders built by a
+    `_unimplemented` factory, so `compiles`, `tests`, `conformance` and
+    `formal` returned the same `failed` verdict for every input: a component
+    that cannot tell a better tree from a worse one is not a component. A
+    placeholder left behind here would make the conjunction unsatisfiable
+    while the scorecard looked complete.
+    """
+    for name in reward.COMPONENTS:
+        probe = reward.PROBES[name]
+        assert callable(probe), name
+        assert "no probe implemented" not in (probe.__doc__ or ""), name
+    assert not hasattr(reward, "_unimplemented"), \
+        "the placeholder factory is gone; every component reads an artifact"
 
 
 def test_the_ninth_component_is_the_one_no_other_can_supply(reward):
@@ -384,22 +452,31 @@ def test_a_probe_answering_for_another_component_fails(reward):
     assert formal.verified is False
 
 
-def test_an_unimplemented_component_fails_rather_than_defaulting(reward):
-    for name in ("compiles", "tests", "conformance", "formal"):
-        verdict = reward.PROBES[name](_candidate(reward, "/nowhere"))
-        assert verdict.verified is False
-        assert "no probe implemented" in verdict.reason
+def test_every_component_fails_on_a_tree_that_is_not_there(reward, tiny_repo):
+    """The blanket fail-closed check. `tiny_repo` has a git history and nothing
+    else: no tools, no crate, no ledger, no doc. Every component must land on
+    `failed`, because "the artifact is missing" is never "nothing objected"."""
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("**",))
+    for name in reward.COMPONENTS:
+        verdict = reward.PROBES[name](candidate)
+        assert verdict.verified is False, f"{name}: {verdict.reason}"
+        assert verdict.component == name
 
 
-def test_the_conformance_component_names_the_tool_that_does_not_exist(reward):
-    """Item 536 maps this component to `tools/gate_verdict_parity.py`, which is
-    not in the tree. Fail-closed means the component says so rather than being
-    quietly dropped, and this test reds when the tool arrives, which is when the
-    probe has to be written."""
-    assert not (ROOT / "tools" / "gate_verdict_parity.py").exists()
-    verdict = reward.PROBES["conformance"](_candidate(reward, "/nowhere"))
-    assert verdict.verified is False
-    assert "gate_verdict_parity.py" in verdict.reason
+def test_the_conformance_component_does_not_wait_on_a_tool_that_never_existed(
+        reward):
+    """Item 536 mapped this component to `tools/gate_verdict_parity.py`, a file
+    that has never been in this tree (issue #1233, roadmap item 547). Slice 1
+    failed the component by name so the absence would block rather than be
+    awarded. The decision taken in slice 3 is to re-point the component at the
+    registers that DO record cross-tier divergence, so the scorer must no
+    longer depend on that name in either direction."""
+    source = (ROOT / "tools" / "evolution_reward.py").read_text()
+    assert "gate_verdict_parity" in source, \
+        "the decision not to build it is recorded in the module, not erased"
+    assert reward.PROBES["conformance"] is reward.probe_conformance
+    body = reward.probe_conformance.__doc__ or ""
+    assert "tier_guarantees" in body or "check-tier-parity" in body
 
 
 # --------------------------------------------------------------------------
@@ -452,6 +529,38 @@ def test_an_unreadable_base_fails_rather_than_scoring_nothing(reward, tiny_repo)
     verdict = reward.probe_scope(
         _candidate(reward, tiny_repo, base="no/such/ref", scope=("tools/**",)))
     assert verdict.verified is False
+
+
+_BASE_READERS = ("probe_no_new_false_admits", "probe_scope", "probe_tests",
+                 "probe_conformance", "probe_formal")
+
+
+@pytest.mark.parametrize("probe", _BASE_READERS)
+def test_a_base_the_tree_cannot_resolve_is_refused_by_name(
+        reward, tiny_repo, probe):
+    """The CI shape: a clone with no `origin/main` in it. Every component that
+    compares against `base` refuses by one name before it runs anything, and
+    none of them substitutes a ref of its own. The change is in scope and the
+    tree is real, so the refusal is the only thing that can fail it."""
+    (tiny_repo / "tools" / "a.py").write_text("a\n")
+    missing = _candidate(reward, tiny_repo, base="origin/main", scope=("**",))
+    verdict = getattr(reward, probe)(missing)
+    assert verdict.verified is False
+    assert "base `origin/main` does not name a commit" in verdict.reason, (
+        verdict.reason)
+
+
+def test_the_base_refusal_fires_only_on_a_missing_base(reward, tiny_repo):
+    """The control for the test above: the same tree, a base it has."""
+    assert reward.base_refusal(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("**",))) is None
+    sha = _git(tiny_repo, "rev-parse", "HEAD").stdout.strip()
+    assert reward.base_refusal(
+        _candidate(reward, tiny_repo, base=sha, scope=("**",))) is None
+    assert reward.base_refusal(
+        _candidate(reward, tiny_repo, base="HEAD~1", scope=("**",)))
+    assert reward.base_refusal(
+        _candidate(reward, tiny_repo, base="--all", scope=("**",)))
 
 
 @pytest.mark.parametrize("pattern,path,want", [
@@ -590,9 +699,104 @@ def test_record_refuses_to_write_a_false_admission_and_check_still_fails(
 
 @pytest.fixture
 def real_candidate(reward):
-    return _candidate(reward, ROOT, base="origin/main", scope=("**",))
+    """This tree, compared against its own HEAD commit, named by sha.
+
+    Not `origin/main`. A CI checkout carries no remote-tracking ref, so a
+    fixture that names one measures the runner's clone depth, not the tree. The
+    HEAD commit exists in every checkout, shallow or not, and the question the
+    real-artifact tests ask is whether a fresh measurement of THIS tree is no
+    weaker than what this tree commits. A missing base is covered by its own
+    test below, against a repository that genuinely has no such ref.
+    """
+    sha = _git(ROOT, "rev-parse", "--verify", "HEAD^{commit}").stdout.strip()
+    assert len(sha) >= 40, sha
+    return _candidate(reward, ROOT, base=sha, scope=("**",))
 
 
+PROBE_DOC = ROOT / "docs" / "zz-evolution-reward-probe.md"
+PROBE_TEXT = "# probe\n\nstatus: scratch\n"
+
+# Runs beside the test and removes the probe doc once the test process is gone,
+# however it went. It blocks on its stdin, a pipe only the test process holds:
+# the read returns at EOF, which the kernel delivers when that process exits,
+# including by `os._exit` (pytest-timeout's thread method, which the pre-commit
+# hook uses) or SIGKILL, where no `finally` and no atexit handler runs.
+_REAPER = """
+import pathlib, sys
+sys.stdin.buffer.read()
+doc = pathlib.Path(sys.argv[1])
+try:
+    if doc.read_text(encoding="utf-8") == sys.argv[2]:
+        doc.unlink()
+except OSError:
+    pass
+"""
+
+
+@contextlib.contextmanager
+def probe_doc_in_tree():
+    """A new top-level doc in THIS tree, for as long as the block runs.
+
+    It has to be in the real tree: the fault is "a doc `docgen --check` has not
+    seen", and the probes run the candidate's own tools over the candidate's
+    own tree. So the cleanup has to outlive the test process. Issue #1449: the
+    hook's 60s timeout killed a run mid-probe, the `finally` never ran, the doc
+    stayed in the worktree, and every later run failed its
+    `not exists()` precondition. A doc with exactly the probe text is one of
+    ours left by a killed run and is removed; anything else there is somebody's
+    work and fails loudly.
+    """
+    with scratch_file(PROBE_DOC, PROBE_TEXT) as doc:
+        yield doc
+
+
+@contextlib.contextmanager
+def scratch_file(path: Path, text: str):
+    """`path` holds `text` for the block, and is gone after it even when the
+    process running the block is killed. See `probe_doc_in_tree`."""
+    if path.exists():
+        assert path.read_text(encoding="utf-8") == text, (
+            f"{path} exists and is not this test's probe; not touching it")
+        path.unlink()
+    reaper = subprocess.Popen(
+        [sys.executable, "-c", _REAPER, str(path), text],
+        stdin=subprocess.PIPE, start_new_session=True)
+    try:
+        path.write_text(text, encoding="utf-8")
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+        reaper.stdin.close()
+        reaper.wait(timeout=60)
+
+
+def test_the_probe_doc_is_removed_even_when_the_test_process_is_killed(tmp_path):
+    """What the pre-commit hook's timeout does to a slow test: `os._exit` from
+    a watchdog thread, so neither `finally` nor atexit runs. The same helper,
+    on a tmp path, in a process that dies inside the block."""
+    doc = tmp_path / "zz-probe.md"
+    script = (
+        "import importlib.util, os, pathlib, sys\n"
+        f"spec = importlib.util.spec_from_file_location('rew', {str(Path(__file__))!r})\n"
+        "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+        f"with mod.scratch_file(pathlib.Path({str(doc)!r}), 'probe\\n'):\n"
+        "    print('inside', flush=True)\n"
+        "    os._exit(1)\n")
+    proc = subprocess.run([sys.executable, "-c", script], cwd=str(ROOT),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.stdout.strip() == "inside", proc.stdout + proc.stderr
+    assert proc.returncode == 1
+    deadline = time.monotonic() + 30
+    while doc.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not doc.exists(), "the reaper did not remove the probe after a kill"
+
+
+# Issue #1449: two whole-tree tools, `docgen.py --check` and
+# `check_roadmap_claims.py --check`, nothing a session could share. Measured
+# 13s alone at load average 5, 34s and 41s inside hook-sized selections at
+# load 25-60, against the pre-commit hook's 60s default.
+@pytest.mark.timeout(300)
 def test_documentation_verifies_on_this_tree(reward, real_candidate):
     verdict = reward.probe_documentation(real_candidate)
     assert verdict.verified is True, verdict.reason
@@ -604,17 +808,19 @@ def test_documentation_fails_on_a_genuinely_stale_doc_inventory(
     of `docs/*.md`, so a new top-level doc makes `tools/docgen.py --check` stale.
     The file is created and removed inside this test; nothing else moves, which
     is what makes the control below meaningful."""
-    probe_doc = ROOT / "docs" / "zz-evolution-reward-probe.md"
-    assert not probe_doc.exists()
-    probe_doc.write_text("# probe\n\nstatus: scratch\n")
-    try:
+    with probe_doc_in_tree():
         verdict = reward.probe_documentation(real_candidate)
-    finally:
-        probe_doc.unlink()
     assert verdict.verified is False
     assert "docgen" in verdict.reason
 
 
+# Issue #1449: inherently slow, not re-deriving anything a session could share.
+# It is two full `tools/regen_goldens.py --all --check` runs (six backend golden
+# trees and both gate crates), once on the clean tree and once with the fault;
+# the two runs see different trees, so neither can stand in for the other.
+# Measured 20-23s alone at load average 5 and 57-63s inside hook-sized
+# selections at load 25-60, against the pre-commit hook's 60s default.
+@pytest.mark.timeout(300)
 def test_artifact_stability_is_the_control_and_passes_either_way(
         reward, real_candidate):
     """The control. The same fault that fails `documentation` leaves every
@@ -623,13 +829,8 @@ def test_artifact_stability_is_the_control_and_passes_either_way(
     clean = reward.probe_artifact_stability(real_candidate)
     assert clean.verified is True, clean.reason
 
-    probe_doc = ROOT / "docs" / "zz-evolution-reward-probe.md"
-    assert not probe_doc.exists()
-    probe_doc.write_text("# probe\n\nstatus: scratch\n")
-    try:
+    with probe_doc_in_tree():
         dirty = reward.probe_artifact_stability(real_candidate)
-    finally:
-        probe_doc.unlink()
     assert dirty.verified is True, dirty.reason
 
 
@@ -645,4 +846,872 @@ def test_the_cli_exits_nonzero_while_anything_is_unverified(
     card = json.loads(out.read_text())
     assert card["retained"] is False
     assert "compiles" in card["blockers"]
+    assert "held-out" in card["blockers"]
     assert card["prose_ignored"] == ["rationale"]
+
+
+# --------------------------------------------------------------------------
+# compiles: the gate crate through real cargo, the six-tier matrix through the
+# repository's own walk. Non-vacuity is a fixture that genuinely does not
+# compile and a fixture whose matrix genuinely has a gap.
+# --------------------------------------------------------------------------
+
+def _stub_tool(tree, rel, body):
+    path = tree / rel
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(body)
+    return path
+
+
+def _matrix_report(gaps=(), tiers=None, cases=("expr/add",)):
+    """A `tools/conformance.py --json` report, in that tool's own shape."""
+    tiers = tuple(tiers if tiers is not None
+                  else ("python", "typescript", "rust", "java", "wasm", "go"))
+    report = {"cases": [{"case": c, "tiers": {t: "ok" for t in tiers},
+                         "emit_kind": {t: "ok" for t in tiers}} for c in cases],
+              "frontend_rejected": [], "gaps": {}}
+    for tier, case, deliberate in gaps:
+        report["gaps"].setdefault(tier, []).append(
+            {"case": case, "message": "no case for it", "deliberate": deliberate})
+    return report
+
+
+@pytest.fixture
+def crate_repo(tiny_repo):
+    """`tiny_repo` plus a real, minimal cargo crate at `crates/revl-gate`.
+
+    A real crate rather than a mocked `cargo`: the component's claim is that
+    rustc accepted this source, and a stubbed compiler would test the stub. It
+    has no dependencies, so `--offline` needs no registry and the check is about
+    a second, against twenty for the repository's own gate crate.
+    """
+    crate = tiny_repo / "crates" / "revl-gate"
+    (crate / "src").mkdir(parents=True)
+    (crate / "Cargo.toml").write_text(
+        "[package]\nname = \"revl-gate\"\nversion = \"0.1.0\"\n"
+        "edition = \"2021\"\n\n[workspace]\n")
+    (crate / "src" / "lib.rs").write_text(_LIB_RS % "n")
+    return tiny_repo
+
+
+# The fixture crate's source. `%s` is the body of `admit`, so a test can break
+# the unit test without breaking the build.
+_LIB_RS = """pub fn admit(n: i64) -> i64 { %s }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn admits_its_input() {
+        assert_eq!(super::admit(7), 7);
+    }
+}
+"""
+
+
+def _with_matrix(tree, report):
+    _stub_tool(tree, "tools/conformance.py",
+               "import json, sys\nprint(json.dumps(%r))\n" % (report,))
+    return tree
+
+
+def test_compiles_verifies_when_the_crate_builds_and_no_tier_has_a_real_gap(
+        reward, crate_repo):
+    _with_matrix(crate_repo, _matrix_report())
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+
+
+def test_compiles_fails_on_source_that_does_not_compile(reward, crate_repo):
+    """Non-vacuity for the crate half, with a real rustc refusal. This is the
+    case a digest gate cannot see: `tools/build_gate_crate.py --check` compares
+    BYTES, so a regenerated crate can be byte-correct and not compile."""
+    _with_matrix(crate_repo, _matrix_report())
+    (crate_repo / "crates" / "revl-gate" / "src" / "lib.rs").write_text(
+        "pub fn admit(n: i64) -> i64 { n + }\n")
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "cargo check" in verdict.reason
+
+
+def test_compiles_fails_when_the_crate_builds_but_a_unit_test_fails(
+        reward, crate_repo):
+    """Real rustc, real `cargo test`: the source compiles and the crate's own
+    unit test fails. A check alone verified this crate."""
+    _with_matrix(crate_repo, _matrix_report())
+    (crate_repo / "crates" / "revl-gate" / "src" / "lib.rs").write_text(
+        _LIB_RS % "n + 1")
+    candidate = _candidate(reward, crate_repo, base="HEAD", scope=("**",))
+    check = reward.check_crate(candidate, crate_repo / "crates" / "revl-gate")
+    assert check.ok is True, check.detail
+    verdict = reward.probe_compiles(candidate)
+    assert verdict.verified is False
+    assert "unit tests do not pass" in verdict.reason
+
+
+def test_compiles_fails_on_a_real_emitter_gap_and_passes_a_deliberate_limit(
+        reward, crate_repo):
+    """The distinction the component turns on. An emitter that raised its own
+    `EmitError` declared a tier limit; an emitter that crashed had no case for a
+    construct it should express. `origin/main` carries eleven of the first and
+    zero of the second, so the bar is zero REAL gaps, not zero refusals."""
+    candidate = _candidate(reward, crate_repo, base="HEAD", scope=("**",))
+
+    _with_matrix(crate_repo, _matrix_report(
+        gaps=[("wasm", "expr/true division", True)]))
+    assert reward.probe_compiles(candidate).verified is True
+
+    _with_matrix(crate_repo, _matrix_report(
+        gaps=[("wasm", "expr/true division", True),
+              ("rust", "expr/add", False)]))
+    verdict = reward.probe_compiles(candidate)
+    assert verdict.verified is False
+    assert "rust" in verdict.reason and "real emitter gap" in verdict.reason
+
+
+def test_compiles_fails_when_a_tier_stops_being_walked_everywhere(
+        reward, crate_repo):
+    """The matrix cannot shrink its way to green, direction one: a tier dropped
+    from EVERY row. No per-row comparison sees this, because every row still
+    agrees with every other. The union is held against `MIN_TIERS` instead."""
+    _with_matrix(crate_repo, _matrix_report(
+        tiers=("python", "typescript", "rust", "java", "go")))
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "5 host tier(s)" in verdict.reason
+    assert str(reward.MIN_TIERS) in verdict.reason
+
+
+def test_compiles_fails_when_one_case_row_drops_a_tier(reward, crate_repo):
+    """Direction two: a tier dropped from ONE row. The reference is the union
+    over rows, so the short row fails and names the tier it is missing."""
+    report = _matrix_report(cases=("expr/add", "ctrl/loop"))
+    report["cases"][1]["tiers"].pop("wasm")
+    _with_matrix(crate_repo, report)
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "ctrl/loop" in verdict.reason and "wasm" in verdict.reason
+
+
+def test_the_tier_roster_is_not_re_declared_here(reward):
+    """Issue #1285's gate: the six backend names are a closed vocabulary already
+    declared in eight places and recorded as an unresolved mirror. This module
+    must not become the ninth copy, so the coverage read carries a floor and
+    reads the roster off the report."""
+    roster = {"python", "typescript", "rust", "java", "wasm", "go"}
+    for name in dir(reward):
+        value = getattr(reward, name)
+        if isinstance(value, (tuple, list, set, frozenset, dict)):
+            assert not roster <= set(value), \
+                f"{name} re-declares the six-tier roster; read it off the report"
+    assert reward.MIN_TIERS == 6
+    assert reward._walked_tiers([{"case": "c", "tiers": dict.fromkeys(roster)}]) \
+        == (True, sorted(roster))
+
+
+def test_compiles_fails_when_the_matrix_prints_nothing_readable(
+        reward, crate_repo):
+    _stub_tool(crate_repo, "tools/conformance.py", "print('not json')\n")
+    verdict = reward.probe_compiles(
+        _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+
+
+# Issue #1449: real cargo work in a cold scratch target directory, plus the
+# six-tier walk, and nothing another test has already built. Measured 26.5s
+# inside a hook-sized selection at load average 25 with `cargo check` alone;
+# building the crate's test profile as well (PR #1483) was measured at 60-75s
+# under load, past the pre-commit hook's 60s default.
+@pytest.mark.timeout(600)
+def test_compiles_verifies_on_this_tree(reward, real_candidate):
+    """The real artifact: the real gate crate, its real unit tests and the real
+    six-tier walk. Most of the cost is a cold `cargo check` and a cold
+    `cargo test --lib` build in one scratch target directory.
+
+    Gated the way `tests/test_gate_crate_admit.py` gates the same crate: the
+    assertion is that this tree compiles, which a machine that cannot resolve
+    `cordis-rs` at all cannot answer. On such a machine the COMPONENT still
+    fails closed (the stub-cargo tests below hold that); what is skipped is only
+    this test's claim about the tree."""
+    from revl.run_rust import rust_runtime_reason
+    reason = rust_runtime_reason()
+    if reason is not None:
+        pytest.skip(f"needs a resolvable cordis-rs toolchain: {reason}")
+    verdict = reward.probe_compiles(real_candidate)
+    assert verdict.verified is True, verdict.reason
+
+
+# The cargo policy, against a stub `cargo` on PATH. A real cargo cannot be made
+# to see a cold registry and a reachable index on demand, and the property under
+# test is the ORDER of calls, which a stub records exactly.
+
+_STUB_CARGO = """#!{python}
+import os, sys
+from pathlib import Path
+log = Path(os.environ["STUB_CARGO_LOG"])
+with log.open("a") as fh:
+    fh.write(" ".join(sys.argv[1:]) + "\\n")
+fetched = log.with_suffix(".fetched")
+mode = os.environ["STUB_CARGO_MODE"]
+if sys.argv[1] == "fetch":
+    fetched.touch()
+    sys.exit(0)
+resolve = ("error: no matching package named `cordis-rs` found\\n"
+           "As a reminder, you're using offline mode (--offline)")
+broken = "error[E0308]: mismatched types\\nerror: could not compile `revl-gate`"
+if mode == "cold" and not fetched.exists():
+    sys.exit(print(resolve, file=sys.stderr) or 101)
+if mode == "broken":
+    sys.exit(print(broken, file=sys.stderr) or 101)
+if mode == "cold-then-broken":
+    sys.exit(print(broken if fetched.exists() else resolve, file=sys.stderr) or 101)
+if sys.argv[1] == "test":
+    tests = os.environ.get("STUB_CARGO_TESTS", "pass")
+    if tests == "pass":
+        print("test result: ok. 3 passed; 0 failed; 0 ignored")
+    elif tests == "fail":
+        print("test tests::admits ... FAILED")
+        print("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+        sys.exit(101)
+    elif tests == "fail-exit-0":
+        print("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+    elif tests == "none":
+        print("test result: ok. 0 passed; 0 failed; 0 ignored")
+    elif tests == "silent":
+        pass
+sys.exit(0)
+"""
+
+
+@pytest.fixture
+def stub_cargo(tmp_path, monkeypatch):
+    """Put a recording stub `cargo` first on PATH; return (set_mode, calls)."""
+    bin_dir = tmp_path / "stub-bin"
+    bin_dir.mkdir()
+    cargo = bin_dir / "cargo"
+    cargo.write_text(_STUB_CARGO.format(python=sys.executable))
+    cargo.chmod(0o755)
+    log = tmp_path / "cargo.log"
+    monkeypatch.setenv("PATH", str(bin_dir) + ":" + os.environ.get("PATH", ""))
+    monkeypatch.setenv("STUB_CARGO_LOG", str(log))
+
+    def calls():
+        return log.read_text().splitlines() if log.exists() else []
+    return (lambda mode: monkeypatch.setenv("STUB_CARGO_MODE", mode)), calls
+
+
+def _stub_build_and_test(reward, tiny_repo, monkeypatch, tests, mode="ok"):
+    monkeypatch.setattr(reward, "_index_reachable", lambda: True)
+    monkeypatch.setenv("STUB_CARGO_MODE", mode)
+    monkeypatch.setenv("STUB_CARGO_TESTS", tests)
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("**",))
+    return reward.build_and_test_crate(candidate, tiny_repo)
+
+
+_CHECK = "check --offline --quiet"
+_TEST = "test --offline --quiet --lib"
+
+
+def test_the_crate_is_checked_then_its_unit_tests_run(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """Issue #1206 named `cargo test --offline --lib`. The unit tests run after
+    the check, and the count they report is carried into the verdict."""
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass")
+    assert run.ok is True, run.detail
+    assert calls() == [_CHECK, _TEST]
+    assert "3 unit test(s) passed" in run.detail
+
+
+def test_a_build_whose_unit_tests_fail_is_not_a_pass(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """The check is green and the crate's own unit tests are not: before this
+    change `compiles` verified exactly this case."""
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "fail")
+    assert run.ok is False
+    assert "unit tests do not pass" in run.detail
+    assert calls() == [_CHECK, _TEST]
+
+
+def test_a_failed_result_line_fails_even_on_exit_0(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, _ = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "fail-exit-0")
+    assert run.ok is False
+    assert "1 failed unit test(s)" in run.detail
+
+
+@pytest.mark.parametrize("tests,why", [
+    ("none", "ran zero unit tests"),
+    ("silent", "no `test result:` line"),
+])
+def test_a_unit_suite_that_ran_nothing_is_not_a_pass(
+        reward, tiny_repo, stub_cargo, monkeypatch, tests, why):
+    _, _ = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, tests)
+    assert run.ok is False
+    assert why in run.detail
+
+
+def test_a_crate_that_does_not_build_never_reaches_its_tests(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass",
+                               mode="broken")
+    assert run.ok is False
+    assert calls() == [_CHECK]
+
+
+def test_the_unit_tests_run_offline_after_a_cold_registry_is_filled(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass",
+                               mode="cold")
+    assert run.ok is True, run.detail
+    assert calls() == [_CHECK, "fetch", _CHECK, _TEST]
+    assert "after `cargo fetch`" in run.detail
+
+
+def _stub_check(reward, tiny_repo, monkeypatch, reachable):
+    monkeypatch.setattr(reward, "_index_reachable", lambda: reachable)
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("**",))
+    return reward.check_crate(candidate, tiny_repo)
+
+
+def test_a_cold_registry_is_filled_then_checked_offline_again(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """The CI shape: `--offline` finds no `cordis-rs`, the index answers. The
+    network is used for `cargo fetch` alone and the verdict is the second
+    OFFLINE check."""
+    set_mode, calls = stub_cargo
+    set_mode("cold")
+    run = _stub_check(reward, tiny_repo, monkeypatch, reachable=True)
+    assert run.ok is True, run.detail
+    assert calls() == ["check --offline --quiet", "fetch",
+                       "check --offline --quiet"]
+    assert "after `cargo fetch`" in run.detail
+
+
+def test_a_cold_registry_with_no_index_fails_by_name(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    set_mode, calls = stub_cargo
+    set_mode("cold")
+    run = _stub_check(reward, tiny_repo, monkeypatch, reachable=False)
+    assert run.ok is False
+    assert "index.crates.io is unreachable" in run.detail
+    assert calls() == ["check --offline --quiet"]
+
+
+def test_a_build_failure_is_not_retried_over_the_network(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """A compile error is not a resolve miss, so nothing is fetched and the
+    offline failure is the verdict."""
+    set_mode, calls = stub_cargo
+    set_mode("broken")
+    run = _stub_check(reward, tiny_repo, monkeypatch, reachable=True)
+    assert run.ok is False
+    assert "could not compile" in run.detail
+    assert calls() == ["check --offline --quiet"]
+
+
+def test_the_fetch_retry_cannot_launder_a_build_failure(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """A cold registry AND a crate that does not compile: the fetch fills the
+    registry, the second offline check then reaches the compiler, and the
+    compile error is the verdict."""
+    set_mode, calls = stub_cargo
+    set_mode("cold-then-broken")
+    run = _stub_check(reward, tiny_repo, monkeypatch, reachable=True)
+    assert run.ok is False
+    assert "could not compile" in run.detail
+    assert calls() == ["check --offline --quiet", "fetch",
+                       "check --offline --quiet"]
+
+
+# --------------------------------------------------------------------------
+# tests: the repository's own selection, actually run, with a collected count.
+# --------------------------------------------------------------------------
+
+def _with_selection(tree, full="0", pytest_targets="", backends="",
+                    gates="", reason="stub"):
+    block = "\n".join([f"FULL {full}", f"REASON {reason}",
+                        f"PYTEST {pytest_targets}", f"BACKENDS {backends}",
+                        f"GATES {gates}"])
+    _stub_tool(tree, "tools/affected_tests.py", f"print({block!r})\n")
+    return tree
+
+
+@pytest.fixture
+def suite_repo(tiny_repo):
+    (tiny_repo / "tests").mkdir()
+    (tiny_repo / "tests" / "test_green.py").write_text(
+        "def test_a():\n    assert True\n\n\ndef test_b():\n    assert True\n")
+    return tiny_repo
+
+
+def test_tests_verifies_when_the_selected_suite_runs_green(reward, suite_repo):
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "2 test(s) passed" in verdict.reason
+
+
+def test_tests_fails_on_a_selected_suite_that_genuinely_fails(
+        reward, suite_repo):
+    """Non-vacuity: a real pytest process, a real assertion failure."""
+    (suite_repo / "tests" / "test_red.py").write_text(
+        "def test_c():\n    assert 1 == 2\n")
+    _with_selection(suite_repo,
+                    pytest_targets="tests/test_green.py tests/test_red.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "exited" in verdict.reason
+
+
+def test_a_suite_that_collected_nothing_is_not_a_pass(reward, suite_repo):
+    """The fail-open shape this probe exists to close. A pytest summary with no
+    test count means zero tests ran, and a run of zero tests exits 0 whenever
+    something else in the selection kept the exit status clean. The probe reads
+    the COUNT, not only the status."""
+    (suite_repo / "tests" / "test_all_skipped.py").write_text(
+        "import pytest\n\n\n@pytest.mark.skip(reason='stub')\n"
+        "def test_d():\n    assert True\n")
+    _with_selection(suite_repo, pytest_targets="tests/test_all_skipped.py")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "collected nothing" in verdict.reason
+
+
+def test_an_empty_selection_is_not_a_pass(reward, suite_repo):
+    _with_selection(suite_repo, pytest_targets="", reason="nothing mapped")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "named no test at all" in verdict.reason
+
+
+def test_a_full_selection_means_the_whole_tests_tree(reward, suite_repo):
+    """FULL is the selector falling safe, and falling safe must not be read as
+    "nothing to run"."""
+    _with_selection(suite_repo, full="1", pytest_targets="",
+                    reason="a core file changed")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "FULL" in verdict.reason
+
+
+def test_a_selected_backend_suite_is_added_to_the_run(reward, suite_repo):
+    """`pytest tests/` does not contain the per-backend emit suites; they live
+    outside `tests/` and run as their own CI jobs. A selection that names a tier
+    and a probe that ran only `tests/` is the wave gap this repository has
+    already paid for twice."""
+    (suite_repo / "backends" / "go").mkdir(parents=True)
+    (suite_repo / "backends" / "go" / "test_emit_go.py").write_text(
+        "def test_go_golden():\n    assert True\n")
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py",
+                    backends="go")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "3 test(s) passed" in verdict.reason
+
+
+def test_a_backend_whose_suite_this_probe_cannot_run_fails_it(
+        reward, suite_repo):
+    """`tools/pre_merge.sh` SKIPS the python and typescript backend suites when
+    their toolchain is absent. A skip is not a pass, so a selection that names
+    one fails the component by name instead."""
+    _with_selection(suite_repo, pytest_targets="tests/test_green.py",
+                    backends="typescript")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "typescript" in verdict.reason
+
+
+def test_a_selector_that_cannot_run_fails_the_component(reward, suite_repo):
+    _stub_tool(suite_repo, "tools/affected_tests.py", "import sys\nsys.exit(2)\n")
+    verdict = reward.probe_tests(
+        _candidate(reward, suite_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "selection could not be read" in verdict.reason
+
+
+# --------------------------------------------------------------------------
+# conformance: the two divergence registers, ratcheted against `base`. The
+# component item 536 pointed at a tool that has never existed; these hold the
+# read that replaced it.
+# --------------------------------------------------------------------------
+
+_TIERS = ("py", "ts", "rust", "java", "wasm", "go", "revl")
+
+
+def _committed_block(cells):
+    """The GUARANTEE-TIER-MATRIX block as `tools/conformance.py` writes it."""
+    glyph = {"proved": "proved", "divergence": "**div**",
+             "no reproducer": "no repro", "unimplemented": "unimpl"}
+    lines = ["<!-- GUARANTEE-TIER-MATRIX:START -->",
+             "",
+             "| guarantee | " + " | ".join(_TIERS) + " | evidence |",
+             "|---" * (len(_TIERS) + 2) + "|"]
+    for code in sorted({c for c, _ in cells}):
+        row = [glyph[cells[(code, tier)]] for tier in _TIERS]
+        lines.append(f"| `{code}` | " + " | ".join(row) + " | [`src/x.py`](x) |")
+    lines += ["", "| tier | proved | div | no repro | unimpl |",
+              "|---|---|---|---|---|",
+              "| py | 1 | 0 | 0 | 0 |", "",
+              "<!-- GUARANTEE-TIER-MATRIX:END -->"]
+    return "\n".join(lines) + "\n"
+
+
+def _matrix_json(cells):
+    rows = {}
+    for (code, tier), verdict in cells.items():
+        rows.setdefault(code, {})[tier] = {"verdict": verdict, "why": "stub"}
+    return {"tiers": list(_TIERS),
+            "rows": [{"code": code, "cells": tiers}
+                     for code, tiers in sorted(rows.items())]}
+
+
+def _cells(**overrides):
+    out = {(code, tier): "proved"
+           for code in ("G1", "G2") for tier in _TIERS}
+    for key, verdict in overrides.items():
+        code, _, tier = key.partition("_")
+        out[(code, tier)] = verdict
+    return out
+
+
+@pytest.fixture
+def matrix_repo(tiny_repo):
+    """A repo whose committed `docs/conformance.md` carries a base matrix."""
+    (tiny_repo / "docs").mkdir()
+    (tiny_repo / "docs" / "conformance.md").write_text(
+        "# conformance\n\n" + _committed_block(_cells()))
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "matrix")
+    return tiny_repo
+
+
+def _with_tier_guarantees(tree, cells, exit_code=0):
+    _stub_tool(tree, "tools/tier_guarantees.py",
+               "import json, sys\nprint(json.dumps(%r))\nsys.exit(%d)\n"
+               % (_matrix_json(cells), exit_code))
+    return tree
+
+
+def test_conformance_verifies_when_no_cell_is_weaker_than_at_base(
+        reward, matrix_repo):
+    _with_tier_guarantees(matrix_repo, _cells())
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "none weaker" in verdict.reason
+
+
+def test_a_guarantee_lost_on_one_tier_fails_conformance(reward, matrix_repo):
+    """Non-vacuity, and the promotion-bar entry it serves: "no weakened
+    refusal". A tier that was `proved` at base and is a recorded divergence at
+    head has lost the guarantee, whatever else the candidate did."""
+    _with_tier_guarantees(matrix_repo, _cells(G1_java="divergence"))
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "G1 on java: proved -> divergence" in verdict.reason
+
+
+def test_a_cell_getting_stronger_is_the_work_and_passes(reward, tiny_repo):
+    """The ratchet has a direction. `unimplemented -> divergence` is a partial
+    port arriving, which is progress; reading it as a regression would punish
+    exactly the work this component is supposed to be indifferent to."""
+    (tiny_repo / "docs").mkdir()
+    (tiny_repo / "docs" / "conformance.md").write_text(
+        _committed_block(_cells(G1_revl="unimplemented")))
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "matrix")
+    _with_tier_guarantees(tiny_repo, _cells(G1_revl="divergence"))
+    verdict = reward.probe_conformance(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+
+
+def test_a_row_deleted_at_head_fails_conformance(reward, matrix_repo):
+    """Deleting the row is the other way to make a cell stop being a
+    divergence, and it is the one a subset check would miss."""
+    cells = {k: v for k, v in _cells().items() if k[0] != "G2"}
+    _with_tier_guarantees(matrix_repo, cells)
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "the row is gone" in verdict.reason
+
+
+def test_a_register_that_grew_without_a_decision_fails_conformance(
+        reward, matrix_repo):
+    """`tools/tier_guarantees.py` raises rather than dropping an unmapped
+    `--check-tier-parity` subject or an unmapped `DIVERGENCES` entry. That exit
+    status is what keeps the registers armed, so it has to fail the component
+    rather than be read as an empty matrix."""
+    _with_tier_guarantees(matrix_repo, _cells(), exit_code=1)
+    verdict = reward.probe_conformance(
+        _candidate(reward, matrix_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "exited 1" in verdict.reason
+
+
+def test_conformance_fails_when_base_carries_no_matrix(reward, tiny_repo):
+    (tiny_repo / "docs").mkdir()
+    (tiny_repo / "docs" / "conformance.md").write_text("# nothing generated\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "no matrix")
+    _with_tier_guarantees(tiny_repo, _cells())
+    verdict = reward.probe_conformance(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "GUARANTEE-TIER-MATRIX" in verdict.reason
+
+
+def test_the_committed_block_parser_reads_the_real_one(reward):
+    """The base side is parsed out of the real generated block, so the parser
+    is held against the real artifact rather than against the fixture that
+    mimics it."""
+    ok, cells = reward._committed_matrix(
+        (ROOT / "docs" / "conformance.md").read_text())
+    assert ok, cells
+    assert cells[("G1", "py")] == "proved"
+    assert set(cells.values()) <= set(reward.CELL_STRENGTH)
+    assert len({tier for _, tier in cells}) == 7
+
+
+def test_conformance_verifies_on_this_tree(reward, real_candidate):
+    """The real registers, measured live, against the real committed matrix."""
+    verdict = reward.probe_conformance(real_candidate)
+    assert verdict.verified is True, verdict.reason
+
+
+# --------------------------------------------------------------------------
+# formal: the ledger, and the two gates over it that need no Lean.
+# --------------------------------------------------------------------------
+
+_AXIOMS = "import RevL\n\n#print axioms RevL.G1.a\n#print axioms RevL.G2.b\n"
+_TSV = ("# registry\n"
+        "RevL.G1.a\tinstance\tRevL.G2.b\ta witness\n"
+        "RevL.G2.b\tconcrete\t\ta computation\n")
+
+
+@pytest.fixture
+def formal_repo(tiny_repo):
+    (tiny_repo / "formal" / "scripts").mkdir(parents=True)
+    (tiny_repo / "formal" / "CheckAxioms.lean").write_text(_AXIOMS)
+    (tiny_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(_TSV)
+    for name in ("nonvacuity_gate.py", "layering_gate.py"):
+        (tiny_repo / "formal" / "scripts" / name).write_text("print('clean')\n")
+    _git(tiny_repo, "add", "-A")
+    _git(tiny_repo, "commit", "-qm", "formal")
+    return tiny_repo
+
+
+def test_formal_verifies_when_the_ledger_did_not_shrink(reward, formal_repo):
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "2 registered theorem(s)" in verdict.reason
+
+
+def test_a_removed_theorem_fails_formal(reward, formal_repo):
+    """Non-vacuity, and item 536's negative bar entry "no reduced formal
+    coverage". Deleting the theorem deletes the obligation, and a green suite
+    says nothing about it."""
+    (formal_repo / "formal" / "CheckAxioms.lean").write_text(
+        "import RevL\n\n#print axioms RevL.G1.a\n")
+    (formal_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(
+        "RevL.G1.a\tinstance\tRevL.G2.b\ta witness\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "SHRANK" in verdict.reason and "RevL.G2.b" in verdict.reason
+
+
+def test_an_added_theorem_is_the_work_and_passes_formal(reward, formal_repo):
+    (formal_repo / "formal" / "CheckAxioms.lean").write_text(
+        _AXIOMS + "#print axioms RevL.G3.c\n")
+    (formal_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(
+        _TSV + "RevL.G3.c\tinstance\tRevL.G2.b\ta new witness\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is True, verdict.reason
+    assert "3 registered theorem(s)" in verdict.reason
+
+
+def test_a_theorem_downgraded_to_contentless_fails_formal(reward, formal_repo):
+    """The row survives and the content does not, so a set comparison alone
+    would read this as unchanged. `contentless` is the registry's own word for
+    "true by definition", and it is recorded as a FINDING, not a pass."""
+    (formal_repo / "formal" / "scripts" / "nonvacuity.tsv").write_text(
+        "RevL.G1.a\tcontentless\tRevL.G2.b\ttrue by definition now\n"
+        "RevL.G2.b\tconcrete\t\ta computation\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "contentless" in verdict.reason and "RevL.G1.a" in verdict.reason
+
+
+def test_a_failing_ledger_gate_fails_formal(reward, formal_repo):
+    (formal_repo / "formal" / "scripts" / "nonvacuity_gate.py").write_text(
+        "import sys\nprint('a witness is not registered')\nsys.exit(1)\n")
+    verdict = reward.probe_formal(
+        _candidate(reward, formal_repo, base="HEAD", scope=("**",)))
+    assert verdict.verified is False
+    assert "nonvacuity_gate" in verdict.reason
+
+
+def test_formal_is_the_control_for_the_conformance_fixture(
+        reward, matrix_repo):
+    """The control. `matrix_repo` has no `formal/` at all, so `formal` fails
+    there for its own reason on BOTH sides of the conformance fault, and the
+    conformance verdict above is located rather than global."""
+    candidate = _candidate(reward, matrix_repo, base="HEAD", scope=("**",))
+    _with_tier_guarantees(matrix_repo, _cells())
+    clean = reward.probe_formal(candidate)
+    _with_tier_guarantees(matrix_repo, _cells(G1_java="divergence"))
+    dirty = reward.probe_formal(candidate)
+    assert clean.verified is dirty.verified is False
+    assert clean.reason == dirty.reason
+
+
+def test_formal_verifies_on_this_tree(reward, real_candidate):
+    verdict = reward.probe_formal(real_candidate)
+    assert verdict.verified is True, verdict.reason
+
+
+# --------------------------------------------------------------------------
+# progress (issue #1224, roadmap item 545): the one component that rises when
+# the system gets better. Scored for real on a tree built by the progress
+# suite's own builder; every OTHER component is a stub, so what is under test
+# is the composition, not the other nine probes.
+# --------------------------------------------------------------------------
+
+def _progress_builder():
+    """`tests/test_evolution_progress.py`'s tree builder, loaded by path under
+    a private name and not registered: two test modules must not share one
+    importable name for a helper, and a bare `import` would bind whichever
+    copy was found first."""
+    spec = importlib.util.spec_from_file_location(
+        "_evolution_reward_progress_builder",
+        ROOT / "tests" / "test_evolution_progress.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.fixture
+def progress_repo(tmp_path):
+    builder = _progress_builder()
+    tree = tmp_path / "progress"
+    builder.build_tree(tree)
+    _git(tree.parent, "init", "-q", str(tree))
+    _git(tree, "config", "user.email", "t@example.com")
+    _git(tree, "config", "user.name", "t")
+    _git(tree, "add", "-A")
+    _git(tree, "commit", "-qm", "base")
+    return tree, builder
+
+
+def _all_but_progress(reward, failing=()):
+    table = {n: (lambda c, n=n: reward.failed(n, "stub") if n in failing
+                 else reward.verified(n, "stub"))
+             for n in reward.COMPONENTS}
+    table["progress"] = reward.probe_progress
+    return table
+
+
+def test_progress_is_a_registered_component(reward):
+    assert "progress" in reward.COMPONENTS
+    assert reward.PROBES["progress"] is reward.probe_progress
+
+
+def test_the_empty_diff_is_not_retained_when_everything_else_verifies(
+        reward, progress_repo):
+    """Item 545's property, on the scorer itself. Nine preservation components
+    say yes, and the candidate that changed nothing is still not retained,
+    because it improved nothing. Before `progress` was registered this exact
+    scorecard was a retention."""
+    tree, _builder = progress_repo
+    card = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward))
+    assert card.retained is False
+    assert card.blockers == ("progress",)
+    progress = [v for v in card.verdicts if v.component == "progress"][0]
+    assert "did not advance" in progress.reason
+
+
+def test_a_real_improvement_with_everything_else_verified_is_retained(
+        reward, progress_repo):
+    """The satisfying side: the same scorer retains a candidate whose reach
+    ledger genuinely shrank, so the conjunction is satisfiable."""
+    tree, builder = progress_repo
+    builder.build_tree(tree, gaps=("kind=a",))
+    card = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward))
+    assert card.retained is True, card.render()
+
+
+def test_an_improvement_does_not_buy_back_any_failed_component(
+        reward, progress_repo):
+    """Property 2: progress is added to preservation, never traded against it.
+    With a real improvement on the tree, failing ANY one other component is
+    still a non-retention, and it is that component that blocks."""
+    tree, builder = progress_repo
+    builder.build_tree(tree, gaps=("kind=a",))
+    candidate = _candidate(reward, tree, base="HEAD")
+    for victim in reward.COMPONENTS:
+        if victim == "progress":
+            continue
+        card = reward.score(candidate,
+                            probes=_all_but_progress(reward, failing={victim}))
+        assert card.retained is False, victim
+        assert card.blockers == (victim,)
+
+
+def test_the_scorecard_carries_the_ledger_promote_reads(reward, progress_repo):
+    """The reopening comment on issue #1224: the scorecard carries the counter
+    ledger, so a generation is judged from reward scorecards directly."""
+    tree, builder = progress_repo
+    flat = reward.score(_candidate(reward, tree, base="HEAD"),
+                        probes=_all_but_progress(reward)).as_dict()
+    builder.build_tree(tree, gaps=("kind=a",))
+    moved = reward.score(_candidate(reward, tree, base="HEAD"),
+                         probes=_all_but_progress(reward)).as_dict()
+    assert [d["direction"] for d in moved["progress"]["deltas"]].count(
+        "improved") == 1
+    assert moved["progress"]["base"] == _git(tree, "rev-parse", "HEAD").stdout.strip()
+    evolution_progress = reward._progress_module()
+    assert evolution_progress.promote([flat]).promoted is False
+    result = evolution_progress.promote([flat, moved])
+    assert result.promoted is True
+    assert result.witnesses == (str(tree),)
+
+
+def test_the_progress_probe_leaves_the_interpreter_as_it_found_it(
+        reward, progress_repo):
+    """The probe imports `evolution_progress` from this checkout. It may ADD
+    that one module; it must not replace any module already loaded, and it
+    must hand `sys.path` back unchanged, or every later bare import in the
+    session resolves against a directory nobody asked for."""
+    tree, _builder = progress_repo
+    path_before = list(sys.path)
+    modules_before = dict(sys.modules)
+    reward.probe_progress(_candidate(reward, tree, base="HEAD"))
+    assert sys.path == path_before
+    replaced = [k for k, v in modules_before.items() if sys.modules.get(k) is not v]
+    assert not replaced, replaced
+    added = set(sys.modules) - set(modules_before)
+    assert added <= {"evolution_progress"}, added

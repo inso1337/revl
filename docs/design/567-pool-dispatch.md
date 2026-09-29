@@ -203,16 +203,29 @@ dispatch is exactly the failure the refusal exists to prevent.
    `pool init` can write - and a classifier that can prove a composition
    dispatchable at one of them. Building the verb first would ship a promotion
    to a tier nothing can be sent at.
-2. **Liveness in `pool status`** (item 550's open point 6). A member's row now
-   carries what it OWES (`outstanding=N`), which is what an operator deciding
-   whether to withdraw a peer needs beside what it holds. Reachability is still
-   not shown; `src/revl/liveness.py` is the machinery to read from.
+2. **Liveness in `pool status`** (item 550's open point 6). Closed since, by
+   `revl pool probe` and `pool status --require-live` (`src/revl/pool_health.py`;
+   the "Liveness" section of [550](550-private-peer-pool.md)). A probe shares
+   this channel: `PeerRunner.handle` routes a probe to
+   `pool_health.answer_probe`, which runs nothing and spends no task id, and
+   `dispatch_one` records a delivered task as a live contact and an unanswered
+   send as an unreachable one. The pointer this point used to carry, to
+   `src/revl/liveness.py`, was wrong: that module is the Petri-net deadlock
+   search behind `revl analyze`.
 3. **A multi-file artifact.** A task pins ONE artifact by hash. Two files are
    refused on `multi-file-artifact` rather than silently hashing the first; a
    bundle digest is what that needs.
-4. **Concurrency.** The ledger is a JSON file with no concurrency control, the
-   same limit the roster carries and for the same assumed deployment: one
-   operator writing.
+4. **Concurrency.** Closed since (issue #1198). Every writer of the pool
+   directory holds `pool_state.locked` for its whole read-modify-write, and
+   every file is replaced atomically. `dispatch_one` is two transactions, one
+   before the send and one after it, and the second READS THE STATE AGAIN
+   rather than writing back what it read before the send. Before that, a
+   withdrawal made while a task was in flight was undone when the dispatch
+   finished: the peer was back in the roster and its orphaned task read
+   `delivered`. `tests/test_pool_state_concurrency_1198.py` forces that
+   interleaving with two real processes. The late answer is now refused
+   (`receipt-refused`, because the withdrawal revoked the key that signed it)
+   and the task stays `orphaned`.
 
 ## Self-host
 

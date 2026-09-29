@@ -52,7 +52,6 @@ carries the wasm target, for a machine whose default cargo does not.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -71,14 +70,12 @@ from revl.errors import RevlError  # noqa: E402
 # oracle so the wasm gate is measured against the same programs and the same
 # guarantee vocabulary the rust crate is. A copy here would be free to drift.
 import test_selfhost_lower as oracle  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _generator():
     path = ROOT / "tools" / "build_gate_wasm.py"
-    spec = importlib.util.spec_from_file_location("revl_build_gate_wasm_vector", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["revl_build_gate_wasm_vector"] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("revl_build_gate_wasm_vector", path)
     return module
 
 
@@ -411,10 +408,7 @@ def _crate_generator():
     one: the frontier derivation ITSELF, so the tables can be re-measured here
     instead of only read back off the artifact they produced."""
     path = ROOT / "tools" / "build_gate_crate.py"
-    spec = importlib.util.spec_from_file_location("revl_build_gate_crate_probe", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["revl_build_gate_crate_probe"] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("revl_build_gate_crate_probe", path)
     return module
 
 

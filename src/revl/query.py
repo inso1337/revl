@@ -147,6 +147,20 @@ def _fn_extern_reach(ir: dict) -> dict:
     return reach
 
 
+def _emitting_extern_reach(ir: dict) -> dict:
+    """The checker's G4 fixed point keyed by EXTERN NAME: callable name -> the
+    emission/witnessed externs its call or its value reaches, with `*` marking
+    a first-class dispatch on the way. The same map `boundary._boundary` folds
+    for the G8 surface, so a first-class route is read off the checker's own
+    analysis rather than re-derived."""
+    from .emission_analysis import _emitting_extern_names
+
+    fns = ir.get("functions") or []
+    if isinstance(fns, dict):
+        fns = list(fns.values())
+    return _emitting_extern_names(list(fns), list(ir.get("externs") or []))
+
+
 def _called_names(node) -> set:
     """Callable names a lowered node references — `lower`'s own walk, which
     knows both call encodings (component `{kind: fn}`, pure `{kind: call,
@@ -177,6 +191,7 @@ class Composition:
         self.load_order = list(self.manifest.get("loadOrder") or [])
         self.emitting_fns = _emitting_fn_names(ir)
         self.fn_externs = _fn_extern_reach(ir)
+        self._emitting_externs = None  # built on first `emission_routes` call
 
         # provision resolution is per-(key, realm): the same key in two realms
         # is multi-tenancy, not a conflict (docs/design-v2-realms.md)
@@ -261,6 +276,54 @@ class Composition:
         values: set = set()
         _calls_in(nodes, found, values=values)
         return bool(values & self.emitting_fns)
+
+    def emission_routes(self, nodes) -> dict:
+        """Every `emission` extern `nodes` reach -> whether EVERY route to it is
+        a call naming the extern itself in this scope.
+
+        The reach is the checker's own: `_calls_in`'s call and value channels
+        over the scope, closed by the G4 fixed point (`_emitting_extern_reach`). That
+        is the pair `emission_analysis._method_emissions` reads to print "`x`
+        (passed as a function value)", so this cannot find less than the
+        diagnostic names. Three routes, and only the first is direct:
+
+        * the scope calls the extern by name;
+        * the scope calls a pure `fn` that reaches it (a fn body cannot call a
+          `deferred` extern by name, item 400, so a deferred extern reached
+          this way was handed through as a value);
+        * the scope references the extern, or a callable reaching it, as a
+          VALUE (`let g = x`, `apply(x, n)`, `{ f: x }`, `[x]`, an arrow
+          capturing an alias). The value is dispatched as an ordinary call,
+          so a `deferred` extern reached this way fires at the call rather
+          than being enqueued: the py tier enqueues only an `emit x(..)` step.
+
+        `witnessed` externs are in the fixed point's seed but not in this map:
+        their reversibility is a registered inverse, not a crossing."""
+        from .lower import _calls_in
+
+        called: set = set()
+        values: set = set()
+        _calls_in(nodes, called, values=values)
+        if self._emitting_externs is None:
+            self._emitting_externs = _emitting_extern_reach(self.ir)
+        emitting = self._emitting_externs
+        routes: dict = {}
+
+        def reach(name: str, direct: bool) -> None:
+            if (self.externs.get(name) or {}).get("class") != "emission":
+                return
+            routes[name] = routes.get(name, True) and direct
+
+        for name in called:
+            if name in self.externs:
+                reach(name, True)
+            else:
+                for ext in emitting.get(name) or ():
+                    reach(ext, False)
+        for name in values:
+            for ext in emitting.get(name) or ():
+                reach(ext, False)
+        return routes
 
     # -- per-scope boundary facts -------------------------------------
 
