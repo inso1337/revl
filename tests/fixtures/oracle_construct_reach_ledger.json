@@ -209,26 +209,11 @@
     "step=unload"
   ],
   "emit_ts": [
-    "class=witnessed",
-    "kind=do",
     "kind=hole",
-    "kind=stream-merge",
-    "kind=subscribe",
-    "lifecycle=<true>",
-    "mode=every",
     "name=Err",
     "name=Ok",
     "op=!==",
-    "op====",
-    "root=stdlib",
-    "stage=take",
-    "step=advance",
-    "step=assert_no_residue",
-    "step=call",
-    "step=load",
-    "step=stream-iter",
-    "step=timer",
-    "step=unload"
+    "op===="
   ],
   "emit_wasm": [
     "async=<true>",

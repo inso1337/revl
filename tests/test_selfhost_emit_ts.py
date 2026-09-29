@@ -81,17 +81,21 @@ closed by verification. ``components_await.rvl`` (already v1 in the corpus) cove
 the async-generator body on this path; the three new fixtures add the config /
 saga / provide-method v1 body and the isolate/intercept-only v2 dispatch.
 
-Declared boundaries tracked by the coverage ledgers include the component-body
-``timer`` step, in-file ``test``/``fault_test``/``lifecycle test`` emission,
-witnessed transactions, deferred holes/streams, temporal expressions, and ROUTED requires
-(item 167 — a routed require, ``requires <k> in realms(...) strategy(...)``, also
-lowers to ir_version 2 but additionally needs the ``_TS_ROUTER_SRC`` runtime
-literal, the ``realmLabel`` runtime import, the ``inject_keys = requires - routes``
-gate, the per-key ``revlRouter`` proxy, and the routed-``req`` read; the router
-literal embeds backtick templates and ``${…}`` the revl lexer reserves, so it is
-kept out to stay byte-VERIFIED — a routed v2 doc must NOT enter this corpus until
-that lands). These remain explicit source-backed boundaries rather than implied
-full compiler parity.
+Slice 8 (issue #106) closes the families the port used to refuse by name or
+diverge on silently, each held byte-identical by a CORPUS document that failed
+against the previous port: ROUTED requires (item 167: the verbatim router
+helper, the ``realmLabel`` import, the inject gate less the routed keys, the
+per-key ``revlRouter`` proxy and the routed ``req`` read), ``@ts ref`` externs
+(item 396 option B) and config externs (item 378), the ``Map`` subscript
+(#957), in-file ``test`` and ``lifecycle test`` drivers, the activation-body
+``timer`` step, the stream surface (item 130) and the ``do`` block arm. The
+whole-tree survey (``tools/selfhost_differential_survey.py --tiers ts``) now
+reads zero divergences and zero refusals on this tier.
+
+Declared boundaries tracked by the coverage ledgers are witnessed transactions,
+``fault test`` sections (the reference refuses the document; the port names the
+section), temporal expressions and the canonical ABI. These remain explicit
+source-backed boundaries rather than implied full compiler parity.
 """
 
 import importlib.util
@@ -107,10 +111,6 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_files  # noqa: E402
-
-sys.path.insert(0, str(ROOT / "tests"))
-
-from _boundary_witness import assert_boundary_witness  # noqa: E402
 
 CORPUS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_corpus"
 
@@ -225,6 +225,44 @@ CORPUS = [
     # apart on it. Added FAILING FIRST — the port answered
     # `<<UNSUPPORTED-METHOD-STEP:if>>` and dropped every route in the document.
     "../emit_py_corpus/services_control_flow.rvl",
+    # issue #106 / item 391: the families the port used to refuse by name or
+    # diverge on silently. Each document below failed against the previous
+    # port (a named `<<UNSUPPORTED-...>>` marker, or different bytes with none).
+    # A `Map` subscript (#957): `revlMapIndex`, not the List guard `revlIndex`.
+    "../emit_py_corpus/maps.rvl",
+    # A routed require (item 167) on the v2 path: the verbatim router helper,
+    # the `realmLabel` import, the inject gate less the routed key, and the
+    # per-key `revlRouter` proxy built in `apply()`.
+    "../../../stdlib/router.rvl",
+    # `@ts ref` externs (item 396 option B): the three `node:` imports, the ref
+    # runtime, and one lazy sync thunk per extern against the stdlib root.
+    "../../../stdlib/fs.rvl",
+    # In-file tests: vitest `it(...)` cases, the test-mode `assert` through
+    # `revlEq`/`revlShow`, and lifecycle drivers (load with config, call with
+    # and without a binding, unload, assert no residue).
+    "../../../examples/lifecycle_cache.rvl",
+    "../../../backends/go/testdata/opt_gaps_280.rvl",
+    # Activation-body timers (item 57): `scheduleEvery`/`scheduleAfter` with a
+    # `Frame.bracket` cancel; an async timer body's in-flight set (item 170);
+    # a lifecycle driver's `advance` step and its clock reset.
+    "../emit_py_corpus/services_timers.rvl",
+    "../../../examples/async_timer.rvl",
+    "../../../backends/go/scenarios/advance.rvl",
+    # The stream surface (item 130): `subscribe` with merge, stages, capacity
+    # and drain; the `every ... in` loop; the typed-event `on ... as` gate.
+    "../../../backends/go/testdata/stream_130.rvl",
+    "../emit_rust_corpus/comp_stream.rvl",
+    # A statement-block match arm (`do`, item 361) in a provide method.
+    "../emit_py_corpus/branches.rvl",
+    # Written for this port, for the shapes no document above reaches: a routed
+    # require READ in a provide method (least_loaded), an async timer body that
+    # mixes async and plain emissions, an async `do` arm with a mutable binding,
+    # and a lifecycle driver awaiting an async operation.
+    "routed_timers.rvl",
+    # ...and at function level: async and `Secret[T]` `@ts ref` externs against
+    # the user root, empty-list inference through a `Map` subscript, and the
+    # three in-file assert shapes (empty body, `!=`, a plain condition).
+    "ref_externs.rvl",
 ]
 
 def _load_reference_emit():
@@ -425,90 +463,25 @@ console.log(removals.join(","))
 # The self-host emitters' safety argument is that an unported construct answers
 # with a named `<<UNSUPPORTED-...>>` marker rather than with silence: a marker is
 # visible in the emitted bytes and is pinned here, while a section the port
-# simply skips is invisible to the byte oracle (no corpus document carries one)
-# and is counted as mirrored by tools/selfhost_coverage.py.
+# simply skips is invisible to the byte oracle and is counted as mirrored by
+# tools/selfhost_coverage.py.
 #
-# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-# every self-host slice, and `selfhost/emit_ts.rvl` used to emit NOTHING for it.
-# It now emits one named marker per test, per family.
-IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
-
-LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
-component P provides p: Ping {
-  provide p { fn ping() = 1 }
-}
-lifecycle test "probe" {
-  load P
-  assert true
-}
-"""
-
-FAULT_TEST_SRC = """service Ping { fn ping() -> Int }
-component P provides p: Ping {
-  let scratch = effect Map.new() undo scratch.drop()
-  provide p { fn ping() = 1 }
-}
-fault test "probe" for P {
-  fail at step 1
-  assert no residue
-}
-"""
-
-
-@pytest.mark.parametrize("source, reference_token, port_token", [
-    pytest.param(IN_FILE_TEST_SRC, "import { expect, it } from 'vitest'",
-                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
-    pytest.param(LIFECYCLE_TEST_SRC, "import { AsyncLocalStorage } from 'node:async_hooks'",
-                 "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
-])
-def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
-                                           reference_token, port_token):
-    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
-    path = tmp_path / "boundary.rvl"
-    path.write_text(source)
-    ir = compile_files([str(path)])
-    want, got = reference.emit(ir), emitted["emit_ts_src"](ir)
-    assert reference_token in want
-    assert port_token in got
-    assert got != want, "boundary is stale: move its witness into CORPUS"
+# In-file `test` and `lifecycle test` emission is ported now (issue #106) and
+# held to byte agreement by CORPUS (`lifecycle_cache.rvl`, `opt_gaps_280.rvl`,
+# `ref_externs.rvl`). `fault test` is the family left: the reference refuses the
+# whole document, and the port names the section instead. The document lives in
+# tests/fixtures/emit_ts_refusals/, where the line-coverage gate drives both
+# halves over it; its refusal text is asserted here.
+REFUSALS_DIR = ROOT / "tests" / "fixtures" / "emit_ts_refusals"
 
 
 def test_a_fault_test_section_is_a_reference_refusal_and_a_named_port_marker(
-        emitted, reference, tmp_path):
+        emitted, reference):
     """`fault test` runs on the python reference tier only (docs/fault-tests.md),
     so the reference TS emitter refuses the whole document by name. The port has
     no refusal channel — a pure self-host emitter fn cannot `fail` — so it names
     the section with a marker instead of dropping it."""
-    path = tmp_path / "fault.rvl"
-    path.write_text(FAULT_TEST_SRC)
-    ir = compile_files([str(path)])
+    ir = compile_files([str(REFUSALS_DIR / "fault_test_section.rvl")])
     with pytest.raises(reference.EmitError, match="fault tests do not lower"):
         reference.emit(ir)
     assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in emitted["emit_ts_src"](ir)
-
-
-# item 130 (issue #81): the stream surface this port does not carry
-# ---------------------------------------------------------------------------
-#
-# The reference emitter lowers the whole `Stream[T]` surface on this tier; the
-# Path B port does not, and `tests/fixtures/selfhost_blind_spots.json` carries
-# that as a named `unported` baseline. The baseline records the GAP. What was
-# never checked is that the port is LOUD about it: the ledger is satisfied by a
-# port that silently emits a module with the subscription missing, which is the
-# section-level silence issue #1123 found for the in-file test section and the
-# worst answer item 130 admits for a stream. So the marker is pinned here,
-# where it runs.
-
-
-def test_the_stream_surface_is_named_not_dropped(emitted, reference):
-    """A stream document reaches TWO port boundaries — the `subscribe`
-    acquisition and the `stream-iter` loop behind `every … in` — and both must
-    answer with a marker rather than with nothing."""
-    ir = compile_files([str(ROOT / "backends" / "go" / "testdata" / "stream_130.rvl")])
-    want = reference.emit(ir)
-    got = emitted["emit_ts_src"](ir)
-    for reference_token, port_token in (
-        ("host.Stream.subscribe(", "<<UNSUPPORTED-EXPR:subscribe>>"),
-        ("host.Stream.isClosed(", "<<UNSUPPORTED-STEP:stream-iter>>"),
-    ):
-        assert_boundary_witness(want, got, reference_token, port_token)

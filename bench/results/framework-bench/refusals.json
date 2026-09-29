@@ -39,14 +39,25 @@
           ]
         },
         "ts": {
-          "residual": 4,
-          "corpus": 61,
-          "reproduced": 57,
+          "residual": 15,
+          "corpus": 74,
+          "reproduced": 59,
           "documents": [
+            "../../../backends/go/scenarios/advance.rvl",
+            "../../../backends/go/testdata/opt_gaps_280.rvl",
+            "../../../backends/go/testdata/stream_130.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+            "../../../examples/async_timer.rvl",
             "../../../examples/java_match.rvl",
+            "../../../examples/lifecycle_cache.rvl",
+            "../../../stdlib/fs.rvl",
+            "../../../stdlib/router.rvl",
+            "../emit_py_corpus/branches.rvl",
             "../emit_py_corpus/services_control_flow.rvl",
-            "component_edges.rvl"
+            "../emit_rust_corpus/comp_stream.rvl",
+            "component_edges.rvl",
+            "ref_externs.rvl",
+            "routed_timers.rvl"
           ]
         },
         "wasm": {
@@ -56,8 +67,8 @@
           "documents": []
         }
       },
-      "total_residual": 11,
-      "total_corpus": 261,
+      "total_residual": 22,
+      "total_corpus": 274,
       "clean_tiers": [
         "go",
         "java",
@@ -325,39 +336,10 @@
           }
         },
         "ts": {
-          "unported_constructs": 16,
-          "unported_reasons": 8,
+          "unported_constructs": 1,
+          "unported_reasons": 1,
           "blind_constructs": 4,
           "reasons": {
-            "component `call`, `load`, and `unload` steps require routed instance/reference lifecycle machinery rather than the mirrored provide/guard/effect subset; their source branches terminate in the reference component runtime, not v3 statement emission": [
-              "step=call",
-              "step=load",
-              "step=unload"
-            ],
-            "in-file lifecycle tests are emitted by reference-only `_emit_ts_lifecycle_tests`; corpus oracle documents compile library/application output and the port intentionally has no test-runner generation path": [
-              "lifecycle=<true>"
-            ],
-            "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81: the java tier, which still refuses the whole stream surface)": [
-              "kind=stream-merge",
-              "kind=subscribe",
-              "stage=take",
-              "step=stream-iter"
-            ],
-            "reference roots named `stdlib` enter `_emit_ts_ref_runtime`/`_emit_ts_ref_thunk`; the self-host corpus contract requires ordinary host roots and refuses missing host roots instead of synthesizing reference-runtime thunks": [
-              "root=stdlib"
-            ],
-            "temporal `every` and component timer/advance/assert-no-residue steps are handled by reference-only `_emit_temporal` and runtime scheduler hooks, outside the self-host emitter's synchronous component subset": [
-              "mode=every",
-              "step=advance",
-              "step=assert_no_residue",
-              "step=timer"
-            ],
-            "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
-              "kind=do"
-            ],
-            "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
-              "class=witnessed"
-            ],
             "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
               "kind=hole"
             ]
@@ -439,7 +421,7 @@
           }
         }
       },
-      "total_unported": 205
+      "total_unported": 190
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -451,12 +433,12 @@
         "emit_java": 36,
         "emit_py": 29,
         "emit_rust": 34,
-        "emit_ts": 20,
+        "emit_ts": 5,
         "emit_wasm": 50,
         "gate_census": 5,
         "lower_ir": 6
       },
-      "total_unreached": 250
+      "total_unreached": 235
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",
