@@ -1,0 +1,20 @@
+// REFUSED G1: `db` is not a declared requirement of C.
+//
+// Layout twin of a document in this directory: the same program with the block
+// spelled the other way. It was refused before the fix too. Twin of
+// g1_after_guard_provide.rvl.
+//
+// One document per rule and block form, so the gate/reference census measures
+// each (tools/gate_reference_census.py). The file name's prefix is the
+// expected verdict; tests/test_gate_reference_census.py holds it.
+
+service K { fn f() -> Int }
+component C provides k: K {
+  if (true) { fail "x" }
+  provide k {
+    fn f() {
+      emit db.put("a")
+      return 0
+    }
+  }
+}
