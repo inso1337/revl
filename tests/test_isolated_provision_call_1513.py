@@ -257,3 +257,133 @@ def test_revl_call_refuses_a_two_realm_key_by_name(transport, tmp_path):
     assert "inactive" not in text
     assert "`TenantAStore` in realm `tenant_a`" in text
     assert "`TenantBStore` in realm `tenant_b`" in text
+
+
+# --------------------------------------------------------------------------- #
+# The mock-world lifecycle runner (`revl test --mock-requires`)
+# --------------------------------------------------------------------------- #
+
+def _mock_world(source: str) -> tuple[tuple[int, int], str]:
+    from revl import mocks  # noqa: PLC0415
+
+    lines: list[str] = []
+    result = mocks.run_mock_requires(compile_source(source, "m.rvl"),
+                                     out=lines.append)
+    return result, "\n".join(lines)
+
+
+def test_a_lifecycle_call_reaches_an_isolated_provision():
+    """On main the `call` step read `root.get("ops")` and failed with "loaded
+    but not ACTIVE" while `Worker` was ACTIVE in realm `wa`."""
+    result, out = _mock_world(_ISOLATED + """
+lifecycle test "isolated call" {
+  load Worker
+  let r = call ops.run("x")
+  assert r == "x"
+  unload Worker
+  assert no_residue
+}
+""")
+    assert result == (0, 1), out
+
+
+def test_an_isolated_requirement_is_mocked_in_its_realm():
+    """`App` requires `db` in realm `wa`. On main the auto-mock check read
+    `root.get("db")`, found nothing, and plugged the mock into the SHARED
+    realm, where `App` never sees it, so `App` stayed PENDING."""
+    result, out = _mock_world("""
+service Database { fn ping() -> Bool }
+service Api { fn up() -> Bool }
+component App requires db: Database provides api: Api {
+  isolate db in realm("wa")
+  provide api { fn up() { return db.ping() } }
+}
+lifecycle test "isolated requirement" {
+  load App
+  let u = call api.up()
+  unload App
+  assert no_residue
+}
+""")
+    assert result == (0, 1), out
+
+
+def test_a_lifecycle_call_on_a_two_realm_key_is_refused_by_name():
+    result, out = _mock_world(_TWO_REALMS + """
+lifecycle test "two realms" {
+  load TenantAStore
+  load TenantBStore
+  let r = call kv.get("who")
+  unload TenantBStore
+  unload TenantAStore
+}
+""")
+    assert result == (1, 1), out
+    assert "`TenantAStore` in realm `tenant_a`" in out
+    assert "not ACTIVE" not in out
+
+
+# --------------------------------------------------------------------------- #
+# The placement process runner (`revl run --placement`)
+# --------------------------------------------------------------------------- #
+
+def _placement(tmp_path, source: str, toml: str) -> str:
+    """Boot one placement through the conductor with THIS interpreter (which
+    has cordis-py, per the module skip) and return its whole trace."""
+    import os  # noqa: PLC0415
+    import subprocess  # noqa: PLC0415
+
+    rvl = tmp_path / "app.rvl"
+    rvl.write_text(source, encoding="utf-8")
+    placement = tmp_path / "app.toml"
+    placement.write_text(toml, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, "-m", "revl", "run", str(rvl),
+         "--placement", str(placement), "--once"],
+        capture_output=True, text=True, timeout=300,
+        stdin=subprocess.DEVNULL, cwd=str(tmp_path),
+        env={**os.environ, "REVL_PY": sys.executable,
+             "PYTHONPATH": str(ROOT / "src")})
+    trace = result.stdout + result.stderr
+    assert result.returncode == 0, trace
+    return trace
+
+
+def test_a_process_holds_two_tenants_of_one_key(tmp_path):
+    """On main the runner plugged every component with `root.plugin`, which
+    drops `isolate`, so both stores provided `kv` in the shared realm: the
+    second FAILED with `service "kv" has been registered at <TenantAStore>`,
+    left residue, and the probe silently answered from tenant A. Both now
+    activate in their realms, and the probe on the two-realm key is refused
+    naming both."""
+    trace = _placement(tmp_path, _TWO_REALMS,
+                       '[processes.only]\n'
+                       'components = ["TenantAStore", "TenantBStore"]\n'
+                       "probe = [\"kv.get('k')\"]\n")
+    assert "load  | TenantAStore    | state=ACTIVE" in trace, trace
+    assert "load  | TenantBStore    | state=ACTIVE" in trace, trace
+    assert "has been registered" not in trace, trace
+    assert "`TenantBStore` in realm `tenant_b`" in trace, trace
+    assert "=> 'a:k'" not in trace, trace
+    assert "[only] residue no residue" in trace, trace
+
+
+def test_a_probe_and_a_seam_reach_an_isolated_provision(tmp_path):
+    """Regression guard, passes on main too, where isolation was dropped: with
+    isolation now honoured, a probe on an isolated key still resolves, and a
+    seam still carries an isolated key from its provider process to a
+    consumer isolated into the same realm in another process."""
+    trace = _placement(tmp_path, _ISOLATED + """
+service Api { fn go(x: Str) -> Str }
+component Front requires ops: Ops provides api: Api {
+  isolate ops in realm("wa")
+  provide api { fn go(x) { return ops.run(x) } }
+}
+""", '[processes.back]\ncomponents = ["Worker"]\n'
+     "probe = [\"ops.run('p')\"]\n\n"
+     '[processes.front]\ncomponents = ["Front"]\n'
+     "probe = [\"api.go('s')\"]\n")
+    assert "[back] probe | ops.run('p')    | => 'p'" in trace, trace
+    assert "[front] probe | api.go('s')     | => 's'" in trace, trace
+    assert "[back] residue no residue" in trace, trace
+    assert "[front] residue no residue" in trace, trace

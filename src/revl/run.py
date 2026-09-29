@@ -551,6 +551,94 @@ def _key_to_service(ir: dict) -> dict[str, str]:
     return out
 
 
+# ── issue #1513: resolving a provided key from outside every realm ─────────
+#
+# One implementation, shared by `_Driver` (Session.call, MCP revl_call, the
+# REPL), the mock-world lifecycle runner (`revl.mocks`) and the placement
+# process runner (`revl._process_runner`), so no host-side caller keeps a
+# second, shared-realm-only lookup of its own.
+
+
+class _AmbiguousRealm:
+    """The `host_realm` answer for a key isolated into two or more realms."""
+
+    def __repr__(self) -> str:
+        return "AMBIGUOUS_REALM"
+
+
+AMBIGUOUS_REALM = _AmbiguousRealm()
+
+
+def provision_placements(ir: dict, key: str) -> list[tuple[str, str | None]]:
+    """Every `(component, realm)` that provides `key` in `ir`, in declaration
+    order. `realm` is the component's `isolate` placement for `key`, or `None`
+    for the shared root realm."""
+    return [(comp["name"], (comp.get("isolate") or {}).get(key))
+            for comp in _components(ir)
+            if key in (comp.get("provides") or {})]
+
+
+def host_realm(ir: dict, key: str):
+    """The realm a caller outside every realm reaches `key` in: `None` for the
+    shared realm, a realm label, or `AMBIGUOUS_REALM`.
+
+    The shared realm answers first, as Def. 28's default resolution does: a
+    shared-realm provider (a router included) is what `key` names. A key
+    provided ONLY in isolated realms is reached in its placement realm when
+    that realm is unique; G2 is per-(key, realm), so one realm means one
+    provider. A key isolated into two or more realms has no single answer.
+    This is the choice `ClassMap._provider_of` makes when it classifies a
+    call, so a call and its approval decision always name the same provider."""
+    realms = {realm for _name, realm in provision_placements(ir, key)}
+    if not realms or None in realms:
+        return None
+    if len(realms) == 1:
+        return next(iter(realms))
+    return AMBIGUOUS_REALM
+
+
+def resolve_provision(root, runtime, key: str, realm):
+    """Resolve `key` in `realm` (`None` = the shared root realm): an isolated
+    key lives in its placement realm, so it is read through
+    `root.isolate(key, realm(w)).reflect.get(key)`, exactly how `_Router` and
+    the emitted routed-require resolve it. Returns `None` when no live
+    provider has published it there."""
+    if realm is None:
+        return root.get(key)
+    return root.isolate(key, runtime.realm_label(realm)).reflect.get(key)
+
+
+def resolve_key(root, runtime, ir: dict, key: str):
+    """The live value a caller outside every realm reaches for `key` (issue
+    #1513), or `None` when there is no single live provider. See
+    :func:`host_realm` for which realm that is."""
+    realm = host_realm(ir, key)
+    if realm is AMBIGUOUS_REALM:
+        return None
+    return resolve_provision(root, runtime, key, realm)
+
+
+def unserved_key_reason(ir: dict, key: str) -> str | None:
+    """Why `resolve_key` found nothing, when the reason is a realm: a key
+    isolated in two or more realms (every provider may be live, but a caller
+    names a key, not a realm), or a single provider isolated in a named realm
+    that is inactive. `None` when the key's provider is in the shared realm,
+    so the caller keeps its own wording for that case."""
+    placements = provision_placements(ir, key)
+    if host_realm(ir, key) is AMBIGUOUS_REALM:
+        realms = {realm for _name, realm in placements}
+        where = ", ".join(f"`{name}` in realm `{realm}`"
+                          for name, realm in placements)
+        return (f"key {key!r} is provided in {len(realms)} realms ({where}); "
+                "a call names a key, not a realm, so it has no single provider "
+                "to reach")
+    if len(placements) == 1 and placements[0][1] is not None:
+        name, realm = placements[0]
+        return (f"key {key!r} is declared but not currently provided: its "
+                f"provider `{name}`, isolated in realm `{realm}`, is inactive")
+    return None
+
+
 def _print_plan(ir: dict, config: dict, backend: str) -> None:
     order = _load_order(ir)
     by_name = {c["name"]: c for c in _components(ir)}
@@ -1688,46 +1776,18 @@ class _Driver:
             await asyncio.sleep(0)
 
     def _resolve_provision(self, key: str, realm):
-        """Resolve one provided key the way the composition publishes it: an
-        isolated key lives in its placement realm (a worker's provision lands in
-        `realm(w)`, not the shared root realm), so it is read through
-        `root.isolate(key, realm(w)).reflect.get(key)` — exactly how `_Router`
-        and the emitted routed-require resolve it. `realm` is the providing
-        component's own placement for `key` (`None` = the shared root realm), so
-        the SAME key provided by different workers in different realms resolves
-        per provider. Returns `None` when no live provider has published it."""
-        if realm is None:
-            return self.root.get(key)
-        return self.root.isolate(
-            key, self.runtime.realm_label(realm)).reflect.get(key)
+        """Resolve one provided key in `realm` (see :func:`resolve_provision`)."""
+        return resolve_provision(self.root, self.runtime, key, realm)
 
     def provision_placements(self, key: str) -> list[tuple[str, str | None]]:
-        """Every `(component, realm)` that provides `key` in the live
-        composition, in declaration order. `realm` is the component's
-        `isolate` placement for `key`, or `None` for the shared root realm."""
-        return [(comp["name"], (comp.get("isolate") or {}).get(key))
-                for comp in _components(self.ir or {})
-                if key in (comp.get("provides") or {})]
+        """Every `(component, realm)` providing `key` in the live composition
+        (see :func:`provision_placements`)."""
+        return provision_placements(self.ir or {}, key)
 
     def resolve_key(self, key: str):
         """The live value a caller outside every realm reaches for `key`
-        (issue #1513), or `None` when there is no single live provider.
-
-        The shared realm answers first, as Def. 28's default resolution does:
-        a shared-realm provider (a router included) is what `key` names. A key
-        provided ONLY in isolated realms resolves in its placement realm when
-        that realm is unique; G2 is per-(key, realm), so one realm means one
-        provider. A key isolated into two or more realms has no single answer
-        and resolves to `None`; `provision_placements` tells the caller why.
-        This is the same choice `ClassMap._provider_of` makes when it
-        classifies the call, so the call and its approval decision always
-        name the same provider."""
-        realms = {realm for _name, realm in self.provision_placements(key)}
-        if not realms or None in realms:
-            return self.root.get(key)
-        if len(realms) == 1:
-            return self._resolve_provision(key, next(iter(realms)))
-        return None
+        (see :func:`resolve_key`)."""
+        return resolve_key(self.root, self.runtime, self.ir or {}, key)
 
     def resolved_keys(self) -> set:
         """The keys this composition actually provides — those with a live

@@ -8730,26 +8730,11 @@ def _ir_has_approval_edges(ir: dict) -> bool:
 
 def _unserved_key_message(driver, key: str) -> str:
     """Why a declared key has no value to call (issue #1513), naming the
-    provider and its realm rather than guessing "inactive".
-
-    A key isolated into several realms is not inactive: every provider may be
-    live, but a call names a key, not a realm, so none of them is THE provider.
-    A key whose single provider is isolated names that realm, so an inactive
-    provider in `realm("wa")` is not mistaken for a missing shared one."""
-    placements = driver.provision_placements(key)
-    realms = {realm for _name, realm in placements}
-    if placements and None not in realms and len(realms) > 1:
-        where = ", ".join(f"`{name}` in realm `{realm}`"
-                          for name, realm in placements)
-        return (f"key {key!r} is provided in {len(realms)} realms ({where}); "
-                "a call names a key, not a realm, so it has no single provider "
-                "to reach")
-    if len(placements) == 1 and placements[0][1] is not None:
-        name, realm = placements[0]
-        return (f"key {key!r} is declared but not currently provided: its "
-                f"provider `{name}`, isolated in realm `{realm}`, is inactive")
-    return (f"key {key!r} is declared but not currently provided "
-            "— its provider is inactive")
+    provider and its realm rather than guessing "inactive"."""
+    from ..run import unserved_key_reason  # noqa: PLC0415 (lazy: run pulls cordis)
+    return (unserved_key_reason(driver.ir or {}, key)
+            or f"key {key!r} is declared but not currently provided "
+               "— its provider is inactive")
 
 
 def _plain(value):
