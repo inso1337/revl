@@ -249,6 +249,27 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
+def _java_placements(ir: dict, own: list) -> dict:
+    """`key -> [{component, realm}]` for every provision this java process's
+    own components make, with the realm an `isolate` publishes it in (None for
+    the shared realm).
+
+    Issue #1567: the java placement runners resolved a served or probed key
+    with a shared-realm `ctx.get`, so an isolated provider could be neither
+    served over a seam nor probed. They now resolve each key the way the py
+    tier's `resolve_key` does: the shared realm when the key is provided
+    there, else its one isolated realm, and a key isolated in two or more
+    realms is refused by name."""
+    by_name = {c.get("name"): c for c in ir.get("components") or []}
+    out: dict = {}
+    for name in own:
+        comp = by_name.get(name) or {}
+        isolate = comp.get("isolate") or {}
+        for key in comp.get("provides") or {}:
+            out.setdefault(key, []).append({"component": name, "realm": isolate.get(key)})
+    return out
+
+
 def _parse_probe(expr: str) -> dict:
     """`key.method('a', 'b')` -> {"key","method","args"} for the rust runner,
     whose probes are structured rather than eval'd strings."""
@@ -4369,6 +4390,7 @@ def run_placement(files, placement_path: str, once: bool = False,
                           | set(spec["provides"]))
             spec["ifaces"] = {k: f"revl.Components${key_service[k]}"
                               for k in iface_keys if k in key_service}
+            spec["placements"] = _java_placements(ir, spec["components"])
 
     def command_for(backend: str, spec_file: Path) -> tuple[list, dict | None, str]:
         if backend == "node":

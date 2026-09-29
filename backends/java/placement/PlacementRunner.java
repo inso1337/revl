@@ -196,6 +196,7 @@ public final class PlacementRunner {
         String estopLatch = (String) spec.get("estopLatch");
         Estop.publishLatch(estopLatch);
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
+        placements = (Map<String, Object>) spec.getOrDefault("placements", Map.of());
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
 
         Context ctx = new Context();
@@ -341,7 +342,7 @@ public final class PlacementRunner {
             }
         }
         Class<?> iface = Class.forName((String) ifaces.get(key));
-        Object service = ctx.get(ServiceKey.of((Class) iface, key));
+        Object service = resolveKey(ctx, iface, key);
         Method m = findMethod(iface, method, args.size());
         return m.invoke(service, coerceArgs(m, args));
     }
@@ -399,6 +400,49 @@ public final class PlacementRunner {
             new java.util.concurrent.ConcurrentHashMap<>();
     private static final Map<Method, Class<?>[]> PARAM_TYPE_CACHE =
             new java.util.concurrent.ConcurrentHashMap<>();
+
+    // --- key resolution across realms (issue #1567) --------------------------
+    //
+    // `placements` is key -> [{component, realm}] for this process's own
+    // provisions (src/revl/placement.py::_java_placements). A served or probed
+    // key used to be read with a shared-realm `ctx.get`, so a provider placed
+    // with `isolate kv in realm("wa")` answered `no provider`. The order is the
+    // py tier's `resolve_key`: the shared realm when the key is provided there,
+    // else its one isolated realm, read strictly. A key isolated in two or more
+    // realms has no single provider for a call that names only the key, so it
+    // is refused naming each provider and realm. A key this process does not
+    // provide (a proxy) resolves in the shared realm, as before.
+    static Map<String, Object> placements = Map.of();
+
+    @SuppressWarnings("unchecked")
+    static Object resolveKey(Context ctx, Class<?> iface, String key) {
+        List<Map<String, Object>> at =
+                (List<Map<String, Object>>) placements.getOrDefault(key, List.of());
+        boolean shared = at.isEmpty();
+        for (Map<String, Object> p : at) {
+            if (p.get("realm") == null) shared = true;
+        }
+        if (shared) {
+            return ctx.get(ServiceKey.of((Class) iface, key));
+        }
+        if (at.size() == 1) {
+            String realm = (String) at.get(0).get("realm");
+            java.util.Optional<?> found = ctx.serviceInRealm(iface, realm);
+            if (found.isEmpty()) {
+                throw new RuntimeException("key '" + key + "' is provided in realm `" + realm
+                        + "` by `" + at.get(0).get("component") + "`, and that provider is not active");
+            }
+            return found.get();
+        }
+        StringBuilder where = new StringBuilder();
+        for (Map<String, Object> p : at) {
+            if (where.length() > 0) where.append(", ");
+            where.append('`').append(p.get("component")).append("` in realm `")
+                    .append(p.get("realm")).append('`');
+        }
+        throw new RuntimeException("key '" + key + "' is provided in " + at.size() + " realms ("
+                + where + "); a call names a key, not a realm, so it has no single provider to reach");
+    }
 
     static Method findMethod(Class<?> iface, String name, int arity) {
         return METHOD_CACHE
@@ -679,7 +723,7 @@ public final class PlacementRunner {
                         }
                         Class<?> iface = served.get(key);
                         if (iface == null) throw new RuntimeException("key " + key + " not exported");
-                        Object service = ctx.get(ServiceKey.of((Class) iface, key));
+                        Object service = resolveKey(ctx, iface, key);
                         args = (List<Object>) req.getOrDefault("args", List.of());
                         Method m = findMethod(iface, method, args.size());
                         // Record the crossing as in flight WHILE its handler runs: a
