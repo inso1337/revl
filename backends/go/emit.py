@@ -639,7 +639,15 @@ def _expr(node, env: _Env, expected=None) -> str:
         # tier limit beats a fall-through.
         name = _v3_ident(node.get("name"), "function")
         args = ", ".join(_expr(a, env) for a in node.get("args") or [])
-        return "%s(%s)" % (name, args)
+        call = "%s(%s)" % (name, args)
+        declared = _declared_extern(node)
+        if declared is not None and env.receiver:
+            # issue #1511: a provide-method crossing of an extern that
+            # declares its own `compensate`, in whatever position it is
+            # written. The activation body's one admissible position (an
+            # `emit` statement) registers at the step instead.
+            return _declared_crossing_expr(call, declared, env)
+        return call
     if kind == "record":
         # v3 typed-core only: a record literal needs the document's declared
         # record type for its field set (the v1/v2 tier carries none).
@@ -1228,6 +1236,15 @@ _COMP_NEEDS_TEARDOWN = False
 _COMP_NEEDS_METHOD_WITNESSED = False
 # Per-emit counter for unique witnessed-step local names (`_revlWit1`, …).
 _WITNESSED_COUNTER = 0
+# Issue #1511: every emission extern that DECLARES its own compensation
+# (`extern emission fn put(k: Str) -> Int compensate undo_put()`, item 254),
+# by name, mapped to the extern. Rebuilt per `emit()` call beside
+# `_WITNESSED_EXTERNS`; empty for a document that declares none, so its
+# emission stays byte-identical.
+_DECLARED_COMPENSATE: dict = {}
+# Whether some provide method crosses one of them, so the module needs
+# `revlDeclaredCrossing` (`_DECLARED_CROSSING_HELPER`).
+_COMP_NEEDS_DECLARED = False
 # item 322 Slice 1: record mode. When True, a witnessed transactional step also
 # writes a durable discharge-descriptor to the go WAL sink (revlRecordTransactional)
 # and the recording preamble is emitted. Default False -> byte-identical output.
@@ -1563,6 +1580,7 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
     has_method_frame = any(
         _method_body_has_witnessed(m.get("body"))
         or _method_body_has_compensate(m.get("body"))
+        or _reaches_declared(m.get("body"))
         for m in methods)
 
     # struct fields: ctx + config + every bind + every req (over-capture ok).
@@ -2240,6 +2258,7 @@ def _emit_component(comp, services, out):
     global _CONFIG_TYPES, _SERVICES
     name = comp["name"]
     _refuse_required_stream(comp, "cordis-go")
+    _refuse_unregistered_declared(comp)
     cname = _camel(name)
     requires = comp.get("requires", {}) or {}
     provides = comp.get("provides", {}) or {}
@@ -2570,13 +2589,127 @@ def _method_body_has_compensate(body) -> bool:
     return False
 
 
+# --------------------------------------------------------------------------
+# extern-declared compensations (item 254 shape, issue #1511)
+# --------------------------------------------------------------------------
+#
+# An extern may declare its own compensation:
+#
+#     extern emission fn put(k: Str) -> Int compensate undo_put() = @go { ... }
+#
+# The IR keeps that `compensate` on the extern; a call site is a plain `fn`
+# node, in any position (`emit put(..)`, `let a = emit put(..)`, an argument,
+# an `if` arm, `put(..) + 1`). Before issue #1511 this tier registered it
+# nowhere, so an abort after the crossing ran nothing.
+#
+# The ONE path: `_expr`'s `fn` arm. Every position renders its call through
+# it, so a provide-method crossing becomes
+# `revlDeclaredCrossing(<frame>, key, method, put(..), func() error {...})`:
+# go evaluates `put(..)` first, and the helper then parks the compensation
+# through `registerMethodCompensation`, the same call a site-spelled
+# `emit .. compensate ..` in a method makes. A panicking crossing registers
+# nothing. The activation body admits the crossing only as an `emit` statement
+# (the frontend refuses the other positions there), which rides the
+# activation's site-spelled `ctx.Effect` registration so it keeps its LIFO
+# place among the activation's other entries; any other activation position is
+# refused by name (`_refuse_unregistered_declared`) rather than dropped.
+
+
+def _declared_extern(node):
+    """The extern a `fn` call node crosses, if that extern declares its own
+    `compensate`; else None."""
+    if not _DECLARED_COMPENSATE or not isinstance(node, dict):
+        return None
+    if node.get("kind") != "fn":
+        return None
+    return _DECLARED_COMPENSATE.get(node.get("name"))
+
+
+def _reaches_declared(tree) -> bool:
+    """True iff some `fn` node anywhere under `tree` crosses an extern that
+    declares its own compensation."""
+    if not _DECLARED_COMPENSATE:
+        return False
+    if isinstance(tree, dict):
+        if _declared_extern(tree) is not None:
+            return True
+        return any(_reaches_declared(v) for v in tree.values())
+    if isinstance(tree, list):
+        return any(_reaches_declared(v) for v in tree)
+    return False
+
+
+def _declared_compensation_call(ext, env) -> tuple[str, str, str]:
+    """`(key, method, go call)` for an extern's declared compensation. The slot
+    binds nothing (lower.py `_check_extern_undo`), so it renders the same in
+    any scope. The callee is spelled the way the `fn` arm spells every other
+    call of a declared callable, so the name matches its definition."""
+    comp = ext["compensate"]
+    callee = comp.get("callee") or {}
+    name = callee.get("name") or callee.get("id")
+    if comp.get("kind") != "call" or callee.get("kind") != "var" or not name:
+        raise EmitError(
+            "extern %s: its declared `compensate` is not a plain call of a "
+            "declared callable, which is the only shape the go tier registers "
+            "(issue #1511)" % ext.get("name"))
+    args = ", ".join(_expr(a, env) for a in comp.get("args") or [])
+    call = "%s(%s)" % (_v3_ident(name, "function"), args)
+    return str(name), str(name), call
+
+
+def _declared_crossing_expr(call: str, ext, env) -> str:
+    """A provide-method crossing of `ext`, registering its declared
+    compensation on the component's activation frame after the call returns."""
+    global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED, _COMP_NEEDS_DECLARED
+    _COMP_NEEDS_TEARDOWN = True
+    _COMP_NEEDS_METHOD_WITNESSED = True
+    _COMP_NEEDS_DECLARED = True
+    key, method, comp_call = _declared_compensation_call(ext, env)
+    frame = "%s.revlFrame" % env.receiver
+    run = "func() error { %s; return nil }" % comp_call
+    if _go_v3_type(ext.get("returns"), _V3_TYPES or {}) == "":
+        # a Unit extern has no value to thread through; its call is only ever
+        # a statement, which a called func literal is.
+        return "func() { %s; %s.registerMethodCompensation(%s, %s, %s) }()" % (
+            call, frame, _go_string(key), _go_string(method), run)
+    return "revlDeclaredCrossing(%s, %s, %s, %s, %s)" % (
+        frame, _go_string(key), _go_string(method), call, run)
+
+
+def _refuse_unregistered_declared(comp) -> None:
+    """Refuse, by name, an activation-body crossing of a compensate-declaring
+    extern that no registration covers. The activation registers one only at
+    the root of a top-level `emit` statement; the frontend refuses the other
+    positions today, and this keeps a future admission from becoming a silent
+    drop on this tier."""
+    if not _DECLARED_COMPENSATE:
+        return
+    for step in comp.get("body") or []:
+        if step.get("step") == "provide":
+            continue
+        rest = step
+        if step.get("step") == "emit" and _declared_extern(step.get("expr")) is not None:
+            rest = {k: v for k, v in step.items() if k != "expr"}
+            rest["args"] = step["expr"].get("args")
+        if _reaches_declared(rest):
+            raise EmitError(
+                "component %s: an extern that declares `compensate` is crossed "
+                "in its activation body somewhere other than an `emit` "
+                "statement; the go tier registers the declared compensation "
+                "only there (issue #1511), so it refuses this rather than "
+                "drop the compensation" % comp.get("name"))
+
+
 def _provide_has_method_frame(provide_step) -> bool:
     """True iff any method of a `provide` step registers a per-tool-call entry
-    onto the component activation frame — a witnessed effect (item 318) or an
-    `emit ... compensate ...` (item-247 method-body remainder). Either makes the
-    provide impl struct need a `revlFrame` field and the frame be handed to it."""
+    onto the component activation frame — a witnessed effect (item 318), an
+    `emit ... compensate ...` (item-247 method-body remainder), or a crossing
+    of an extern that declares its own compensation (issue #1511). Each makes
+    the provide impl struct need a `revlFrame` field and the frame be handed
+    to it."""
     return any(_method_body_has_witnessed(m.get("body"))
                or _method_body_has_compensate(m.get("body"))
+               or _reaches_declared(m.get("body"))
                for m in provide_step.get("methods", []) or [])
 
 
@@ -2590,7 +2723,8 @@ def _body_needs_frame(steps) -> bool:
         kind = step.get("step")
         if kind in ("let-effect", "effect") and _witnessed_extern(step.get("acquire")) is not None:
             return True
-        if kind == "emit" and step.get("compensate") is not None:
+        if kind == "emit" and (step.get("compensate") is not None
+                               or _declared_extern(step.get("expr")) is not None):
             return True
         if kind == "provide" and _provide_has_method_frame(step):
             return True
@@ -3174,12 +3308,22 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # `runCompensationPhase` drains the queue, best-effort and bounded,
         # via the goroutine-abandon pattern (go's per-tier obligation).
         emit_call = _expr(step["expr"], env)
+        # issue #1511: an extern that DECLARES its own `compensate` owes it
+        # here exactly as a site-spelled one does, and registers first (it is
+        # the older entry: it is owed as soon as the call returns). A site
+        # clause on the same statement is a second entry after it.
+        entries = []
+        declared = _declared_extern(step.get("expr"))
+        if declared is not None:
+            entries.append(_declared_compensation_call(declared, env))
         comp_node = step.get("compensate")
         if comp_node is not None:
-            compensate_call = _expr(comp_node, env)
             key, method = _call_descriptor(comp_node)
+            entries.append((key, method, _expr(comp_node, env)))
+        for position, (key, method, compensate_call) in enumerate(entries):
             out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
-            out.append("%s%s" % (inner, emit_call))
+            if position == 0:
+                out.append("%s%s" % (inner, emit_call))
             out.append("%sreturn func() error {" % inner)
             out.append("%s\tif _revlFrame.committed {" % inner)
             out.append("%s\t\treturn nil // item 247 a5a: discharge — never runs" % inner)
@@ -3193,7 +3337,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             out.append("%s}" % pad)
             global _COMP_NEEDS_TEARDOWN
             _COMP_NEEDS_TEARDOWN = True
-        else:
+        if not entries:
             out.append("%s%s" % (pad, emit_call))
     elif s == "timer":
         # A `timer` step (item 57): a revertible schedule. Arming the timer is
@@ -7445,6 +7589,35 @@ func revlRecordActivationComplete() {
 '''
 
 
+# Issue #1511: the provide-method registration of an extern-declared
+# compensation (see `_declared_crossing_expr`). Emitted only when a method
+# crosses such an extern, so every other module stays byte-identical.
+_DECLARED_CROSSING_HELPER = '''// revlDeclaredCrossing parks the compensation an extern DECLARES
+// (`extern emission fn put(..) compensate undo()`) for one crossing made from a
+// provide method, in whatever position the call is written (issue #1511). go
+// evaluates the call before this runs, so the entry is owed only for a crossing
+// that returned; a panicking crossing registers nothing. It is the registration
+// a site-spelled method `emit .. compensate ..` makes: discharged on commit,
+// Phase 2 on abort, newest first.
+func revlDeclaredCrossing[T any](f *RevlFrame, key, method string, value T, run func() error) T {
+	f.registerMethodCompensation(key, method, run)
+	return value
+}
+'''
+
+
+def _set_declared_compensate(externs) -> None:
+    """Rebuild the per-emit registry of compensate-declaring externs
+    (issue #1511) and clear its helper flag."""
+    global _DECLARED_COMPENSATE, _COMP_NEEDS_DECLARED
+    _DECLARED_COMPENSATE = {
+        ext["name"]: ext for ext in externs
+        if ext.get("name") and ext.get("class") == "emission"
+        and ext.get("compensate") is not None
+    }
+    _COMP_NEEDS_DECLARED = False
+
+
 def _teardown_preamble(method_witnessed: bool) -> str:
     """The teardown accumulator preamble. Byte-identical to the base
     `_TEARDOWN_PREAMBLE` unless a provide-method registers a witnessed effect,
@@ -9823,6 +9996,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         ext["name"]: ext for ext in (ir.get("externs") or [])
         if ext.get("class") == "witnessed"
     }
+    _set_declared_compensate(ir.get("externs") or [])
     # item 320: declared return types of every top-level fn and extern, so a
     # value-typed `let x = effect <fn call>` bracket acquisition can be
     # declared by its ACTUAL return type instead of `*T`. Empty for a document
@@ -9989,6 +10163,8 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append(_COMP_RESULT_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _COMP_NEEDS_DECLARED:
+            out.append(_DECLARED_CROSSING_HELPER)
         if _RECORD_MODE:
             out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
@@ -10569,6 +10745,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         ext["name"]: ext for ext in externs
         if ext.get("class") == "witnessed"
     }
+    _set_declared_compensate(externs)
     _WITNESSED_COUNTER = 0
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
@@ -10880,6 +11057,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         out.append(_V3_STDLIB_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _COMP_NEEDS_DECLARED:
+            out.append(_DECLARED_CROSSING_HELPER)
         if _RECORD_MODE:
             # item 322 Slice 1: the durable WAL sink the teardown records
             # through. `_emit` appends it beside the teardown preamble; a

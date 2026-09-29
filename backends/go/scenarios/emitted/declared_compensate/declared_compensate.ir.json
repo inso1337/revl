@@ -1,0 +1,896 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Ops": {
+      "methods": {
+        "run_statement": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "run_let": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "run_return": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "run_argument": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "run_ifarm": {
+          "params": [
+            {
+              "name": "c",
+              "type": "Bool"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        },
+        "run_nested": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "run_unit": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "run_boom": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    },
+    "Every": {
+      "methods": {
+        "run": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Agent",
+      "source": "backends/go/scenarios/declared_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "plain",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "k"
+              }
+            ]
+          },
+          "compensate": {
+            "kind": "fn",
+            "name": "undo_site",
+            "args": []
+          }
+        },
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "run_statement",
+              "params": [],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_statement",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 0
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_let",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "a",
+                  "value": {
+                    "kind": "fn",
+                    "name": "put_let",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "a"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_return",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_return",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_argument",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "s",
+                  "value": {
+                    "kind": "fn",
+                    "name": "double",
+                    "args": [
+                      {
+                        "kind": "fn",
+                        "name": "put_argument",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "s"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_ifarm",
+              "params": [
+                "c"
+              ],
+              "body": [
+                {
+                  "step": "if",
+                  "cond": {
+                    "kind": "name",
+                    "id": "c"
+                  },
+                  "then": [
+                    {
+                      "step": "emit",
+                      "expr": {
+                        "kind": "fn",
+                        "name": "put_ifarm",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "else": null
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 0
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_nested",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "b",
+                  "value": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "fn",
+                      "name": "put_nested",
+                      "args": [
+                        {
+                          "kind": "lit",
+                          "value": "k"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "b"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_unit",
+              "params": [],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_unit",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 0
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run_boom",
+              "params": [],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_first",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_boom",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Full",
+      "source": "backends/go/scenarios/declared_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "all": "Every"
+      },
+      "body": [
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "put_act",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "k"
+              }
+            ]
+          }
+        },
+        {
+          "step": "provide",
+          "name": "all",
+          "service": "Every",
+          "methods": [
+            {
+              "name": "run",
+              "params": [],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_statement",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "a",
+                  "value": {
+                    "kind": "fn",
+                    "name": "put_let",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "s",
+                  "value": {
+                    "kind": "fn",
+                    "name": "double",
+                    "args": [
+                      {
+                        "kind": "fn",
+                        "name": "put_argument",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "if",
+                  "cond": {
+                    "kind": "lit",
+                    "value": true
+                  },
+                  "then": [
+                    {
+                      "step": "emit",
+                      "expr": {
+                        "kind": "fn",
+                        "name": "put_ifarm",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "else": null
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "plain",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  },
+                  "compensate": {
+                    "kind": "fn",
+                    "name": "undo_site",
+                    "args": []
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "b",
+                  "value": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "fn",
+                      "name": "put_nested",
+                      "args": [
+                        {
+                          "kind": "lit",
+                          "value": "k"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_return",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Agent",
+        "file": "backends/go/scenarios/declared_compensate.rvl",
+        "inject": [],
+        "provides": [
+          "ops"
+        ]
+      },
+      {
+        "name": "Full",
+        "file": "backends/go/scenarios/declared_compensate.rvl",
+        "inject": [],
+        "provides": [
+          "all"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Agent",
+      "Full"
+    ]
+  },
+  "externs": [
+    {
+      "name": "double",
+      "class": "pure",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\treturn n * 2\n"
+      }
+    },
+    {
+      "name": "plain",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:site\")\n\treturn 1\n"
+      }
+    },
+    {
+      "name": "undo_site",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:site\")\n"
+      }
+    },
+    {
+      "name": "undo_statement",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:statement\")\n"
+      }
+    },
+    {
+      "name": "put_statement",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:statement\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_statement"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_let",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:let\")\n"
+      }
+    },
+    {
+      "name": "put_let",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:let\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_let"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_return",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:return\")\n"
+      }
+    },
+    {
+      "name": "put_return",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:return\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_return"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_argument",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:argument\")\n"
+      }
+    },
+    {
+      "name": "put_argument",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:argument\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_argument"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_ifarm",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:ifarm\")\n"
+      }
+    },
+    {
+      "name": "put_ifarm",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:ifarm\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_ifarm"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_nested",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:nested\")\n"
+      }
+    },
+    {
+      "name": "put_nested",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:nested\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_nested"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_unit",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:unit\")\n"
+      }
+    },
+    {
+      "name": "put_unit",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:unit\")\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_unit"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_first",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:first\")\n"
+      }
+    },
+    {
+      "name": "put_first",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:first\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_first"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_boom",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:boom\")\n"
+      }
+    },
+    {
+      "name": "put_boom",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:boom\")\n\tpanic(\"put:boom failed\")\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_boom"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_act",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "go": "\n\thostRecord(\"comp:act\")\n"
+      }
+    },
+    {
+      "name": "put_act",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\thostRecord(\"put:act\")\n\treturn 1\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_act"
+        },
+        "args": []
+      }
+    }
+  ],
+  "tests": [
+    {
+      "name": "clean unload of an un-called agent leaves no residue",
+      "lifecycle": true,
+      "body": [
+        {
+          "step": "load",
+          "component": "Agent",
+          "config": {}
+        },
+        {
+          "step": "unload",
+          "component": "Agent"
+        },
+        {
+          "step": "assert_no_residue"
+        }
+      ]
+    }
+  ]
+}
