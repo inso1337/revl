@@ -527,3 +527,85 @@ def test_live_route_refuses_by_name_when_unconfigured(tmp_path, clean_env):
         assert DEV_FLAG in reply.body.decode("utf-8")
     finally:
         session.unload()
+
+
+# ---------------------------------------------------------------- startup
+
+# Design 569 question 5, decided for issue #1554: `revl serve --http` refuses to
+# START with the dev stub flag set on a non-loopback bind, naming the flag and
+# the address, before anything is loaded or bound. A per-call refusal would
+# still leave an any-token face listening on the network.
+
+class _FakeSession:
+    loads: list = []
+
+    def __init__(self):
+        self.ir = None
+
+    def load(self, ir, config, origin=None, **kwargs):
+        self.ir = ir
+        _FakeSession.loads.append(ir)
+
+
+class _FakeHttpd:
+    def __init__(self, host, port):
+        self.server_address = (host, port)
+
+    def serve_forever(self):
+        return None
+
+    def server_close(self):
+        return None
+
+
+@pytest.fixture
+def no_network(monkeypatch):
+    """Stand `revl serve --http` up with no runtime and no socket, recording
+    whether it got as far as loading and binding."""
+    binds: list = []
+    _FakeSession.loads = []
+
+    def fake_bind(face, host, port):
+        binds.append(host)
+        return _FakeHttpd(host, port)
+
+    monkeypatch.setattr("revl.mcp.session.Session", _FakeSession)
+    monkeypatch.setattr("revl.mcp.http_face.build_http_server", fake_bind)
+    return binds
+
+
+def _serve(host: str) -> int:
+    return main(["serve", "--http", "--host", host, "--port", "0", AUTH])
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.10",
+                                  "no-such-host.invalid"])
+def test_the_dev_stub_refuses_to_start_off_loopback(clean_env, no_network,
+                                                    capsys, host):
+    clean_env.setenv(DEV_FLAG, "1")
+    assert _serve(host) != 0
+    err = capsys.readouterr().err
+    assert DEV_FLAG in err and repr(host) in err
+    # refused before the composition was loaded or anything was bound
+    assert no_network == [] and _FakeSession.loads == []
+
+
+@pytest.mark.parametrize("host", ["127.0.0.1", "127.0.0.2", "::1",
+                                  "localhost"])
+def test_the_dev_stub_still_starts_on_loopback(clean_env, no_network, host):
+    clean_env.setenv(DEV_FLAG, "1")
+    assert _serve(host) == 0
+    assert no_network == [host] and len(_FakeSession.loads) == 1
+
+
+def test_off_loopback_starts_without_the_dev_flag(configured, no_network):
+    assert _serve("0.0.0.0") == 0
+    assert no_network == ["0.0.0.0"]
+
+
+def test_any_value_of_the_flag_refuses_off_loopback(clean_env, no_network):
+    # auth.rvl refuses a flag other than "1" per call; the bind check fails
+    # closed on any value at all
+    clean_env.setenv(DEV_FLAG, "true")
+    assert _serve("0.0.0.0") != 0
+    assert no_network == []

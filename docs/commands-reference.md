@@ -1948,7 +1948,11 @@ A valid token's `sub` becomes the `Principal`'s subject. A bad token is a `401`.
 With no validator configured, every authenticated route answers `503`
 `auth_not_configured`, naming the variables to set. The any-token test stub
 (a non-blank token is that subject) runs only with
-`REVL_AUTH_INSECURE_DEV_STUB=1`, and is refused if a key is also set. The ts,
+`REVL_AUTH_INSECURE_DEV_STUB=1`, and is refused if a key is also set. With
+that flag set to any value, `revl serve --http` refuses to start on a
+non-loopback `--host` (exit 2, naming the flag and the address), before it
+loads or binds anything; `127.0.0.1`, `::1` and names that resolve only to
+loopback still start. The ts,
 rust, go, java and wasm tiers have no validator body, so emitting a composition
 that composes `stdlib/auth.rvl` for them is refused at compile time.
 

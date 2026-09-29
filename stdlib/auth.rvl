@@ -105,7 +105,9 @@
 // validator configured nor the flag, every call is refused with a `503`
 // `auth_not_configured` naming the variables to set: an unconfigured deployment
 // never accepts silently. Setting the flag next to a configured validator is
-// refused too, so a stale dev flag cannot shadow production keys.
+// refused too, so a stale dev flag cannot shadow production keys. And
+// `revl serve --http` refuses to START on a non-loopback address while the flag
+// is set (design 569 question 5), so the stub never listens on the network.
 //
 // Tiers (issue #1554):
 //   py            the validator above; the reference tier.
