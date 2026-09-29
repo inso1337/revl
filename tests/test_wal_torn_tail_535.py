@@ -38,6 +38,15 @@ import replay  # noqa: E402
 from revl import _deploy_participant, recovery, wal as wal_core  # noqa: E402
 
 
+class _RealWorld(recovery.DictWorld):
+    """An in-memory world that declares itself REAL (issue #1477). recover
+    writes its at-most-once fences only against a real world, because a model
+    run attempts nothing out there; the fence tests below exercise that
+    discipline, so they bind a world that claims to be the outside one."""
+
+    kind = "real"
+
+
 def _header_line() -> str:
     return json.dumps(
         {"record": "header", "walVersion": 1, "generation": 1,
@@ -164,7 +173,7 @@ def test_undeclared_inverse_is_at_most_once_even_over_a_torn_tail(tmp_path):
     _witnessed_undeclared(path)
     _append_torn(path)  # a torn trailing write sits under recover's fence
 
-    first = recovery.recover(path)
+    first = recovery.recover(path, world=_RealWorld())
     [entry] = first["transactionalRolledBack"]
     assert entry["replay"] == "fenced"
 
@@ -174,7 +183,7 @@ def test_undeclared_inverse_is_at_most_once_even_over_a_torn_tail(tmp_path):
     assert any(r.get("record") == "replay-fence" for r in reread["records"])
 
     # the second pass finds the fence and does NOT re-apply: at most once holds
-    second = recovery.recover(path)
+    second = recovery.recover(path, world=_RealWorld())
     assert second["transactionalRolledBack"] == []
     [fenced] = second["fencedDeferred"]
     assert fenced["referent"] == "db:row#1"
@@ -186,7 +195,7 @@ def test_recover_over_a_torn_tail_does_not_raise_mid_file_corruption(tmp_path):
     path = str(tmp_path / "no-corruption.wal")
     _witnessed_undeclared(path)
     _append_torn(path)
-    recovery.recover(path)
-    recovery.recover(path)  # a second pass reads the sealed file with no raise
+    recovery.recover(path, world=_RealWorld())
+    recovery.recover(path, world=_RealWorld())  # a second pass reads the sealed file with no raise
     loaded = wal_core.read_wal(path)
     assert loaded["torn"] is False

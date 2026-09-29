@@ -492,8 +492,9 @@ def _run_recover(args) -> int:
     (docs/crash-recovery.md). Reads the WAL, decides roll-forward vs roll-back,
     runs the reconstructible boundary inverses (roll-back) or resumes the
     persisted generation (roll-forward), and prints a checked verdict with a
-    residue proof. Exit status follows the residue: 0 when clean, 1 when honest
-    residue remains."""
+    residue proof. Exit status: 0 when clean, 1 when honest residue remains, 3
+    when the in-memory model stood in for at least one call and `--model-only`
+    was not given (issue #1477; see `_recover_exit_status`)."""
     # The recovery core reads the WAL through the tier-agnostic `revl.wal`
     # reader (item 322), so recover itself needs NO backend — it works from the
     # durable log alone, for a py OR a non-py (go/rust/java/wasm) tier's WAL.
@@ -565,7 +566,43 @@ def _run_recover(args) -> int:
         print(json.dumps(report, indent=2))
     else:
         print(render(report))
-    return 0 if report.get("residue", {}).get("clean") else 1
+    return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
+
+
+#: `revl recover`'s exit status when the modelled residue is clean, the model
+#: stood in for at least one call against the world, and `--model-only` was not
+#: given (issue #1477). Distinct from 1 (residue) so a script can tell "the WAL
+#: owes something" from "nothing was reconciled out there". 3 is what `revl
+#: quarantine --require-runtime` already uses for "the real thing was not
+#: available".
+EXIT_MODEL_ONLY = 3
+
+
+def _recover_exit_status(report: dict, *, model_only: bool) -> int:
+    """0 clean, 1 honest residue, 3 clean only in the model (issue #1477).
+
+    A verdict whose world is the model and whose model stood in for at least
+    one call (`worldCalls`) has not performed that call against the outside
+    world, so without `--model-only` it may not exit 0: an operator reading exit
+    0 after a crash would take it as "reconciled". A verdict that made no call
+    against any world (a clean roll-forward, a roll-back whose every effect was
+    moot) modelled nothing, so its exit 0 is as true of the outside world as of
+    the model. A report missing `world` or `worldCalls` is read the unsafe way
+    round: a model that made calls. Residue still exits 1, because residue in
+    the model is residue: the WAL owes something the model could not clear
+    either."""
+    clean = bool(report.get("residue", {}).get("clean"))
+    modelled = (report.get("world") != "real"
+                and report.get("worldCalls", 1) > 0)
+    if modelled and not model_only:
+        print(f"revl recover: not reconciled. This run replayed the WAL against "
+              f"an in-memory model (world: model), and the model stood in for "
+              f"{report.get('worldCalls', 'an unknown number of')} call(s) "
+              f"against the world. They were modelled, not performed; the "
+              f"outside world was not touched. Pass --model-only to accept a "
+              f"model run.", file=sys.stderr)
+        return 1 if not clean else EXIT_MODEL_ONLY
+    return 0 if clean else 1
 
 
 def _run_branch(args) -> int:
