@@ -1701,6 +1701,34 @@ class _Driver:
         return self.root.isolate(
             key, self.runtime.realm_label(realm)).reflect.get(key)
 
+    def provision_placements(self, key: str) -> list[tuple[str, str | None]]:
+        """Every `(component, realm)` that provides `key` in the live
+        composition, in declaration order. `realm` is the component's
+        `isolate` placement for `key`, or `None` for the shared root realm."""
+        return [(comp["name"], (comp.get("isolate") or {}).get(key))
+                for comp in _components(self.ir or {})
+                if key in (comp.get("provides") or {})]
+
+    def resolve_key(self, key: str):
+        """The live value a caller outside every realm reaches for `key`
+        (issue #1513), or `None` when there is no single live provider.
+
+        The shared realm answers first, as Def. 28's default resolution does:
+        a shared-realm provider (a router included) is what `key` names. A key
+        provided ONLY in isolated realms resolves in its placement realm when
+        that realm is unique; G2 is per-(key, realm), so one realm means one
+        provider. A key isolated into two or more realms has no single answer
+        and resolves to `None`; `provision_placements` tells the caller why.
+        This is the same choice `ClassMap._provider_of` makes when it
+        classifies the call, so the call and its approval decision always
+        name the same provider."""
+        realms = {realm for _name, realm in self.provision_placements(key)}
+        if not realms or None in realms:
+            return self.root.get(key)
+        if len(realms) == 1:
+            return self._resolve_provision(key, next(iter(realms)))
+        return None
+
     def resolved_keys(self) -> set:
         """The keys this composition actually provides — those with a live
         provider (roadmap item 372), resolved in each provider's placement realm.
@@ -2059,7 +2087,7 @@ class _Driver:
     # -- REPL --------------------------------------------------------------
 
     def _namespace(self) -> dict:
-        return {key: self.root.get(key) for key in _key_to_service(self.ir)}
+        return {key: self.resolve_key(key) for key in _key_to_service(self.ir)}
 
     def _print_keys(self) -> None:
         keys = _key_to_service(self.ir)
