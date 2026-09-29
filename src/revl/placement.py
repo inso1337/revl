@@ -2135,6 +2135,63 @@ def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
     return None, {host.host: model_schedule.handoff(host) for host in schedules}
 
 
+def _model_host_plan(ir, files, providers_path: str, processes: dict,
+                     requires: dict, model_handoffs: dict) -> tuple:
+    """Check `--providers` against a placement (item 515 S2). Returns
+    `(refusal, {model key: service})`.
+
+    Refused here, before anything spawns: a configuration the program's
+    placement forbids (the same check `revl run --providers` makes); a model
+    key required on a tier with no model host; a process that would load a
+    managed role with no model schedule to say where; and a scheduled device
+    the role's binding names no load options for.
+    """
+    from . import providers as _p  # noqa: PLC0415 - loaded only when asked
+    try:
+        hosts = _p.bind_for_run(ir, files, providers_path)
+        config = _p.load_config(providers_path)
+    except (_p.ProviderConfigError, _p.PlacementRefused, _p.ProviderError,
+            RevlError) as exc:
+        return str(exc), {}
+    except OSError as exc:
+        return f"cannot read provider configuration: {exc}", {}
+    served = _p.model_keys(ir)
+    for pname, pconf in processes.items():
+        keys = sorted(k for k in requires[pname] if k in served)
+        if not keys:
+            continue
+        backend = _canonical_backend(pconf.get("backend", "py"))
+        if backend != "py":
+            return (f"process `{pname}` requires model key(s) "
+                    f"{', '.join(keys)} and is on the {backend} tier; "
+                    f"--providers binds model hosts on the py tier only"), {}
+        managed = sorted({role for key in keys for role in hosts[key]._revl_roles()
+                          if role and config.binding(role).managed})
+        entry = model_handoffs.get(pname)
+        if managed and entry is None:
+            return (f"process `{pname}` would load model role(s) "
+                    f"{', '.join(managed)}, which revl loads itself, but no "
+                    f"model action is scheduled on it, so nothing says which "
+                    f"device to load them on. Route the action with `route "
+                    f"model` and declare the host's devices "
+                    f"(docs/model-scheduling.md)"), {}
+        resident = (entry or {}).get("schedule", {}).get("resident") or {}
+        for role in managed:
+            device = resident.get(role)
+            if device is None:
+                continue
+            binding = config.binding(role)
+            if binding.device_options(device) is None:
+                return (f"host `{pname}`: the model schedule places role "
+                        f"`{role}` on device `{device}`, and its "
+                        f"{binding.provider} binding in {config.source} names "
+                        f"no load options for `{device}` (it names "
+                        f"{', '.join(binding.device_names())}). The member is "
+                        f"loaded only where the schedule placed it; add "
+                        f"`devices.{device}` to the binding"), {}
+    return None, served
+
+
 def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
                              to_backend: str) -> tuple[dict | None, str | None]:
     """The model schedule a swap successor is handed (item 515), as
@@ -3569,7 +3626,8 @@ def _estop_halt_report(record: dict, latch: str, roster: dict,
 
 
 def run_placement(files, placement_path: str, once: bool = False,
-                  estop_latch: str | None = None) -> int:
+                  estop_latch: str | None = None,
+                  providers: str | None = None) -> int:
     # item 443: the operator E-Stop. `--estop-latch FILE` (or the ambient
     # REVL_ESTOP_LATCH) arms it; UNARMED is the default, and a placement that
     # never arms one runs byte-identically to the pre-443 conductor — no
@@ -3740,6 +3798,19 @@ def run_placement(files, placement_path: str, once: bool = False,
     model_problem, model_handoffs = _model_schedules(files, processes)
     if model_problem:
         return abort(model_problem)
+
+    # --- model hosts (item 515 S2, over issue #1461's adapters): with
+    # `--providers FILE`, a key whose service is a model service and that no
+    # component provides is served INSIDE each process that requires it, by a
+    # model host loading its managed roles on the devices just scheduled. The
+    # configuration is checked here, before anything spawns. Without the flag
+    # nothing changes: such a key is still "provided by no process".
+    model_served: dict = {}
+    if providers:
+        model_problem, model_served = _model_host_plan(
+            ir, files, providers, processes, requires, model_handoffs)
+        if model_problem:
+            return abort(model_problem)
 
     if placement.get("report_colocation"):
         for advice in colocation_advice(processes, placed, ir):
@@ -4088,7 +4159,7 @@ def run_placement(files, placement_path: str, once: bool = False,
         p_deadlines = {m: float(s) for m, s in (pconf.get("seam_deadlines") or {}).items()}
         proxies: dict[str, dict] = {}
         for key, service in requires[pname].items():
-            if key in provides[pname]:
+            if key in provides[pname] or key in model_served:
                 continue
             host = owner.get(key)
             if host is None and key not in remote_specs:
@@ -4200,6 +4271,12 @@ def run_placement(files, placement_path: str, once: bool = False,
             # by the child before any component activates. Absent for a host
             # that routes no model action, so its spec is unchanged.
             spec["modelSchedule"] = model_handoffs[pname]
+        model_keys_here = sorted(k for k in requires[pname] if k in model_served)
+        if model_keys_here:
+            # item 515 S2: the child binds these keys to model hosts from the
+            # same configuration, checked again there, and loads each managed
+            # role on this host's scheduled device before anything activates.
+            spec["providers"] = str(Path(providers).resolve())
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
             # declaration* admits for each exported key, read off the IR. The

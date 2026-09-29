@@ -12,7 +12,7 @@ before any adapter is built:
    picked one, so it is refused.
 2. **The role's residence.** A role declared `on_device` may only be bound to
    an endpoint whose residence is `on_device` (`config.endpoint_residence`: an
-   OpenAI-compatible server on a loopback host). This is what makes the
+   OpenAI-compatible or Ollama server on a loopback host). This is what makes the
    compile-time confidentiality ceiling true at run time: `model_route` refuses
    a `confidential` arm that names an `off_device` role, and this refuses the
    `on_device` role being served from off the device.
@@ -235,7 +235,7 @@ def check_bindings(placement: Placement, config: ProviderConfig,
                 f"an on_device role is the placement the program relies on to "
                 f"keep a prompt on this machine; serving it from off the "
                 f"device would make the compile-time placement false. Bind it "
-                f"to an OpenAI-compatible server on a loopback address "
+                f"to an OpenAI-compatible or Ollama server on a loopback address "
                 f"(127.0.0.1, ::1, localhost). See {DOC}", name))
         reach = _reach_refusal(role, binding)
         if reach is not None:

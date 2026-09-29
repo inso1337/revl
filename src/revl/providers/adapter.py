@@ -11,6 +11,14 @@ The credential is read from the environment at request time, on every
 request, and is held only in the local variables of `complete`. No object in
 this package stores it, so no `repr`, trace or manifest that serializes one of
 them can contain it.
+
+A MANAGED adapter (`provider = "ollama"`, roadmap item 515 slice S2) also
+loads and unloads its model. It does not decide when or where: the role's
+provision (`revl.providers.provision`) calls `load` once, on the device the
+model schedule chose, and `unload` once, when its last consumer releases it.
+Until it is loaded, a managed adapter refuses to complete, because a
+completion sent to an unloaded model makes the server load it wherever it
+likes, which is the placement decision the schedule exists to take.
 """
 
 from __future__ import annotations
@@ -19,7 +27,7 @@ import os
 import time
 from dataclasses import replace
 
-from . import wire_anthropic, wire_gemini, wire_openai
+from . import wire_anthropic, wire_gemini, wire_ollama, wire_openai
 from .completion import Completion, CompletionRequest
 from .config import Binding
 from .transport import ProviderError, redact, request_json
@@ -28,6 +36,7 @@ _WIRES = {
     "openai-compatible": wire_openai,
     "anthropic": wire_anthropic,
     "gemini": wire_gemini,
+    "ollama": wire_ollama,
 }
 
 
@@ -61,6 +70,9 @@ class Adapter:
         def lookup(name, _environ=environ):
             return (os.environ if _environ is None else _environ).get(name)
         self._lookup = lookup
+        # managed only: the device the model is loaded on, and its options
+        self._device: str | None = None
+        self._device_options: dict = {}
 
     @property
     def label(self) -> str:
@@ -72,12 +84,75 @@ class Adapter:
                 f"model={b.model!r}, endpoint={b.base_url!r}, "
                 f"residence={b.residence!r}, credential_env={b.api_key_env!r})")
 
-    def complete(self, request: CompletionRequest) -> Completion:
+    @property
+    def managed(self) -> bool:
+        return self.binding.managed
+
+    @property
+    def loaded_on(self) -> str | None:
+        """The device the model is loaded on, or None (managed only)."""
+        return self._device
+
+    def _credential(self):
         b = self.binding
         credential = (read_credential(b.api_key_env, self._lookup)
                       if b.api_key_env else None)
-        secrets = (credential,) if credential else ()
-        url, headers, body = self._wire.build(b, request, credential)
+        return credential, ((credential,) if credential else ())
+
+    def load(self, device: str) -> dict:
+        """Load the model on `device` and return the server's reply. The
+        provision checks `device` is the scheduled one before calling."""
+        if not self.managed:
+            raise ProviderError(f"{self.label}: this endpoint manages its own "
+                                f"residency; revl loads nothing through it")
+        options = self.binding.device_options(device)
+        if options is None:
+            raise ProviderError(
+                f"{self.label}: the binding names no load options for device "
+                f"`{device}` (it names {', '.join(self.binding.device_names())})")
+        credential, secrets = self._credential()
+        url, headers, body = self._wire.load_request(self.binding, credential,
+                                                     options)
+        started = time.monotonic()
+        raw = request_json(url, body=body, headers=headers,
+                           timeout=self.binding.timeout, secrets=secrets,
+                           label=self.label)
+        self._device, self._device_options = device, options
+        return {**raw, "revl_load_seconds": time.monotonic() - started}
+
+    def unload(self) -> dict:
+        """Take the model out of memory."""
+        credential, secrets = self._credential()
+        url, headers, body = self._wire.unload_request(self.binding,
+                                                       credential)
+        self._device, self._device_options = None, {}
+        return request_json(url, body=body, headers=headers,
+                            timeout=self.binding.timeout, secrets=secrets,
+                            label=self.label)
+
+    def residency(self) -> dict | None:
+        """What the server reports holding for this model, or None when it
+        holds nothing. Asked of the server, never remembered."""
+        credential, secrets = self._credential()
+        url, headers = self._wire.residency_request(self.binding, credential)
+        raw = request_json(url, headers=headers, timeout=self.binding.timeout,
+                           secrets=secrets, label=self.label)
+        return self._wire.resident_entry(raw, self.binding.model)
+
+    def complete(self, request: CompletionRequest) -> Completion:
+        b = self.binding
+        credential, secrets = self._credential()
+        if self.managed:
+            if self._device is None:
+                raise ProviderError(
+                    f"{self.label}: the model is not loaded, and a completion "
+                    f"sent to an unloaded model makes the server load it on a "
+                    f"device it picks. Its provision loads it on the device "
+                    f"the model schedule chose")
+            url, headers, body = self._wire.build(
+                b, request, credential, self._device_options)
+        else:
+            url, headers, body = self._wire.build(b, request, credential)
         started = time.monotonic()
         raw = request_json(url, body=body, headers=headers, timeout=b.timeout,
                            secrets=secrets, label=self.label)

@@ -269,7 +269,69 @@ def _install_model_schedule(spec: dict) -> None:
     except model_schedule.ScheduleRefusal as exc:
         raise BootRefused(f"[{name}] BOOT REFUSED: {exc}") from None
     if resident is not None:
-        model_placement.install(name, resident)
+        # the entry's devices were validated by `verify_handoff` above
+        classes = {d["name"]: d["device"]
+                   for d in (spec.get(model_schedule.SPEC_KEY) or {})
+                   .get("devices") or ()}
+        model_placement.install(name, resident, classes)
+
+
+def _open_model_hosts(spec: dict, running_ir: dict, log) -> dict:
+    """Bind, provide-ready and OPEN this process's model hosts (item 515 S2).
+
+    The conductor names the provider configuration in `spec["providers"]`.
+    The keys served here are re-derived from this process's own components
+    and the composition's files rather than read off the spec, and the
+    configuration is checked again against the program's placement. Opening a
+    host acquires the provision of each managed role it routes to, which loads
+    the member on the device `revl.model_placement` answers, the one the
+    schedule installed just before chose. Any refusal is a refused boot, and
+    whatever was loaded before it is unloaded again first.
+    """
+    from revl import model_placement, providers  # noqa: PLC0415
+    from revl.errors import RevlError  # noqa: PLC0415
+    name = spec["name"]
+    own = set(spec.get("components") or ())
+    try:
+        every = providers.bind_for_run(running_ir, spec["files"],
+                                       spec["providers"])
+        needed = {key for comp in running_ir.get("components") or ()
+                  if comp.get("name") in own
+                  for key in (comp.get("requires") or {}) if key in every}
+        hosts = {key: every[key] for key in sorted(needed)}
+        providers.open_hosts(hosts)
+    except (providers.ProviderConfigError, providers.PlacementRefused,
+            providers.ProviderError, providers.ProvisionRefused,
+            model_placement.ModelPlacementRefused, RevlError,
+            OSError) as exc:
+        raise BootRefused(f"[{name}] BOOT REFUSED: {exc}") from None
+    for line in providers.provision_summaries(hosts):
+        log("model", "provision", line)
+    return hosts
+
+
+async def _close_model_hosts(hosts: dict, disposers: list, log) -> dict:
+    """Withdraw the model hosts, release their provisions, and return the
+    residue (`{role: [problem, ...]}`), empty when every member is gone."""
+    from revl import providers  # noqa: PLC0415
+    for dispose in reversed(disposers):
+        try:
+            joined = dispose._join() if hasattr(dispose, "_join") else dispose()
+            if hasattr(joined, "__await__"):
+                await joined
+        except Exception as exc:  # noqa: BLE001 - the residue proof reports it
+            log("model", "withdraw", f"failed: {type(exc).__name__}: {exc}")
+    disposers.clear()
+    for failure in providers.close_hosts(hosts):
+        log("model", "release", f"failed: {failure}")
+    for line in providers.provision_summaries(hosts):
+        log("model", "provision", line)
+    return providers.provision_residue(hosts)
+
+
+def _has_provisions(hosts: dict) -> bool:
+    from revl import providers  # noqa: PLC0415
+    return providers.has_provisions(hosts)
 
 
 def _load_module(ir: dict) -> types.ModuleType:
@@ -777,6 +839,18 @@ async def run(spec: dict, spec_path=None) -> None:
     clients: dict[str, object] = {}
     baseline_disposables = root.fiber._disposables.length
 
+    # 0. model hosts (item 515 S2): with a provider configuration in the spec,
+    # the model keys this process's components require are served here, by
+    # hosts whose managed roles are loaded now, on the scheduled devices,
+    # before any proxy is wired or component activated. A refused load is a
+    # refused boot with nothing loaded.
+    model_hosts: dict = {}
+    model_disposers: list = []
+    if spec.get("providers"):
+        model_hosts = _open_model_hosts(spec, running_ir, log)
+        for key, host in model_hosts.items():
+            model_disposers.append(root.reflect.provide(key, host))
+
     # 1. proxies for keys provided by other processes. A proxy targets either a
     # local UDS (`socket`) or a network TCP+mTLS seam (`endpoint`); the bridge
     # normalizes both to an `Endpoint`. The deadline/withdrawal/canonical machinery
@@ -1048,6 +1122,11 @@ async def run(spec: dict, spec_path=None) -> None:
     await teardown_lifo(fibers, _dispose)
     if server is not None:
         server.close()
+    # item 515 S2: the model hosts go after every component that could call
+    # them, and the last release of a role unloads its member
+    model_residue = (await _close_model_hosts(model_hosts, model_disposers, log)
+                     if model_hosts else {})
+    managed = bool(model_hosts) and _has_provisions(model_hosts)
 
     # per-process no-residue proof: a provider torn down by a swap (or the
     # whole placement stopping) must leave its Context empty — the distributed
@@ -1056,9 +1135,14 @@ async def run(spec: dict, spec_path=None) -> None:
         "registry": root.registry.size == 0,
         "provisions": root.reflect.store == {},
         "effects": root.fiber._disposables.length == baseline_disposables,
+        "models": not model_residue,
     }
     detail = (f"registry={root.registry.size} provisions={sorted(root.reflect.store)} "
               f"disposables={root.fiber._disposables.length}/{baseline_disposables}")
+    if managed:
+        detail += " models=" + ("; ".join(
+            f"{role}: {', '.join(problems)}"
+            for role, problems in sorted(model_residue.items())) or "unloaded")
     verdict = "no residue" if all(checks.values()) else "RESIDUE LEFT"
     _funnel_line(f"[{name}] residue {verdict} | {detail}")
     _funnel_line(f"[{name}] DOWN")

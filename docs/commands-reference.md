@@ -861,7 +861,11 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   to an endpoint off the device, a crossing on an unbound or undeclared role, a
   binding that reaches past its role, a credential written into the file, or
   an unset credential variable each refuse the boot. py tier only. `--plan`
-  prints the bindings. See [model-providers.md](model-providers.md).
+  prints the bindings. With `--placement`, each process serves the model keys
+  its components require, and an `ollama` role is loaded on the device the
+  model schedule chose and unloaded at teardown, with the model in the residue
+  proof. See [model-providers.md](model-providers.md) and
+  [providers-ollama.md](providers-ollama.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
   refused and the run keeps going.
 - `--record` - record the effect accumulator so the REPL can step backwards
