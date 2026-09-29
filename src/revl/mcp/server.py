@@ -1279,7 +1279,9 @@ def _tool_revoke(arguments: dict) -> dict:
       * `hash` (item 471 Slice 2) withdraws a PENDING multi-party QUESTION — a
         different object from a minted grant, so it is a different branch and not
         a third spelling of one. The votes cast so far stop counting, no approval
-        is minted, and the decision graph records who closed it and why.
+        is minted, and the decision graph records who closed it and why. For a
+        single-party ticket the same `hash` is the operator's NO (issue #1553):
+        the re-issue the ticket holds is refused once and fires nothing.
 
     Revoking a capability/id with no live grant is a clean typed no-op
     (`count: 0`), not an error — idempotent. Gated by the `approve` operator verb
@@ -2940,7 +2942,11 @@ TOOLS = [
                                         "minted grant). The votes cast so far "
                                         "stop counting and no approval is minted. "
                                         "Only the proposer or an approver the rule "
-                                        "names may close it"},
+                                        "names may close it. Issue #1553: a "
+                                        "single-party ticket's hash answers it NO: "
+                                        "the re-issue it holds is refused once "
+                                        "and fires nothing, and a yes minted for "
+                                        "it and not yet spent is withdrawn"},
                 "reason": {"type": "string",
                            "description": "item 471: why the question is being "
                                           "withdrawn, recorded on the "

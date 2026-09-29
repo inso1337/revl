@@ -425,6 +425,10 @@ def _run_serve(args) -> int:
               file=sys.stderr)
         return 2
 
+    operator, code = _serve_operator_options(args, http)
+    if code is not None:
+        return code
+
     from ..holes import refuse_admission  # noqa: PLC0415
     from ..mcp.surface import declared_param_types  # noqa: PLC0415
 
@@ -480,11 +484,16 @@ def _run_serve(args) -> int:
                                 tls_key=getattr(args, "tls_key", None),
                                 allow_hosts=tuple(getattr(args, "allow_host", None) or ()),
                                 allow_origins=tuple(getattr(args, "allow_origin", None) or ()))
+            from ..mcp.http_transport import TransportError  # noqa: PLC0415
+
             try:
                 return serve_http(ir, config, composition=args.composition,
                                   host=args.host, port=args.port, exposure=exposure,
-                                  declared=declared)
-            except ExposureError as error:
+                                  declared=declared,
+                                  approval_policy=getattr(args, "approval_policy",
+                                                          None),
+                                  operator=operator)
+            except (ExposureError, TransportError) as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
         from ..mcp.composed import serve_composition  # noqa: PLC0415
@@ -493,6 +502,53 @@ def _run_serve(args) -> int:
     except SessionError as error:
         print(f"error: {error}", file=sys.stderr)
         return 3
+
+
+def _serve_operator_options(args, http: bool):
+    """`(operator listener kwargs or None, None)` for `revl serve`, or `(None,
+    exit code)` after saying why the options do not go together (issue #1553).
+
+    The approval policy and the operator listener are `--http` options: `--mcp`
+    serves one stdio client, which has no second listener to answer from."""
+    listen = getattr(args, "operator_listen", None)
+    profile = getattr(args, "operator_profile", None)
+    if not http:
+        for flag, value in (("--approval-policy", getattr(args, "approval_policy", None)),
+                            ("--operator-listen", listen),
+                            ("--operator-profile", profile)):
+            if value:
+                print(f"error: {flag} applies to `revl serve --http` only",
+                      file=sys.stderr)
+                return None, 2
+        return None, None
+    if not listen:
+        if profile:
+            print("error: --operator-profile needs --operator-listen: the app "
+                  "face authenticates nobody, and operators are served only on "
+                  "the operator listener", file=sys.stderr)
+            return None, 2
+        return None, None
+    host, sep, port = listen.rpartition(":")
+    if not sep or not host or not port.isdigit():
+        print(f"error: --operator-listen expects HOST:PORT, got {listen!r}",
+              file=sys.stderr)
+        return None, 2
+    if not profile:
+        print("error: --operator-listen needs --operator-profile: every request "
+              "on the operator listener is bound to one of its operators",
+              file=sys.stderr)
+        return None, 2
+    from ..mcp.http_guard import Exposure  # noqa: PLC0415
+
+    exposure = Exposure(host=host.strip("[]"), port=int(port),
+                        tls_cert=getattr(args, "operator_tls_cert", None),
+                        tls_key=getattr(args, "operator_tls_key", None),
+                        tls_client_ca=getattr(args, "operator_tls_client_ca", None),
+                        allow_hosts=tuple(getattr(args, "operator_allow_host", None)
+                                          or ()))
+    return {"exposure": exposure, "profile_path": profile,
+            "auth": getattr(args, "operator_auth", "bearer"),
+            "settle_ms": getattr(args, "profile_settle_ms", 1000)}, None
 
 
 def _run_import(args) -> int:

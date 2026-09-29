@@ -180,6 +180,19 @@ its full `--upstream-timeout` (120 s by default) blocks every other caller for
 that long, except `revl_estop`. This is slice 1's bound; per-request concurrency
 needs a session that can run more than one call at a time.
 
+## Beside `revl serve --http`: the operator listener
+
+`revl serve --http --operator-listen HOST:PORT --operator-profile P` runs this
+same transport against the served composition's session, on a second address,
+so a face whose callers are the application's users can still be halted and
+have its tickets answered (issue #1553, design 569 C2). Identity, the settle
+window, the placeholder between requests and the non-queuing `revl_estop` are
+all as described here. What differs: the two listeners share one session and
+one dispatch lock (an app request runs bound to an operator token no profile can
+declare, `<app caller>`), `--allow-origin` does not exist for it, and it refuses
+the app face's port. See `revl serve` in
+[commands-reference.md](commands-reference.md).
+
 ## Where it may listen
 
 These rules are shared with `revl serve --http` (`http_guard`):
