@@ -63,12 +63,56 @@
 // On the ts tier the provider binds `Auth.validate` to Cordis SSO's
 // `ctx.sso.validateSession` through a `host @auth` row over a shipped shim
 // (docs/design/529-sso-auth-alignment.md). That host binding — the `host` row,
-// `stdlib/server.rvl`, and the `@cordisjs/plugin-sso` shim — is Slice 3. This
-// module is the Slice-2 SURFACE plus the py test binding: `host_validate` is a
-// deterministic stub (a non-empty token is a session, anything else is a `401`)
-// so the authorization property is exercised on the reference tier without a
-// live SSO. The `Principal`/`Auth.validate` shape and the admission refusal are
+// `stdlib/server.rvl`, and the `@cordisjs/plugin-sso` shim — is Slice 3. The
+// `Principal`/`Auth.validate` shape and the admission refusal are
 // tier-independent and land here.
+//
+// ---------------------------------------------------------------- the validator
+// `Auth.validate` is only as sound as `host_validate`, the body that mints the
+// `Principal` (issue #1554, design docs/design/569-serve-http-caller-identity.md:
+// `revl serve --http` authenticates nobody, so this body IS the authentication).
+//
+// Format: a signed JWT (RFC 7519) in JWS compact form (RFC 7515) with the
+// HS256 algorithm (HMAC-SHA256, RFC 7518 section 3.2). Why this one:
+//   * it is the token every identity provider and every JWT library can mint,
+//     so an app does not have to invent a session format to use this module;
+//   * HMAC-SHA256 verifies with the Python standard library alone (`hmac`,
+//     `hashlib`), so revl keeps zero required runtime dependencies. An
+//     asymmetric algorithm (EdDSA, ES256) would need `cryptography` on py;
+//   * the claims the issue asks for are standard members: `exp` (expiry),
+//     `aud` (audience), `iss` (issuer), and `sub` becomes the subject.
+// Only `alg: "HS256"` is accepted. `none`, every other algorithm, a `crit`
+// header, a `typ` other than `JWT`, duplicate JSON members, non-canonical
+// base64url and tokens over 8 KiB are refused. The signature is checked in
+// constant time BEFORE the claims are parsed. `exp`, `iss`, `aud` and `sub` are
+// required; `nbf` is honoured when present.
+//
+// Configuration comes from the process environment only, never from the IR, a
+// component config table (those are recorded with the composition) or a
+// request:
+//   REVL_AUTH_HS256_SECRET       the shared key, at least 32 bytes (RFC 7518)
+//   REVL_AUTH_HS256_SECRET_FILE  or a file holding it (one trailing newline is
+//                                dropped); set exactly one of the two
+//   REVL_AUTH_ISSUER             the exact `iss` a token must carry
+//   REVL_AUTH_AUDIENCE           the audience a token's `aud` must contain
+//   REVL_AUTH_LEEWAY             optional clock-skew allowance in whole
+//                                seconds, 0 to 300 (default 0)
+// No refusal, log line or trace carries the key: it is read inside this body
+// and never becomes a revl value (tests/test_auth_validator_1554.py pins it).
+//
+// The old any-token stub (a non-blank token is that subject) survives ONLY
+// behind the explicit dev flag REVL_AUTH_INSECURE_DEV_STUB=1. With neither a
+// validator configured nor the flag, every call is refused with a `503`
+// `auth_not_configured` naming the variables to set: an unconfigured deployment
+// never accepts silently. Setting the flag next to a configured validator is
+// refused too, so a stale dev flag cannot shadow production keys.
+//
+// Tiers (issue #1554):
+//   py            the validator above; the reference tier.
+//   ts, rs, go,   no body: emitting a composition that composes this module is
+//   java          refused at compile time naming `host_validate` and the
+//                 backend. The ts binding is Cordis SSO (Slice 3, design 529).
+//   wasm          refused at compile time: `Principal` is not lowerable there.
 //
 // Compose this file as a ROOT module of the composition (components are never
 // `use`-imported): `compile_files(["your_app.rvl", "stdlib/auth.rvl"])`, and
@@ -109,21 +153,212 @@ service Auth {
   fn validate(b: Bearer) -> Result[Principal, ApiError]
 }
 
-// The single host body behind the crossing. On py it is the test stub below; on
-// ts it becomes the `host @auth` row over Cordis SSO's `ctx.sso.validateSession`
-// (Slice 3). It is `pure` for the same reason `stdlib/fs.rvl`'s read ops are: it
-// READS external state (the session store) and performs no accounted mutation,
-// so it carries no emission on the G8 audit surface. Its RESULT type is the
+// The single host body behind the crossing. On py it is the HS256 JWT validator
+// described in the header; on ts it becomes the `host @auth` row over Cordis
+// SSO's `ctx.sso.validateSession` (Slice 3). It is `pure` for the same reason
+// `stdlib/fs.rvl`'s read ops are: it READS external state (its key, the clock)
+// and performs no accounted mutation, so it carries no emission on the G8 audit
+// surface. Because it reads the clock, its answer for one token changes when
+// the token expires, so it must never be memoized. Its RESULT type is the
 // opaque `Principal`, which no caller can otherwise obtain.
 extern pure fn host_validate(b: Bearer) -> Result[Principal, ApiError] = @py {
-    # Deterministic py test stub (design §"Authorization": "a stub on py for
-    # tests"). A record arrives as a dict and `Opt[Str]` as the bare value or
-    # None; a present, non-blank token is a session, anything else is a 401.
+    # A record arrives as a dict and `Opt[Str]` as the bare value or None.
+    import base64, hashlib, hmac, json, math, os, time
+
+    B64URL = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_"
+    MAX_TOKEN = 8192
+    MIN_KEY = 32
+    MAX_LEEWAY = 300
+    DEV_FLAG = "REVL_AUTH_INSECURE_DEV_STUB"
+    CONFIGURE = ("set REVL_AUTH_HS256_SECRET (or REVL_AUTH_HS256_SECRET_FILE), "
+                 "REVL_AUTH_ISSUER and REVL_AUTH_AUDIENCE")
+
+    def refuse(status, code, message):
+        return Err({"status": status, "code": code, "message": message})
+
+    def unconfigured(reason):
+        return refuse(503, "auth_not_configured", "stdlib/auth: " + reason)
+
+    def unauthorized(reason):
+        return refuse(401, "unauthorized", "invalid credential: " + reason)
+
+    def read_key():
+        # (key bytes or None, problem or None). The key never enters a message.
+        inline = os.environ.get("REVL_AUTH_HS256_SECRET", "")
+        path = os.environ.get("REVL_AUTH_HS256_SECRET_FILE", "")
+        if inline and path:
+            return None, ("set only one of REVL_AUTH_HS256_SECRET and "
+                          "REVL_AUTH_HS256_SECRET_FILE")
+        if path:
+            try:
+                with open(path, "rb") as fh:
+                    key = fh.read()
+            except OSError:
+                return None, "REVL_AUTH_HS256_SECRET_FILE cannot be read"
+            if key.endswith(b"\n"):
+                key = key[:-2] if key.endswith(b"\r\n") else key[:-1]
+        elif inline:
+            key = inline.encode("utf-8")
+        else:
+            return None, None
+        if len(key) < MIN_KEY:
+            return None, ("the HS256 key is shorter than 32 bytes "
+                          "(RFC 7518 section 3.2)")
+        return key, None
+
+    def read_leeway():
+        raw = os.environ.get("REVL_AUTH_LEEWAY", "").strip()
+        if not raw:
+            return 0, None
+        if not (raw.isascii() and raw.isdigit()) or int(raw) > MAX_LEEWAY:
+            return None, "REVL_AUTH_LEEWAY must be whole seconds from 0 to 300"
+        return int(raw), None
+
+    def settings():
+        # ("stub" | a config dict | None, problem or None)
+        dev = os.environ.get(DEV_FLAG, "")
+        if dev not in ("", "1"):
+            return None, DEV_FLAG + " must be exactly 1 or unset"
+        key, problem = read_key()
+        if problem:
+            return None, problem
+        if key is None:
+            if dev == "1":
+                return "stub", None
+            return None, ("no token validator is configured: " + CONFIGURE +
+                          "; the any-token test stub runs only with " +
+                          DEV_FLAG + "=1")
+        if dev:
+            return None, (DEV_FLAG + " is set next to a configured validator; "
+                          "unset one of them")
+        issuer = os.environ.get("REVL_AUTH_ISSUER", "")
+        audience = os.environ.get("REVL_AUTH_AUDIENCE", "")
+        if not issuer or not audience:
+            return None, "an HS256 key is set but " + CONFIGURE + " are all required"
+        leeway, problem = read_leeway()
+        if problem:
+            return None, problem
+        return {"key": key, "iss": issuer, "aud": audience,
+                "leeway": leeway}, None
+
+    def b64url(segment):
+        # strict unpadded base64url; a non-canonical spelling is refused so one
+        # signature has exactly one encoding
+        if not segment or len(segment) % 4 == 1:
+            raise ValueError("bad base64url")
+        if any(c not in B64URL for c in segment):
+            raise ValueError("bad base64url")
+        raw = base64.urlsafe_b64decode(segment + "=" * (-len(segment) % 4))
+        if base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii") != segment:
+            raise ValueError("non-canonical base64url")
+        return raw
+
+    def no_duplicates(pairs):
+        obj = dict(pairs)
+        if len(obj) != len(pairs):
+            raise ValueError("duplicate member")
+        return obj
+
+    def no_constant(name):
+        raise ValueError("non-finite number")
+
+    def json_object(raw):
+        value = json.loads(raw.decode("utf-8"), object_pairs_hook=no_duplicates,
+                           parse_constant=no_constant)
+        if not isinstance(value, dict):
+            raise ValueError("not an object")
+        return value
+
+    def header_problem(header):
+        if header.get("alg") != "HS256":
+            return "unsupported or missing alg (only HS256 is accepted)"
+        if "crit" in header:
+            return "unsupported crit header"
+        if header.get("typ", "JWT") != "JWT":
+            return "unsupported typ"
+        return None
+
+    def verified_claims(token, key):
+        # (claims or None, reason or None); the signature is checked first
+        if len(token) > MAX_TOKEN:
+            return None, "token too large"
+        parts = token.split(".")
+        if len(parts) != 3:
+            return None, "not a signed JWT"
+        head, body, sig = parts
+        try:
+            header = json_object(b64url(head))
+        except (ValueError, RecursionError):
+            return None, "malformed header"
+        reason = header_problem(header)
+        if reason:
+            return None, reason
+        try:
+            payload = b64url(body)
+            signature = b64url(sig)
+        except ValueError:
+            return None, "malformed token"
+        # both segments are checked base64url above, so they are ASCII
+        signed = (head + "." + body).encode("ascii")
+        expected = hmac.new(key, signed, hashlib.sha256).digest()
+        if not hmac.compare_digest(expected, signature):
+            return None, "signature does not verify"
+        try:
+            return json_object(payload), None
+        except (ValueError, RecursionError):
+            return None, "malformed claims"
+
+    def is_number(v):
+        if isinstance(v, bool) or not isinstance(v, (int, float)):
+            return False
+        return isinstance(v, int) or math.isfinite(v)
+
+    def time_problem(claims, leeway, now):
+        exp = claims.get("exp")
+        if not is_number(exp):
+            return "token has no numeric exp"
+        if now >= exp + leeway:
+            return "token expired"
+        nbf = claims.get("nbf")
+        if nbf is not None and (not is_number(nbf) or now < nbf - leeway):
+            return "token not yet valid"
+        return None
+
+    def audiences(aud):
+        if isinstance(aud, str):
+            return [aud]
+        if isinstance(aud, list) and all(isinstance(a, str) for a in aud):
+            return aud
+        return []
+
+    def claims_problem(claims, cfg, now):
+        reason = time_problem(claims, cfg["leeway"], now)
+        if reason:
+            return reason
+        if claims.get("iss") != cfg["iss"]:
+            return "wrong issuer"
+        if cfg["aud"] not in audiences(claims.get("aud")):
+            return "wrong audience"
+        sub = claims.get("sub")
+        if not isinstance(sub, str) or not sub.strip():
+            return "token has no subject"
+        return None
+
+    cfg, problem = settings()
+    if problem:
+        return unconfigured(problem)
     tok = b.get("token") if isinstance(b, dict) else None
-    if isinstance(tok, str) and tok.strip():
+    if not isinstance(tok, str) or not tok.strip():
+        return refuse(401, "unauthorized", "missing credential")
+    if cfg == "stub":
+        # REVL_AUTH_INSECURE_DEV_STUB=1 only: a non-blank token is that subject
         return Ok({"subject": tok})
-    return Err({"status": 401, "code": "unauthorized",
-                "message": "missing or invalid credential"})
+    claims, reason = verified_claims(tok, cfg["key"])
+    if reason is None:
+        reason = claims_problem(claims, cfg, time.time())
+    if reason:
+        return unauthorized(reason)
+    return Ok({"subject": claims["sub"]})
 }
 
 // ---------------------------------------------------------------- provider
