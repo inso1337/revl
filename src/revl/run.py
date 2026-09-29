@@ -605,7 +605,7 @@ def resolve_provision(root, runtime, key: str, realm):
     provider has published it there."""
     if realm is None:
         return root.get(key)
-    return root.isolate(key, runtime.realm_label(realm)).reflect.get(key)
+    return root.isolate(key, runtime.realm_label(realm, key)).reflect.get(key)
 
 
 def resolve_key(root, runtime, ir: dict, key: str):
@@ -778,7 +778,8 @@ class _Router:
     def _handle(self, realm):
         """The live provider handle for ``key`` in ``realm``, or ``None`` when
         that realm has no ACTIVE provider (cordis's strict ``reflect.get``)."""
-        scoped = self._root.isolate(self._key, self._runtime.realm_label(realm))
+        scoped = self._root.isolate(self._key,
+                                    self._runtime.realm_label(realm, self._key))
         return scoped.reflect.get(self._key)
 
     def _live(self):
