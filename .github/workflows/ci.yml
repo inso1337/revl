@@ -338,10 +338,11 @@ jobs:
       # repo). A new open item with no tracked state is now a red rather than
       # a line that quietly rots in the roadmap.
       #
-      # D (--check-tier-parity) is the only one still off: it has two real
-      # findings on main (items 421 F6 and 422 F6, python-only fixes to a
-      # language-wide guarantee). Turn it on here as its findings are
-      # dispatched.
+      # D (--check-tier-parity) is on since issue #1572. It was the one check
+      # left off while it had real findings on main (items 421 F6 and 422 F6,
+      # one-tier fixes to a language-wide guarantee); 422 F6 was answered
+      # first, and 421 F6(i) now names every tier's scope, so it is clean and
+      # an off check would only be silence read as success.
       #
       # Never add `|| true`, and never narrow a check to make this line pass.
       # `make roadmap-check-all` runs all five locally.
@@ -366,6 +367,7 @@ jobs:
             --check-duplicate-headers \
             --check-orphan \
             --require-issue \
+            --check-tier-parity \
             --head-branch "$HEAD_BRANCH"
       # The citation half of the same question. check_roadmap_markers above
       # resolves the roadmap's MARKERS against git and says so itself: it
