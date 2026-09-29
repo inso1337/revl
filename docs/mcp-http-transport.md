@@ -171,6 +171,10 @@ thread: measured, walking the live-frame set raised `RuntimeError: Set changed
 size during iteration` 189 times in about 200,000 halts while another thread
 created frames. If the operator already armed a latch (`REVL_ESTOP_LATCH`), the
 transport uses that one; otherwise it arms a private one for its lifetime.
+That private latch's directory is removed when the server stops, on Ctrl-C and
+on SIGTERM alike: `revl mcp serve --http`, `revl mcp proxy --http` and
+`revl serve --http --operator-listen` turn SIGTERM into the same clean shutdown
+and exit 0 (issue #1553).
 
 ## The one lock, a known limit
 

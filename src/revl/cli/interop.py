@@ -8,7 +8,9 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from ..compiler import compile_files
@@ -311,7 +313,8 @@ def _run_mcp(args) -> int:
             except TransportError as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
-            return transport.serve_forever()
+            with _sigterm_unwinds():
+                return transport.serve_forever()
         live, code = _stdio_live_profile(args)
         if code is not None:
             return code
@@ -392,9 +395,14 @@ def _run_mcp_proxy(args) -> int:
         live, code = _stdio_live_profile(args)
         if code is not None:
             return code
-    return proxy.run(command, undo=undo,
-                     trust_read_only=args.trust_read_only_hints,
-                     timeout=args.upstream_timeout, http=http, live=live)
+    if http is None:
+        return proxy.run(command, undo=undo,
+                         trust_read_only=args.trust_read_only_hints,
+                         timeout=args.upstream_timeout, http=http, live=live)
+    with _sigterm_unwinds():
+        return proxy.run(command, undo=undo,
+                         trust_read_only=args.trust_read_only_hints,
+                         timeout=args.upstream_timeout, http=http, live=live)
 
 
 def _run_serve(args) -> int:
@@ -488,19 +496,20 @@ def _run_serve(args) -> int:
             from ..mcp.http_transport import TransportError  # noqa: PLC0415
 
             try:
-                return serve_http(ir, config, composition=args.composition,
-                                  host=args.host, port=args.port, exposure=exposure,
-                                  declared=declared,
-                                  approval_policy=getattr(args, "approval_policy",
-                                                          None),
-                                  operator=operator,
-                                  # the sources, so the operator listener can
-                                  # snapshot and fork the served composition
-                                  origin=({"files": [os.path.abspath(f)
-                                                     for f in args.files]}
-                                          if operator is not None else None),
-                                  refuse_ungated_emissions=getattr(
-                                      args, "refuse_ungated_emissions", False))
+                with _sigterm_unwinds():
+                    return serve_http(ir, config, composition=args.composition,
+                                      host=args.host, port=args.port, exposure=exposure,
+                                      declared=declared,
+                                      approval_policy=getattr(args, "approval_policy",
+                                                              None),
+                                      operator=operator,
+                                      # the sources, so the operator listener can
+                                      # snapshot and fork the served composition
+                                      origin=({"files": [os.path.abspath(f)
+                                                         for f in args.files]}
+                                              if operator is not None else None),
+                                      refuse_ungated_emissions=getattr(
+                                          args, "refuse_ungated_emissions", False))
             except (ExposureError, TransportError) as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
@@ -510,6 +519,30 @@ def _run_serve(args) -> int:
     except SessionError as error:
         print(f"error: {error}", file=sys.stderr)
         return 3
+
+
+@contextmanager
+def _sigterm_unwinds():
+    """Turn SIGTERM into the KeyboardInterrupt the HTTP serve loops already
+    shut down cleanly on, for as long as they run (issue #1553).
+
+    Without it a SIGTERM ended the process with no `finally`, so the E-Stop
+    latch directory the MCP HTTP transport creates (`HaltLatch`) was left in
+    the temp directory, by `revl mcp serve --http` and by `revl serve --http
+    --operator-listen` alike. The previous handler is put back after; off the
+    main thread, where no handler can be installed, nothing changes."""
+    def interrupt(_signum, _frame):
+        raise KeyboardInterrupt
+
+    try:
+        previous = signal.signal(signal.SIGTERM, interrupt)
+    except ValueError:
+        yield
+        return
+    try:
+        yield
+    finally:
+        signal.signal(signal.SIGTERM, previous)
 
 
 def _serve_operator_options(args, http: bool):

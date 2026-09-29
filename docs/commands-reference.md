@@ -2072,7 +2072,8 @@ options apply to `--http` only; with `--mcp` they are refused.
   `--operator-tls-cert`, and a missing `--operator-profile`. It takes no
   `--allow-origin`, so any request carrying an `Origin` header is refused
   (`403`): no browser page can reach it. It prints its own E-Stop latch path
-  (`revl estop --latch <path>`).
+  (`revl estop --latch <path>`); that latch's directory is removed when the
+  server stops, including on SIGTERM, which shuts it down cleanly (exit 0).
   Both listeners hold ONE session reference, changed only under the shared
   lock: after `revl_fork_confirm` on the operator listener freezes the parent
   and makes the branch the live session (item 250), the next app request is

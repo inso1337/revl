@@ -631,8 +631,9 @@ def _serve_process(tmp_path, *flags):
 
     app = tmp_path / "crier.rvl"
     app.write_text(ROUTED, encoding="utf-8")
+    (tmp_path / "tmp").mkdir(exist_ok=True)
     env = {**os.environ, "REVL_1553_SINK": str(tmp_path / "sink.log"),
-           "REVL_WAL_DIR": str(tmp_path / "wal"), "TMPDIR": str(tmp_path),
+           "REVL_WAL_DIR": str(tmp_path / "wal"), "TMPDIR": str(tmp_path / "tmp"),
            "PYTHONPATH": os.pathsep.join(
                [str(ROOT / "src")] + ([os.environ["PYTHONPATH"]]
                                       if os.environ.get("PYTHONPATH") else []))}
@@ -719,3 +720,68 @@ def test_revl_serve_http_holds_an_app_crossing_for_the_operator_listener(tmp_pat
         except subprocess.TimeoutExpired:
             process.kill()
         process.stderr.close()
+
+
+# ---------------------------------------------------------------- SIGTERM
+
+def _latch_path(process) -> Path:
+    """The E-Stop latch path a server prints at start."""
+    import re
+
+    lines = []
+    deadline = time.monotonic() + 120
+    while time.monotonic() < deadline:
+        line = process.stderr.readline()
+        if not line:
+            break
+        lines.append(line)
+        found = re.search(r"revl estop --latch (\S+)", line)
+        if found:
+            return Path(found.group(1))
+    raise AssertionError("no latch path printed:\n" + "".join(lines))
+
+
+def _sigterm_leaves_no_latch(process, tmp_path):
+    import signal
+
+    try:
+        latch = _latch_path(process)
+        assert latch.parent.is_dir()
+        assert Path(os.path.realpath(latch)).is_relative_to(
+            os.path.realpath(tmp_path)), "the latch lives in this test's TMPDIR"
+        process.send_signal(signal.SIGTERM)
+        code = process.wait(timeout=30)
+        assert not latch.parent.exists(), "the latch directory was removed"
+        assert code == 0, "a SIGTERM is a clean shutdown"
+        assert list((tmp_path / "tmp").glob("revl-mcp-http-*")) == []
+    finally:
+        _end(process)
+
+
+@needs_cordis
+def test_sigterm_removes_the_latch_of_revl_serve_http(tmp_path):
+    profile = tmp_path / "ops.profile"
+    profile.write_text(PROFILE, encoding="utf-8")
+    process = _serve_process(tmp_path, "--operator-listen", "127.0.0.1:0",
+                             "--operator-profile", str(profile))
+    _sigterm_leaves_no_latch(process, tmp_path)
+
+
+@needs_cordis
+def test_sigterm_removes_the_latch_of_revl_mcp_serve_http(tmp_path):
+    import subprocess
+
+    (tmp_path / "tmp").mkdir()
+    profile = tmp_path / "ops.profile"
+    profile.write_text(PROFILE, encoding="utf-8")
+    env = {**os.environ, "TMPDIR": str(tmp_path / "tmp"),
+           "PYTHONPATH": os.pathsep.join(
+               [str(ROOT / "src")] + ([os.environ["PYTHONPATH"]]
+                                      if os.environ.get("PYTHONPATH") else []))}
+    env.pop("REVL_ESTOP_LATCH", None)
+    process = subprocess.Popen(
+        [sys.executable, "-m", "revl", "mcp", "serve", "--http", "127.0.0.1:0",
+         "--operator-profile", str(profile)],
+        cwd=str(tmp_path), env=env, stderr=subprocess.PIPE,
+        stdout=subprocess.DEVNULL, stdin=subprocess.DEVNULL, text=True)
+    _sigterm_leaves_no_latch(process, tmp_path)
