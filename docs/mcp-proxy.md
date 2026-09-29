@@ -186,7 +186,9 @@ The client gets no verb that loads, swaps or edits code.
 forwarded to the upstream unchanged. Upstream notifications are relayed to the
 client, except `notifications/tools/list_changed`, which the proxy acts on: it
 lists the tools again, reclassifies them, and sends its own
-`notifications/tools/list_changed`.
+`notifications/tools/list_changed`. Over HTTP, which caller receives each
+relayed notification is decided per stream: see
+[mcp-http-transport.md](mcp-http-transport.md#streams).
 
 ## What the proxy guarantees
 
@@ -240,7 +242,11 @@ These hold as long as the proxy is the only way the client reaches the server.
    `structuredContent`) is written to the WAL in plaintext.
 8. **Server-initiated requests and cancellation.** Sampling, roots and
    elicitation requests from the upstream are answered with an error, not
-   relayed. A client's `notifications/cancelled` is not forwarded.
+   relayed, on stdio and over HTTP alike, so no HTTP client ever receives an
+   `InputRequiredResult` from the proxy. The proxy declares no client
+   capability to the upstream, so a conforming upstream sends none of these.
+   A client's `notifications/cancelled`, and a closed HTTP response stream, are
+   not forwarded.
 
 Transport: stdio to the upstream. To the client, stdio by default, or MCP
 2026-07-28 Streamable HTTP with `--http HOST:PORT`, where each request is bound

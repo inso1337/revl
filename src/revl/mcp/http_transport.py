@@ -1,4 +1,4 @@
-"""MCP over Streamable HTTP, one operator per request (issue #1463, slice 1).
+"""MCP over Streamable HTTP, one operator per request (issue #1463, slices 1 and 2).
 
 `revl mcp serve --http` and `revl mcp proxy --http` put the same dispatchers the
 stdio transports use (`server.handle`, `Proxy.handle`) behind one HTTP endpoint,
@@ -24,6 +24,10 @@ What this module adds, and nothing else:
   * **A cast is the caller's own.** Over HTTP a caller casts only as itself:
     `asToken` naming anyone else is refused before dispatch, and a cast the
     session binds to its current operator is recorded `boundBy: "transport"`.
+  * **Streams carry only the caller's own events** (slice 2, `http_stream`).
+    An SSE reply to a `POST` carries progress for that request alone, and a
+    `subscriptions/listen` stream carries only what its caller opted in to,
+    for only as long as that caller still authenticates.
   * **E-Stop does not queue.** A caller blocked behind a long upstream call holds
     the lock. `revl_estop` therefore does not wait for it: it arms the runtime's
     E-Stop latch file (item 443), which every crossing seam reads, and the halt
@@ -39,6 +43,7 @@ import hashlib
 import hmac
 import json
 import os
+import queue
 import shutil
 import sys
 import tempfile
@@ -49,6 +54,9 @@ from http.server import BaseHTTPRequestHandler
 
 from .http_guard import (DispatchLock, Exposure, ExposureError, Listener,
                          request_refusal)
+from .http_stream import (RESOURCES, SUBSCRIPTION_ID, EventHub, RequestStream,
+                          SseWriter, Subscription, accepts_sse, filter_refusal,
+                          listen_support, peer_closed)
 from .live_profile import DEFAULT_SETTLE_MS, ProfileSource, ProfileUnavailable, is_estop
 
 PROTOCOL_VERSION = "2026-07-28"
@@ -66,10 +74,14 @@ META_SERVER_INFO = "io.modelcontextprotocol/serverInfo"
 HEADER_MISMATCH = -32020
 UNSUPPORTED_VERSION = -32022
 _NAMED_METHODS = {"tools/call": "name", "prompts/get": "name", "resources/read": "uri"}
-# Methods this slice does not serve over HTTP: the long-lived notification stream
-# (slice 2) and the legacy subscription and logging verbs it replaces.
-_NOT_SERVED = frozenset({"subscriptions/listen", "resources/subscribe",
-                         "resources/unsubscribe", "logging/setLevel"})
+# Methods not served over HTTP: the legacy subscription and logging verbs that
+# MCP 2026-07-28 removed (`subscriptions/listen` replaces the first two).
+_NOT_SERVED = frozenset({"resources/subscribe", "resources/unsubscribe",
+                         "logging/setLevel"})
+LISTEN = "subscriptions/listen"
+# The requests on which MCP 2026-07-28 allows an InputRequiredResult (MRTR).
+_MRTR_METHODS = frozenset({"tools/call", "prompts/get", "resources/read"})
+_MRTR_FIELDS = ("inputResponses", "requestState")
 # The quorum verbs whose `asToken` could name someone other than the caller.
 CAST_TOOLS = frozenset({"revl_approve", "revl_revoke", "revl_escalate",
                         "revl_override"})
@@ -315,12 +327,16 @@ class HaltLatch:
 # ---------------------------------------------------------------- dispatchers
 
 def _modern_capabilities(capabilities: dict) -> dict:
-    """The stdio capabilities, less what needs the notification stream this
-    slice does not serve (`listChanged`, `subscribe`)."""
+    """The stdio capabilities as the HTTP transport honors them. `listChanged`
+    and `subscribe` are kept only when true: the listen stream delivers exactly
+    those. `logging` is dropped: no `notifications/message` is sent over HTTP."""
     out = {}
     for name, value in (capabilities or {}).items():
+        if name == "logging":
+            continue
         if isinstance(value, dict):
-            value = {k: v for k, v in value.items() if k not in ("listChanged", "subscribe")}
+            value = {k: v for k, v in value.items()
+                     if k not in ("listChanged", "subscribe") or v is True}
         out[name] = value
     return out
 
@@ -341,6 +357,15 @@ class ServerDispatcher:
     def advertised_tools(self) -> list:
         return list(self.server._ADVERTISED)
 
+    def attach(self, route) -> None:
+        """The compiler server emits no notification: nothing to route."""
+
+    def subscribe(self, uri: str) -> None:
+        raise LookupError("revl mcp serve serves no resources")
+
+    def unsubscribe(self, uri: str) -> None:
+        pass
+
 
 class ProxyDispatcher:
     """`revl mcp proxy`: the proxy's own `handle`."""
@@ -353,11 +378,26 @@ class ProxyDispatcher:
         return self.proxy.handle(message)
 
     def describe(self) -> dict:
-        return self.proxy.handle({"jsonrpc": "2.0", "id": 0,
-                                  "method": "initialize", "params": {}})["result"]
+        # never through `handle`: that would re-list a changed upstream and swap
+        # the session here, outside the dispatch lock
+        return self.proxy.describe()
 
     def advertised_tools(self) -> list:
         return self.proxy._advertised()
+
+    def attach(self, route) -> None:
+        """Every notification the proxy emits (its own `tools/list_changed`,
+        and what it relays from the upstream) goes to `route`, or back to its
+        stdout with None."""
+        self.proxy.sink = route
+
+    def subscribe(self, uri: str) -> None:
+        """Ask the upstream for updates to `uri`. Called under the dispatch
+        lock: the upstream client serves one request at a time."""
+        self.proxy.upstream.request("resources/subscribe", {"uri": uri})
+
+    def unsubscribe(self, uri: str) -> None:
+        self.proxy.upstream.request("resources/unsubscribe", {"uri": uri})
 
 
 # ---------------------------------------------------------------- the wire
@@ -487,6 +527,11 @@ class HttpTransport:
         self.authenticator = Authenticator(registry, auth, source=source)
         self.binding = CallerBinding(server_module, lambda: self.authenticator.registry)
         self.latch = HaltLatch()
+        self.hub = EventHub()
+        # a quiet listen stream re-checks its caller and sends a keep-alive
+        # comment this often; `poll_s` bounds how late it sees a closed peer
+        self.keepalive_s = 15.0
+        self.poll_s = 0.25
         self.listener: Listener | None = None
         self._thread: threading.Thread | None = None
 
@@ -499,12 +544,18 @@ class HttpTransport:
             raise TransportError(str(error)) from error
         self.latch.arm()
         self.binding.install()
+        self._attach(self.hub.route)
         self._thread = threading.Thread(target=self.listener.serve_forever,
                                         daemon=True, name="revl-mcp-http")
         self._thread.start()
         return self.exposure.host, self.exposure.port_in_use
 
     def stop(self) -> None:
+        # listen streams end first, gracefully, while the upstream can still be
+        # told to unsubscribe
+        for subscription in self.hub.close_all():
+            subscription.ended.wait(timeout=5)
+        self._attach(None)
         if self.listener is not None:
             self.listener.shutdown()
             self.listener.server_close()
@@ -514,6 +565,11 @@ class HttpTransport:
             self._thread = None
         self.binding.uninstall()
         self.latch.disarm()
+
+    def _attach(self, route) -> None:
+        attach = getattr(self.dispatcher, "attach", None)
+        if attach is not None:
+            attach(route)
 
     def serve_forever(self, *, stderr=None) -> int:
         stderr = stderr or sys.stderr
@@ -583,7 +639,12 @@ class HttpTransport:
             operator = self._estop_fallback(message, request.headers, peer)
             if operator is None:
                 return 503, _rpc_error(None, -32603, why), [close]
-        return self.process(message, operator, request.headers)
+        # the reply may become an SSE stream, but only from here: the caller is
+        # authenticated and its body read
+        stream = RequestStream(request, enabled=accepts_sse(request.headers))
+        request._revl_stream = stream
+        return self.process(message, operator, request.headers, peer=peer,
+                            stream=stream)
 
     def _estop_fallback(self, message, headers, peer):
         last = getattr(self.authenticator.source, "last_adopted", None)
@@ -593,7 +654,8 @@ class HttpTransport:
             headers, peer, registry=last)
         return operator
 
-    def process(self, message, operator, headers) -> tuple[int, dict | None, list]:
+    def process(self, message, operator, headers, *, peer=None,
+                stream: RequestStream | None = None) -> tuple[int, object, list]:
         if not isinstance(message, dict) or message.get("jsonrpc") != "2.0" \
                 or not isinstance(message.get("method"), str) \
                 or "result" in message or "error" in message:
@@ -653,42 +715,199 @@ class HttpTransport:
                                        "the body"), []
         if method in _NOT_SERVED:
             return 404, _rpc_error(request_id, -32601,
-                                   f"{method} is not served by this transport yet"), []
+                                   f"{method} is not served by MCP {PROTOCOL_VERSION}: "
+                                   f"use {LISTEN}"), []
         if method == "server/discover":
             return 200, self._discover(request_id), []
+        if method == LISTEN:
+            return self._listen(request_id, params, operator, headers, peer)
+        if method in _MRTR_METHODS and any(f in params for f in _MRTR_FIELDS):
+            # this server never answers with an InputRequiredResult, so no
+            # legitimate retry carries these; forwarding them would hand the
+            # upstream state that no one here issued
+            return 400, _rpc_error(request_id, -32602,
+                                   "this server never requests input (it returns no "
+                                   "InputRequiredResult), so a request carrying "
+                                   "inputResponses or requestState is refused"), []
 
         clean = dict(message)
         clean_params = dict(params)
         rest = {k: v for k, v in meta.items() if not _reserved_meta_key(k)}
-        if rest:
-            clean_params["_meta"] = rest
-        else:
-            clean_params.pop("_meta", None)
-        clean["params"] = clean_params
+        progress = self._bind_progress(rest, stream)
+        try:
+            return self._dispatch(message=clean, params=clean_params, rest=rest,
+                                  operator=operator, headers=headers)
+        finally:
+            if progress is not None:
+                self.hub.progress.release(progress)
 
+    def _dispatch(self, *, message, params, rest, operator, headers):
+        """One validated request, dispatched as `operator` (or, for E-Stop,
+        without waiting for a busy session)."""
+        method, request_id = message["method"], message.get("id")
+        if rest:
+            params["_meta"] = rest
+        else:
+            params.pop("_meta", None)
+        message["params"] = params
         if method == "tools/call":
-            name = clean_params.get("name")
+            name = params.get("name")
             if name in CAST_TOOLS:
-                refused = self._cast_refusal(clean_params.get("arguments"), operator)
+                refused = self._cast_refusal(params.get("arguments"), operator)
                 if refused is not None:
                     return 200, self._result(request_id, refused), []
             if name == "revl_estop":
-                return 200, self._estop(clean, operator), []
-
+                return 200, self._estop(message, operator), []
         with self.binding.as_caller(operator, before=self._complete_halt) as session:
             del session
             if method == "tools/call":
                 tools = {t.get("name"): t for t in self.dispatcher.advertised_tools()}
-                bad = _param_headers_refusal(tools.get(clean_params.get("name")),
-                                             clean_params.get("arguments"), headers)
+                bad = _param_headers_refusal(tools.get(params.get("name")),
+                                             params.get("arguments"), headers)
                 if bad is not None:
                     return 400, _rpc_error(request_id, HEADER_MISMATCH, bad), []
-            response = self.dispatcher.handle(clean)
+            response = self.dispatcher.handle(message)
         if response is None:
             return 202, None, []
         if "error" in response:
             return _status_for(response["error"].get("code", 0)), response, []
         return 200, self._shape(response), []
+
+    # -- streams (slice 2) -----------------------------------------------------
+
+    def _bind_progress(self, meta: dict, stream: RequestStream | None) -> str | None:
+        """Replace the caller's `progressToken` with one minted for this request
+        alone. Without an SSE-capable reply there is no one to deliver progress
+        to, so the token is dropped instead."""
+        if "progressToken" not in meta:
+            return None
+        token = meta["progressToken"]
+        if stream is None or not stream.enabled or isinstance(token, bool) \
+                or not isinstance(token, (str, int)):
+            del meta["progressToken"]
+            return None
+        outbound = self.hub.progress.bind(token, stream)
+        meta["progressToken"] = outbound
+        return outbound
+
+    def _listen(self, request_id, params, operator, headers, peer):
+        """Open a `subscriptions/listen` stream: validate, subscribe upstream,
+        register. `run_listen` writes the stream itself."""
+        if not accepts_sse(headers):
+            return 406, _rpc_error(request_id, -32600,
+                                   f"{LISTEN} is answered with an SSE stream: send "
+                                   f"`Accept: text/event-stream`"), []
+        requested = params.get("notifications")
+        bad = filter_refusal(requested)
+        if bad is not None:
+            return 400, _rpc_error(request_id, -32602, bad), []
+        full = self.hub.admit(operator.token)
+        if full is not None:
+            return 429, _rpc_error(request_id, -32603, full), []
+        support = listen_support(self.dispatcher.describe().get("capabilities"))
+        honored = {flag: True for flag, able in support.items()
+                   if able and flag != RESOURCES and requested.get(flag) is True}
+        uris = list(dict.fromkeys(requested.get(RESOURCES) or []))
+        if uris and support[RESOURCES]:
+            honored[RESOURCES] = self._subscribe(operator, uris)
+        subscription = Subscription(request_id, operator.token, headers, peer, honored)
+        if not self.hub.add(subscription):
+            self._release_uris(subscription)
+            return 503, _rpc_error(request_id, -32603, "the server is shutting down"), []
+        return 200, subscription, []
+
+    def _subscribe(self, operator, uris: list[str]) -> list[str]:
+        """Hold each URI, subscribing upstream for its first holder. The upstream
+        client serves one request at a time, so this takes the dispatch lock,
+        and waits for a busy session."""
+        honored = []
+        with self.binding.as_caller(operator, before=self._complete_halt):
+            for uri in uris:
+                if self.hub.uri_refs(uri) == 0:
+                    try:
+                        self.dispatcher.subscribe(uri)
+                    except Exception:  # noqa: BLE001 - not honored, and the ack says so
+                        continue
+                self.hub.hold_uri(uri)
+                honored.append(uri)
+        return honored
+
+    def _release_uris(self, subscription: Subscription) -> None:
+        last = [uri for uri in subscription.uris if self.hub.drop_uri(uri)]
+        if not last:
+            return
+        with self.binding.lock:
+            for uri in last:
+                try:
+                    self.dispatcher.unsubscribe(uri)
+                except Exception:  # noqa: BLE001 - the upstream may be gone
+                    pass
+
+    def _still_the_caller(self, subscription: Subscription, *, hold: bool):
+        """Does the stream's credential still authenticate as the operator that
+        opened it? True; False (close the stream); or None, when the profile is
+        settling or broken and `hold` is off, or the server is stopping."""
+        while True:
+            operator, _why, status = self.authenticator.authenticate(
+                subscription.headers, subscription.peer)
+            if operator is not None:
+                return operator.token == subscription.token
+            if status != 503:
+                return False
+            if not hold or subscription.shutting_down.is_set():
+                return None
+            subscription.shutting_down.wait(self.poll_s)
+
+    def run_listen(self, handler, subscription: Subscription) -> None:
+        """Write one listen stream until the client leaves, the caller stops
+        authenticating, the stream overflows, or the server stops."""
+        writer = SseWriter(handler)
+        quiet_since = time.monotonic()
+        try:
+            if not writer.event(subscription.acknowledgement()):
+                return
+            while not writer.dead and not subscription.overflowed:
+                if subscription.shutting_down.is_set():
+                    self._end_listen(writer, subscription)
+                    return
+                try:
+                    event = subscription.queue.get(timeout=self.poll_s)
+                except queue.Empty:
+                    event = None
+                if event is None:
+                    if peer_closed(getattr(handler, "connection", None)):
+                        return
+                    if time.monotonic() - quiet_since >= self.keepalive_s:
+                        state = self._still_the_caller(subscription, hold=False)
+                        if state is False:
+                            return
+                        if state is True:
+                            writer.comment()
+                        quiet_since = time.monotonic()
+                    continue
+                if self._still_the_caller(subscription, hold=True) is not True:
+                    return
+                writer.event(event)
+                quiet_since = time.monotonic()
+        finally:
+            self.hub.remove(subscription)
+            self._release_uris(subscription)
+            subscription.ended.set()
+
+    def _end_listen(self, writer: SseWriter, subscription: Subscription) -> None:
+        """The server ends a subscription: `notifications/cancelled` naming it
+        (the cancellation page's MUST), then the completion result (the
+        subscriptions page's graceful closure). Only to a caller who still
+        authenticates."""
+        if self._still_the_caller(subscription, hold=False) is not True:
+            return
+        sid = {SUBSCRIPTION_ID: subscription.id}
+        writer.event({"jsonrpc": "2.0", "method": "notifications/cancelled",
+                      "params": {"requestId": subscription.id,
+                                 "reason": "the server is shutting down",
+                                 "_meta": sid}})
+        writer.event(self._shape({"jsonrpc": "2.0", "id": subscription.id,
+                                  "result": {"_meta": dict(sid)}}))
 
     # -- the pieces ------------------------------------------------------------
 
@@ -788,11 +1007,20 @@ def _handler_class(transport: HttpTransport):
         sys_version = ""
 
         def _serve(self, method: str) -> None:
+            self._revl_stream = None
             try:
                 status, body, headers = transport.respond(self, method)
             except Exception as exc:  # noqa: BLE001 - never a traceback on the wire
                 status, body, headers = 500, _rpc_error(
                     None, -32603, f"{type(exc).__name__}: {exc}"), []
+            if isinstance(body, Subscription):
+                self.close_connection = True
+                transport.run_listen(self, body)
+                return
+            stream = self._revl_stream
+            if stream is not None and stream.finish(body):
+                self.close_connection = True  # the SSE reply ends with its stream
+                return
             self.send_response(status)
             for name, value in headers:
                 self.send_header(name, value)

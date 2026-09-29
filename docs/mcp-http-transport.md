@@ -1,7 +1,7 @@
 # MCP over HTTP: one operator per request
 
-Issue #1463, slice 1 · source: `src/revl/mcp/http_transport.py`,
-`src/revl/mcp/http_guard.py` · companion to
+Issue #1463, slices 1 and 2 · source: `src/revl/mcp/http_transport.py`,
+`src/revl/mcp/http_stream.py`, `src/revl/mcp/http_guard.py` · companion to
 [operator-capabilities.md](operator-capabilities.md) (item 55),
 [component-leases.md](component-leases.md) (item 61),
 [mcp-proxy.md](mcp-proxy.md) and [mcp-reference.md](mcp-reference.md).
@@ -27,7 +27,8 @@ The endpoint is `http://HOST:PORT/mcp` (`https://` with TLS).
 MCP revision **2026-07-28**, Streamable HTTP, and only that revision:
 
 - every JSON-RPC message is its own `POST /mcp`; the reply is one JSON object
-  (`Content-Type: application/json`), and a notification is answered `202`;
+  (`Content-Type: application/json`) or an SSE stream (see [Streams](#streams)),
+  and a notification is answered `202`;
 - every request carries `_meta` with `io.modelcontextprotocol/protocolVersion`
   and `io.modelcontextprotocol/clientCapabilities` (missing: `400`, `-32602`),
   and the headers `MCP-Protocol-Version`, `Mcp-Method`, and `Mcp-Name` for
@@ -40,18 +41,17 @@ MCP revision **2026-07-28**, Streamable HTTP, and only that revision:
 - `server/discover` answers with the supported version, the capabilities, the
   server's name and its instructions;
 - every result carries `resultType: "complete"` and the server's name in
-  `_meta`.
+  `_meta`. No result is ever an `InputRequiredResult` (see [MRTR](#mrtr)).
 
 The revision has no protocol session, so there is nothing to confuse with
 identity: `GET` and `DELETE` are `405`, an `Mcp-Session-Id` header is ignored
-and never echoed.
+and never echoed, and so is `Last-Event-ID`: streams are not resumable.
 
-**Not served in this slice:** SSE responses, `subscriptions/listen` (so no
-`notifications/tools/list_changed` or resource updates reach an HTTP client),
-MRTR input requests, and the legacy `initialize`-era HTTP of revisions
-2025-03-26 to 2025-11-25. A legacy client sending `initialize` gets `400` with
-`-32022` and the supported version. The legacy era will be added only if a real
-client needs it.
+**Not served:** the legacy `initialize`-era HTTP of revisions 2025-03-26 to
+2025-11-25. A legacy client sending `initialize` gets `400` with `-32022` and
+the supported version; the legacy era will be added only if a real client
+needs it. `resources/subscribe`, `resources/unsubscribe` and `logging/setLevel`,
+which 2026-07-28 removed, are `404` (`-32601`) naming `subscriptions/listen`.
 
 ## Identity
 
@@ -172,6 +172,119 @@ size during iteration` 189 times in about 200,000 halts while another thread
 created frames. If the operator already armed a latch (`REVL_ESTOP_LATCH`), the
 transport uses that one; otherwise it arms a private one for its lifetime.
 
+## Streams
+
+Slice 2, `src/revl/mcp/http_stream.py`. A stream is a `200` reply with
+`Content-Type: text/event-stream` and `X-Accel-Buffering: no`; each event is one
+`data:` line holding one JSON-RPC message. There are two kinds.
+
+### An SSE reply to a request
+
+A request whose `Accept` lists `text/event-stream` may be answered with SSE. It
+is, only when a notification for that request arrives while it is dispatched;
+otherwise the reply is one JSON object, as in slice 1. The one request-scoped
+notification relayed is `notifications/progress` from a proxied upstream:
+
+- the caller's `_meta.progressToken` is never sent upstream. The transport
+  mints a random token for that one request, sends that instead, and maps it
+  back when progress arrives. Progress under any other token reaches no one:
+  not a second caller who picked the same token, and not the next request when
+  the upstream reports late for a finished one;
+- without `text/event-stream` in `Accept`, the token is removed before the
+  upstream sees it, and the reply is JSON;
+- the final JSON-RPC response is the last event, then the connection closes.
+  Nothing more is sent for the request after it;
+- `notifications/message` is never sent. The revision allows it only for a
+  request that set `io.modelcontextprotocol/logLevel`, and the proxy does not
+  relay upstream logs, so `server/discover` omits the `logging` capability;
+- closing the stream is the revision's cancellation signal. The transport stops
+  writing to it, but the call in flight is not interrupted and the upstream is
+  not told, as on stdio, where the proxy does not forward
+  `notifications/cancelled` either.
+
+### `subscriptions/listen`
+
+A `subscriptions/listen` request with a `notifications` filter opens a stream
+that stays open until the client or the server closes it.
+
+- It needs `Accept: text/event-stream` (otherwise `406`), a well-formed filter
+  (otherwise `400`, `-32602`), and room: at most 4 open streams per operator and
+  32 in all (otherwise `429`).
+- The first event is `notifications/subscriptions/acknowledged`, naming the
+  part of the filter the server honors. Every event on the stream carries
+  `io.modelcontextprotocol/subscriptionId`, the listen request's id.
+- What is honored follows the capabilities `server/discover` reports:
+
+| filter | `revl mcp serve` | `revl mcp proxy` |
+| --- | --- | --- |
+| `toolsListChanged` | no: its tool list never changes | yes |
+| `promptsListChanged` | no | when the upstream declares `prompts.listChanged` |
+| `resourcesListChanged` | no | when the upstream declares `resources.listChanged` |
+| `resourceSubscriptions` | no | when the upstream declares `resources.subscribe`, each URI it accepts |
+
+- The proxy announces `notifications/tools/list_changed` when it withdraws a
+  read-only claim ([mcp-proxy.md](mcp-proxy.md)), and after the upstream
+  announced a change of its own: the proxy lists the tools again at the next
+  request, from any caller, and announces it then.
+- For `resourceSubscriptions`, the proxy sends the upstream
+  `resources/subscribe` for a URI when the first stream asks for it, and
+  `resources/unsubscribe` when the last stream holding it ends. A URI the
+  upstream refuses is left out of the acknowledgment.
+- A quiet stream gets a keep-alive comment (`:`) every 15 seconds.
+- When the server stops, each stream gets `notifications/cancelled` naming its
+  subscription, then the completion result, then the connection closes. The
+  revision's cancellation page says the server MUST send the first; its
+  subscriptions page says it SHOULD send the second. Sending both meets both.
+
+### Who receives what
+
+Every rule of slice 1 holds on a stream:
+
+1. **Authentication first.** A stream starts only after its request has
+   authenticated and its body has been read. A listen request with no valid
+   identity gets `401` as JSON, with no stream headers.
+2. **One operator per stream, checked again.** A listen stream belongs to the
+   operator that opened it. Before every event and every keep-alive, the
+   stream's credential is authenticated again against the profile as it is
+   now. If it no longer authenticates as that operator (revoked, past its
+   `until`, removed, or re-keyed), the stream is closed with nothing more sent,
+   and a new listen gets `401`. While the profile is settling or broken, events
+   are held and keep-alives stop; held events go out only if the caller still
+   authenticates once the profile settles.
+3. **No event reaches a caller that did not ask for it.** A list-change
+   notification goes only to streams whose filter asked for that list;
+   `notifications/resources/updated` only to streams that named that URI;
+   progress only to the request it belongs to. Everything else an upstream
+   sends (log lines, unknown notifications, its own cancellations) is dropped.
+   Listing and reading are not gated by operator grants (the proxy forwards
+   `resources/*` and `prompts/*` ungated, [mcp-proxy.md](mcp-proxy.md)), so
+   any authenticated operator may ask for any of these events. The isolation
+   is between streams: nothing reaches a stream that its own caller did not
+   ask for.
+4. **E-Stop is never fenced.** An open stream never holds the dispatch lock,
+   so `revl_estop` is dispatched, or latched while another call holds the
+   session, exactly as without streams. Its reply is JSON.
+5. **A slow reader stalls no one.** Listen events are queued per stream (at
+   most 256); a stream that falls that far behind is closed, and its client may
+   listen again. A write to any stream that stalls for 10 seconds ends that
+   stream.
+
+## MRTR
+
+In 2026-07-28 a server that needs input from the client (sampling, elicitation,
+roots) returns an `InputRequiredResult` and the client retries. This server
+never does. The compiler server needs no client input, and the proxy relays no
+server-to-client request: it declares no client capability to its upstream, so
+a conforming upstream sends none, and it answers any it does send with
+`-32601` itself (mcp-proxy.md). No HTTP client therefore ever receives an input
+request.
+
+Because no `requestState` or input request is ever issued, a `tools/call`,
+`prompts/get` or `resources/read` that carries `inputResponses` or
+`requestState` is refused `400` (`-32602`) before dispatch, and nothing of it
+reaches the upstream. The spec asks a server to treat `requestState` as
+attacker-controlled; one this server never minted can only be forged.
+
 ## The one lock, a known limit
 
 Every other request waits while one is dispatched (`http_guard.DispatchLock`,
@@ -179,6 +292,16 @@ the same lock `revl serve --http` takes, issue #1488). A proxied call that block
 its full `--upstream-timeout` (120 s by default) blocks every other caller for
 that long, except `revl_estop`. This is slice 1's bound; per-request concurrency
 needs a session that can run more than one call at a time.
+
+Streams do not lift it. An SSE reply is a request still being dispatched: it
+holds the lock until its final response, like a JSON reply, and its progress
+shows the call is alive, not that another may run. A listen stream holds the
+lock only while it subscribes or unsubscribes its URIs upstream, at open and
+at close, so opening one that names resources waits for a busy session. Events
+are delivered without the lock. Reading the capabilities, for `server/discover`
+and for a listen acknowledgment, touches neither the session nor the upstream,
+so it needs no lock either; an upstream's tool-list change is acted on by the
+next dispatched request, under the lock.
 
 ## Where it may listen
 
@@ -205,7 +328,7 @@ as slice 3. A client that only discovers credentials through OAuth metadata
 cannot connect until then; one that can send a configured `Authorization` header
 can.
 
-## What slice 1 guarantees
+## What slices 1 and 2 guarantee
 
 1. No request without a valid identity is dispatched, and nothing runs as a
    default operator.
@@ -221,8 +344,15 @@ can.
    under either the old or the new version. A profile that no longer parses
    refuses every request but `revl_estop`. A partial file that stays unchanged
    for the whole settle window can still be adopted: write atomically.
+7. A stream carries only what its own caller asked for: a listen stream, the
+   events its filter named; an SSE reply, progress for that request alone. A
+   listen stream sends nothing after its caller stops authenticating.
+8. No open stream holds the dispatch lock or delays an E-Stop.
+9. No server-to-client request reaches an HTTP client, no result is an
+   `InputRequiredResult`, and a request carrying `inputResponses` or
+   `requestState` is refused before dispatch.
 
-## What it does not guarantee
+## What they do not guarantee
 
 1. That an operator is one person. A shared or stolen secret is that operator.
 2. Per-caller transactions. Commit and abort are session-wide: one operator's
@@ -231,5 +361,11 @@ can.
    from the first request after it has settled (about one second by default),
    and requests in between are refused, except `revl_estop`.
 4. Concurrency. See the one lock above.
-5. Delivery of notifications or progress. There is no stream in this slice.
-6. The OAuth 2.1 profile of the MCP spec (slice 3).
+5. Delivery. Streams are not resumable; a listen stream that falls 256 events
+   behind is closed; closing a reply stream does not cancel the call in
+   flight; and an upstream's own tool-list change is announced at the next
+   request, not when it happens.
+6. Revocation between the check and the write. The credential is checked just
+   before each event is written; an event whose check passed before a
+   revocation settled is still written, and nothing after it is.
+7. The OAuth 2.1 profile of the MCP spec (slice 3).

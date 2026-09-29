@@ -316,6 +316,10 @@ class Proxy:
         self.ir: dict | None = None
         self._last: dict | None = None
         self._pending_meta: dict | None = None
+        # where client-bound notifications go instead of stdout: the HTTP
+        # transport's event hub (`http_stream.EventHub.route`), which decides
+        # which caller's stream may carry each one
+        self.sink = None
         upstream.on_notification = self._relay
 
     @property
@@ -635,9 +639,35 @@ class Proxy:
         self._send(message)
 
     def _send(self, message: dict) -> None:
+        sink = self.sink
+        if sink is not None:
+            sink(message)
+            return
         with self._out_lock:
             self.stdout.write(json.dumps(message) + "\n")
             self.stdout.flush()
+
+    def describe(self, requested: str | None = None) -> dict:
+        """The `initialize` result. Pure: it reads the proxy and touches neither
+        the session nor the upstream, so the HTTP transport may read it without
+        the dispatch lock (`server/discover`, `subscriptions/listen`)."""
+        capabilities = {"tools": {"listChanged": True}}
+        for passthrough in ("resources", "prompts", "logging", "completions"):
+            if passthrough in self.upstream_capabilities:
+                capabilities[passthrough] = self.upstream_capabilities[passthrough]
+        name = self.upstream_info.get("name") or "the upstream server"
+        return {
+            "protocolVersion": requested if requested in _KNOWN_PROTOCOLS
+            else PROTOCOL_VERSION,
+            "capabilities": capabilities,
+            "serverInfo": {"name": "revl-mcp-proxy", "version": "2.0"},
+            "instructions": (
+                f"Every tool of {name} is gated by revl. A call to a tool "
+                "revl cannot show to be safe returns `approvalRequired` with a ticket "
+                "instead of running: relay the ticket to a human, who answers "
+                "it with revl_approve. revl_proxy_verdicts lists each tool's "
+                "class and why."),
+        }
 
     def handle(self, message: dict) -> dict | None:
         """One client JSON-RPC message -> one response (None for a notification)."""
@@ -652,24 +682,7 @@ class Proxy:
         request_id = message.get("id")
         params = message.get("params") or {}
         if method == "initialize":
-            requested = params.get("protocolVersion")
-            capabilities = {"tools": {"listChanged": True}}
-            for passthrough in ("resources", "prompts", "logging", "completions"):
-                if passthrough in self.upstream_capabilities:
-                    capabilities[passthrough] = self.upstream_capabilities[passthrough]
-            name = self.upstream_info.get("name") or "the upstream server"
-            result = {
-                "protocolVersion": requested if requested in _KNOWN_PROTOCOLS
-                else PROTOCOL_VERSION,
-                "capabilities": capabilities,
-                "serverInfo": {"name": "revl-mcp-proxy", "version": "2.0"},
-                "instructions": (
-                    f"Every tool of {name} is gated by revl. A call to a tool "
-                    "revl cannot show to be safe returns `approvalRequired` with a ticket "
-                    "instead of running: relay the ticket to a human, who answers "
-                    "it with revl_approve. revl_proxy_verdicts lists each tool's "
-                    "class and why."),
-            }
+            result = self.describe(params.get("protocolVersion"))
         elif method == "tools/list":
             result = {"tools": self._advertised()}
         elif method == "tools/call":
@@ -795,9 +808,9 @@ def _error_result(message: str) -> dict:
 
 
 class _Discard:
-    """Where client-bound notifications go when there is no stream to carry
-    them: MCP over HTTP delivers them only on `subscriptions/listen`, which the
-    first HTTP slice does not serve (docs/mcp-http-transport.md)."""
+    """The proxy's stdout under HTTP, where nothing is written to stdout: the
+    transport routes every client-bound notification through `Proxy.sink`
+    instead (docs/mcp-http-transport.md)."""
 
     def write(self, _text: str) -> int:
         return 0
