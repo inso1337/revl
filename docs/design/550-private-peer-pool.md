@@ -9,7 +9,8 @@ pool declaration, the join admission gate, the tier ladder, promotion on
 attested evidence and withdrawal are in `src/revl/peer_pool.py` with `revl pool
 init | request | join | status | withdraw`; the dispatcher is in
 `src/revl/pool_dispatch.py` with `revl pool serve | ledger` and `revl run --pool
-private`.
+private`; member liveness is in `src/revl/pool_health.py` with `revl pool probe`
+and `revl pool status --require-live`.
 
 Related and read before designing this: `docs/design/480-verifiable-private-peer-pool.md`
 (the three kernels this sits on), `src/revl/peer_offer.py`,
@@ -283,6 +284,13 @@ Running work on the member, once it is admitted ([567](567-pool-dispatch.md)):
       --attest-identity attestor.key --pool-runner test-py work.rvl
     revl pool ledger --dir ./pool
 
+Checking members are still there (see "Liveness" below):
+
+    revl pool probe --dir ./pool --peer alpha --peer-addr 127.0.0.1:<port> \
+      --dispatch-identity operator.key
+    revl pool probe --dir ./pool --dispatch-identity operator.key   # every member
+    revl pool status --dir ./pool --require-live 300                # exit 1 if not
+
 `pool status` needs no key. That is deliberate: an operator inspects membership
 without touching the secret that admits, so the roster is safe to put in a
 dashboard or a health check.
@@ -332,17 +340,85 @@ last of those. What remains:
    declared class as an effect class would be fail-open on this arrow. The
    `replayable` and `durable` tiers therefore admit nothing through the
    dispatcher until a classifier for a composition WITH a boundary exists.
-6. **Liveness and health in `pool status`.** STILL OPEN. `pool status` now
-   shows what each member OWES (`outstanding=N`, read from the delivery
-   ledger), which is what an operator deciding whether to withdraw a peer needs
-   beside what it holds. Reachability is still not shown, and
-   `src/revl/liveness.py` is the existing machinery to read from.
+6. **Liveness and health in `pool status`.** DONE, in `src/revl/pool_health.py`
+   with `revl pool probe` and `revl pool status --require-live SECONDS`; see
+   "Liveness" below. Each member's row carries what it OWES (`outstanding=N`,
+   from the delivery ledger) and whether it was last verified live, and when.
+   (This point used to name `src/revl/liveness.py` as the machinery to read
+   from. That was wrong: that module is `revl analyze`'s Petri-net deadlock
+   search over a composition and knows nothing about peers.)
 7. **Promotion has no CLI verb.** `promote` recounts evidence from
    `(receipt, attestation)` pairs and the ledger now stores those pairs for
    every delivered task, so the input exists. The verb needs charter tiers
    above `probation` that `pool init` can write, and it needs point 5's
    classifier before a promoted member could be sent anything its new tier
    allows and its old one did not.
+
+## Liveness
+
+An operator deciding whether to withdraw a peer needs three facts on one row:
+what it holds, what it owes, and whether it is still there. The first two were
+on `pool status` already. The third was only discoverable by sending the peer
+work and waiting for `peer-unreachable`, which writes an outstanding task into
+the ledger as the price of the question.
+
+`revl pool probe` asks without dispatching anything. The operator signs a
+probe with the same identity key it signs tasks with; the peer's `pool serve`
+checks it against the operator key it pinned, and the pool, charter and peer
+it names, then answers with a heartbeat signed under its own key, echoing the
+probe's nonce and digest. The operator records the result in `health.json`
+beside the roster and the ledger. A delivered task counts as a live contact
+too, and a dispatch nobody answered as an unreachable one, so `status` does not
+say `live` right after `run --pool private` found nobody there.
+
+A heartbeat is a claim, so it is checked before it is believed. Something
+answering at the address is not the member: an address is a hint and identity
+is a key. A heartbeat counts only when it verifies under an ACTIVE key the
+directory pins for that member and answers THIS probe. Otherwise it is refused
+and the member is recorded `unverified`, never `live`:
+
+| what answered | link |
+|---|---|
+| nothing | `peer-unreachable` (recorded `unreachable`) |
+| an unsigned refusal of the probe | `probe-refused`, carrying the peer's link |
+| something that is not a heartbeat | `heartbeat-shape` |
+| a heartbeat from another member | `heartbeat-identity` |
+| a heartbeat signed by a key not pinned for the member | `heartbeat-signature` |
+| a genuine heartbeat under a superseded or revoked key | `heartbeat-key` |
+| a genuine, earlier heartbeat replayed at the address | `stale-heartbeat` |
+| a genuine heartbeat about another charter | `charter-identity` |
+
+The recorded time is the operator's clock when the heartbeat verified, never
+the peer's `answered_at`, which is a value the peer chose.
+
+`pool status --require-live SECONDS` exits 1, naming the members, when any
+member's most recent contact was not a verified heartbeat inside the window.
+It needs no key, like the rest of `status`, so it can sit in a cron job or a
+dashboard.
+
+**Liveness moves no authority.** A probe writes `health.json` and nothing
+else; a test asserts the charter, roster and identity directory are the same
+bytes after three probes as before them, and an AST walk asserts
+`pool_health` calls none of `admit`, `promote`, `withdraw`, `orphan`,
+`register`, `rotate`, `revoke` or any `save_` of the roster, directory or
+ledger. A member that stops answering is shown unreachable with what it owes
+on the same row, and stays a member. Removing it is `pool withdraw`, which
+checks the charter's revoke authority and hands its outstanding work to
+`lawful_retry`. An automatic withdrawal on missed heartbeats would be a second
+authority beside the one the charter declares, and a peer that could be
+knocked off the network could then be knocked out of the pool by anyone who
+can drop its packets.
+
+Limits, stated. A heartbeat proves the member's key is in use at an address
+the operator can reach at that moment; it does not prove the peer will run the
+next task, and it proves nothing about a machine the operator cannot reach.
+`health.json` is written under the same pool lock as the roster and the
+ledger, and re-read under it after the exchange, so two probes of two members
+keep both rows.
+A shared-key member has no key pair for a heartbeat to verify under, so it is
+never `live`. It cannot run `pool serve` either, which already needs an
+identity key, so this adds no new gap; it is the same pressure toward
+`asymmetric` mode the identity census applies.
 
 ## Adversarial review
 
@@ -372,7 +448,10 @@ terms. Refused on `pool-identity`. Pinned by `another-charter`.
 **A5. Join replay.** A captured join record is submitted again, or twice
 concurrently. Refused on `replayed-join` from the roster's spent-nonce ledger,
 and on `duplicate-member` if the nonce ledger were somehow bypassed, so there
-are two independent refusals on the path to a second admission. A refused join
+are two independent refusals on the path to a second admission. Across two
+operator processes this rests on the pool lock: the gate's read of the
+spent-nonce set and its write of the roster are one transaction (issue #1198).
+A refused join
 does NOT spend the nonce, so fixing the cause of a refusal and retrying the same
 request works, which is also tested.
 
@@ -420,9 +499,18 @@ parametrized hostile-input test over ten malformed records.
   closed that: it is now `len(evidence_digests)`, recounted by
   `pool_receipt.count_evidence` from receipts the pool verified, and there is
   no parameter through which a count can be stated.
-* The roster is a JSON file with no concurrency control. Two operators admitting
-  at once on a shared directory would race. A single-writer operator is the
-  assumed deployment and a durable multi-writer roster is not designed here.
+* The roster, the key directory, the ledger and the health record are JSON
+  files in one directory. Since issue #1198's concurrency slice every writer
+  holds an exclusive lock on `pool.lock` in that directory for its whole
+  read-modify-write, never across the network, and every file is replaced
+  atomically (`src/revl/pool_state.py`), so several operator processes on one
+  machine or one shared POSIX filesystem can write the pool at once without
+  losing an update. What that does NOT give: the lock is advisory, so it binds
+  `revl` and not another program editing the files; `flock` over a network
+  filesystem is only as good as that filesystem's locking; and a reader that
+  takes no lock (`pool status`) sees each file whole but may see a roster from
+  one transaction and a ledger from the next. A replicated multi-operator pool
+  is still not designed here.
 * `Roster.outstanding` is populated by whatever dispatches work. That is now
   `pool_dispatch`, so a withdrawal reports the tasks the peer really owed; with
   no dispatcher in the picture it still reports an empty `orphaned` set, which

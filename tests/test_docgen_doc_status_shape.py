@@ -33,21 +33,15 @@ fails and names the column that did it.
 """
 from __future__ import annotations
 
-import importlib.util
-import sys
 from pathlib import Path
 
 import pytest
+from _load_by_path import load_by_path
 
 REPO = Path(__file__).resolve().parents[1]
 
 # docgen is a tool, not a package module. Load it by path, the way CI runs it.
-_spec = importlib.util.spec_from_file_location(
-    "revl_docgen_under_test", REPO / "tools" / "docgen.py"
-)
-docgen = importlib.util.module_from_spec(_spec)
-sys.modules[_spec.name] = docgen
-_spec.loader.exec_module(docgen)
+docgen = load_by_path("revl_docgen_under_test", REPO / "tools" / "docgen.py")
 
 
 # The committed table the generation carries human judgement across. `alpha.md`

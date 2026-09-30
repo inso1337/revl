@@ -660,7 +660,8 @@ def _emitted(src: str):
     """Compile `src`, emit the cordis-py module, and exec it."""
     import types
 
-    import emit as py_emit
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    py_emit = python_backend_emitter()
     source = py_emit.emit(compile_source(src, "m.rvl"))
     module = types.ModuleType("memo_probe")
     exec(compile(source, "memo_probe.py", "exec"), module.__dict__)  # noqa: S102

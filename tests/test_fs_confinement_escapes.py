@@ -65,7 +65,8 @@ def _fs_module():
     """The emitted py module for stdlib/fs.rvl, so the real `write`/`rm`/
     `restore`/`unrm` `@py` bodies can be driven directly (the shape
     tests/test_fs_stdlib.py uses)."""
-    import emit  # noqa: PLC0415  (backends/python on path)
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     ir = copy.deepcopy(_BASE)
     ir["components"] = [_component()]
     module = types.ModuleType("fs_escape_mod")
