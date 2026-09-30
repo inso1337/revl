@@ -27,7 +27,6 @@ rule that decides the `W` row could move with nothing collecting it.
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -35,6 +34,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from _load_by_path import load_by_path  # noqa: E402
 
 #: The reproducers: one wiring key, two different boundaries. The first
 #: declares its two tokens (issue 1142); the second declares nothing at all
@@ -54,11 +54,9 @@ BOUND_CASE = ("examples/interpose_observe.rvl", "Seam", "db", "Db", "execute")
 
 @pytest.fixture(scope="module")
 def harness():
-    spec = importlib.util.spec_from_file_location(
-        "formal_diff_corpus", ROOT / "formal" / "harness" / "diff_corpus.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "formal_diff_corpus",
+        ROOT / "formal" / "harness" / "diff_corpus.py")
     return module
 
 

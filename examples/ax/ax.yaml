@@ -1,0 +1,111 @@
+# revl as the MCP gate inside a google/ax Workspace. See README.md.
+#
+# Written against google/ax commit 9edb7b1b0ca55f71670da02674b5cd6adeb49b7e
+# (v0.3.1-7-g9edb7b1). AX is alpha and says breaking changes are expected.
+# `spec.files` below first appeared after v0.3.1, so v0.3.1 itself rejects this
+# file. Run ./validate.sh before using it with any other AX commit.
+#
+#   ax apply -f examples/ax/ax.yaml
+#   ax resume task revl-gated-triage
+#
+# Every path below assumes the workspace is mounted at /workspace/app, which is
+# what the Task binds. Change both together.
+---
+apiVersion: ax.io/v1alpha1
+kind: Workspace
+metadata:
+  name: revl-gated
+  atespace: default
+spec:
+  files:
+    # The operator's host code. The agent may compose the Tickets service; it
+    # may not declare host code of its own or call host_file directly
+    # (`revl mcp serve` compiles agent source under the untrusted-author
+    # profile). The body is a stand-in that appends to $TICKETS_OUTBOX:
+    # replace it with your real client.
+    - path: .revl/tickets.rvl
+      content: |
+        service Tickets {
+          emission[tickets] fn file(title: Str)
+        }
+
+        pub extern emission[tickets] fn host_file(title: Str) = @py {
+            import os
+            with open(os.environ["TICKETS_OUTBOX"], "a", encoding="utf-8") as out:
+                out.write("filed:" + title + chr(10))
+            return
+        }
+
+        component TicketDesk provides tickets: Tickets {
+          provide tickets {
+            fn file(title) { emit host_file(title) }
+          }
+        }
+    # Runs the agent, then asks revl what the agent left outside the sandbox.
+    # AX writes inlined files 0644, so the Task runs this with `sh`.
+    - path: .revl/after-agent.sh
+      content: |
+        #!/bin/sh
+        # usage: sh after-agent.sh <agent command...>
+        here=$(cd "$(dirname "$0")" && pwd)
+        "$@"
+        status=$?
+        mkdir -p "$here/recovery"
+        for wal in "$here"/wal/*.wal; do
+          [ -e "$wal" ] || continue
+          name=$(basename "$wal" .wal)
+          revl recover --wal "$wal" --json > "$here/recovery/$name.json"
+          echo "revl recover $name: exit $? (0 clean, 1 residue); verdict in $here/recovery/$name.json"
+        done
+        exit "$status"
+  mcp:
+    servers:
+      # The one MCP server this task gets. Every outside effect goes through
+      # it. AX's MCPServer has no cwd or env field, so the shell sets both;
+      # an MCP client that scrubs its children's environment cannot drop them.
+      - name: revl-gate
+        command: sh
+        args:
+          - -c
+          - >-
+            cd /workspace/app/.revl &&
+            exec env
+            REVL_WAL_DIR=/workspace/app/.revl/wal
+            TICKETS_OUTBOX=/workspace/app/.revl/outbox.log
+            revl mcp serve
+            --provider tickets.rvl
+            --grant Tickets
+            --root /workspace/app
+            --approval-policy auto
+      # Slot for `revl mcp proxy` (issue #1463, not released yet). It is meant
+      # to sit in front of an existing MCP server with no .rvl written. Once
+      # it ships, an entry here would launch the proxy with the upstream
+      # server's command. Its flags are not final: take them from
+      # `revl mcp proxy --help` in the release you install, then re-run
+      # ./validate.sh.
+      #
+      # - name: git-tools
+      #   command: revl
+      #   args: [mcp, proxy, <flags from the release>, <upstream server command>]
+---
+apiVersion: ax.io/v1alpha1
+kind: Task
+metadata:
+  name: revl-gated-triage
+  atespace: default
+spec:
+  # An image built from ./Dockerfile and pushed to a registry your cluster can
+  # pull from. Agent Substrate requires the digest form.
+  image: "registry.example.com/revl-ax-task@sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  # Replace `your-agent ...` with your agent. It must read `mcp.servers` from
+  # $AX_METADATA_URL/metadata/v1alpha1/ax/workspaces (or $AX_WORKSPACES_YAML)
+  # and start them itself: the default AX runner does not write an MCP
+  # client config at this commit.
+  command: ["sh", "/workspace/app/.revl/after-agent.sh", "your-agent", "--task", "triage the failing build"]
+  workspaces:
+    - name: revl-gated
+      path: /workspace/app
+  # `ax ssh` needs debug: true, which also serves process and file access
+  # into the sandbox. Leave it off unless you need to read the verdict files
+  # in place.
+  debug: false

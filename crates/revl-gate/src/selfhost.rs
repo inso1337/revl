@@ -183,6 +183,13 @@ pub struct SRun {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct StmtBlk {
+    ss: Vec<Stmt>,
+    i: i64,
+    ok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MethsR {
     xs: Vec<MSig>,
     i: i64,
@@ -7759,6 +7766,107 @@ fn p_stmt_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
     return mk_srun(vec![mkstmt(String::from("expr"), r2.e.clone())], r2.i);
 }
 
+fn blk_no() -> StmtBlk {
+    return StmtBlk { ss: vec![], i: 0i64, ok: false };
+}
+
+fn scope_stmt(kind: String) -> Stmt {
+    return mkstmt(kind.clone(), expr_bind_only());
+}
+
+fn scoped(ss: Vec<Stmt>) -> Vec<Stmt> {
+    let open = vec![scope_stmt(String::from("scope_open"))];
+    return append_stmts(open.clone(), ss.clone()).revl_push(scope_stmt(String::from("scope_close")));
+}
+
+fn p_block_arm(ts: Vec<Token>, k: i64) -> StmtBlk {
+    if atk(&ts, k, "{") {
+        let e = close_brace(&ts, k);
+        if (e == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return blk_no();
+        }
+        return StmtBlk { ss: p_stmts(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"), (e).checked_sub(1i64).expect("revl: Int overflow"), vec![]), i: e, ok: true };
+    }
+    if (((k >= ts.revl_length()) || atk(&ts, k, "eof")) || atk(&ts, k, "}")) {
+        return blk_no();
+    }
+    let le = line_end(&ts, k, ts.revl_length());
+    let r = p_run(ts.clone(), k, le);
+    return StmtBlk { ss: stamp_lines(&r.ss, tkc(&ts, k).line), i: if (r.i > k) { r.i } else { le }, ok: true };
+}
+
+fn p_block_cond(ts: Vec<Token>, k: i64) -> StmtBlk {
+    if (!atk(&ts, k, "(")) {
+        return blk_no();
+    }
+    let c = expr_at(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"));
+    if (is_bad(c.e.clone()) || (!atk(&ts, c.i, ")"))) {
+        return blk_no();
+    }
+    return StmtBlk { ss: stamp_lines(&(vec![mkstmt(String::from("expr"), c.e.clone())]), tkc(&ts, k).line), i: (c.i).checked_add(1i64).expect("revl: Int overflow"), ok: true };
+}
+
+fn p_else_tail(ts: Vec<Token>, k: i64, acc: Vec<Stmt>) -> StmtBlk {
+    if (!atw(&ts, k, "else")) {
+        return StmtBlk { ss: acc.clone(), i: k, ok: true };
+    }
+    if atw(&ts, (k).checked_add(1i64).expect("revl: Int overflow"), "if") {
+        let ei = p_block_stmt(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"));
+        if (!ei.ok) {
+            return StmtBlk { ss: acc.clone(), i: k, ok: true };
+        }
+        return StmtBlk { ss: append_stmts(acc.clone(), ei.ss.clone()), i: ei.i, ok: true };
+    }
+    let el = p_block_arm(ts.clone(), (k).checked_add(1i64).expect("revl: Int overflow"));
+    if (!el.ok) {
+        return StmtBlk { ss: acc.clone(), i: k, ok: true };
+    }
+    return StmtBlk { ss: append_stmts(acc.clone(), scoped(el.ss.clone())), i: el.i, ok: true };
+}
+
+fn p_block_stmt(ts: Vec<Token>, lo: i64) -> StmtBlk {
+    if (atw(&ts, lo, "if") || atw(&ts, lo, "while")) {
+        let c = p_block_cond(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"));
+        if (!c.ok) {
+            return blk_no();
+        }
+        let body = p_block_arm(ts.clone(), c.i);
+        if (!body.ok) {
+            return blk_no();
+        }
+        let ss = append_stmts(c.ss.clone(), scoped(body.ss.clone()));
+        if atw(&ts, lo, "while") {
+            return StmtBlk { ss: ss.clone(), i: body.i, ok: true };
+        }
+        return p_else_tail(ts.clone(), body.i, ss.clone());
+    }
+    if (((atw(&ts, lo, "for") && atk(&ts, (lo).checked_add(1i64).expect("revl: Int overflow"), "(")) && atk(&ts, (lo).checked_add(2i64).expect("revl: Int overflow"), "ident")) && atw(&ts, (lo).checked_add(3i64).expect("revl: Int overflow"), "of")) {
+        let it = expr_at(ts.clone(), (lo).checked_add(4i64).expect("revl: Int overflow"));
+        if (is_bad(it.e.clone()) || (!atk(&ts, it.i, ")"))) {
+            return blk_no();
+        }
+        let body2 = p_block_arm(ts.clone(), (it.i).checked_add(1i64).expect("revl: Int overflow"));
+        if (!body2.ok) {
+            return blk_no();
+        }
+        let ln = tkc(&ts, lo).line;
+        let elem = stamp_lines(&(vec![mkstmtb(String::from("expr"), expr_bind_only(), tkc(&ts, (lo).checked_add(2i64).expect("revl: Int overflow")).text)]), ln);
+        let head = stamp_lines(&(vec![mkstmt(String::from("expr"), it.e.clone())]), ln);
+        return StmtBlk { ss: append_stmts(head.clone(), scoped(append_stmts(elem.clone(), body2.ss.clone()))), i: body2.i, ok: true };
+    }
+    return blk_no();
+}
+
+fn p_run(ts: Vec<Token>, lo: i64, hi: i64) -> SRun {
+    if ((atw(&ts, lo, "if") || atw(&ts, lo, "while")) || atw(&ts, lo, "for")) {
+        let b = p_block_stmt(ts.clone(), lo);
+        if b.ok {
+            return mk_srun(b.ss.clone(), b.i);
+        }
+    }
+    return p_stmt_run(ts.clone(), lo, hi);
+}
+
 fn append_stmts(a: Vec<Stmt>, bs: Vec<Stmt>) -> Vec<Stmt> {
     let mut out = a;
     let mut i = 0i64;
@@ -7774,7 +7882,7 @@ fn stamp_lines(ss: &[Stmt], ln: i64) -> Vec<Stmt> {
     let mut i = 0i64;
     while (i < ss.revl_length()) {
         let s = (ss)[(i) as usize].clone();
-        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: ln, inTimer: s.inTimer, bindTy: s.bindTy.clone() });
+        out.push(Stmt { kind: s.kind.clone(), e: s.e.clone(), bind: s.bind.clone(), spawnTarget: s.spawnTarget.clone(), awaited: s.awaited, line: if (s.line == 0i64) { ln } else { s.line }, inTimer: s.inTimer, bindTy: s.bindTy.clone() });
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
@@ -7792,11 +7900,14 @@ fn mark_timer(ss: &[Stmt]) -> Vec<Stmt> {
 }
 
 fn p_stmts(ts: Vec<Token>, lo: i64, hi: i64, acc: Vec<Stmt>) -> Vec<Stmt> {
-    if ((lo >= hi) || atk(&ts, lo, "}")) {
+    if (lo >= hi) {
         return acc;
     }
+    if atk(&ts, lo, "}") {
+        return p_stmts(ts.clone(), (lo).checked_add(1i64).expect("revl: Int overflow"), hi, acc.clone());
+    }
     let le = line_end(&ts, lo, hi);
-    let r = p_stmt_run(ts.clone(), lo, le);
+    let r = p_run(ts.clone(), lo, le);
     let nx = if (r.i > lo) { r.i } else { le };
     return p_stmts(ts.clone(), nx, hi, append_stmts(acc.clone(), stamp_lines(&r.ss, tkc(&ts, lo).line)));
 }
@@ -8446,8 +8557,11 @@ fn handoff_twice_msg(cname: &str) -> String {
 }
 
 fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bind>, cname: &str, provs: Vec<Provide>, setup: Vec<Stmt>, iso: Vec<ProvKey>, rts: Vec<Route>, icept: Vec<String>, hoff: Bind, action: bool) -> ProvR {
-    if ((i >= end) || atk(&ts, i, "}")) {
+    if (i >= end) {
         return mk_provr_h(provs.clone(), setup.clone(), iso.clone(), rts.clone(), hoff.clone(), i);
+    }
+    if atk(&ts, i, "}") {
+        return p_comp_body(ts.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), end, provh.clone(), reqh.clone(), cname, provs.clone(), setup.clone(), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), action);
     }
     if atw(&ts, i, "provide") {
         let key = tkc(&ts, (i).checked_add(1i64).expect("revl: Int overflow")).text;
@@ -8545,7 +8659,7 @@ fn p_comp_body(ts: Vec<Token>, i: i64, end: i64, provh: Vec<Bind>, reqh: Vec<Bin
         }
     }
     let le = line_end(&ts, i, end);
-    let r = p_stmt_run(ts.clone(), i, le);
+    let r = p_run(ts.clone(), i, le);
     let nx = if (r.i > i) { r.i } else { le };
     return p_comp_body(ts.clone(), nx.clone(), end, provh.clone(), reqh.clone(), cname, provs.clone(), append_stmts(setup.clone(), r.ss.clone()), iso.clone(), rts.clone(), icept.clone(), hoff.clone(), true);
 }
@@ -10730,17 +10844,28 @@ fn has_use_decl(ts: &[Token]) -> bool {
 }
 
 fn mth_rebind(pm: ProvM, scope: &[String], i: i64) -> Verd {
+    return mth_rebind_in(pm.clone(), scope, &(vec![]), i);
+}
+
+fn mth_rebind_in(pm: ProvM, scope: &[String], marks: &[i64], i: i64) -> Verd {
     if (i >= pm.body.revl_length()) {
         return no_verd();
     }
     let s = (pm.body)[(i) as usize].clone();
+    if (s.kind == "scope_open") {
+        return mth_rebind_in(pm.clone(), scope, &(marks.revl_push(scope.revl_length())), (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
+    if ((s.kind == "scope_close") && (marks.revl_length() > 0i64)) {
+        let m = (marks)[((marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow")) as usize].clone();
+        return mth_rebind_in(pm.clone(), &(scope.revl_slice(0i64, m)), &(marks.revl_slice(0i64, (marks.revl_length()).checked_sub(1i64).expect("revl: Int overflow"))), (i).checked_add(1i64).expect("revl: Int overflow"));
+    }
     if (s.bind == "") {
-        return mth_rebind(pm.clone(), scope, (i).checked_add(1i64).expect("revl: Int overflow"));
+        return mth_rebind_in(pm.clone(), scope, marks, (i).checked_add(1i64).expect("revl: Int overflow"));
     }
     if contains__m2(scope, &s.bind) {
         return mk_verd(tagged("G6", &((((String::from("`").revl_concat(&s.bind)).revl_concat("` is already bound in `")).revl_concat(&pm.name)).revl_concat("`"))), s.line);
     }
-    return mth_rebind(pm.clone(), &(scope.revl_push(s.bind.clone())), (i).checked_add(1i64).expect("revl: Int overflow"));
+    return mth_rebind_in(pm.clone(), &(scope.revl_push(s.bind.clone())), marks, (i).checked_add(1i64).expect("revl: Int overflow"));
 }
 
 fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind]) -> Verd {

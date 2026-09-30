@@ -26,7 +26,7 @@ from fnmatch import fnmatchcase
 
 from .. import cap_order
 from .. import intent as _intent
-from .._paths import backends_root
+from .._paths import backends_root, python_backend_emitter
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
@@ -456,10 +456,8 @@ def _emitter_refused(refusal: BaseException) -> "SessionError":
 def _backend():
     """Import the cordis-py runtime, with the same guidance `revl run` gives."""
     backend_dir = backends_root() / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
     try:
-        import emit  # noqa: PLC0415 — backend import after path setup
+        emit = python_backend_emitter()
         import runtime as runtime_mod  # noqa: PLC0415
         from cordis import Context  # noqa: PLC0415
         from cordis.fiber import FiberState  # noqa: PLC0415

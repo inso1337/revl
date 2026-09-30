@@ -41,14 +41,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _census():
-    spec = importlib.util.spec_from_file_location(
-        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "gate_reference_census",
+        ROOT / "tools" / "gate_reference_census.py")
     return module
 
 
@@ -237,6 +236,44 @@ def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):
         "re-record the census baseline:\n  " + "\n  ".join(fixed))
 
 
+# --- authority rules after a block (tests/fixtures/gate_block_nesting/) -------
+#
+# The gate's statement reader lost track of block nesting. A `}` that began a
+# line ended the enclosing body, so a multi-line activation guard hid every
+# `provide` after it and a multi-line `if`/`while` hid every statement after it
+# in a provide method. A block written on one line was skipped whole. The
+# reference refused all of them under G1 or G4 and the gate raised no objection.
+# The census stayed green because no corpus document put a violation after, or
+# inside, a block.
+#
+# The census compares only the TRACKED buckets against its baseline, so a
+# document here that drifted to a refusal the reference raises for some other
+# reason would read as `no-objection-out-of-slice` and nobody would notice. Each
+# document's bucket is therefore held by name: the file name's prefix is the
+# verdict (`g1_`, `g4_` refused under that guarantee, `ok_` admitted).
+BLOCK_NESTING = ROOT / "tests" / "fixtures" / "gate_block_nesting"
+
+
+def _block_nesting_expected(stem: str) -> str:
+    if stem.startswith("ok_"):
+        return "agree-admit"
+    return "agree-refuse/" + stem.split("_", 1)[0].upper()
+
+
+def test_every_authority_rule_after_a_block_is_refused_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(BLOCK_NESTING.glob("*.rvl"))
+    assert len(docs) >= 40, f"the block-nesting corpus shrank to {len(docs)}"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["block-nesting documents moved:"] + wrong)
+
+
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
     """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
     calls its reference set is read STATICALLY out of `_classify`, so that the
@@ -246,11 +283,9 @@ def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measure
     the row has a blind family and the ratchet cannot see it go unreached.
 
     Here rather than beside the report because the run is already paid for."""
-    spec = importlib.util.spec_from_file_location(
-        "oracle_construct_reach", ROOT / "tools" / "oracle_construct_reach.py")
-    reach = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = reach
-    spec.loader.exec_module(reach)
+    reach = load_by_path(
+        "oracle_construct_reach",
+        ROOT / "tools" / "oracle_construct_reach.py")
     surveyed = reach._census_guarantees()
 
     _, (buckets, _) = measured
