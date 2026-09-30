@@ -71,6 +71,7 @@ that provide the same key (see the note atop `tests/semantics.test.ts`).
 | `tests/frame_teardown.test.ts` | `Frame` unit coverage — bracket / transactional / compensation on one LIFO stack, two-phase abort, residue records (item 243 Slice 2b) |
 | `tests/witnessed_teardown.test.ts` | the three-entry-kind teardown loop end to end through a real cordis composition (item 243 Slice 2b) |
 | `tests/method_witnessed.test.ts` | THE H1 GATE (item 318 → 324): a witnessed fs mutation fired from a PROVIDE-METHOD, per tool call — persists on clean unload, reverts on `frame.abort()`, residue enumerable (`Frame.transactionalMethod`) |
+| `tests/reserved_method_names.test.ts` | every TypeScript keyword the frontend admits, as a provided method: called by its contract name and through a required service (issue #1512) |
 | `REPORT.md` | impedance mismatches, upstream bugs, IR contract notes, LOC, ship-first recommendation |
 
 The reference IR is read from `../../examples/user_cache.ir.json` when this
