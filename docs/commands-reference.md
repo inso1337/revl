@@ -1956,6 +1956,30 @@ first-party code, so `stdlib/admit.rvl`'s `admission.admit` (whose `granted` is
 `Trusted[List[Str]]`) is never served. `revl serve` prints each withheld
 operation to stderr at start.
 
+The face authenticates nobody itself: a routed handler that takes a `Bearer`
+runs `auth.validate`, and on the py tier `stdlib/auth.rvl` backs that with an
+HS256 JWT validator (issue #1554). It verifies the signature and requires
+`exp`, `iss`, `aud` and `sub`. Configure it through the environment of the
+`revl serve` process, never through `--config`:
+
+- `REVL_AUTH_HS256_SECRET` (or `REVL_AUTH_HS256_SECRET_FILE`, a file holding
+  it) - the shared key, at least 32 bytes.
+- `REVL_AUTH_ISSUER` - the exact `iss` a token must carry.
+- `REVL_AUTH_AUDIENCE` - the audience a token's `aud` must contain.
+- `REVL_AUTH_LEEWAY` - optional clock-skew allowance, 0 to 300 seconds.
+
+A valid token's `sub` becomes the `Principal`'s subject. A bad token is a `401`.
+With no validator configured, every authenticated route answers `503`
+`auth_not_configured`, naming the variables to set. The any-token test stub
+(a non-blank token is that subject) runs only with
+`REVL_AUTH_INSECURE_DEV_STUB=1`, and is refused if a key is also set. With
+that flag set to any value, `revl serve --http` refuses to start on a
+non-loopback `--host` (exit 2, naming the flag and the address), before it
+loads or binds anything; `127.0.0.1`, `::1` and names that resolve only to
+loopback still start. The ts,
+rust, go, java and wasm tiers have no validator body, so emitting a composition
+that composes `stdlib/auth.rvl` for them is refused at compile time.
+
 - `FILES` (required).
 - One transport (mutually exclusive; required):
   - `--mcp` - serve over the MCP stdio protocol. Every provided operation that
