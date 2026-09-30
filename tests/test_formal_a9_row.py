@@ -26,7 +26,6 @@ directions, and the coverage ratchet. Nothing here runs Lean.
 
 from __future__ import annotations
 
-import importlib.util
 import io
 import re
 import sys
@@ -37,6 +36,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from _load_by_path import load_by_path  # noqa: E402
 
 #: Direction 1's refused shape: `provides skin1: Skin` with `provide skin { … }`.
 FIXTURE = "examples/rejections/a9_provide_key_not_declared.rvl"
@@ -57,11 +57,9 @@ GATE = ROOT / "formal" / "scripts" / "run_gate.sh"
 
 @pytest.fixture(scope="module")
 def harness():
-    spec = importlib.util.spec_from_file_location(
-        "formal_diff_corpus", ROOT / "formal" / "harness" / "diff_corpus.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "formal_diff_corpus",
+        ROOT / "formal" / "harness" / "diff_corpus.py")
     return module
 
 

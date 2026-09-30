@@ -31,6 +31,7 @@ import sys
 from .approval import ApprovalRequired, two_step_payload
 from .schema import tools_from_ir
 from .session import Session, SessionError
+from .surface import DeclaredTypes, Withheld, withheld_operations
 
 PROTOCOL_VERSION = "2024-11-05"
 
@@ -56,24 +57,38 @@ class ComposedServer:
     One live :class:`Session` drives the composition; each advertised tool
     resolves to a ``(key, method, param_names)`` route, and a ``tools/call``
     lands on ``Session.call`` against the running system.
+
+    An operation with an authority parameter (`surface.withheld_operations`:
+    a `Principal`, or a declared `Trusted[...]`) is WITHHELD: it is not
+    advertised, and a ``tools/call`` naming it is refused by name before the
+    session is touched (item 569 B1). `declared` is
+    `surface.declared_param_types(files)`; without it only `Principal` is
+    visible, since the IR does not carry `Trusted[...]`.
     """
 
-    def __init__(self, session: Session, composition: str = "revl") -> None:
+    def __init__(self, session: Session, composition: str = "revl",
+                 declared: DeclaredTypes | None = None) -> None:
         self.session = session
         self.composition = composition
         self._advertised: list[dict] = []
         self._routes: dict[str, tuple[str, str, list[str]]] = {}
-        self._project(session.ir or {})
+        self._withheld: dict[str, Withheld] = {}
+        self._project(session.ir or {}, declared)
 
-    def _project(self, ir: dict) -> None:
+    def _project(self, ir: dict, declared: DeclaredTypes | None = None) -> None:
         """Reuse the schema projection, and remember how each tool name maps
         back onto a provided key + operation for dispatch."""
         self._advertised = []
         self._routes = {}
+        self._withheld = {}
+        withheld = withheld_operations(ir, declared)
         for tool in tools_from_ir(ir, composition=self.composition):
             provenance = tool.get("x-revl") or {}
             key = provenance.get("key")
             method = provenance.get("operation")
+            if (key, method) in withheld:
+                self._withheld[tool["name"]] = withheld[(key, method)]
+                continue
             params = list((tool.get("inputSchema") or {}).get("properties") or {})
             self._routes[tool["name"]] = (key, method, params)
             self._advertised.append(tool)
@@ -136,6 +151,8 @@ class ComposedServer:
         elif method == "tools/call":
             params = message.get("params") or {}
             name = params.get("name")
+            if name in self._withheld:
+                return _error(request_id, -32602, self._withheld[name].message())
             if name not in self._routes:
                 return _error(request_id, -32602, f"unknown tool: {name}")
             payload = self._call_tool(name, params.get("arguments") or {})
@@ -184,7 +201,8 @@ def _error(request_id, code: int, message: str) -> dict:
 
 
 def serve_composition(ir: dict, config: dict | None = None, *,
-                      composition: str = "revl", stdin=None, stdout=None) -> int:
+                      composition: str = "revl", stdin=None, stdout=None,
+                      declared: DeclaredTypes | None = None) -> int:
     """Boot `ir` into a live session and serve its provided operations.
 
     Booting is admission: a composition is loaded through the same
@@ -197,4 +215,8 @@ def serve_composition(ir: dict, config: dict | None = None, *,
     # there is nothing to replay through the gate later (session.py documents
     # None as "this session cannot be snapshotted").
     session.load(ir, config or {}, origin=None)
-    return ComposedServer(session, composition=composition).serve(stdin, stdout)
+    server = ComposedServer(session, composition=composition, declared=declared)
+    for withheld in server._withheld.values():
+        # stderr: stdout is the protocol stream
+        print(f"revl serve --mcp: withheld: {withheld.message()}", file=sys.stderr)
+    return server.serve(stdin, stdout)

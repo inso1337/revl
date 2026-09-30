@@ -33,6 +33,19 @@ else
     PYTEST=""
 fi
 
+# That fallback interpreter carries an editable install of revl pointing at the
+# MAIN checkout's src/ (a plain `.pth` path entry). tests/conftest.py puts this
+# tree's src/ on sys.path for the pytest process, but every python a test or a
+# step starts would still import the main checkout's revl and measure a tree
+# other than the one being committed. PYTHONPATH entries come before
+# site-packages and before anything a `.pth` appends, so exporting this tree's
+# src/ first makes the process and all of its children agree.
+# tests/test_child_python_resolves_this_tree.py holds it.
+if [ -d "$root/src/revl" ]; then
+    PYTHONPATH="$root/src${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH
+fi
+
 fail=0
 step() {
     printf '  %-36s' "$1"

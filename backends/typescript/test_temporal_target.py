@@ -20,7 +20,6 @@ Full Temporal-SDK runtime execution is deferred (the roadmap exit test runs the
 saga on a real dev server); Slice 1 goldens the generated code SHAPE.
 """
 
-import importlib.util
 import json
 import shutil
 import subprocess
@@ -33,30 +32,37 @@ _HERE = Path(__file__).resolve().parent
 _ROOT = _HERE.parent.parent
 if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+# tests/ is APPENDED so it resolves only `_load_by_path`, nothing earlier on
+# sys.path provides (the same arrangement as backends/java's tests).
+if str(_ROOT / "tests") not in sys.path:
+    sys.path.append(str(_ROOT / "tests"))
 
 from revl import compile_source  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
-
-def _emit_module():
-    """Load emit.py under the canonical name `emit`, the same name its sibling
-    `emit_temporal.py` imports from (so both share one `EmitError`)."""
-    if "emit" in sys.modules and getattr(sys.modules["emit"], "__file__", "") \
-            == str(_HERE / "emit.py"):
-        return sys.modules["emit"]
-    spec = importlib.util.spec_from_file_location("emit", _HERE / "emit.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["emit"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-EMIT = _emit_module()
+# Issue #1575: this module used to register the typescript emitter as the bare
+# `sys.modules["emit"]`, and put backends/typescript on sys.path, for the rest
+# of the session. Every backend directory has an `emit.py`, and the py tier
+# reaches its own through that bare name, so any later test that booted a py
+# composition refused with "another backend's emitter was imported under the
+# bare name `emit`" (tests/test_realm_placement_over_the_transport.py, when it
+# ran after this file). The emitter is loaded under a name nothing else binds,
+# and neither global is touched: `emit(..., target="temporal")` binds the bare
+# name only for the duration of its own import of the Temporal sink
+# (`emit.py::_emit_temporal`) and restores it.
+EMIT = load_by_path("revl_ts_emit_temporal_tests", _HERE / "emit.py")
 
 
 def _emit_temporal_module():
-    return importlib.import_module("emit_temporal")
+    """The Temporal sink module the emitter itself renders through, so its
+    `TemporalRefusal` and `EmitError` are the classes the emitter raises. The
+    emitter imports it as `emit_temporal`, inside a window where `emit` names
+    this emitter; the first temporal render here opens that window."""
+    module = sys.modules.get("emit_temporal")
+    if module is None or Path(module.__file__).resolve() != _HERE / "emit_temporal.py":
+        EMIT.emit(_booktrip_ir(), target="temporal")
+        module = sys.modules["emit_temporal"]
+    return module
 
 
 # A mappable saga: two remote-resource crossings with independent-key

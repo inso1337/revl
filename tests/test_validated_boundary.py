@@ -31,7 +31,8 @@ from revl.mcp.schema import (  # noqa: E402
     json_schema_for,
 )
 
-import emit  # noqa: E402
+from revl._paths import python_backend_emitter  # noqa: E402
+emit = python_backend_emitter()
 from runtime import ResponseValidationError, validate_response  # noqa: E402
 
 

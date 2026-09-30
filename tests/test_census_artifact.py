@@ -26,7 +26,6 @@ programs), so it happens once per module.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -36,13 +35,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _load(rel: str, name: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / rel)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(name, ROOT / rel)
     return module
 
 

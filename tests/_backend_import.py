@@ -9,10 +9,12 @@ addendum). Load by path under a unique module name instead; loaded
 modules are cached in ``sys.modules`` so a combined run executes each
 emitter exactly once.
 
-Deliberate exception: tests/test_replay.py keeps the canonical
-``import emit / import runtime`` — emitted modules do ``from runtime
-import ...``, so an aliased copy would be a *different* module object and
-its trace fixture would observe nothing.
+Deliberate exception: tests/test_replay.py keeps the canonical names
+``emit`` and ``runtime``: emitted modules do ``from runtime import ...``,
+so an aliased copy would be a *different* module object and its trace
+fixture would observe nothing. It reaches ``emit`` through
+``revl._paths.python_backend_emitter()``, which imports the canonical name
+and refuses one bound to another backend's file (issue #1449).
 """
 from __future__ import annotations
 

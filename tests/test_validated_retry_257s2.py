@@ -32,7 +32,8 @@ from revl import RevlError, compile_source  # noqa: E402
 from revl.cardinality import cardinality  # noqa: E402
 from revl.mcp.schema import json_schema_for  # noqa: E402
 
-import emit  # noqa: E402
+from revl._paths import python_backend_emitter  # noqa: E402
+emit = python_backend_emitter()
 from runtime import (  # noqa: E402
     ResponseValidationError,
     TransientError,
