@@ -1745,7 +1745,31 @@ becomes an `emission`).
 - `--key KEY` - provision key (default: `imported`).
 - `--backend {ts, py}` - host block backend for the generated externs
   (default: `ts`).
+- `--undo TOOL=INVERSE[:result]` - declare `INVERSE` as the tool that reverts
+  `TOOL`, making `TOOL` `witnessed` (repeatable). `INVERSE` receives `TOOL`'s
+  arguments, or with `:result` its `structuredContent`. Your assertion, not the
+  server's.
 - `-o`, `--output PATH` - output path (default: stdout).
+
+`revl mcp proxy [OPTIONS] -- COMMAND [ARG ...]` - gate an existing MCP server
+with no `.rvl` written ([mcp-proxy.md](mcp-proxy.md)). The proxy starts
+`COMMAND`, speaks MCP over stdio to it and to its own client, classifies each
+upstream tool with the same classifier `revl mcp import` uses, and routes every
+tool call through a live session with the approval policy on: approval, the
+write-ahead log and declared undos apply at call time.
+
+- `upstream` - the server command after `--` (required).
+- `--undo TOOL=INVERSE[:result]` - as for `revl mcp import`; a witnessed tool
+  runs without a prompt and is reverted on abort.
+- `--trust-read-only-hints` - admit a tool whose uncontradicted `readOnlyHint:
+  true` revl cannot check, as `plain`. By default such a tool is gated like any
+  emission and its verdict reads `gated: unchecked read-only claim`.
+- `--upstream-timeout SECONDS` - how long to wait for one upstream answer
+  (default: `120`).
+- `--wal PATH` - the session write-ahead log (default: the per-user state
+  directory).
+- `--operator-profile PROFILE`, `--operator TOKEN`, `--policy POLICY`,
+  `--approval-record-values {bound, withheld}` - as for `revl mcp serve`.
 
 ### `revl import`
 
