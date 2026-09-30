@@ -39,7 +39,6 @@ Two layers of checking, deliberately split
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
@@ -60,14 +59,12 @@ sys.path.insert(0, str(ROOT / "tests"))
 
 from revl.compiler import compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _packager():
     path = ROOT / "tools" / "build_gate_js.py"
-    spec = importlib.util.spec_from_file_location("revl_build_gate_js_test", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["revl_build_gate_js_test"] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("revl_build_gate_js_test", path)
     return module
 
 

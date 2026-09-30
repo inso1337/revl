@@ -1518,6 +1518,167 @@ def test_a_locally_provided_deferred_crossing_is_counted_once_and_held(tmp_path)
     assert [row["component"] for row in verdict["deferred"]] == ["Db"]
 
 
+# --- a function value reaches an emission extern with no call site naming it -
+#
+# `reached_emissions` found externs by CALLED NAME, on the premise that `emit`
+# is the only spelling reaching one. A function value has no call site bearing
+# the extern's name, so every spelling below was ADMITTED into a federated
+# update although it crosses a bare (class-(c)) emission PREPARE cannot hold.
+# The compiler refused the same bodies on a plain method all along ("reaches
+# `charge (passed as a function value)`"); the reach is now read off that same
+# analysis. `plain_refused` pins that the compiler covers each spelling too, so
+# a row here that stops being refused cannot hide behind a compiler that also
+# stopped seeing it.
+
+_FN_VALUE_HELPERS = {
+    "apply": "fn apply(f: (Int) -> {r}, n: Int) -> {r} = f(n)\n",
+    "apply2": ("fn apply(f: (Int) -> {r}, n: Int) -> {r} = f(n)\n"
+               "fn apply2(f: (Int) -> {r}, n: Int) -> {r} = apply(f, n)\n"),
+    "apply0": "fn apply0(fs: List[(Int) -> {r}], x: Int) -> {r} {{ return fs[0](x) }}\n",
+    "pick": "fn pick() -> (Int) -> {r} = charge\n",
+    "run": ("fn apply(f: (Int) -> {r}, n: Int) -> {r} = f(n)\n"
+            "fn run(n: Int) -> {r} = apply(charge, n)\n"),
+    "": "",
+}
+
+# spelling id -> (helpers, provide-method body)
+_FN_VALUE_SPELLINGS = {
+    "alias": ("", "let g = charge let u = g(n) return 0"),
+    "passed-to-helper": ("apply", "let u = apply(charge, n) return 0"),
+    "record-field": ("", "let r = { f: charge } let u = r.f(n) return 0"),
+    "list-element": ("apply0", "let u = apply0([charge], n) return 0"),
+    "returned-from-fn": ("pick", "let h = pick() let u = h(n) return 0"),
+    "arrow-captures-alias": (
+        "", "let g = charge let h = (x: Int) => g(x) let u = h(n) return 0"),
+    "two-helpers-deep": ("apply2", "let u = apply2(charge, n) return 0"),
+    "value-inside-a-called-fn": ("run", "let u = run(n) return 0"),
+}
+
+_BARE_CHARGE = "extern emission fn charge(n: Int) -> Int = @py { return n }\n"
+_DEFERRED_CHARGE = "extern emission deferred fn charge(n: Int) = @py { pass }\n"
+
+
+def _fn_value_source(extern: str, spelling: str, *, emission: bool = True) -> str:
+    helpers, body = _FN_VALUE_SPELLINGS[spelling]
+    result = "Unit" if "deferred" in extern else "Int"
+    marker = "emission " if emission else ""
+    return (extern + _FN_VALUE_HELPERS[helpers].format(r=result)
+            + f"service S {{ {marker}fn go(n: Int) -> Int }}\n"
+            + "component C provides s: S {\n"
+            + f"  provide s {{ fn go(n) {{ {body} }} }}\n}}\n")
+
+
+@pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))
+def test_a_bare_emission_reached_as_a_function_value_is_refused(tmp_path, spelling):
+    ir = _ir(_fn_value_source(_BARE_CHARGE, spelling), tmp_path, "v.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "C", "extern": "charge", "deferrable": False,
+         "idempotency_key": None, "via": None}]
+    verdict = deploy.federation_admission({"c": ir})
+    assert verdict["admitted"] is False
+    (refusal,) = verdict["refusals"]
+    assert refusal["kind"] == deploy.REFUSE_IRREVERSIBLE
+    assert refusal["extern"] == "charge"
+    assert verdict["deferred"] == []
+
+
+@pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))
+def test_the_compiler_sees_every_function_value_spelling_too(tmp_path, spelling):
+    """The same body on a PLAIN method is refused by G4, so the admission
+    decision and the compiler's diagnostic agree about each spelling."""
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError) as excinfo:
+        _ir(_fn_value_source(_BARE_CHARGE, spelling, emission=False),
+            tmp_path, "p.rvl")
+    assert "`S.go` is declared plain" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))
+def test_a_deferred_emission_reached_as_a_function_value_is_not_held(tmp_path, spelling):
+    """`deferred` is honoured only at an `emit charge(..)` step: the py tier
+    enqueues that shape and nothing else. A function value is dispatched as an
+    ordinary call and fires on the spot, so it is class (c), not (b)."""
+    ir = _ir(_fn_value_source(_DEFERRED_CHARGE, spelling), tmp_path, "d.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "C", "extern": "charge", "deferrable": False,
+         "idempotency_key": None, "via": None}]
+    verdict = deploy.federation_admission({"c": ir})
+    assert verdict["admitted"] is False
+    (refusal,) = verdict["refusals"]
+    assert "already `deferred`" in refusal["reason"]
+    assert "function value" in refusal["reason"]
+
+
+def test_a_deferred_emission_emitted_directly_is_still_held(tmp_path):
+    ir = _ir(_DEFERRED_CHARGE + """\
+service S { emission fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s { fn go(n) { emit charge(n) return 0 } }
+}
+""", tmp_path, "h.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "C", "extern": "charge", "deferrable": True,
+         "idempotency_key": None, "via": None}]
+    verdict = deploy.federation_admission({"c": ir})
+    assert verdict["admitted"] is True
+    assert [row["extern"] for row in verdict["deferred"]] == ["charge"]
+
+
+def test_a_held_emit_in_one_scope_does_not_launder_a_value_route_in_another(tmp_path):
+    """One component, two provide-methods: `go` emits the deferred extern as a
+    held step, `other` dispatches it as a value. The rows are per component, so
+    the component is deferrable only if every route is; the first-seen held
+    row used to decide it alone."""
+    ir = _ir(_DEFERRED_CHARGE + """\
+service S { emission fn go(n: Int) -> Int  emission fn other(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n) { emit charge(n) return 0 }
+    fn other(n) { let g = charge let u = g(n) return 0 }
+  }
+}
+""", tmp_path, "m.rvl")
+    assert deploy.reached_emissions(ir) == [
+        {"component": "C", "extern": "charge", "deferrable": False,
+         "idempotency_key": None, "via": None}]
+    assert deploy.federation_admission({"c": ir})["admitted"] is False
+
+
+def test_a_pure_function_value_crosses_nothing(tmp_path):
+    """The reach is the checker's, not "any value": a dispatcher handed a PURE
+    callable reaches no emission, so the plan is admitted with no rows."""
+    ir = _ir("""\
+extern pure fn twice(n: Int) -> Int = @py { return n * 2 }
+fn apply(f: (Int) -> Int, n: Int) -> Int = f(n)
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s { fn go(n) { let u = apply(twice, n) return u } }
+}
+""", tmp_path, "pure.rvl")
+    assert deploy.reached_emissions(ir) == []
+    assert deploy.federation_admission({"c": ir}) == {
+        "admitted": True, "refusals": [], "deferred": []}
+
+
+def test_a_witnessed_crossing_stays_out_of_the_emission_list(tmp_path):
+    """`witnessed` externs seed the same fixed point but their reversibility is
+    a registered inverse, so they are absent from `reached_emissions` by
+    construction, whatever route reaches them."""
+    ir = _ir("""\
+type Stash = { path: Str, bak: Str }
+extern pure fn unstash(w: Stash) -> Unit = @py { return None }
+extern witnessed fn stash(p: Str) -> Result[Stash, Str]
+    undo unstash(result) = @py { return Ok({"path": p, "bak": p}) }
+service S { emission fn go(x: Str) -> Int }
+component C provides s: S {
+  provide s { fn go(x) { effect stash(x) return 0 } }
+}
+""", tmp_path, "w.rvl")
+    assert deploy.reached_emissions(ir) == []
+    assert deploy.federation_admission({"c": ir})["admitted"] is True
+
+
 # --- a stranded participant settles by the durable record, never a guess ----
 
 

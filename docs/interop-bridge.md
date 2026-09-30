@@ -178,6 +178,19 @@ Every bridge marshals values to the same JSON so any pair of backends interop:
   name that is not one, so a malformed tag is a wire error rather than an
   arbitrary lookup in the emitting program's namespace.
 
+An `Int` is a JSON number written with all of its digits, so a 64-bit value
+past 2^53 crosses exact: a receiver must not round it through a double. The
+wire does not say which numbers are `Int`s, so a tier whose `Int` has its own
+representation decodes by the declared types. On ts, where `Int` is a `bigint`,
+the conductor puts each served and proxied method's parameter and return types,
+plus the document's type table, in the node process's spec
+(`placement.seam_typing`). The node bridge decodes every argument, reply and
+probe literal by them (`bridge.ts` `decodeAs`), including list elements, record
+fields and variant payloads. It parses the wire keeping large integers exact
+and writes them with `JSON.rawJSON` (issue #1566). Before that, an `Int`
+reached a ts method as a JS `number` and failed with `Cannot mix BigInt and
+other types`.
+
 The shape is self-describing: the case name travels in `$kind`, so a consumer
 rebuilds the native ADT (map `$kind` to the case constructor) without needing
 the method's return type. Each backend's bridge encodes its native ADT to this

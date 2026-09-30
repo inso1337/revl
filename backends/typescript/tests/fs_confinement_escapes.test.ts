@@ -54,6 +54,22 @@ afterEach(() => {
   fs.rmSync(base, { recursive: true, force: true })
 })
 
+/** Stop a swapper worker and WAIT until its thread has exited (issue #1539).
+ *
+ * `worker.terminate()` only requests the stop and returns a promise. Left
+ * unawaited, the swapper can still be looping when `afterEach` removes the
+ * workspace: it recreates its target between `rmSync` emptying `ws` and
+ * removing it, and the cleanup fails with `ENOTEMPTY ... rmdir '<base>/ws'`
+ * (seen once on a loaded CI runner). The guard under test is synchronous, so
+ * the swapper is the only writer that can still be running at that point; the
+ * failure was the test racing its own writer, not a confinement defect. A
+ * thread that has exited reports `threadId` -1, which the tests assert before
+ * they return. */
+async function stopSwapper(worker: Worker): Promise<void> {
+  await worker.terminate()
+  expect(worker.threadId, 'the swapper must have exited before cleanup').toBe(-1)
+}
+
 function inWs(rel: string): string { return path.join(ws, rel) }
 function outWs(rel: string): string { return path.join(outside, rel) }
 function exists(p: string): boolean {
@@ -264,7 +280,7 @@ describe('F3: a hardlinked target is refused, not written through', () => {
 // ===========================================================================
 
 describe('F4: a concurrent writer cannot divert a write out of the root', () => {
-  it('survives a leaf swapped for an outside symlink under the write', () => {
+  it('survives a leaf swapped for an outside symlink under the write', async () => {
     // Pre-fix, `resolveWithin` was followed by a NAME-BASED `writeFileSync`,
     // and a competing writer in the workspace swapping the leaf for a symlink
     // in that window diverted the write outside the root, reproduced in 88
@@ -289,14 +305,14 @@ describe('F4: a concurrent writer cannot divert a write out of the root', () => 
         if (exists(victim)) break
       }
     } finally {
-      worker.terminate()
+      await stopSwapper(worker)
     }
 
     expect(exists(victim)).toBe(false)
     expect(fs.readdirSync(outside)).toEqual(['canary.txt'])
   }, 30_000)
 
-  it('a write racing an unlink refuses rather than claiming Ok', () => {
+  it('a write racing an unlink refuses rather than claiming Ok', async () => {
     // The fd keeps the bytes on the inode the check admitted, but the NAME may
     // no longer hold them. Reporting Ok would enumerate a write nobody can see
     // and register an undo over a change that never became visible.
@@ -315,7 +331,7 @@ describe('F4: a concurrent writer cannot divert a write out of the root', () => 
         if (r.kind === 'Err' && r.value.code === 'ERACE') { sawRace = true; break }
       }
     } finally {
-      worker.terminate()
+      await stopSwapper(worker)
     }
     // Not asserted as guaranteed to happen (it is a race), but when it does the
     // answer must be ERACE and never a false Ok.

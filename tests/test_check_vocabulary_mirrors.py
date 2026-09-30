@@ -2,20 +2,17 @@
 each way a mirror goes wrong, and it still names the three instances the issue
 was filed for."""
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    spec = importlib.util.spec_from_file_location(
-        "check_vocabulary_mirrors", ROOT / "tools" / "check_vocabulary_mirrors.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "check_vocabulary_mirrors",
+        ROOT / "tools" / "check_vocabulary_mirrors.py")
     return module
 
 
