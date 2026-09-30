@@ -87,9 +87,25 @@ class _StubSession:
         return {"loaded": True}
 
 
+def _every_op(ir: dict) -> set:
+    """Every provided `(key, op)`, declared public. The canonical path serves
+    only what is declared public (item 569 B1); these tests exercise its wire
+    mechanics, so they declare the whole composition public."""
+    services = ir.get("services") or {}
+    return {(key, op)
+            for component in ir.get("components") or []
+            for key, service in (component.get("provides") or {}).items()
+            for op in (services.get(service) or {}).get("methods") or {}}
+
+
+def _public_face(session) -> HttpComposedServer:
+    return HttpComposedServer(session, composition="app",
+                              public=_every_op(session.ir))
+
+
 def _face(source: str, **kw) -> tuple[HttpComposedServer, _StubSession]:
     session = _StubSession(source, **kw)
-    return HttpComposedServer(session, composition="app"), session
+    return _public_face(session), session
 
 
 # ------------------------------------------------------ the manifest (GET /)
@@ -179,7 +195,7 @@ def test_session_error_is_400_with_diagnostics():
         def call(self, key, method, args, *, raw=False):
             raise SessionError("key 'cache' is not one the admitted turn provides")
 
-    face = HttpComposedServer(_Bad(CACHE), composition="app")
+    face = _public_face(_Bad(CACHE))
     status, body = face.dispatch("POST", "/app/cache/get", b'["k"]')
     assert status == 400
     assert body["ok"] is False
@@ -198,7 +214,7 @@ def test_class_c_crossing_is_403_with_the_ticket_not_an_opaque_fault():
                                     "hash": "sha256:deadbeef",
                                     "capabilities": ["send"]})
 
-    face = HttpComposedServer(_Raising(BUS), composition="app")
+    face = _public_face(_Raising(BUS))
     status, body = face.dispatch("POST", "/app/bus/send", b'["hi"]')
     assert status == 403
     assert body["approvalRequired"] is True
@@ -361,7 +377,7 @@ def test_live_round_trip_marshals_record_opt_result_and_adt():
     generated client reads back."""
     session = Session()
     session.load(compile_source(INVENTORY), {}, origin=None)
-    face = HttpComposedServer(session, composition="app")
+    face = _public_face(session)
     httpd = build_http_server(face, "127.0.0.1", 0)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

@@ -17,7 +17,6 @@ tell one declaration from two. javac rejects the duplicate local outright. One
 test goes further and EXECUTES the class, proving decl and use agree on the JVM.
 """
 
-import importlib.util
 import subprocess
 import sys
 from pathlib import Path
@@ -27,20 +26,25 @@ import pytest
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+# tests/ is APPENDED, so its modules resolve only names nothing earlier on
+# sys.path provides; `_load_by_path` is the one wanted here. Not
+# `tests._load_by_path` via the repository root: tck/tests is a regular
+# package and would win the name `tests` in a session that collected it.
+if str(ROOT / "tests") not in sys.path:
+    sys.path.append(str(ROOT / "tests"))
 
 from revl import compile_source  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
-# the tier's one toolchain resolver + stub-compile helper
-if str(HERE) not in sys.path:
-    sys.path.insert(0, str(HERE))
-import javac_gate  # noqa: E402
+# Both by path, under names nothing else binds to another file. Every backend
+# directory has an `emit.py`, so this tier's emitter is never the bare `emit`
+# (issue #1449); `javac_gate` is the tier's one toolchain resolver and
+# stub-compile helper, shared with the other java tests under its own name.
+javac_gate = load_by_path("javac_gate", HERE / "javac_gate.py")
+emit = load_by_path("revl_java_emit_rw", HERE / "emit.py")
 
 JAVA, JAVAC = javac_gate.JAVA, javac_gate.JAVAC
 NO_JDK, STUB_SOURCES = javac_gate.NO_JDK, javac_gate.STUB_SOURCES
-
-_spec = importlib.util.spec_from_file_location("revl_java_emit_rw", HERE / "emit.py")
-emit = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(emit)
 
 
 def _emit(source: str) -> str:

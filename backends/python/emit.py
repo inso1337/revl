@@ -473,6 +473,39 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     return _mangle_escaping(name, _EMITTED_BUILTINS | extra)
 
 
+def _method_def_name(name: Any, what: str) -> str:
+    """The ONE rename for a provided service method (issue #1474), used at its
+    definition, at its registration and at every static call site.
+
+    A service method's CONTRACT name is what every dynamic dispatcher looks up
+    (`Session.call`, the bridge, a spawn handle, a lifecycle `call`), and what
+    a remote tier sends over the wire, so it stays the attribute name. Only the
+    `def` statement needs a Python-legal spelling: a keyword or soft keyword
+    (`class`, `from`, `match`, `_`) or `self` gets the injective append-`_`
+    rename for the `def`, the provided class gets the contract name back as an
+    alias (`_Ops.__dict__` holds both), and a static call through a required
+    service reaches it by `getattr(target, 'class')` because `target.class` is
+    not Python. Before this, the definition site renamed and the lookup site
+    did not, so `fn class()` was refused as "method 'class_' is not part of the
+    provided service", and `self` was refused as emitter scaffolding.
+
+    A name that needs no rename is returned unchanged, so every other module is
+    emitted byte-identically."""
+    if not isinstance(name, str) or not name.isidentifier():
+        raise EmitError(f"{what} {name!r} is not a usable Python identifier")
+    if name.startswith("_") and name.lstrip("_").startswith("revl"):
+        raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
+    return _mangle_escaping(name, frozenset({"self"}))
+
+
+def _method_access(target: str, name: str) -> str:
+    """`target.name`, or `getattr(target, 'name')` for a contract name the
+    `def` had to rename (see `_method_def_name`)."""
+    if _method_def_name(name, "method name") == name:
+        return f"{target}.{name}"
+    return f"getattr({target}, {name!r})"
+
+
 def _mangle_kw(name: str) -> str:
     """`_mangle` without the builtin guard: keyword escaping only. For a name
     emitted as an attribute or a runtime string key (see `_mangle`), which
@@ -1496,7 +1529,7 @@ class _ComponentEmitter:
                 if not isinstance(method, str) or not method.isidentifier():
                     raise EmitError(f"{where}: bad method name {method!r}")
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-                rendered = f"{target}.{method}({args})"
+                rendered = f"{_method_access(target, method)}({args})"
                 # item 121 Slice 2: a crossing whose arguments the analysis
                 # proved read completion `site`'s binding fires THROUGH the
                 # marker helper, so the recorder can stamp `producedBy` on this
@@ -1508,7 +1541,7 @@ class _ComponentEmitter:
                 site = self._derived_crossings.get(id(expr))
                 if site is not None:
                     self.uses.add("produced_emit")
-                    marked = f"{_runtime_ref('produced_emit')}({site!r}, {target}.{method}"
+                    marked = f"{_runtime_ref('produced_emit')}({site!r}, {_method_access(target, method)}"
                     rendered = f"{marked}, {args})" if args else f"{marked})"
             else:
                 # `Some(x)` is the identity on this tier (item 436 F8) — the
@@ -2678,17 +2711,25 @@ class _ComponentEmitter:
             out.add(0)
             self._method(out, indent + 1, name, method, where)
         out.add(0)
+        # issue #1474: a method whose `def` had to be renamed is registered
+        # under its contract name too, which is what every dispatcher looks up.
+        for method in methods:
+            contract = method.get("name")
+            spelled = _method_def_name(contract, f"{where}: method name")
+            if spelled != contract:
+                out.add(indent, f"setattr({cls}, {contract!r}, {cls}.{spelled})")
         # runtime-derived revertible provision (R5): the withdrawal inverse is
         # _revl_ctx.provide's own disposer, yielded into the component accumulator
         out.add(indent, f"yield _revl_ctx.provide({name!r})")
         out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict, where: str) -> None:
-        name = _ident(method.get("name"), f"{where}: method name", attr=True)
+        contract = method.get("name")
+        name = _method_def_name(contract, f"{where}: method name")
         service = self.services.get(self.provides.get(provide_name)) or {}
-        spec = (service.get("methods") or {}).get(name)
+        spec = (service.get("methods") or {}).get(contract)
         if spec is None:
-            raise EmitError(f"{where}: method {name!r} is not part of the provided service")
+            raise EmitError(f"{where}: method {contract!r} is not part of the provided service")
         params = [_ident(param, f"{where}.{name}: param") for param in method.get("params") or []]
         # v1/A6: method params are the surface names binding the body and may
         # differ from the service's declared names; only the arity must agree
