@@ -53,7 +53,8 @@ def _load_module(name: str, path: Path):
 # imported under their canonical names on purpose: emitted modules do
 # `from runtime import ...`, so an aliased copy would be a *different* module
 # object and the trace fixture would observe nothing.
-import emit as py_emit  # noqa: E402
+from revl._paths import python_backend_emitter  # noqa: E402
+py_emit = python_backend_emitter()
 import replay  # noqa: E402
 import runtime as runtime_mod  # noqa: E402
 

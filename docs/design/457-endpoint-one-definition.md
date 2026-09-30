@@ -223,7 +223,13 @@ Three consequences, each checkable:
   header and passes it through untouched. It has no auth vocabulary: no
   `auth` keyword on the route, no `security` in the export, no token logic in
   the client. Deleting the router (serving the operation over the MCP face
-  instead) changes nothing about who may read a note.
+  instead) changes nothing about who may read a note. That holds because no
+  face decodes a `Principal` from a request: `revl serve --http` and
+  `revl serve --mcp` withhold every operation with a `Principal` or declared
+  `Trusted[...]` parameter, so `store.get` is not reachable from the wire at
+  all, and the HTTP face serves only the routed operations (item 569 B1,
+  issue #1502). Before that fix both faces served `store.get` and decoded
+  `who` from the request body, and the sentence above was false.
 - **Removing the step is refused at admission.** A handler that drops
   `auth.validate` has no `Principal` in scope and cannot call `store.get`;
   the refusal names the missing producer. This is G1 read at the value level:
