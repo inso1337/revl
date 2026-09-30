@@ -41,7 +41,7 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import hostref as _hostref
-from ._paths import backends_root
+from ._paths import backends_root, python_backend_emitter
 from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
@@ -2506,10 +2506,8 @@ def run_command(args, hold_once: bool = False) -> int:
                         interactive=interactive, policy=policy)
 
     backend_dir = backends_root() / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
     try:
-        import emit  # noqa: PLC0415 — backend import after path setup
+        emit = python_backend_emitter()
         import runtime as runtime_mod  # noqa: PLC0415
         from cordis import Context  # noqa: PLC0415
         from cordis.fiber import FiberState  # noqa: PLC0415

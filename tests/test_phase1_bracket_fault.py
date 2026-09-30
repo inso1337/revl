@@ -49,7 +49,11 @@ pytestmark = [needs_cordis, pytest.mark.asyncio]
 
 
 def _backend():
-    import emit  # noqa: PLC0415 — resolved from the backend dir appended above
+    # Not a bare `import emit`: every backend directory has an `emit.py`, and in
+    # a session that also collected `backends/java/` the bare import resolved
+    # the java emitter (issue #1449).
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     import runtime  # noqa: PLC0415
     return emit, runtime
 

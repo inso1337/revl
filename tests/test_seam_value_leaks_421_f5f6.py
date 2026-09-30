@@ -407,7 +407,8 @@ def test_the_emitter_marks_both_ends_of_the_declared_marking():
     """The origin (a `Secret[T]` return) and the receiver (a `Secret[T]` provide
     param) are both marked in the emitted module, so the marking fires with no
     recorder attached: a plain `revl run` prints the same trace."""
-    import emit as pyemit  # noqa: PLC0415 (backend module, path set above)
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    pyemit = python_backend_emitter()
 
     from revl import compile_source  # noqa: PLC0415
 

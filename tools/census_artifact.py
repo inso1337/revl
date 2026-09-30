@@ -61,6 +61,7 @@ USAGE
     python3 tools/census_artifact.py                     # render to stdout
     python3 tools/census_artifact.py --write             # write both files
     python3 tools/census_artifact.py --check             # fail if they drifted
+    python3 tools/census_artifact.py --verify [REPORT]   # judge a published copy
     python3 tools/census_artifact.py --crate-json C.json --record-reproduction
 
 THE REPRODUCTION, AND WHY IT IS RECORDED RATHER THAN RE-RUN
@@ -85,14 +86,25 @@ Refresh it with:
     python3 tools/census_artifact.py --write
 
 Exit status is 1 when `--check` finds drift, 2 on unusable input.
+
+VERIFYING A PUBLISHED COPY
+--------------------------
+`--verify` is the reader's command, and `docs/design/560-census-artifact.md`
+carries the argument. It compares the published `census.pins` against this
+checkout (every file a census run opens is pinned, measured by an audit hook),
+then re-runs the census and compares `census.cases` row by row. Exit 0
+reproduced, 1 refuted, 2 unusable, 3 not a full check (inputs differ, or
+published programs were edited or removed).
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import importlib.util
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -213,6 +225,151 @@ def corpus_digest(cases) -> str:
         h.update(f"{case_id}:{len(blob)}\n".encode())
         h.update(blob)
     return h.hexdigest()
+
+
+# ------------------------------------------------------------------ the pins
+#
+# `checker_version` digests a DECLARED list of files, and a declared list is
+# only as complete as the person who wrote it. Measured on the tree this
+# section landed on: a census run reads `backends/python/emit.py` (which turns
+# `selfhost/lower.rvl` into the python the fast engine executes) and
+# `tests/test_selfhost_lower.py` (whose `_classify` maps a reference error to
+# the tag the census compares). Neither is in `CHECKER_SOURCES`, so either
+# could change a verdict without moving any published identity.
+#
+# The pins below are therefore MEASURED, not declared. The generator records
+# every file under the checkout that the census run opens, through an audit
+# hook, and pins each one by sha256. The verifier measures the same thing on
+# the reader's side, so a file that decides a verdict and is missing from the
+# published pins is reported by name instead of being trusted by omission.
+
+# Inputs to the REPORT that the census run itself does not read. They decide
+# what the artifact says about the allowance, the provenance and the
+# reproduction, not what any program's verdict is, so they are a separate
+# group and a change to one of them never reads as a refutation.
+REPORT_INPUTS = (
+    "tools/gate_reference_census_baseline.json",
+    "tests/fixtures/corpus_provenance.json",
+    "tests/fixtures/census_crate_reproduction.json",
+)
+
+# The shipped gate, which the crate engine builds with cargo in a subprocess,
+# so the audit hook never sees it. Pinned by glob; `build_gate_crate.py
+# --check` is what ties it to `selfhost/lower.rvl`.
+GATE_CRATE_GLOBS = ("crates/revl-gate/Cargo.toml",
+                    "crates/revl-gate/src/**/*.rs")
+
+# One stack of open sets, fed by one audit hook. An audit hook cannot be
+# removed once added, so it is added at most once per process and does
+# nothing while the stack is empty; `recording_reads` is the only writer.
+_READS: list[set[str]] = []
+_HOOK_ADDED = False
+
+
+def _audit(event: str, args) -> None:
+    if event != "open" or not _READS or not args:
+        return
+    target = args[0]
+    if isinstance(target, (str, bytes, os.PathLike)):
+        _READS[-1].add(os.fsdecode(target))
+
+
+@contextlib.contextmanager
+def recording_reads():
+    """Collect every path opened inside the block. Nested blocks each see
+    only their own opens; the hook is inert once the outermost one exits."""
+    global _HOOK_ADDED
+    if not _HOOK_ADDED:
+        sys.addaudithook(_audit)
+        _HOOK_ADDED = True
+    seen: set[str] = set()
+    _READS.append(seen)
+    try:
+        yield seen
+    finally:
+        _READS.pop()
+
+
+def tree_file(path: str) -> str | None:
+    """`path` as a repo-relative source name, or None when it is not a file
+    in the checkout. A byte-compiled module is mapped back to its source,
+    because the source is what a reader has and what the pin is about."""
+    try:
+        rel = Path(path).resolve().relative_to(ROOT)
+    except (ValueError, OSError):
+        return None
+    parts = rel.parts
+    if len(parts) >= 2 and parts[-2] == "__pycache__":
+        rel = Path(*parts[:-2], parts[-1].split(".", 1)[0] + ".py")
+    if not (ROOT / rel).is_file():
+        return None
+    return rel.as_posix()
+
+
+def _sha(rel: str) -> str:
+    return hashlib.sha256((ROOT / rel).read_bytes()).hexdigest()
+
+
+def _is_reference(rel: str) -> bool:
+    return rel.startswith("src/revl/") and rel.endswith(".py")
+
+
+def case_rows(measured: dict) -> list[list[str]]:
+    """`[case id, sha256 of its source, bucket]` for every program, in run order.
+
+    The verifier compares verdicts case by case, so a reader whose corpus has
+    grown can still check every published case whose bytes did not change. A
+    repeated case id carries the same source both times, so it is assigned the
+    buckets it landed in, in order.
+    """
+    pending: dict[str, list[str]] = {}
+    for name, ids in measured["buckets"].items():
+        for case_id in ids:
+            pending.setdefault(case_id, []).append(name)
+    rows = []
+    for case_id, source in measured["cases"]:
+        digest = hashlib.sha256(
+            source.encode("utf-8", "surrogatepass")).hexdigest()
+        rows.append([case_id, digest, pending[case_id].pop(0)])
+    return rows
+
+
+def build_pins(measured: dict, reads: set[str]) -> dict:
+    """Every input the published verdicts depend on, each by sha256.
+
+    Four groups, because a change to each means something different:
+
+      * `corpus`: carried per case in `census.cases`; the aggregate is `run`.
+      * `reference`: `src/revl/**/*.py`, whole, as `compiler_tree_digest`
+        already digests it, now listed per file so a reader sees what moved.
+      * `decides_verdicts`: every other file the census run OPENED, measured.
+      * `report_inputs`: `REPORT_INPUTS` and the shipped crate, which shape the
+        report but are not read by the run that produces a verdict.
+    """
+    corpus_files = {case_id for case_id, _ in measured["cases"]}
+    opened = {rel for rel in map(tree_file, reads) if rel is not None}
+    deciding = sorted(rel for rel in opened
+                      if rel not in corpus_files and not _is_reference(rel))
+    reference = sorted(p.relative_to(ROOT).as_posix()
+                       for p in ROOT.glob(REFERENCE_GLOB))
+    crate = sorted({p.relative_to(ROOT).as_posix()
+                    for pattern in GATE_CRATE_GLOBS for p in ROOT.glob(pattern)
+                    if p.is_file()})
+    report_inputs = sorted(set(REPORT_INPUTS) | set(crate))
+    return {
+        "note": (
+            "Every file the published verdicts depend on, by sha256. "
+            "`decides_verdicts` is MEASURED: it is the set of files under the "
+            "checkout that the census run opened, recorded by an audit hook, "
+            "minus the corpus (pinned per case in `cases`) and the reference "
+            "(pinned here per file). A file that decides a verdict cannot be "
+            "left out of this list by forgetting to name it, and "
+            "`tools/census_artifact.py --verify` measures it again on the "
+            "reader's side."),
+        "decides_verdicts": {rel: _sha(rel) for rel in deciding},
+        "reference": {rel: _sha(rel) for rel in reference},
+        "report_inputs": {rel: _sha(rel) for rel in report_inputs},
+    }
 
 
 # ----------------------------------------------- the never-baselined probes
@@ -644,6 +801,14 @@ def build_report(census, provenance, measured: dict,
                 "corpora": prov_rows,
             },
             "reproduction": reproduction,
+            "pins": measured.get("pins"),
+            "cases": measured.get("case_rows"),
+            "cases_note": (
+                "One row per program run, in run order: case id, sha256 of "
+                "the source bytes, bucket. `tools/census_artifact.py --verify` "
+                "re-runs the census and compares these rows one by one, so a "
+                "published verdict is checkable on its own and not only as "
+                "part of a bucket count."),
             "not_established": [
                 "This report says nothing about any implementation other than "
                 "revl's own two. It is not a comparison and carries no "
@@ -733,9 +898,12 @@ def render_markdown(report: dict) -> str:
             w(f"- `{case_id}`")
         w("")
     w("Neither identity is a commit or a clock. `run` is a sha256 over the corpus")
-    w("this run read; the checker version is a sha256 over the files that decide")
-    w("what the census does. Every file name inside a digest is relative to the")
-    w("checkout root, so both are recomputable from any clone, at any path.")
+    w("this run read; the checker version is a sha256 over five named files the")
+    w("crate reproduction is keyed on. Neither is the complete list of what")
+    w("decides a verdict: that list is measured, not named, and is pinned file by")
+    w("file in `census.pins` (see \"Verifying a published copy\" below). Every")
+    w("file name inside a digest is relative to the checkout root, so all of them")
+    w("are recomputable from any clone, at any path.")
     w("")
     w("## The claim, and why it is not the corpus size")
     w("")
@@ -967,6 +1135,7 @@ def render_markdown(report: dict) -> str:
     w("`tools/gate_reference_census.py`, and `--json` writes out the per-case")
     w("classification if you want to audit an individual verdict.")
     w("")
+    render_verify_section(c, w)
     w("## What this does not establish")
     w("")
     for line in c["not_established"]:
@@ -984,6 +1153,295 @@ def render_markdown(report: dict) -> str:
     w("that checker does not read.")
     w("")
     return "\n".join(out)
+
+
+# ------------------------------------------------------------ the verifier
+#
+# `--check` answers "is the committed file what this tree produces today", which
+# is the right question for the repository and the wrong one for a reader who
+# holds a PUBLISHED copy: the corpus grows every week, so `--check` reds on a
+# reader's clone for a reason that says nothing about whether the published
+# numbers were true. `--verify` answers the reader's question instead. It
+# compares the pins first, so a difference in the INPUTS is never reported as a
+# difference in the RESULT, and then compares verdicts case by case on every
+# published program whose bytes did not change.
+
+VERDICT_EXIT = {"reproduced": 0, "refuted": 1, "partial": 3,
+                "different-inputs": 3}
+
+
+def _pin_diff(published: dict, local: dict) -> dict:
+    return {
+        "moved": sorted(k for k in published
+                        if k in local and local[k] != published[k]),
+        "missing": sorted(k for k in published if k not in local),
+        "added": sorted(k for k in local if k not in published),
+    }
+
+
+def _bucket_counts(rows) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for _, _, name in rows:
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def judge(published: dict, local: dict) -> dict:
+    """Compare a published `census` section against a local measurement.
+
+    `local` carries `pins`, `cases` (rows as `case_rows` builds them) and
+    `mechanism_holds`. Pure: it runs nothing, so every arm of the verdict is
+    testable without a census run.
+
+    The verdict is one of:
+
+      * `refuted`: the published file contradicts itself, or the inputs that
+        decide a verdict are byte-identical and some unchanged program landed
+        in a different bucket, or the zero-tolerance mechanism does not hold.
+      * `reproduced`: those inputs are identical and every published program
+        is present, unchanged, and in the bucket the file says.
+      * `partial`: those inputs are identical and every published program that
+        is still present and unchanged reproduced, but some are gone or edited.
+      * `different-inputs`: a file that decides a verdict moved, or the run
+        read a file the publication does not pin. This is not a check of the
+        published numbers, and the per-case agreement is reported as
+        information only.
+    """
+    pub_pins = published.get("pins") or {}
+    loc_pins = local["pins"]
+    rows = published.get("cases") or []
+
+    # The published file against itself: the bucket table must be what the
+    # rows add up to, and the zero-tolerance bucket must be empty in both.
+    table = {row["bucket"]: row["count"] for row in published.get("buckets", [])}
+    derived = _bucket_counts(rows)
+    self_contradictions = []
+    if table != derived:
+        names = sorted(set(table) | set(derived))
+        self_contradictions += [
+            f"bucket {n}: table says {table.get(n, 0)}, rows add up to "
+            f"{derived.get(n, 0)}" for n in names
+            if table.get(n, 0) != derived.get(n, 0)]
+    published_admissions = sorted(
+        {cid for cid, _, b in rows if b == "false-admission"}
+        | set(published.get("false_admission", {}).get("members", [])))
+    if published_admissions:
+        self_contradictions.append(
+            "the published file lists false-admission members: "
+            + ", ".join(published_admissions))
+    if not published.get("false_admission", {}).get("mechanism", {}).get("holds"):
+        self_contradictions.append(
+            "the published file does not record the mechanism as holding")
+
+    deciding = _pin_diff(pub_pins.get("decides_verdicts", {}),
+                         loc_pins["decides_verdicts"])
+    reference = _pin_diff(pub_pins.get("reference", {}), loc_pins["reference"])
+    report_inputs = _pin_diff(pub_pins.get("report_inputs", {}),
+                              loc_pins["report_inputs"])
+    # A file the local run opened that the publication does not pin at all is
+    # an input the published identity never covered. It is not a local change;
+    # it is a hole in the publication, and it is named as one.
+    unpinned = deciding["added"]
+    inputs_same = not (deciding["moved"] or deciding["missing"] or unpinned
+                       or reference["moved"] or reference["missing"]
+                       or reference["added"])
+
+    local_rows: dict[str, list[tuple[str, str]]] = {}
+    for cid, sha, name in local["cases"]:
+        local_rows.setdefault(cid, []).append((sha, name))
+    agree, differ, edited, gone = [], [], [], []
+    seen: dict[str, int] = {}
+    for cid, sha, name in rows:
+        i = seen.get(cid, 0)
+        seen[cid] = i + 1
+        here = local_rows.get(cid, [])
+        if i >= len(here):
+            gone.append(cid)
+            continue
+        local_sha, local_name = here[i]
+        if local_sha != sha:
+            edited.append(cid)
+        elif local_name == name:
+            agree.append(cid)
+        else:
+            differ.append({"case": cid, "published": name, "local": local_name})
+    published_ids = {cid for cid, _, _ in rows}
+    new = sorted({cid for cid in local_rows if cid not in published_ids})
+    local_admissions = sorted({cid for cid, _, b in local["cases"]
+                               if b == "false-admission"})
+
+    if self_contradictions:
+        verdict = "refuted"
+    elif not inputs_same:
+        verdict = "different-inputs"
+    elif differ or not local["mechanism_holds"] or local_admissions:
+        verdict = "refuted"
+    elif edited or gone:
+        verdict = "partial"
+    else:
+        verdict = "reproduced"
+
+    return {
+        "verdict": verdict,
+        "exit": VERDICT_EXIT[verdict],
+        "self_contradictions": self_contradictions,
+        "decides_verdicts": deciding,
+        "unpinned_inputs": unpinned,
+        "reference": reference,
+        "report_inputs": report_inputs,
+        "published_cases": len(rows),
+        "checked": len(agree) + len(differ),
+        "agree": len(agree),
+        "differ": differ,
+        "edited": sorted(set(edited)),
+        "gone": sorted(set(gone)),
+        "new": new,
+        "local_false_admissions": local_admissions,
+        "local_mechanism_holds": local["mechanism_holds"],
+    }
+
+
+def render_verdict(result: dict) -> str:
+    """The judgement as text a reader can act on, every difference named."""
+    out: list[str] = []
+    w = out.append
+    w(f"census verify: {result['verdict'].upper()}")
+    w(f"  published programs: {result['published_cases']}; checked "
+      f"(same bytes on both sides): {result['checked']}; same bucket: "
+      f"{result['agree']}")
+    for c in result["self_contradictions"]:
+        w(f"  THE PUBLISHED FILE CONTRADICTS ITSELF: {c}")
+    for group in ("decides_verdicts", "reference", "report_inputs"):
+        diff = result[group]
+        for kind in ("moved", "missing", "added"):
+            if group == "decides_verdicts" and kind == "added":
+                continue
+            for rel in diff[kind]:
+                w(f"  {group}: {kind}: {rel}")
+    for rel in result["unpinned_inputs"]:
+        w(f"  UNPINNED INPUT: the census read {rel}, which the publication "
+          f"does not pin")
+    for d in result["differ"]:
+        w(f"  verdict differs: {d['case']}: published {d['published']}, "
+          f"here {d['local']}")
+    for label, key in (("edited since publication", "edited"),
+                       ("absent here", "gone"),
+                       ("new here, not in the publication", "new")):
+        if result[key]:
+            w(f"  {label}: {len(result[key])}")
+            for cid in result[key][:10]:
+                w(f"    {cid}")
+            if len(result[key]) > 10:
+                w(f"    ... and {len(result[key]) - 10} more")
+    for cid in result["local_false_admissions"]:
+        w(f"  FALSE ADMISSION in this run: {cid}")
+    if not result["local_mechanism_holds"]:
+        w("  the NEVER_BASELINED mechanism does NOT hold in this checkout")
+    meaning = {
+        "reproduced": ("every published verdict was recomputed here from "
+                       "byte-identical inputs and matched."),
+        "partial": ("the inputs that decide a verdict are byte-identical and "
+                    "every published program still present reproduced; the "
+                    "ones named above were edited or removed and were not "
+                    "checked."),
+        "different-inputs": ("a file that decides a verdict differs from the "
+                             "published one, so this run is a new measurement "
+                             "and not a check of the published numbers. Check "
+                             "out a tree whose files match the published pins "
+                             "to check them."),
+        "refuted": ("the published numbers do not hold on the inputs they "
+                    "name."),
+    }[result["verdict"]]
+    w(f"  meaning: {meaning}")
+    return "\n".join(out)
+
+
+def verify(path: Path, engine: str = "selfhost") -> tuple[int, str]:
+    """Re-measure this checkout and judge the published file at `path`."""
+    try:
+        bundle = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return 2, f"census verify: cannot read {path}: {exc}"
+    published = bundle.get("census") or {}
+    if published.get("schema") != CENSUS_SCHEMA:
+        return 2, (f"census verify: {path} carries no {CENSUS_SCHEMA} "
+                   f"section")
+    if not published.get("pins") or not published.get("cases"):
+        return 2, (f"census verify: {path} predates per-case rows and pins, "
+                   f"so there is nothing to verify it against; regenerate it "
+                   f"with --write")
+    census, measured = measure_pinned(engine)
+    local = {"pins": measured["pins"], "cases": measured["case_rows"],
+             "mechanism_holds": probe_never_baselined(census)["holds"]}
+    result = judge(published, local)
+    return result["exit"], render_verdict(result)
+
+
+def render_verify_section(c: dict, w) -> None:
+    """How a reader holding a published copy checks it, and what each way of
+    cooking this benchmark runs into. The second half is the argument, so
+    each row names whether a tool closes the move or only public history does.
+    """
+    pins = c.get("pins") or {}
+    deciding = sorted(pins.get("decides_verdicts", {}))
+    w("## Verifying a published copy")
+    w("")
+    w("`--check` asks whether this file is what today's tree produces, and it")
+    w("fails as soon as the corpus grows. A reader holding a copy published")
+    w("earlier needs a different question answered: were the numbers true on")
+    w("the inputs they name? That is `--verify`:")
+    w("")
+    w("```")
+    w(".venv/bin/python tools/census_artifact.py --verify path/to/census-artifact.json")
+    w("```")
+    w("")
+    w("It re-runs the census in your clone and compares in two steps. First the")
+    w("pins: every file the published verdicts depend on, each by sha256. Then")
+    w(f"the verdicts, one row per program: this file carries {len(c.get('cases') or [])}")
+    w("rows of case id, sha256 of the source and bucket, and every row whose")
+    w("source is byte-identical in your clone is recomputed and compared.")
+    w("")
+    w("| verdict | exit | meaning |")
+    w("|---|---|---|")
+    w("| reproduced | 0 | the inputs that decide a verdict are byte-identical and every published row matched |")
+    w("| refuted | 1 | same inputs, different verdict; or the file contradicts itself; or a false admission; or the mechanism does not hold |")
+    w("| partial | 3 | same inputs, every row still present matched, but some programs were edited or removed since |")
+    w("| different-inputs | 3 | a file that decides a verdict differs, so the run is a new measurement and not a check |")
+    w("")
+    w("The files that decide a verdict are MEASURED rather than listed. The")
+    w("generator records, through a Python audit hook, every file under the")
+    w("checkout the census run opens, and pins each one. For this run that is")
+    w(f"the corpus (per row), `{REFERENCE_GLOB}` ("
+      f"{_plural(len(pins.get('reference', {})), 'file', 'files')}), and:")
+    w("")
+    for rel in deciding:
+        w(f"- `{rel}`")
+    w("")
+    w("`--verify` measures the same set on your side, and a file your run")
+    w("opened that the publication does not pin is reported by name as an")
+    w("UNPINNED INPUT. A list someone wrote down can forget a file. This one")
+    w("cannot, short of the file being opened by something the hook does not")
+    w("see, such as a subprocess.")
+    w("")
+    w("### What each way of cooking this runs into")
+    w("")
+    w("| move | what stops it | by the tool, or by history |")
+    w("|---|---|---|")
+    w("| record a `false-admission` into the baseline | `--record` drops it (`NEVER_BASELINED`) | tool |")
+    w("| hand-edit the baseline to tolerate one | `--check` fails on any member whatever the baseline says | tool |")
+    w("| edit a count in `census-artifact.json` | its bucket table must equal the sum of its per-case rows, and `--verify` recomputes every row | tool |")
+    w("| edit a row and the count together | `--verify` recomputes the row from pinned inputs and reports the case by name | tool |")
+    w("| measure with one gate, emitter or classifier and publish another | each is pinned by sha256, measured; a reader's run names any file that moved or was never pinned | tool |")
+    w("| quote the fast engine where the real crate disagrees | the crate run is recorded at a checker version, and a stale one lifts no claim | tool |")
+    w("| drop hard programs from the corpus before publishing | the corpus is every `.rvl` under fixed directories plus three inline lists, globbed and not selected; a removal is a public diff | history |")
+    w("| bend the reference until it agrees with the gate | the reference is pinned, so the bent version is the one published and readable | history |")
+    w("| mislabel a document's provenance | nothing; stated below | history |")
+    w("")
+    w("The rows marked tool are closed by construction: no edit to the")
+    w("published JSON survives `--verify` on the pinned inputs, and no edit to")
+    w("the baseline can tolerate a `false-admission`. The rows marked history are closed only because the repository")
+    w("is public and every one of those moves is a diff somebody can read.")
+    w("")
 
 
 # ------------------------------------------------------------------ the CLI
@@ -1020,16 +1478,33 @@ def trim_reproduction(census, raw: dict) -> dict:
 
 
 def generate(engine: str, crate_json: Path | None) -> tuple[dict, str]:
-    census = _load("tools/gate_reference_census.py", "artifact_census")
+    # The measurement goes FIRST, before anything else is imported, so every
+    # file it depends on is opened inside the recording.
+    census, measured = measure_pinned(engine)
     provenance = _load("tools/corpus_provenance.py", "artifact_provenance")
     crate = None
     path = crate_json if crate_json is not None else (
         CRATE_REPRODUCTION if CRATE_REPRODUCTION.is_file() else None)
     if path is not None:
         crate = json.loads(Path(path).read_text(encoding="utf-8"))
-    measured = measure(census, engine)
     report = build_report(census, provenance, measured, crate)
     return report, render_markdown(report)
+
+
+def measure_pinned(engine: str):
+    """`(census module, measure(...))`, with every file the run opens pinned.
+
+    The census module is loaded INSIDE the recording, so the files it and the
+    reference pull in are measured rather than assumed. Call it before
+    anything else in the process imports the reference: a module that is
+    already imported is not opened again, and would be missing from the pins.
+    """
+    with recording_reads() as reads:
+        census = _load("tools/gate_reference_census.py", "artifact_census")
+        measured = measure(census, engine)
+    measured["pins"] = build_pins(measured, reads)
+    measured["case_rows"] = case_rows(measured)
+    return census, measured
 
 
 def _serialise(report: dict) -> str:
@@ -1054,7 +1529,20 @@ def main(argv: list[str]) -> int:
                     help="write docs/census-artifact.{md,json}")
     ap.add_argument("--check", action="store_true",
                     help="fail when the committed artifact has drifted")
+    ap.add_argument("--verify", nargs="?", const=str(REPORT_JSON),
+                    metavar="REPORT",
+                    help="re-run the census here and judge a published "
+                         "census-artifact.json against it, pin by pin and case "
+                         "by case (default: the committed one). Exit 0 "
+                         "reproduced, 1 refuted, 2 unusable input, 3 not a "
+                         "full check (inputs differ, or programs were edited "
+                         "or removed)")
     args = ap.parse_args(argv)
+
+    if args.verify is not None:
+        code, text = verify(Path(args.verify), args.engine)
+        print(text)
+        return code
 
     if args.write and args.check:
         ap.error("--write and --check are opposites; pick one")

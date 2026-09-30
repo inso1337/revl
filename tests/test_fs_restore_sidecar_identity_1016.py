@@ -81,7 +81,8 @@ def _ir(component: dict) -> dict:
 def _fs_module():
     """The emitted py module for stdlib/fs.rvl, so the real `write`/`restore`
     `@py` bodies can be called directly."""
-    import emit  # noqa: PLC0415  (backends/python on path)
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     ir = _ir(_component("Probe", [_effect("write", "artifact.txt", "x")]))
     module = types.ModuleType("fs_identity_probe_mod")
     sys.modules["fs_identity_probe_mod"] = module
