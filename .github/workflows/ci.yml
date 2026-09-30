@@ -437,6 +437,11 @@ jobs:
         python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # Full history: `pytest tests/` includes the real-history tests in
+          # tests/test_landing_witness.py, which FAIL by name on a shallow
+          # clone. They used to skip there, and a skip reads as a pass.
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python }}
@@ -601,6 +606,16 @@ jobs:
       # tests/test_backend_suite_roots_combine.py, which needs no toolchain and
       # so covers the tiers this job cannot install.
       - run: cd backends/python && .venv/bin/pytest ../wasm/ tests/ -q
+      # Issue #1465: tck/tests/test_tck.py was collected in NO CI job (it sits
+      # outside tests/, so the root `pytest tests/ -q` runs never touch it, and
+      # no other job named it either). tck/README.md documents exactly this
+      # invocation -- `backends/python/.venv/bin/python -m pytest
+      # tck/tests/test_tck.py -q` -- run under the cordis-py venv this job
+      # already built above, because the kit's own worked-example test
+      # (test_py_reference_run_is_ok_and_a8_async_now_conforms) drives the real
+      # cordis-py runtime and otherwise just skips. Verified locally: 6 passed
+      # 1 skipped without cordis-py, 7 passed with the pinned fork installed.
+      - run: backends/python/.venv/bin/python -m pytest tck/tests/test_tck.py -q
 
   # The root `tests/` suite, WITH the cordis-py runtime.
   #
@@ -624,6 +639,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # Full history: `pytest tests/` includes the real-history tests in
+          # tests/test_landing_witness.py, which FAIL by name on a shallow
+          # clone. They used to skip there, and a skip reads as a pass.
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
@@ -722,8 +742,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           # full history so the PR base and the previous push tip are both real
-          # locally; the explicit base fetch below is the belt-and-braces guard
-          # that a shallow checkout still works, the same shape `changes` uses.
+          # locally, and so the real-history tests can answer ancestry
+          # questions (they FAIL by name on a shallow clone rather than skip).
+          # The base fetch below must not pass `--depth`: into a full clone
+          # that re-shallows it.
           fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
@@ -759,7 +781,13 @@ jobs:
           # to the FULL selection on its own, which is the wanted answer there.
           base_arg=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin \
+            # No `--depth` here. A `--depth=1` fetch into this FULL clone
+            # grafts the base tip, which makes the repository shallow again:
+            # every commit older than that tip then reads as "not an
+            # ancestor" of HEAD, and the real-history tests in
+            # tests/test_landing_witness.py measured six carried entries as
+            # carried by nothing (issue #1434).
+            git fetch --no-tags origin \
               "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
             base_arg="--base origin/${BASE_REF}"
           elif [ -n "${BEFORE_SHA}" ] \
@@ -808,7 +836,8 @@ jobs:
   # like `root-suite-affected` and for the same reason: the defect it covers is
   # "nobody was looking", and a check with an `if:` can report `skipping`,
   # which is indistinguishable from a pass in the merge box. It costs one
-  # `gh pr list` and one `git merge-base --is-ancestor` per pull request.
+  # `gh pr list` and one `git merge-base --is-ancestor` per pull request, plus
+  # the baseline's pinned tests (about a minute).
   #
   # `fetch-depth: 0` is load-bearing twice over. The merge commits live on the
   # base branches, not on main, so a single-branch clone does not have them --
@@ -840,9 +869,22 @@ jobs:
       # step stays because it keeps the common case to zero network calls
       # inside the checker.
       - run: git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
+      # The same run re-measures each baseline entry's WITNESS (issue #1434):
+      # the merge's added inventory, the byte-identity of every file claimed
+      # carried AT the commit that carried it (so a later edit to one of
+      # those files costs nothing), and the tests named for a file that was
+      # carried already modified.
+      # `--pinned run` executes those tests rather than only collecting them,
+      # so the job needs revl and pytest installed; a skipped pin fails, since
+      # a skip is not a pass. Entries it cannot check (REWORKED) are printed
+      # UNCHECKED rather than counted as verified.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}"
+        run: python tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}" --pinned run
 
   # The held-out scoring set (roadmap item 537, issue #1207). Every other
   # corpus that scores a change here is a file in this repository, so the
@@ -1806,6 +1848,7 @@ jobs:
           tests/test_run_ts_stdlib_fs_root.py
           tests/test_stdlib_version.py
           tests/test_total_field_surface.py
+          tests/test_ts_seam_int_1566.py
           tests/test_value_stdlib.py
           -q
         env:

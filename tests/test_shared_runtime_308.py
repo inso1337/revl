@@ -32,6 +32,15 @@ from revl.recovery import DictWorld, recover, render  # noqa: E402
 from revl.shared_runtime import JournaledSharedGrantBook, ledger_count  # noqa: E402
 from revl.wal import WAL_VERSION, read_wal  # noqa: E402
 
+
+class _RealWorld(DictWorld):
+    """An in-memory world that declares itself REAL (issue #1477). recover
+    writes its at-most-once fences only against a real world, because a model
+    run attempts nothing out there; the fence tests below exercise that
+    discipline, so they bind a world that claims to be the outside one."""
+
+    kind = "real"
+
 _INVERSE = {"receiver": "pool", "method": "close", "args": ["db#1"]}
 _REFERENT = "pool:db#1"  # DictWorld.key(_INVERSE)
 _INVERSE2 = {"receiver": "pool", "method": "close", "args": ["db#2"]}
@@ -172,7 +181,7 @@ def test_whole_process_crash_from_a_real_journal_reclaims_once(tmp_path):
     # ...crash: the process dies with both holders still counted, no release.
 
     # recover reads the durable ledger the runtime wrote (not a hand-built WAL)
-    crash_world = DictWorld()
+    crash_world = _RealWorld()
     crash_world.seed(_REFERENT)                 # the remote referent survived
     report = recover(path, world=crash_world)
 

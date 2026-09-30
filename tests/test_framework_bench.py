@@ -19,7 +19,6 @@ direction for a gate to point. What is pinned instead:
 from __future__ import annotations
 
 import ast
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -30,6 +29,7 @@ ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / "bench"
 sys.path.insert(0, str(BENCH))
 sys.path.insert(0, str(ROOT / "tools"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _load_by_path(name: str, path: Path):
@@ -44,10 +44,7 @@ def _load_by_path(name: str, path: Path):
     in the same process, which is why it reached `main` green from a targeted
     run and failed the root suite.
     """
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(name, path)
     return module
 
 import check_eval_report  # noqa: E402

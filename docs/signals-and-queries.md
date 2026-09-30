@@ -77,7 +77,8 @@ Pushing an external event into a running instance is a `tools/call` that lands
 on a live provided operation. `revl_call` invokes a provided operation against
 the in-memory session ([mcp-bridge.md](mcp-bridge.md) §3, "the live session");
 `revl serve --mcp` puts every provided operation on the wire as
-`<prefix>.<key>.<op>`, maps the named MCP arguments back onto the declared
+`<prefix>.<key>.<op>` (except one that takes a `Principal` or `Trusted[...]`
+value, which is never read from a request), maps the named MCP arguments back onto the declared
 parameter order, and lands on `Session.call` against the running composition
 (§4). An external actor — a human, another service, an agent — calling
 `cache.put("k","v")` on a booted composition *is* delivering a signal to a
