@@ -2098,6 +2098,26 @@ def _named_call_method(undo: Callable[[Any], Any]) -> str:
     return getattr(undo, "__name__", None) or "undo"
 
 
+def _descriptor_call(call: Optional[dict], fn: Callable, receiver: str,
+                     args: list) -> tuple:
+    """`(receiver, method, args)` for a WAL discharge descriptor.
+
+    `call` is the named call the emitter derived at the registration site,
+    `{"receiver", "method", "args"}`, with the arguments evaluated at
+    registration (teardown-contract.md: "args captured at registration,
+    WAL-serializable"). `receiver` is the required-service KEY for a service
+    call and `None` for an extern or module fn, which lives in the emitted
+    module. It is written verbatim, so `replay_descriptors` can re-issue it in a
+    fresh process. Without one (a hand-built frame, an unrecognised shape) the
+    descriptor keeps its previous best-effort naming: the component, the
+    closure's first global, and `args`."""
+    if isinstance(call, dict) and isinstance(call.get("method"), str):
+        captured = call.get("args")
+        return (call.get("receiver"), call["method"],
+                list(captured) if isinstance(captured, (list, tuple)) else None)
+    return receiver, _named_call_method(fn), args
+
+
 class _Transactional:
     """The disposer for one witnessed (transactional) effect (item 243).
 
@@ -2404,134 +2424,159 @@ class _Compensation:
 
 
 # ---------------------------------------------------------------------------
-# item 522 slice 3 (issue #1369): the UI transaction unit
+# Declared compensations in provide methods, and the UI transaction unit
 # ---------------------------------------------------------------------------
 #
-# docs/design/538-ui-transactions.md §10. A provide method that crosses a
-# computer-use verb is one transaction: the unit `revl.ui_transaction.
-# method_plan` reads off the same method body. The emitter wraps that body in
-# `Frame.ui_transaction(...)` and decorates every computer-use extern with
-# `ui_crossing(...)`.
+# ONE registration path for an extern that DECLARES `compensate` (item 254) or
+# a computer-use capability (item 522). The emitter decorates every such
+# extern with `declared_crossing(...)`, and wraps every provide method that
+# can reach one in a call scope (`Frame.call_scope` or, for a computer-use
+# method, `Frame.ui_transaction`). Inside a scope the decorator registers the
+# extern's declared compensation through `Frame.compensation_method`, the
+# same call a site-spelled `emit ... compensate ...` makes, AFTER the host body
+# returns (item 247's register-after-fire order), wherever the crossing is
+# written: a statement, a `let`, a `return`, an argument, an `if` arm.
 #
-# On a clean return nothing changes: every entry the call registered stays
-# parked on the activation frame exactly as any provide-method entry does, and
-# the session or the activation settles it (discharged on commit, run on abort).
+# Before this, only a site-spelled `emit ... compensate ...` registered in a
+# provide method. An extern's declared `compensate` (the item-254 shape, and the
+# only form item 522 slice 1 checks) registered nowhere in a method body, so an
+# abort could not undo what the program declared undoable.
 #
-# On a failure, the unit settles its OWN entries at once, with the teardown
-# contract's two phases scoped to the entries this call registered: every
-# witnessed inverse, newest first, then every compensation, newest first. The
-# failure then propagates unchanged. Before this, the entries were parked and a
-# later clean commit DISCHARGED them, so a transaction that stopped half way
-# kept its typed fields and no compensation ever ran.
+# The ACTIVATION body keeps its own path: its compensations are yielded onto
+# cordis's disposer stack so they interleave with brackets (item 247), and the
+# decorator is a pass-through while an activation step runs.
+#
+# The UI transaction unit (issue #1369, docs/design/538-ui-transactions.md §10)
+# is a scope that SETTLES on failure. On a clean return nothing changes: the
+# entries stay parked on the activation frame like any provide-method entry.
+# On a failure the unit settles its OWN entries at once, with the teardown
+# contract's two phases scoped to them: witnessed inverses newest first, then
+# compensations newest first. The failure then propagates unchanged. A plain
+# `call_scope` never settles: a failed call's entries stay parked for the
+# activation's verdict, exactly as a site-spelled compensation's always have.
 #
 # The substrate still performs every crossing, compensations included: they are
 # the `@py` bodies of the declared inverses. What revl owns, and what runs here,
 # is the order and the membership (538 §3: `compensate` is the phase revl owns).
 
-#: The unit the current task is inside, or None. A context variable and not a
+#: The scope the current task is inside, or None. A context variable and not a
 #: module global, so two concurrent tool calls on one frame each see their own
-#: unit, and `_UiUnit.__exit__` restores the previous value on every path.
-_UI_UNIT: "contextvars.ContextVar[Optional[_UiUnit]]" = contextvars.ContextVar(
-    "revl_ui_unit", default=None)
+#: scope, and `_CallScope.__exit__` restores the previous value on every path.
+_CALL_SCOPE: "contextvars.ContextVar[Optional[_CallScope]]" = contextvars.ContextVar(
+    "revl_call_scope", default=None)
 
 
-class _UiUnit:
-    """One UI transaction unit: the context manager `Frame.ui_transaction`
-    returns. It records which computer-use crossings started, which one raised,
-    and which witnessed and compensation entries this call registered."""
+class _CallScope:
+    """One provide-method call's registration scope: the context manager
+    `Frame.call_scope` and `Frame.ui_transaction` return. It records which
+    declared crossings started, which one raised, and which witnessed and
+    compensation entries this call registered. `settles` is True for a UI
+    transaction unit only."""
 
-    __slots__ = ("frame", "name", "crossed", "failed_step", "transactional",
-                 "compensations", "labels", "_token")
+    __slots__ = ("frame", "name", "settles", "crossed", "failed_step",
+                 "transactional", "compensations", "labels", "_token",
+                 "_activating")
 
-    def __init__(self, frame: "Frame", name: str) -> None:
+    def __init__(self, frame: "Frame", name: str, settles: bool) -> None:
         self.frame = frame
         self.name = name
-        self.crossed: list = []          # computer-use crossings started, in order
+        self.settles = settles
+        self.crossed: list = []          # declared crossings started, in order
         self.failed_step: Optional[str] = None
         self.transactional: list = []    # `_Transactional` entries this call registered
         self.compensations: list = []    # `_Compensation` entries this call registered
         self.labels: dict = {}           # id(entry) -> the crossing it offsets
         self._token = None
+        self._activating = 0
 
-    def __enter__(self) -> "_UiUnit":
-        self._token = _UI_UNIT.set(self)
+    def __enter__(self) -> "_CallScope":
+        # an activation that starts INSIDE this call (a spawn) registers on its
+        # own frame's cordis stack; `declared_crossing` compares depths
+        self._activating = len(_ACTIVATING)
+        self._token = _CALL_SCOPE.set(self)
         return self
 
     def __exit__(self, exc_type, error, _tb) -> bool:
-        _UI_UNIT.reset(self._token)
-        if exc_type is not None:
+        _CALL_SCOPE.reset(self._token)
+        if exc_type is not None and self.settles:
             self.frame._unwind_ui_unit(self, error)
         return False   # the failure always propagates
 
-    def _register(self, label: str, compensate: Optional[Callable[[], Any]]) -> None:
-        """Register the crossing's DECLARED compensation on the frame, the same
-        first-class entry a provide-method `emit ... compensate ...` gets."""
+    def _register(self, label: str, compensate: Optional[Callable[[], Any]],
+                  call: Optional[dict] = None) -> None:
+        """Register the crossing's DECLARED compensation on the frame, through
+        the same `Frame.compensation_method` a site-spelled one uses."""
         if compensate is None or self.frame._halted:
             return
-        entry = self.frame.compensation_method(compensate)
+        entry = self.frame.compensation_method(compensate, call=call)
         self.labels[id(entry)] = label
 
 
-def _ui_unit_for(frame: "Frame") -> "Optional[_UiUnit]":
-    unit = _UI_UNIT.get()
-    return unit if unit is not None and unit.frame is frame else None
+def _scope_for(frame: "Frame") -> "Optional[_CallScope]":
+    scope = _CALL_SCOPE.get()
+    return scope if scope is not None and scope.frame is frame else None
 
 
-def ui_crossing(label: str, compensate: Optional[Callable[[], Any]] = None):
-    """Decorator on an extern that declares a computer-use capability.
+def declared_crossing(label: str, compensate: Optional[Callable[[], Any]] = None,
+                      *, ui: bool = False, call: Optional[dict] = None):
+    """Decorator on an extern that declares `compensate`, a computer-use
+    capability, or both.
 
-    Outside a unit it is a pass-through, so an activation-body crossing and an
-    ordinary call behave exactly as before. Inside one it notes the crossing,
-    registers the extern's declared `compensate` AFTER the host body returns
-    (item 247's register-after-fire order), and on a raise marks this crossing
-    as the step the transaction failed at.
+    Outside a call scope, and while an activation step that started inside the
+    scope runs, it is a pass-through. Inside a scope it notes the crossing, registers the declared
+    `compensate` after the host body returns, and on a raise marks this crossing
+    as the step the call failed at.
 
-    A crossing that RAISES still registers its own compensation. That is 538
-    §10's rule for the failing step, applied to the runtime: a raise says the
+    A computer-use crossing (`ui=True`) that RAISES still registers its own
+    compensation. That is 538 §10's rule for the failing step: a raise says the
     substrate could not confirm the effect, which is not knowing it did not
     land, and a declared inverse that clears a field is correct either way.
-    `revl.ui_transaction.compensation_run` states the same rule statically."""
+    Any other raising crossing registers nothing, item 247's rule: the
+    compensation is owed for an emission that crossed."""
     def _wrap(fn):
         def _enter():
-            unit = _UI_UNIT.get()
-            if unit is not None:
-                unit.crossed.append(label)
-            return unit
+            scope = _CALL_SCOPE.get()
+            if scope is None or len(_ACTIVATING) > scope._activating:
+                return None   # no scope, or an activation body: it registers on cordis's stack
+            scope.crossed.append(label)
+            return scope
 
-        def _failed(unit):
-            if unit.failed_step is None:
-                unit.failed_step = label
+        def _failed(scope):
+            if scope.failed_step is None:
+                scope.failed_step = label
+            if not ui:
+                return
             try:
-                unit._register(label, compensate)
+                scope._register(label, compensate, call)
             except EstopRefused:
                 pass   # a halt runs no compensation; the crossing's own raise propagates
 
         if inspect.iscoroutinefunction(fn):
-            async def _ui_crossing_async(*args, **kwargs):
-                unit = _enter()
-                if unit is None:
+            async def _declared_crossing_async(*args, **kwargs):
+                scope = _enter()
+                if scope is None:
                     return await fn(*args, **kwargs)
                 try:
                     value = await fn(*args, **kwargs)
                 except BaseException:
-                    _failed(unit)
+                    _failed(scope)
                     raise
-                unit._register(label, compensate)
+                scope._register(label, compensate, call)
                 return value
-            wrapped = _ui_crossing_async
+            wrapped = _declared_crossing_async
         else:
-            def _ui_crossing_sync(*args, **kwargs):
-                unit = _enter()
-                if unit is None:
+            def _declared_crossing_sync(*args, **kwargs):
+                scope = _enter()
+                if scope is None:
                     return fn(*args, **kwargs)
                 try:
                     value = fn(*args, **kwargs)
                 except BaseException:
-                    _failed(unit)
+                    _failed(scope)
                     raise
-                unit._register(label, compensate)
+                scope._register(label, compensate, call)
                 return value
-            wrapped = _ui_crossing_sync
+            wrapped = _declared_crossing_sync
         wrapped.__name__ = fn.__name__
         wrapped.__qualname__ = fn.__qualname__
         wrapped.__doc__ = fn.__doc__
@@ -3451,7 +3496,8 @@ class Frame:
                       undo_idempotent: bool = False,
                       register: Optional[str] = None,
                       idempotency: Optional[str] = None,
-                      scope: Optional[dict] = None) -> "_Transactional":
+                      scope: Optional[dict] = None,
+                      call: Optional[dict] = None) -> "_Transactional":
         """Register a witnessed effect's declared inverse as a TRANSACTIONAL
         entry, carrying its `witness` (item 243). Returns the disposer the
         emitted body yields into the accumulator, so it sits in the same LIFO
@@ -3485,14 +3531,18 @@ class Frame:
         _estop_check(f"{self.name}.{_named_call_method(undo)}")   # item 443
         entry = _Transactional(self, undo, witness,
                                undo_idempotent=undo_idempotent, scope=scope)
+        if isinstance(call, dict) and isinstance(call.get("method"), str):
+            entry.method = call["method"]   # the named inverse, for residue records
         self._transactional.append(entry)
         wal = self._wal()
         if wal is not None:
+            receiver, method, args = _descriptor_call(
+                call, undo, self.name, [witness])
             record = wal.record_discharge_descriptor(
                 "transactional",
-                receiver=self.name,
-                method=_named_call_method(undo),
-                args=[witness],
+                receiver=receiver,
+                method=method,
+                args=args,
                 origin={"phase": "activation", "key": self.name},
                 witness=witness,
                 # item 309: carry the register into the WAL so a fresh-process
@@ -3506,7 +3556,8 @@ class Frame:
 
     def transactional_method(self, undo: Callable[[Any], Any], witness: Any, *,
                              undo_idempotent: bool = False,
-                             scope: Optional[dict] = None) -> "_Transactional":
+                             scope: Optional[dict] = None,
+                             call: Optional[dict] = None) -> "_Transactional":
         """Register the declared inverse of a witnessed effect that has NO body
         generator to yield its disposer into, as a transactional entry on THIS
         component's activation frame (item 318,
@@ -3564,18 +3615,22 @@ class Frame:
         _estop_check(f"{self.name}.{_named_call_method(undo)}")   # item 443
         entry = _Transactional(self, undo, witness,
                                undo_idempotent=undo_idempotent, scope=scope)
+        if isinstance(call, dict) and isinstance(call.get("method"), str):
+            entry.method = call["method"]   # the named inverse, for residue records
         self._transactional.append(entry)
         self._deferred_transactional.append(entry)
-        unit = _ui_unit_for(self)   # item 522 slice 3: settled by the unit on failure
-        if unit is not None:
-            unit.transactional.append(entry)
+        scope = _scope_for(self)   # settled by a UI transaction unit on failure
+        if scope is not None:
+            scope.transactional.append(entry)
         wal = self._wal()
         if wal is not None:
+            receiver, method, args = _descriptor_call(
+                call, undo, self.name, [witness])
             record = wal.record_discharge_descriptor(
                 "transactional",
-                receiver=self.name,
-                method=_named_call_method(undo),
-                args=[witness],
+                receiver=receiver,
+                method=method,
+                args=args,
                 origin={"phase": "call", "key": self.name},
                 witness=witness,
                 undo_idempotent=undo_idempotent,
@@ -3595,7 +3650,8 @@ class Frame:
         mutations revert, residue-free. Idempotent."""
         self._aborting = True
 
-    def compensation(self, fn: Callable[[], Any]) -> "_Compensation":
+    def compensation(self, fn: Callable[[], Any], *,
+                     call: Optional[dict] = None) -> "_Compensation":
         """Register an `emit ... compensate ...` step's offsetting call as a
         COMPENSATION entry on the SAME per-activation LIFO disposer stack as
         every bracket and transactional entry (item 247, docs/design/
@@ -3625,23 +3681,25 @@ class Frame:
         `entry.seq` carries the assigned seq so `drain` can name it in the
         discharge record on a clean commit; it is `None` when no WAL is
         active."""
-        _estop_check(f"{self.name}.{_named_call_method(fn)}")   # item 443
-        entry = _Compensation(self, fn, method=_named_call_method(fn))
+        receiver, method, args = _descriptor_call(call, fn, self.name, [])
+        _estop_check(f"{self.name}.{method}")   # item 443
+        entry = _Compensation(self, fn, method=method)
         self._compensations.append(entry)
         wal = self._wal()
         if wal is not None:
             record = wal.record_discharge_descriptor(
                 "compensation",
-                receiver=self.name,
-                method=_named_call_method(fn),
-                args=[],
+                receiver=receiver,
+                method=method,
+                args=args,
                 origin={"phase": "activation", "key": self.name},
                 witness=None,
             )
             entry.seq = record["seq"]
         return entry
 
-    def compensation_method(self, fn: Callable[[], Any]) -> "_Compensation":
+    def compensation_method(self, fn: Callable[[], Any], *,
+                            call: Optional[dict] = None) -> "_Compensation":
         """Register a PROVIDE-METHOD `emit ... compensate ...` step's offsetting
         call as a COMPENSATION entry on THIS component's activation frame (the
         item-247 method-body compensate remainder, docs/design/teardown-contract.md).
@@ -3685,38 +3743,45 @@ class Frame:
         (its `ctx` has no `_revl_timeline`), so this is a no-op there, byte-inert.
         The discharge-descriptor's `method` is read from the ORIGINAL `fn` before
         wrapping, so the WAL names the real offsetting call, not the wrapper."""
-        _estop_check(f"{self.name}.{_named_call_method(fn)}")   # item 443
-        method_name = _named_call_method(fn)
+        receiver, method_name, args = _descriptor_call(call, fn, self.name, [])
+        _estop_check(f"{self.name}.{method_name}")   # item 443
         timeline = getattr(self.ctx, "_revl_timeline", None)
         if timeline is not None:
             _step, fn = timeline.record_yield(fn, f"{self.name}/compensate")
         entry = _Compensation(self, fn, method=method_name)
         self._compensations.append(entry)
         self._deferred_compensations.append(entry)
-        unit = _ui_unit_for(self)   # item 522 slice 3: settled by the unit on failure
-        if unit is not None:
-            unit.compensations.append(entry)
+        scope = _scope_for(self)   # settled by a UI transaction unit on failure
+        if scope is not None:
+            scope.compensations.append(entry)
         wal = self._wal()
         if wal is not None:
             record = wal.record_discharge_descriptor(
                 "compensation",
-                receiver=self.name,
+                receiver=receiver,
                 method=method_name,
-                args=[],
+                args=args,
                 origin={"phase": "call", "key": self.name},
                 witness=None,
             )
             entry.seq = record["seq"]
         return entry
 
-    def ui_transaction(self, name: str) -> "_UiUnit":
-        """The UI transaction unit for one provide-method call (item 522 slice
-        3, issue #1369). The emitter wraps a method body that crosses a
-        computer-use verb in `with _revl_frame.ui_transaction("key.method"):`.
-        See `_UiUnit` and `ui_crossing` for what it records."""
-        return _UiUnit(self, name)
+    def call_scope(self, name: str) -> "_CallScope":
+        """The registration scope for one provide-method call that can reach an
+        extern declaring `compensate`. It never settles anything itself: a
+        failed call's entries stay parked for the activation's verdict. See
+        `_CallScope` and `declared_crossing`."""
+        return _CallScope(self, name, settles=False)
 
-    def _unwind_ui_unit(self, unit: "_UiUnit", error: BaseException) -> None:
+    def ui_transaction(self, name: str) -> "_CallScope":
+        """The UI transaction unit for one provide-method call (item 522 slice
+        3, issue #1369): a call scope that SETTLES its own entries when the call
+        fails. The emitter wraps a method body that crosses a computer-use verb
+        in `with _revl_frame.ui_transaction("key.method"):`."""
+        return _CallScope(self, name, settles=True)
+
+    def _unwind_ui_unit(self, unit: "_CallScope", error: BaseException) -> None:
         """Settle the entries a FAILED unit registered, and record the run.
 
         The teardown contract's abort, scoped to this call: Phase 1 replays the
@@ -4096,6 +4161,169 @@ class Frame:
                     self._record_phase1_residue(effect, error)
 
         return run()
+
+
+# ---------------------------------------------------------------------------
+# Re-issuing WAL discharge descriptors in a fresh process (issue #1369)
+# ---------------------------------------------------------------------------
+#
+# Every transactional and compensation entry writes a discharge descriptor at
+# registration whose `call` is the named call the emitter derived at the site
+# (`{"receiver", "method", "args"}`, arguments evaluated at registration). A
+# process that dies before its verdict leaves those descriptors open. This is
+# the ONE entry point that re-issues them: it rebuilds the same `_Transactional`
+# and `_Compensation` entries under their original `seq` and runs them through
+# the frame's own abort path (`Frame.drain`, then `Frame._drain_phase2`), so the
+# fences, the E-Stop, the budget, the error capture and the residue records are
+# the ones an in-process abort gets. There is no second executor.
+
+
+class _ReplayTimeline:
+    """The one attribute `Frame._wal` reads off a recording context."""
+
+    def __init__(self, wal: Any) -> None:
+        self._wal = wal
+
+
+class _ReplayContext:
+    """A context for the replay frame: it carries the WAL and nothing else. A
+    plain class so the frame registry can hold a weak reference to it."""
+
+    def __init__(self, wal: Any) -> None:
+        self._revl_timeline = _ReplayTimeline(wal)
+
+
+def _replay_wal_module():
+    try:
+        import replay as module  # noqa: PLC0415 - sibling, on the path runtime came from
+    except ModuleNotFoundError:  # pragma: no cover - path-loaded copy of this module
+        import importlib.util as _util  # noqa: PLC0415
+        spec = _util.spec_from_file_location(
+            "revl_replay_for_descriptors",
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), "replay.py"))
+        module = _util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+    return module
+
+
+def _settled_seqs(wal_path: str) -> tuple:
+    """`(settled, fenced)` seqs already on disk: a discharge record or an
+    `aborted` record settles a seq, a `replay-fence` fences one."""
+    settled: set = set()
+    fenced: set = set()
+    if not os.path.exists(wal_path):
+        return settled, fenced
+    with open(wal_path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                record = json.loads(line)
+            except ValueError:
+                continue   # a torn tail; the WAL seals it on open
+            kind = record.get("record")
+            if kind == "discharge":
+                settled.update(record.get("discharged") or [])
+            elif kind == "aborted":
+                settled.update(record.get("replayed") or [])
+            elif kind == "replay-fence":
+                fenced.add(record.get("seq"))
+    return settled, fenced
+
+
+def _resolve_call(module: Any, services: dict, call: dict) -> Optional[Callable]:
+    """The host body a descriptor's `call` names: a module-level binding of the
+    emitted module when `receiver` is `None`, else `method` on the live
+    provider the caller supplied for that required-service key."""
+    method = call.get("method")
+    if not isinstance(method, str):
+        return None
+    receiver = call.get("receiver")
+    owner = module if receiver is None else services.get(receiver)
+    target = getattr(owner, method, None) if owner is not None else None
+    return target if callable(target) else None
+
+
+def replay_descriptors(module: Any, wal_path: str, descriptors: list, *,
+                       services: Optional[dict] = None) -> dict:
+    """Re-issue open WAL discharge descriptors in a fresh process.
+
+    `module` is the composition's emitted module, loaded without activating it;
+    `services` maps a required-service key to a live provider, for descriptors
+    whose `call` goes through one. Each descriptor is rebuilt as the entry it was
+    registered as, under its original `seq`, and every entry runs through the
+    frame's own abort path: witnessed inverses newest first with their replay
+    fences written to `wal_path`, then compensations newest first under the
+    Phase-2 budget. An `aborted` record naming what ran is appended at the end.
+
+    Returns `{seq: outcome}`, where outcome is one of `ran`, `failed`, `fenced`
+    (a non-idempotent inverse a previous attempt had already fenced), `settled`
+    (a discharge or `aborted` record already names it), `unresolved` (the call
+    names no host body here, or its arguments were not captured at
+    registration), or `stranded` (an E-Stop is in force, so nothing runs)."""
+    services = dict(services or {})
+    settled, fenced = _settled_seqs(wal_path)
+    wal = _replay_wal_module().WriteAheadLog(wal_path).open()
+    outcome: dict = {}
+    try:
+        frame = Frame(_ReplayContext(wal), "replay")
+        # The replay frame belongs to no session: a live owner in this process
+        # (a provider loaded to serve service-call descriptors) must neither
+        # escrow its entries nor count them in its commit manifest.
+        if frame._owner is not None:
+            frame._owner.withdraw_frame(frame)
+            frame._owner = None
+        frame._aborting = True   # this drain is an abort: nothing commits
+        if estop_engaged():
+            frame._halted = True
+        transactional: list = []
+        compensations: list = []
+        for descriptor in sorted(descriptors, key=lambda d: d.get("seq") or 0):
+            seq = descriptor.get("seq")
+            call = descriptor.get("call") or {}
+            if seq in settled:
+                outcome[seq] = "settled"
+                continue
+            idempotent = bool(descriptor.get("undo_idempotent"))
+            if descriptor.get("entry") == "transactional" and seq in fenced \
+                    and not idempotent:
+                outcome[seq] = "fenced"
+                continue
+            target = _resolve_call(module, services, call)
+            if target is None or not isinstance(call.get("args"), list):
+                outcome[seq] = "unresolved"
+                continue
+            args = list(call["args"])
+            if descriptor.get("entry") == "transactional":
+                entry = _Transactional(
+                    frame, lambda _witness, _t=target, _a=args: _t(*_a), None,
+                    undo_idempotent=idempotent)
+                entry.method = call["method"]
+                transactional.append(entry)
+            else:
+                entry = _Compensation(frame, lambda _t=target, _a=args: _t(*_a),
+                                      method=call["method"])
+                compensations.append(entry)
+            entry.seq = seq
+        frame._transactional = transactional
+        frame._deferred_transactional = list(transactional)
+        frame._compensations = compensations
+        frame._deferred_compensations = list(compensations)
+        frame.drain()           # Phase 1, and the compensations enqueue
+        frame._drain_phase2()   # Phase 2
+        failed = {r.get("seq") for r in frame.compensation_residue}
+        for entry in transactional:
+            outcome[entry.seq] = ("stranded" if frame._halted
+                                  else "failed" if entry.seq in failed
+                                  else "ran" if entry.replayed else "unresolved")
+        for entry in compensations:
+            outcome[entry.seq] = ("stranded" if frame._halted
+                                  else "failed" if entry.failed or entry.seq in failed
+                                  else "ran" if entry.ran else "unresolved")
+        ran = sorted(seq for seq, state in outcome.items() if state == "ran")
+        if ran:
+            wal.record_aborted(ran)
+    finally:
+        wal.close()
+    return outcome
 
 
 # ---------------------------------------------------------------------------
@@ -4576,8 +4804,12 @@ class SessionOwner:
         # compensation entry counts toward the commit gate target (it discharges
         # at commit, joining the discharge record) instead of crashing the
         # manifest — the two-step commit of a session holding a compensation.
+        # A compensation that already RAN (a failed UI transaction unit settled
+        # it, item 522 slice 3) is settled, exactly as `_entry_status` reads
+        # it, so it is not live and must not move the hash the operator confirms.
         return sum(1 for e in self._live_entries()
-                   if not e.discharged and not getattr(e, "replayed", False))
+                   if not e.discharged and not getattr(e, "replayed", False)
+                   and not getattr(e, "ran", False))
 
     def _target(self) -> dict:
         """The gate target, hash-bound: (queue, live witnessed count, registry

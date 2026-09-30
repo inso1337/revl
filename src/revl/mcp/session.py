@@ -3000,7 +3000,7 @@ class Session:
                 entry.frame.abort()
             owner.finalize_abort()
         residue = self._surface_compensation_residue(owner)
-        report = self._teardown_report(driver)
+        report = self._teardown_report(driver, residue)
         self._reset()
         return {"unloaded": True, "compensationResidue": residue, **report}
 
@@ -3338,11 +3338,13 @@ class Session:
         # record), then run the R4 residue checks and the per-resource ledger.
         extra = finalize() or {}
         residue = self._surface_compensation_residue(owner)
-        report = self._teardown_report(driver)
+        report = self._teardown_report(driver, residue)
         failed = [r["component"] for r in resources if r["outcome"] == "failed"]
         unattempted = [r["component"] for r in resources
                        if r["outcome"] in ("owned", "attempted")]
-        r4_clean = bool(report["noResidue"])
+        # R4 alone: the compensation check is reported separately below
+        r4_clean = all(v for k, v in report["checks"].items()
+                       if k != "compensations")
         # `settled` is PHYSICAL settlement: the aggregate returned, every original
         # disposer that was reached returned, and R4 passes. A logged fault on a
         # single original resource withholds it even though the aggregate returned.
@@ -3505,7 +3507,7 @@ class Session:
         discharged = owner.finalize_commit()       # one discharge record
         self._commit_wal(driver)                   # activation-complete + close
         residue = self._surface_compensation_residue(owner)
-        report = self._teardown_report(driver)
+        report = self._teardown_report(driver, residue)
         prompts = dict(owner.prompts)
         self._reset()
         return {"committed": True, "flushed": flush["fired"],
@@ -3529,7 +3531,7 @@ class Session:
         result = owner.finalize_abort()            # aborted record (+ escrow Phase 2)
         self._close_wal()
         residue = self._surface_compensation_residue(owner)
-        report = self._teardown_report(driver)
+        report = self._teardown_report(driver, residue)
         prompts = dict(owner.prompts)
         self._reset()
         return {"aborted": True, "replayed": result["replayed"],
@@ -4183,8 +4185,17 @@ class Session:
         owner.prompts["residue"] += len(residue)
         return residue
 
-    def _teardown_report(self, driver) -> dict:
-        """The R4 residue checks after a teardown, and the drained trace."""
+    def _teardown_report(self, driver, residue=()) -> dict:
+        """The R4 residue checks after a teardown, and the drained trace.
+
+        `residue` is the session's compensation residue at this boundary: an
+        offset that was owed and did not land (teardown-contract.md, "the merged
+        residue schema", `state: "unresolved"`). R4 itself checks in-process
+        state only, so an unresolved compensation used to leave `noResidue`
+        true beside a non-empty `compensationResidue`, a verdict claiming a clean
+        undo that did not happen. When there is any, a fifth check,
+        `compensations`, is present and false, and `noResidue` is false with it.
+        A boundary with none keeps the four checks, byte-identical."""
         checks = {
             "registry": driver.root.registry.size == 0,
             "provisions": driver.root.reflect.store == {},
@@ -4192,6 +4203,8 @@ class Session:
                         == driver._baseline_disposables),
             "listeners": driver._hooks() == driver._baseline_hooks,
         }
+        if residue:
+            checks["compensations"] = False
         detail = {
             "registrySize": driver.root.registry.size,
             "provisions": sorted(driver.root.reflect.store),

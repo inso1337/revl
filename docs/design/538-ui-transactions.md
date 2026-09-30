@@ -438,7 +438,7 @@ stopped half way, kept what it typed, and ran no compensation.
 
 Now the unit `method_plan` reads is also the unit the python tier runs. The
 emitter wraps each planned provide method in `Frame.ui_transaction` and
-decorates each computer-use extern with `ui_crossing`, which registers the
+decorates each computer-use extern with `declared_crossing`, which registers the
 extern's declared compensation wherever the crossing is written (a `let`, a
 `return`, an argument), after the host body returns. If the call fails, the
 unit settles the entries this call registered with the teardown contract's two

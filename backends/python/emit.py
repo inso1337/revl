@@ -32,7 +32,7 @@ import keyword
 import math
 import re
 import textwrap
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 
 IR_VERSION = 1
 
@@ -91,7 +91,7 @@ _IMPORT_ALIAS = {
     "mark_secret": "_revl_mark_secret",
     "secret_result": "_revl_secret_result",
     "declare_secret_types": "_revl_declare_secret_types",
-    "ui_crossing": "_revl_ui_crossing",
+    "declared_crossing": "_revl_declared_crossing",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -1217,13 +1217,14 @@ def _is_map_cas(acquire: Any) -> bool:
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None,
                  plan_groups: list | None = None,
-                 ui_units: set | None = None) -> None:
+                 scopes: dict | None = None) -> None:
         self.ir = component
         self.services = services
         # item 522 slice 3 (issue #1369): the `(provide key, method)` pairs of
-        # this component that are UI transaction units (`_ui_transaction_facts`).
-        self.ui_units: set = {(_ident(key, "provides key"), method)
-                              for key, method in (ui_units or ())}
+        # this component that run in a call scope, mapped to `ui_transaction`
+        # or `call_scope` (`_crossing_facts`).
+        self.scopes: dict = {(_ident(key, "provides key"), method): kind
+                             for (key, method), kind in (scopes or {}).items()}
         # item 259 slice 2: every declared extern by name, so an `emit` step's
         # forward-delivery idempotence (the fan-out eligibility gate) is readable
         # off a host-extern emission the same way a req-target emission reads it
@@ -2005,7 +2006,8 @@ class _ComponentEmitter:
                 # (docs/contract-errata.md's TCK A5 respec, a5a/a5b); it is
                 # compensation, not inversion (§6.1).
                 out.add(indent, "yield _revl_frame.compensation(lambda: "
-                                 f"{self._expr(step.get('compensate'), where)})")
+                                 f"{self._expr(step.get('compensate'), where)}"
+                                 f"{self._compensation_call(step.get('compensate'), where)})")
             ext_comp = self._compensated_extern(step.get("expr"))
             if ext_comp is not None:
                 # item 254: the emitted extern DECLARES its own `compensate` (the
@@ -2019,7 +2021,8 @@ class _ComponentEmitter:
                 # call, no `result` binding — lower.py `_check_extern_undo`), the
                 # same shape `_witnessed_step` renders for a witnessed `undo`.
                 out.add(indent, "yield _revl_frame.compensation(lambda: "
-                                 f"{self._expr(ext_comp['compensate'], where)})")
+                                 f"{self._expr(ext_comp['compensate'], where)}"
+                                 f"{self._compensation_call(ext_comp['compensate'], where)})")
         elif kind == "approval":
             self._approval_step(out, indent, step, where)
         elif kind == "await":
@@ -2274,7 +2277,8 @@ class _ComponentEmitter:
                 # forward effect is compensated only if it landed). §3.3 invariant P.
                 out.add(indent, f"if _revl_group[{pos}].ok:")
                 out.add(indent + 1, "yield _revl_frame.compensation(lambda: "
-                                    f"{self._expr(member.get('compensate'), where)})")
+                                    f"{self._expr(member.get('compensate'), where)}"
+                                    f"{self._compensation_call(member.get('compensate'), where)})")
         # re-raise the first fault AFTER every fired member's compensation is on
         # the stack, so the L-Raise teardown unwinds a correctly-ordered stack.
         out.add(indent, "_revl_raise_first(_revl_group)")
@@ -2387,6 +2391,11 @@ class _ComponentEmitter:
                 f"[{', '.join(args)}], lambda: {fire}"
                 f"{_deferred_register_kwargs(ext, args)})")
 
+    def _compensation_call(self, node: Any, where: str,
+                           witness: Optional[str] = None) -> str:
+        """`, call={...}` for a registration site: see `_named_call_kwarg`."""
+        return _named_call_kwarg(node, lambda a: self._expr(a, where), witness)
+
     def _compensated_extern(self, expr: Any) -> Optional[dict]:
         """The emission extern (one DECLARING a `compensate`) an `emit` step's
         expression calls, or None (item 254).
@@ -2463,6 +2472,7 @@ class _ComponentEmitter:
             out.add(indent + 1,
                     f"{_runtime_ref('mark_secret')}({tmp}.value)")
         extra = _transactional_register_kwargs(ext) + _transactional_scope_kwargs(ext)
+        extra += self._compensation_call(ext["undo"], where, f"{tmp}.value")
         out.add(indent + 1,
                 f"yield _revl_frame.transactional((lambda result: {undo}), "
                 f"{tmp}.value{extra})")
@@ -2510,7 +2520,8 @@ class _ComponentEmitter:
                     f"{_runtime_ref('mark_secret')}({tmp}.value)")
         out.add(indent + 1,
                 f"_revl_frame.transactional_method((lambda result: {undo}), "
-                f"{tmp}.value{_transactional_scope_kwargs(ext)})")
+                f"{tmp}.value{_transactional_scope_kwargs(ext)}"
+                f"{self._compensation_call(ext['undo'], where, f'{tmp}.value')})")
         if bind is not None:
             out.add(indent, f"{bind} = {tmp}")
 
@@ -2789,14 +2800,17 @@ class _ComponentEmitter:
         self.analyze_model_flow(body, mwhere)
         prev_async = self._in_async
         self._in_async = method_is_async
-        # item 522 slice 3 (issue #1369): a method that crosses a computer-use
-        # verb is one UI transaction unit, the unit `ui_transaction.method_plan`
-        # reads statically. Its body runs inside `Frame.ui_transaction`, which
-        # runs the call's own compensations LIFO if the call fails. Every other
-        # method is byte-identical.
+        # A method that can reach an extern declaring `compensate` runs inside
+        # a call scope, so the extern's `declared_crossing` decorator can
+        # register the compensation wherever the crossing is written. A method
+        # that crosses a computer-use verb is a UI transaction unit (item 522
+        # slice 3, issue #1369), the unit `ui_transaction.method_plan` reads,
+        # and its scope also runs the call's own compensations LIFO if the call
+        # fails. Every other method is byte-identical.
         body_indent = indent + 1
-        if (provide_name, method.get("name")) in self.ui_units:
-            out.add(indent + 1, "with _revl_frame.ui_transaction("
+        scope = self.scopes.get((provide_name, method.get("name")))
+        if scope is not None:
+            out.add(indent + 1, f"with _revl_frame.{scope}("
                                 f"{provide_name + '.' + name!r}):")
             body_indent = indent + 2
         try:
@@ -2916,7 +2930,8 @@ class _ComponentEmitter:
                 out.add(indent,
                         "_revl_frame.compensation_method("
                         f"{_inverse_lambda(step, 'compensate')}: "
-                        f"{self._expr(step.get('compensate'), where)})")
+                        f"{self._expr(step.get('compensate'), where)}"
+                        f"{self._compensation_call(step.get('compensate'), where)})")
             else:
                 out.add(indent, self._emit_fire(step, where))
         elif kind == "return":
@@ -4269,7 +4284,7 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
     return out
 
 
-def _emit_externs(externs: list, ui_externs: set = frozenset()) -> "_Lines":
+def _emit_externs(externs: list, crossings: dict | None = None) -> "_Lines":
     out = _Lines()
     # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
     # FAIL-LOUD lookup. The driver (src/revl/run.py) resolves each bound secret's
@@ -4359,18 +4374,21 @@ def _emit_externs(externs: list, ui_externs: set = frozenset()) -> "_Lines":
         # top import would run the referenced module at artifact LOAD, outside
         # every classification/approval/witness gate; the thunk keeps host
         # execution where an inline body's execution is (design §"Emit, py").
-        # item 522 slice 3 (issue #1369): a computer-use extern is decorated so
-        # the UI transaction unit its call runs inside can see the crossing, and
-        # can register the extern's DECLARED `compensate` wherever the crossing
-        # is written (a `let`, a `return`, an argument), not only at a bare
-        # `emit` statement. The slot runs with no variables in scope (lower
-        # refuses one that names a parameter), so it is a closed thunk here.
-        # Emitted only for a computer-use extern, so every other `def` is
-        # byte-identical.
-        if ext["name"] in ui_externs:
+        # An extern that declares `compensate` (item 254) or a computer-use
+        # capability (item 522) is decorated, so the call scope a provide
+        # method runs in can register the declared compensation wherever the
+        # crossing is written (a statement, a `let`, a `return`, an argument),
+        # through the same `Frame.compensation_method` a site-spelled
+        # `emit ... compensate ...` uses. The slot runs with no variables in
+        # scope (lower refuses one that names a parameter), so it is a closed
+        # thunk here. Every other `def` is byte-identical.
+        if ext["name"] in (crossings or {}):
             comp = ext.get("compensate")
             thunk = "None" if comp is None else f"lambda: {_expr(comp)}"
-            out.add(0, f"@{_runtime_ref('ui_crossing')}({ext['name']!r}, {thunk})")
+            ui = ", ui=True" if crossings[ext["name"]] else ""
+            call = "" if comp is None else _named_call_kwarg(comp, _expr)
+            out.add(0, f"@{_runtime_ref('declared_crossing')}"
+                       f"({ext['name']!r}, {thunk}{ui}{call})")
         if "py" in refs and "py" not in bodies:
             out.extend(_emit_py_ref_thunk(name, params, ext, refs["py"]))
             continue
@@ -5197,18 +5215,18 @@ def _ui_transaction_facts(ir: dict) -> tuple[set, dict]:
     describes. Unlike the fan-out plan this is a correctness dependency, so it
     is FAIL-CLOSED: without the frontend a document that declares a computer-use
     capability is refused rather than emitted with no unit."""
+    roots = {str(cap).split(".", 1)[0]
+             for ext in ir.get("externs") or []
+             for cap in ext.get("capabilities") or []}
+    if not roots & {"ui", "screen"}:
+        return set(), {}
     try:
         from revl import ui_family, ui_transaction  # noqa: PLC0415
     except Exception as error:  # noqa: BLE001 - frontend absent
-        roots = {str(cap).split(".", 1)[0]
-                 for ext in ir.get("externs") or []
-                 for cap in ext.get("capabilities") or []}
-        if roots & {"ui", "screen"}:
-            raise EmitError(
-                "a computer-use extern needs the revl frontend to find its "
-                "transaction unit (item 522), and it is not importable here: "
-                f"{error}") from error
-        return set(), {}
+        raise EmitError(
+            "a computer-use extern needs the revl frontend to find its "
+            "transaction unit (item 522), and it is not importable here: "
+            f"{error}") from error
     index = ui_transaction._extern_index(ir)
     ui_externs = {name for name, entry in index.items()
                   if ui_family.reversibility(entry["token"]) is not None}
@@ -5219,6 +5237,122 @@ def _ui_transaction_facts(ir: dict) -> tuple[set, dict]:
         units.setdefault(plan["component"], set()).add(
             (plan["key"], plan["method"]))
     return ui_externs, units
+
+
+#: Argument shapes a compensation's WAL descriptor may capture by evaluating
+#: them again at registration: reading one repeats no crossing.
+_INERT_ARG_KINDS = frozenset({"name", "var", "lit", "config"})
+
+
+def _inert(node: Any) -> bool:
+    if not isinstance(node, dict):
+        return False
+    if node.get("kind") == "field":
+        return _inert(node.get("target"))
+    return node.get("kind") in _INERT_ARG_KINDS
+
+
+def _named_call_kwarg(node: Any, render: Callable[[dict], str],
+                      witness: Optional[str] = None) -> str:
+    """The named call an inverse or compensation makes, as the `call=` keyword
+    for `Frame.transactional` / `transactional_method` / `compensation` /
+    `compensation_method`, which write it verbatim into the WAL discharge
+    descriptor (docs/design/teardown-contract.md, "WAL descriptor") so a fresh
+    process can re-issue it (`runtime.replay_descriptors`). The lambda beside it
+    stays the in-process path.
+
+    `receiver` is the required-service KEY for a call through one and `None`
+    for an extern or module fn, which the emitted module binds by `method`.
+    `args` are evaluated at registration. A witnessed inverse's are evaluated
+    against `result`, the `Ok` witness (`witness` is its expression here). A
+    compensation's are captured only when every one is a name, a literal, a
+    config read or a field of one: capturing evaluates them a second time, and
+    an argument that is itself a call (`compensate a.y(a.q(t))`) would cross at
+    registration, on every successful call, instead of only when the
+    compensation is owed. Such a descriptor records `args: None`.
+
+    Before this, the runtime guessed the method from the closure's first global
+    and wrote `args: []` for every compensation and `[witness]` for every
+    inverse, so `compensate tickets.withdraw(t)` was recorded as receiver
+    `Agent`, method `tickets`, args `[]`. An unrecognised shape adds nothing and
+    keeps that best-effort naming."""
+    if not isinstance(node, dict):
+        return ""
+    kind = node.get("kind")
+    receiver = None
+    if kind == "call" and isinstance(node.get("target"), dict):
+        if node["target"].get("kind") != "req":
+            return ""
+        receiver, method = node["target"].get("name"), node.get("method")
+    elif kind == "call" and isinstance(node.get("callee"), dict) \
+            and node["callee"].get("kind") == "var":
+        method = node["callee"].get("name")
+    elif kind == "fn":
+        method = node.get("name")
+    else:
+        return ""
+    if not isinstance(method, str):
+        return ""
+    args = node.get("args") or []
+    listed = ", ".join(render(a) for a in args)
+    if witness is not None:
+        captured = f"(lambda result: [{listed}])({witness})"
+    elif all(_inert(a) for a in args):
+        captured = f"[{listed}]"
+    else:
+        captured = "None"
+    return (f", call={{'receiver': {receiver!r}, 'method': {method!r}, "
+            f"'args': {captured}}}")
+
+
+#: Keys holding a registered inverse, not a forward crossing: the site-spelled
+#: `compensate` of an `emit` and the `undo` of an `effect`. They run on unwind.
+_INVERSE_KEYS = frozenset({"compensate", "undo"})
+
+
+def _reaches(node: Any, names: set) -> bool:
+    """Whether `node` calls an extern in `names` anywhere in its forward
+    evaluation: any statement, any expression position, any `if` arm."""
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in names:
+            return True
+        return any(_reaches(value, names) for key, value in node.items()
+                   if key not in _INVERSE_KEYS)
+    if isinstance(node, list):
+        return any(_reaches(item, names) for item in node)
+    return False
+
+
+def _crossing_facts(ir: dict) -> tuple[dict, dict]:
+    """The externs `declared_crossing` decorates, as `{name: is_computer_use}`,
+    and the provide methods that run in a call scope, as
+    `{component: {(key, method): "ui_transaction" | "call_scope"}}`.
+
+    An extern is decorated when it declares `compensate` (item 254) or a
+    computer-use capability (item 522). A method gets a scope when its body can
+    reach one of them; a computer-use method's scope is its UI transaction unit.
+    A document with neither kind of extern gets `({}, {})` and is emitted
+    byte-identically."""
+    ui_externs, units = _ui_transaction_facts(ir)
+    declared = {ext.get("name") for ext in ir.get("externs") or []
+                if ext.get("class") == "emission"
+                and ext.get("compensate") is not None}
+    crossings = {name: name in ui_externs for name in declared | ui_externs}
+    if not crossings:
+        return {}, {}
+    scopes: dict = {}
+    for comp in ir.get("components") or []:
+        cname = comp.get("name")
+        for entry in comp.get("body") or []:
+            if not isinstance(entry, dict) or entry.get("step") != "provide":
+                continue
+            for method in entry.get("methods") or []:
+                key = (entry.get("name"), method.get("name"))
+                if key in units.get(cname, set()):
+                    scopes.setdefault(cname, {})[key] = "ui_transaction"
+                elif _reaches(method.get("body"), set(crossings)):
+                    scopes.setdefault(cname, {})[key] = "call_scope"
+    return crossings, scopes
 
 
 def _parallel_step_groups(ir: dict) -> dict:
@@ -5417,11 +5551,11 @@ def emit(ir: dict) -> str:
     # body has a provable parallel group - either way the emission is sequential
     # and byte-identical to before).
     plan_groups = _parallel_step_groups(ir)
-    ui_externs, ui_units = _ui_transaction_facts(ir)
+    crossings, scopes = _crossing_facts(ir)
     emitters = [
         _ComponentEmitter(component, services, externs,
                           plan_groups.get(component.get("name")),
-                          ui_units.get(component.get("name")))
+                          scopes.get(component.get("name")))
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]
@@ -5487,10 +5621,9 @@ def emit(ir: dict) -> str:
         # through `emitter.uses`.
         | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
            else set())
-        # item 522 slice 3: a computer-use extern is decorated so a UI
-        # transaction unit can see the crossing (`_emit_externs`). A document
-        # with no computer-use extern is byte-identical.
-        | ({"ui_crossing"} if ui_externs else set())
+        # an extern declaring `compensate` or a computer-use capability is
+        # decorated (`_emit_externs`). A document with neither is byte-identical.
+        | ({"declared_crossing"} if crossings else set())
         # item 421 F6: a declared secret type that reaches a `Map` also needs the
         # record field types emitted, so the walk can tell the two apart.
         | ({"declare_secret_types"} if secret_types else set())
@@ -5836,7 +5969,7 @@ def emit(ir: dict) -> str:
     if functions:
         out.extend(_emit_functions(functions))
     if externs:
-        out.extend(_emit_externs(externs, ui_externs))
+        out.extend(_emit_externs(externs, crossings))
     if tests:
         out.extend(_emit_tests(tests))
     if fault_tests:

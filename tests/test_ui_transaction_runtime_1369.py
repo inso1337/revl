@@ -491,15 +491,15 @@ def test_the_unit_leaves_no_task_state_behind(desktop, monkeypatch):
     already settled."""
     session, frame = _session(FIVE_STEPS)
     runtime = session._driver.runtime   # the module the emitted code imports
-    before = runtime._UI_UNIT.get()
+    before = runtime._CALL_SCOPE.get()
     assert session.call("ops", "run", ["r"])["result"] == 1
-    assert runtime._UI_UNIT.get() is before is None
+    assert runtime._CALL_SCOPE.get() is before is None
     # the clean call already resolved `Approve` twice; its postcondition read
     # in the second call is the fourth
     monkeypatch.setenv("REVL_UI_FAIL", "locate:Approve#4")
     _call_failing(session, "r")
-    assert runtime._UI_UNIT.get() is None
-    assert contextvars.copy_context().get(runtime._UI_UNIT) is None
+    assert runtime._CALL_SCOPE.get() is None
+    assert contextvars.copy_context().get(runtime._CALL_SCOPE) is None
     session.unload()
 
 
@@ -518,8 +518,42 @@ def test_a_program_with_no_computer_use_verb_is_emitted_as_before():
         "}\n", "plain_1369.rvl")
     code = emit.emit(plain)
     assert "ui_transaction" not in code
-    assert "ui_crossing" not in code
+    assert "declared_crossing" not in code
     ui = emit.emit(compile_source(FIVE_STEPS, "runtime_1369.rvl"))
     assert "with _revl_frame.ui_transaction('ops.run'):" in ui
-    assert "@_revl_ui_crossing('type_amount', lambda: clear_amount())" in ui
-    assert "@_revl_ui_crossing('actuate', None)" in ui
+    assert ("@_revl_declared_crossing('type_amount', lambda: clear_amount(), "
+            "ui=True, call={'receiver': None, 'method': 'clear_amount', "
+            "'args': []})") in ui
+    assert "@_revl_declared_crossing('actuate', None, ui=True)" in ui
+
+
+# ------------------------------------------ the commit hash the operator sees
+
+
+@needs_cordis
+def test_the_commit_hash_does_not_count_a_compensation_the_unit_already_ran(
+        desktop, monkeypatch):
+    """The session commit manifest hashes a count of LIVE witnessed entries
+    (`SessionOwner._witnessed_count`). A compensation a failed unit already
+    ran is settled, so the manifest after that failure must hash exactly as a
+    session that made no call at all. Before the fix it counted both run
+    compensations as live, so the operator was asked to confirm two entries
+    that no commit or abort would ever touch again."""
+    fresh, _frame = _session(FIVE_STEPS)
+    untouched = fresh._owner.manifest()
+    fresh.unload()
+    assert untouched["witnessed"]["count"] == 0
+
+    monkeypatch.setenv("REVL_UI_FAIL", POSTCONDITION_UNMET)
+    session, frame = _session(FIVE_STEPS)
+    _call_failing(session, "r")
+    assert [e.ran for e in frame._compensations] == [True, True]
+    after = session._owner.manifest()
+    assert after["witnessed"]["count"] == 0
+    assert after["hash"] == untouched["hash"]
+
+    # the control: a clean call leaves three live entries, and they count
+    monkeypatch.delenv("REVL_UI_FAIL")
+    session.call("ops", "run", ["r"])
+    assert session._owner.manifest()["witnessed"]["count"] == 3
+    session.unload()
