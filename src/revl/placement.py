@@ -3187,6 +3187,42 @@ def _find_jdk21() -> str | None:
     return None
 
 
+def _java_real_runtime_selected() -> bool:
+    """Whether a java process of this placement would run on the REAL cordis4j
+    runtime (`RealPlacementRunner`): the same choice `ensure_backend` makes."""
+    return bool(_find_jdk21() and _find_cordis4j_classes())
+
+
+def java_real_serve_refusal(specs: dict, backends: dict) -> str | None:
+    """Refuse, at plan time, a java process that must serve a key when the real
+    cordis4j runtime is selected (issue #1581).
+
+    `RealPlacementRunner` is consumer-only: it proxies required keys and runs
+    probes, but it binds no socket and serves nothing. A java process that
+    other processes depend on used to boot, print `UP` and answer no one; its
+    consumers saw only `java.net.SocketException: No such file or directory`
+    from a socket that was never created. Until the real runner has a serve
+    path, such a placement is refused before anything is spawned, naming each
+    process and the keys it would have to serve. A java process that only
+    consumes keys is unaffected, and on the in-repo stub runtime
+    (`PlacementRunner`, which serves) nothing is refused."""
+    serving = sorted(
+        (name, list((spec.get("serve") or {}).get("keys") or []))
+        for name, spec in specs.items()
+        if backends.get(name) == "java" and (spec.get("serve") or {}).get("keys"))
+    if not serving or not _java_real_runtime_selected():
+        return None
+    lines = [f"process {name!r} (java) must serve {', '.join(repr(k) for k in keys)}"
+             for name, keys in serving]
+    return ("placement refused: the real cordis4j runtime is selected "
+            "(REVL_CORDIS4J_CLASSES), and its placement runner "
+            "(backends/java/placement/RealPlacementRunner.java) serves no key, so "
+            "these providers would print UP and answer no consumer (issue #1581):\n  "
+            + "\n  ".join(lines)
+            + "\n  place the provider on another tier, or run the java processes on "
+            "the in-repo stub runtime by unsetting REVL_CORDIS4J_CLASSES")
+
+
 def _find_cordis4j_classes() -> str | None:
     """A compiled cordis4j-core classes dir (REVL_CORDIS4J_CLASSES or the cached
     checkout the java verifier builds), or None to fall back to the stub runtime."""
@@ -4427,6 +4463,13 @@ def run_placement(files, placement_path: str, once: bool = False,
     if cap_problem:
         return abort(cap_problem)
 
+    # --- issue #1581: a java provider on the real cordis4j runtime would print
+    # UP and serve nothing (RealPlacementRunner is consumer-only). Fail closed
+    # here, before any process is spawned.
+    real_serve_problem = java_real_serve_refusal(specs, backends)
+    if real_serve_problem:
+        return abort(real_serve_problem)
+
     # --- cross-process boundary checks (item 363, stage 4; Finding A): refuse a
     # resource-type crossing on EVERY cross-process seam, tier-agnostic (parity
     # with the swap gate; a handle cannot cross a process seam and a witnessed
@@ -4938,6 +4981,17 @@ def run_placement(files, placement_path: str, once: bool = False,
         if boundary_after:
             print(f"  swap refused: {boundary_after}", flush=True)
             print("  running composition untouched; the candidate never booted.", flush=True)
+            return
+
+        # issue #1581: a java successor on the real cordis4j runtime would serve
+        # nothing (RealPlacementRunner is consumer-only), so every consumer of
+        # the swapped component would lose it. Refuse before anything is built.
+        old_keys = (specs[old].get("serve") or {}).get("keys") or []
+        if to_backend == "java" and old_keys and _java_real_runtime_selected():
+            print(f"swap refused: {component} would be re-hosted on the real cordis4j "
+                  f"runtime, whose placement runner serves no key, and it serves "
+                  f"{', '.join(repr(k) for k in old_keys)} (issue #1581)", flush=True)
+            print("  running composition untouched.", flush=True)
             return
 
         try:
