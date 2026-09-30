@@ -26,7 +26,7 @@ from fnmatch import fnmatchcase
 
 from .. import cap_order
 from .. import intent as _intent
-from .._paths import backends_root
+from .._paths import backends_root, python_backend_emitter
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
@@ -402,6 +402,17 @@ class _LoadCheckpoint:
             bridge.bind(bound)
 
 
+def _name_the_candidate(exc: BaseException, ir: dict) -> None:
+    """Record on a ticket raised while `ir` was booting that the ticket is
+    about `ir`. A yes to it admits `ir`'s host code, and the server has to show
+    the operator that code, not the running composition's. Every path that
+    boots a composition (load, swap, and so edit, repair, restore, rollback and
+    undo) goes through `load` or `swap`, so this covers them all. The innermost
+    boot names it: a ticket that already names a candidate keeps it."""
+    if isinstance(exc, ApprovalRequired) and exc.candidate is None:
+        exc.candidate = ir
+
+
 @dataclasses.dataclass(frozen=True)
 class _SwapPlan:
     """What `Session._plan_swap` settled before the teardown, for `_cut_over`:
@@ -445,10 +456,8 @@ def _emitter_refused(refusal: BaseException) -> "SessionError":
 def _backend():
     """Import the cordis-py runtime, with the same guidance `revl run` gives."""
     backend_dir = backends_root() / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
     try:
-        import emit  # noqa: PLC0415 — backend import after path setup
+        emit = python_backend_emitter()
         import runtime as runtime_mod  # noqa: PLC0415
         from cordis import Context  # noqa: PLC0415
         from cordis.fiber import FiberState  # noqa: PLC0415
@@ -925,8 +934,9 @@ class Session:
         checkpoint = _LoadCheckpoint(self)
         try:
             return self._boot(ir, config, record, origin)
-        except BaseException:
+        except BaseException as exc:
             checkpoint.restore(self)
+            _name_the_candidate(exc, ir)
             raise
 
     def _boot(self, ir: dict, config: dict | None, record: bool,
@@ -1530,10 +1540,15 @@ class Session:
         checkpoint = _LoadCheckpoint(self)
         try:
             plan = self._plan_swap(driver, ir, migrate)
-        except BaseException:
+        except BaseException as exc:
             checkpoint.restore(self)
+            _name_the_candidate(exc, ir)
             raise
-        return self._cut_over(driver, ir, origin, plan)
+        try:
+            return self._cut_over(driver, ir, origin, plan)
+        except ApprovalRequired as exc:
+            _name_the_candidate(exc, ir)
+            raise
 
     def _plan_swap(self, driver, ir: dict, migrate: str) -> "_SwapPlan":
         """Everything `swap` does before the teardown: every gate, rendering

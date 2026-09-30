@@ -51,7 +51,7 @@
     "reference": {
       "go": 3348,
       "java": 986,
-      "py": 710,
+      "py": 714,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -838,8 +838,8 @@
         "Planner environmental fallbacks: _parallel_step_groups returns an empty map if frontend import or plan construction raises. These are host environment/planner failure paths, not source constructs; the normal planner invocation runs for every document. No artificial broken import is added to the oracle corpus.": {
           "_parallel_step_groups": 4
         },
-        "Provide residuals: undeclared provide/unknown service/header mismatch are frontend errors; zero-method class emits pass on both sides. Existing services have methods, so that empty-class spelling is source-reviewed rather than evidence for service implementation behavior.": {
-          "_ComponentEmitter._provide": 4
+        "Provide residuals: undeclared provide/unknown service/header mismatch are frontend errors; zero-method class emits pass on both sides. Existing services have methods, so that empty-class spelling is source-reviewed rather than evidence for service implementation behavior. Issue #1474 adds one: the `setattr` that registers a renamed method under its contract name, re-recorded 4 to 5 (see the #1474 entry).": {
+          "_ComponentEmitter._provide": 5
         },
         "Realm/parallel component output boundary: emit renders route proxies, advances over an emitted parallel group, replaces inject list with intercept map, and emits isolate metadata. Port retains simple inject lists. stdlib/router.rvl and emit_ts_corpus/realm_{intercept,isolate}.rvl reproduce these output differences, with metadata pinned in named boundary tests.": {
           "_ComponentEmitter.emit": 9
@@ -880,6 +880,10 @@
         },
         "issue #1382 added `_refuse_validated_externs` to the python reference emitter: the tier refuses a `validated` EXTERN rather than dropping the modifier and emitting a module byte-identical to one written without it. The loop header, the `validated` test and its `continue` are executed by every corpus document that declares any extern; the two statements that name the offender and raise are not, because no corpus document declares a validated extern (measured 2026-09-22: 0 of 1068 `.rvl` sources and 0 of 54 `.ir.json` documents). Adding one would not help this oracle: the gate REFUSES, so such a document has no emitted bytes for the byte-agreement corpus to compare. The refusal path is pinned executably instead, by tests/test_validated_extern_python_1382.py, which asserts the message names the extern and that the sibling service-operation carrier still lowers.": {
           "_refuse_validated_externs": 2
+        },
+        "Issue #1474, a provided method named after a Python keyword, soft keyword or `self`: `_method_def_name` is the one rename for the method's `def`, `_ComponentEmitter._provide` registers the contract name back on the provided class with `setattr`, and `_method_access` reaches it by `getattr(target, 'class')` at a static call site. No emit_py corpus document names a provided method after a Python keyword, and selfhost/emit_py.rvl does not port the rename, so a corpus document here would make the byte-agreement oracle diverge; the self-host port plus that document is the work that retires this entry. Not reached besides: the two refusals `_method_def_name` makes (a non-identifier, a `_revl` scaffolding name), which the frontend stops first. The input family is tests/test_keyword_method_names_1474.py.": {
+          "_method_access": 1,
+          "_method_def_name": 2
         },
         "Item 522 slice 3 (issue #1369), the UI transaction unit on the python tier: `_ui_transaction_facts` finds the computer-use externs and the provide methods `revl.ui_transaction.plans` reads as units, `_emit_externs` decorates a computer-use extern with `declared_crossing`, and `_ComponentEmitter._method` wraps a unit's body in `Frame.ui_transaction`. selfhost/emit_py.rvl does not port the unit, so no corpus document can declare a computer-use capability without the byte-agreement oracle diverging; the self-host port is the work that retires this entry. Re-recorded 8 to 12 when the capability check moved ahead of the frontend import, so a document with no computer-use capability no longer imports it. The input family is tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS.": {
           "_ui_transaction_facts": 12

@@ -329,15 +329,16 @@ def _book(session) -> LeaseBook:
 # ------------------------------------------------------ swap-target derivation
 
 
-def _swap_targets(session, arguments: dict) -> list[str] | None:
-    """The component names a swap with these arguments would *replace*, reusing
-    item 55's target derivation (read-only). ``None`` means undecidable — the
-    candidate will not compile, or nothing is loaded. Enforcement fails CLOSED
-    on it (see :func:`check_swap`); only the advisory path, which never blocks
-    anything, is allowed to shrug."""
+def _swap_targets(session, arguments: dict, verb: str = "swap") \
+        -> list[str] | None:
+    """The component names a `verb` with these arguments would *replace*,
+    boot or take down, reusing item 55's target derivation (read-only).
+    ``None`` means undecidable — the candidate will not compile, or nothing is
+    loaded. Enforcement fails CLOSED on it (see :func:`check`); only the
+    advisory path, which never blocks anything, is allowed to shrug."""
     from . import operator as _operator  # noqa: PLC0415 — read-only reuse of item 55
 
-    targets = _operator._targets("swap", session, arguments)
+    targets = _operator._targets(verb, session, arguments)
     if targets is None:
         return None
     return [name for name, _labels in targets]
@@ -404,10 +405,48 @@ def advise_plan(session, arguments: dict, now: float | None = None) -> list[dict
 # ---------------------------------------------------------------- enforcement
 
 
+#: Every verb the enforced lease book fences: what it does to a leased name,
+#: and what a refusal of it leaves alone. A swap replaces the name; an unload
+#: takes it down, and so do a commit confirm and an abort, which settle the
+#: session and then tear the composition down; a load (and a restore, which is
+#: a load from a snapshot) boots it. Each of them reaches the result a
+#: refused swap was refused, so each one checks, or the lease is a gate only
+#: `revl_swap` walks. A load always boots into an empty session (a load over a
+#: running composition is refused outright), so fencing the boot is what makes
+#: a claim made before boot, or held across the holder's own unload and
+#: reload, mean anything: without it another operator's code takes the name,
+#: and the holder's next move is a replacement of that code.
+FENCED = {
+    "swap": ("replace",
+             "the running composition is untouched — a lease held by another "
+             "operator, enforced by policy, refused this replacement"),
+    "unload": ("unload",
+               "the running composition is untouched and still serving: a "
+               "lease held by another operator, enforced by policy, refused "
+               "this unload"),
+    "commit": ("commit and tear down",
+               "the running composition is untouched and still serving, and "
+               "nothing was flushed: a lease held by another operator, "
+               "enforced by policy, refused this commit"),
+    "abort": ("abort and tear down",
+              "the running composition is untouched and still serving, and "
+              "nothing was replayed: a lease held by another operator, "
+              "enforced by policy, refused this abort"),
+    "load": ("boot",
+             "nothing was loaded: a lease held by another operator, enforced "
+             "by policy, refused booting a component under the name it holds"),
+    "restore": ("boot",
+                "nothing was restored: a lease held by another operator, "
+                "enforced by policy, refused booting a component under the "
+                "name it holds"),
+}
+
+
 @dataclass(frozen=True)
 class LeaseRefusal:
-    """A swap refused because it would replace a component another operator
-    leases, under an enforcing policy. Same why-trace shape as item 55."""
+    """A swap, load or unload refused because it would replace, boot or take
+    down a component another operator leases, under an enforcing policy. Same
+    why-trace shape as item 55. `verb` is the refused verb (see `FENCED`)."""
 
     holder: str
     component: str
@@ -415,6 +454,12 @@ class LeaseRefusal:
     expiry: float
     why: WhyTrace
     message: str
+    verb: str = "swap"
+
+    @property
+    def note(self) -> str:
+        """What the refused verb left alone, for the refusal payload."""
+        return FENCED[self.verb][1]
 
 
 def _exempt(lease: Lease, me: str) -> bool:
@@ -430,20 +475,22 @@ def _exempt(lease: Lease, me: str) -> bool:
     return lease.holder == me and lease.verified
 
 
-def _refusal(holder: str, lease: Lease, now: float) -> LeaseRefusal:
+def _refusal(holder: str, lease: Lease, now: float,
+             verb: str = "swap") -> LeaseRefusal:
     # `_exempt` refused this, so either the lease is someone else's or it names
     # the acting operator without having been claimed here. The message has to
     # say *which*: "leased by `alice`" is baffling when you are alice.
+    action = FENCED[verb][0]
     if lease.holder == holder:
         message = (
-            f"operator `{holder}` may not replace `{lease.component}` — the "
+            f"operator `{holder}` may not {action} `{lease.component}` — the "
             f"lease came back from a restored snapshot naming `{holder}` as its "
             f"holder, and a snapshot is caller-supplied input: it may carry a "
             f"fence, it may not mint a claim. Re-claim the name with "
             f"`revl_lease` to make it yours (component leases, item 61)")
     else:
         message = (
-            f"operator `{holder}` may not replace `{lease.component}` — it is "
+            f"operator `{holder}` may not {action} `{lease.component}` — it is "
             f"leased by `{lease.holder}` for another "
             f"{round(lease.remaining(now), 1)}s and this composition's policy "
             f"enforces leases (component leases, item 61; boundary policy, item 33)")
@@ -455,26 +502,33 @@ def _refusal(holder: str, lease: Lease, now: float) -> LeaseRefusal:
         kind="component-lease", subject=holder, shape=CHAIN,
         steps=[
             TraceStep(holder, "operator", None, None,
-                      f"attempts to replace `{lease.component}`"),
+                      f"attempts to {action} `{lease.component}`"),
             TraceStep(lease.component, "component", None, None,
                       detail, (lease.holder,)),
         ])
     return LeaseRefusal(holder, lease.component, lease.holder, lease.expiry,
-                        why, message)
+                        why, message, verb)
 
 
 def check_swap(session, arguments: dict,
                now: float | None = None) -> LeaseRefusal | None:
-    """The enforcement decision for a swap. Returns a :class:`LeaseRefusal`
-    when the policy enforces leases and the swap would replace a component held
-    by *another* operator; ``None`` otherwise (advisory-only, or clear).
+    """The enforcement decision for a swap: :func:`check` with verb ``swap``."""
+    return check(session, "swap", arguments, now)
+
+
+def check(session, verb: str, arguments: dict,
+          now: float | None = None) -> LeaseRefusal | None:
+    """The enforcement decision for a `verb` in :data:`FENCED`. Returns a
+    :class:`LeaseRefusal` when the policy enforces leases and the verb would
+    replace, boot or take down a component held by *another* operator;
+    ``None`` otherwise (advisory-only, or clear).
 
     All-or-nothing like admission: the first offending target refuses the whole
-    swap, and the server leaves the running composition untouched.
+    action, and the server leaves the session untouched.
 
-    An UNDECIDABLE target set fails closed: the swap is checked against EVERY
-    active lease, so a swap whose targets cannot be derived cannot launder past
-    a lease it might be replacing. Deferring instead was the bypass — a
+    An UNDECIDABLE target set fails closed: the action is checked against EVERY
+    active lease, so an action whose targets cannot be derived cannot launder
+    past a lease it might be touching. Deferring instead was the bypass — a
     candidate that renamed the component it replaced derived no targets and so
     was refused by nothing, which is exactly the swap an enforced lease exists
     to stop.
@@ -482,12 +536,14 @@ def check_swap(session, arguments: dict,
     The self-holder exemption is granted only to a *verified* lease (see
     :func:`_exempt`), so a lease re-seated from a restored snapshot refuses
     even the operator its document names as holder."""
+    if verb not in FENCED:
+        raise ValueError(f"no lease rule for verb {verb!r}")
     if not enforced(session):
         return None
     now = time.time() if now is None else now
     undecidable = False
     try:
-        targets = _swap_targets(session, arguments)
+        targets = _swap_targets(session, arguments, verb)
     except Exception:  # noqa: BLE001 — a derivation that raised is undecidable
         targets = None
     if targets is None:
@@ -498,7 +554,7 @@ def check_swap(session, arguments: dict,
     if undecidable:
         for lease in active:
             if not _exempt(lease, me):
-                return _refusal(me, lease, now)
+                return _refusal(me, lease, now, verb)
         return None
     if not targets:
         return None
@@ -506,5 +562,5 @@ def check_swap(session, arguments: dict,
     for name in targets:
         lease = live.get(name)
         if lease is not None and not _exempt(lease, me):
-            return _refusal(me, lease, now)
+            return _refusal(me, lease, now, verb)
     return None

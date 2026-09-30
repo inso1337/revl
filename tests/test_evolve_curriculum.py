@@ -26,23 +26,19 @@ fill and empty again, and `test_an_empty_rung_and_a_source_that_could_not_run_
 do_not_print_the_same_thing` holds the two apart at the output.
 """
 
-import importlib.util
 import re
 import subprocess
 import sys
 from pathlib import Path
 
 import pytest
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    spec = importlib.util.spec_from_file_location(
-        "evolve_curriculum", ROOT / "tools" / "evolve_curriculum.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("evolve_curriculum", ROOT / "tools" / "evolve_curriculum.py")
     return module
 
 

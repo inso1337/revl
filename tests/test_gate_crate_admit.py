@@ -49,7 +49,6 @@ byte-compare) lives in `tests/test_gate_crate_drift.py` and needs no toolchain.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import os
 import re
@@ -122,6 +121,7 @@ from revl.run_rust import rust_runtime_reason  # noqa: E402
 # oracle so the crate is measured against the same programs and the same
 # guarantee vocabulary the oracle uses. A copy here would be free to drift.
 import test_selfhost_lower as oracle  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
 _RUST_REASON = rust_runtime_reason()
 pytestmark = pytest.mark.skipif(
@@ -407,6 +407,11 @@ def agreement(consumer) -> list[tuple[str, str, tuple[str, str], dict]]:
 # --------------------------------------------- the release-blocking direction
 
 
+# Issue #1449: the first test in this file to ask for `consumer`, so its setup
+# carries the module's one cargo build of the consumer crate plus the corpus
+# run in `agreement`: 19-26s measured at load average 4, and a timeout counts
+# setup. The build is shared by every later test; it only has to land somewhere.
+@pytest.mark.timeout(300)
 def test_the_verdict_surface_issues_no_admission_for_anything_in_the_corpus(agreement):
     """THE security clause, on the surface a consumer of `admit` holds.
 
@@ -1496,6 +1501,10 @@ def test_the_consumer_reads_the_frontier_the_crate_was_generated_with(consumer):
         "decide, or a consumer will read a no-objection as an admission")
 
 
+# Issue #1449: `cargo test` in crates/revl-gate, compile-dominated. Measured
+# 36.5s with a cold target directory at load average 4; a loaded machine
+# multiplies that past the hook's 60s default.
+@pytest.mark.timeout(600)
 def test_the_crate_ships_its_own_cargo_tests(consumer):
     """`cargo test` inside the crate is the no-Python half of the evidence: the
     self-host's own in-file `test` blocks run natively there, alongside the
@@ -1667,11 +1676,9 @@ def _crate_emits(binary: Path, tier: str, documents: list[str]) -> list[dict]:
 def _reference_rust_emitter():
     """`backends/rust/emit.py`, loaded by path the way the backends' own tests
     load it, so the comparison is against the emitter under test."""
-    spec = importlib.util.spec_from_file_location(
-        "revl_rust_emit_for_gate_crate", ROOT / "backends" / "rust" / "emit.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "revl_rust_emit_for_gate_crate",
+        ROOT / "backends" / "rust" / "emit.py")
     return module
 
 
@@ -1679,12 +1686,9 @@ def _declared_emit_corpus() -> set[str]:
     """The port's own coverage declaration — `test_selfhost_emit_rust.py::
     CORPUS`, read from the file rather than restated here, so the crate oracle
     and the port's byte-exact oracle cannot drift apart."""
-    spec = importlib.util.spec_from_file_location(
+    module = load_by_path(
         "revl_selfhost_emit_rust_declaration",
         ROOT / "tests" / "test_selfhost_emit_rust.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
     declared = set(module.CORPUS)
     assert declared, "the port declares no covered corpus"
     return declared
@@ -1788,6 +1792,15 @@ def test_emit_ir_fails_closed_outside_what_it_can_back(consumer):
 # ------------------------------------------------- the census's fast engine
 
 
+# Issue #1449: inherently slow, and the hook's 60s default cannot hold it.
+# Profiled: building the fast engine (compile `selfhost/lower.rvl`, emit it to
+# python) about 12s, running it over the 923-program census corpus about 24s,
+# and the crate over the same corpus, plus the consumer's cargo build when
+# this is the first test to ask for it (19-26s). Measured 75s alone (19s
+# setup, 56s call) at load average 5 and 57-148s inside a module run; about
+# 120s alone was reported on a loaded machine. Every part is per-program work
+# over the whole corpus, not something another test already computed.
+@pytest.mark.timeout(600)
 def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
     """`tools/gate_reference_census.py` runs on every PR through the frontend
     job, where there is no cargo. It gets its verdicts from the self-host
@@ -1799,11 +1812,9 @@ def test_the_census_fast_engine_answers_what_the_crate_answers(consumer):
     code, same message. A divergence means the cheap gate on every PR is
     measuring something other than the artifact that ships.
     """
-    spec = importlib.util.spec_from_file_location(
-        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
-    census = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = census
-    spec.loader.exec_module(census)
+    census = load_by_path(
+        "gate_reference_census",
+        ROOT / "tools" / "gate_reference_census.py")
 
     cases = [(cid, src) for cid, src in census.load_corpus(oracle)
              if cid not in _CROSS_CHECK_EXCLUSIONS]

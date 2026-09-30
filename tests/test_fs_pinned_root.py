@@ -90,7 +90,8 @@ def _session(base):
     source.write_text(CONSUMER)
     session = Session()
     session.load(compile_files([str(source)]), record=True)
-    import emit
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     import runtime
     assert Path(emit.__file__).resolve() == ROOT / "backends/python/emit.py"
     assert Path(runtime.__file__).resolve() == ROOT / "backends/python/runtime.py"
