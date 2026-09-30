@@ -48,6 +48,15 @@ from revl.policy import parse_policy               # noqa: E402
 from revl.recovery import DictWorld, recover       # noqa: E402
 
 
+class _RealWorld(DictWorld):
+    """An in-memory world that declares itself REAL (issue #1477). recover
+    writes its at-most-once fences only against a real world, because a model
+    run attempts nothing out there; the fence tests below exercise that
+    discipline, so they bind a world that claims to be the outside one."""
+
+    kind = "real"
+
+
 # ---------------------------------------------------------------------------
 # helpers
 # ---------------------------------------------------------------------------
@@ -166,7 +175,9 @@ pub extern witnessed[db] fn charge(id: Str) -> Result[ChargeWitness, Str]
 def test_read_register_is_emitted_into_the_transactional_kwargs():
     """The py emitter passes `register='read'` down to the runtime, which writes
     it onto the WAL discharge-descriptor."""
-    from emit import _transactional_register_kwargs  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    _py_emit = python_backend_emitter()
+    _transactional_register_kwargs = _py_emit._transactional_register_kwargs
 
     assert _transactional_register_kwargs({"register": "read"}) \
         == ", register='read'"
@@ -203,11 +214,11 @@ def test_non_idempotent_inverse_still_refuses_on_the_second_run(tmp_path):
     inverse: one fenced attempt, then `outcome: "unknown"` for a human."""
     path = _wal(tmp_path, [_inverse_descriptor()])
 
-    first = recover(path, world=DictWorld())
+    first = recover(path, world=_RealWorld())
     assert [e["replay"] for e in first["transactionalRolledBack"]] == ["fenced"]
     assert first["residue"]["clean"] is True
 
-    second = recover(path, world=DictWorld())
+    second = recover(path, world=_RealWorld())
     assert second["transactionalRolledBack"] == []
     assert second["residue"]["clean"] is False
     (record,) = second["residue"]["outstanding"]
@@ -315,14 +326,14 @@ def test_a_declared_reissue_is_fenced_before_the_fire(tmp_path):
         _owed_emission(1, "Mail", "send", ["m"], register="declared"),
         {"record": "commit-approved", "hash": "h"},
     ])
-    first = recover(path, world=DictWorld(), reissue="declared")
+    first = recover(path, world=_RealWorld(), reissue="declared")
     assert [e["outcome"] for e in first["reissued"]] == ["reissued"]
     fences = [json.loads(line) for line in
               Path(path).read_text(encoding="utf-8").splitlines()
               if '"reissue-fence"' in line]
     assert fences == [{"record": "reissue-fence", "register": "declared", "seq": 1}]
 
-    second = recover(path, world=DictWorld(), reissue="declared")
+    second = recover(path, world=_RealWorld(), reissue="declared")
     assert second["reissued"] == []
     assert [e["outcome"] for e in second["owedFlushes"]] == ["unknown"]
     (record,) = second["residue"]["outstanding"]
@@ -394,7 +405,8 @@ def test_a_keyed_deferred_emission_emits_its_register_and_key_value(tmp_path):
     """The seam decides from the DESCRIPTOR, so the emitter must put the register
     and the key's VALUE (not the parameter name) onto the enqueue call — the key
     a fresh-process re-issue has to repeat is the argument at this call site."""
-    import emit  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     from revl.compiler import compile_source  # noqa: PLC0415
 
     ir = compile_source(
@@ -417,7 +429,8 @@ def test_a_keyed_deferred_emission_emits_its_register_and_key_value(tmp_path):
 
 def test_an_unregistered_deferred_emission_emits_byte_identically(tmp_path):
     """Additivity: a pre-440 deferred emission's emitted enqueue is unchanged."""
-    import emit  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     from revl.compiler import compile_source  # noqa: PLC0415
 
     ir = compile_source(

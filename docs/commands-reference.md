@@ -955,7 +955,25 @@ LIFO), ending in a checked verdict + residue proof
 - `--wal FILE` - a write-ahead log written by `revl run --wal` (required).
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
-- `--json` - machine-readable output.
+- `--approval-policy auto` - on `--restore`, re-arm the auto-approve policy the
+  snapshot was taken under, so a class-(c) activation crossing re-prompts
+  instead of firing unprompted.
+- `--policy POLICY` - the boundary-policy file. On `--restore` it re-binds the
+  posture the snapshot was taken under; a `recovery may re-issue owed
+  emissions` rule also turns on the item-440 re-issue seam.
+- `--forward` - finalize forward a two-phase admission whose runtime advanced
+  past the crash and whose surface still matches. Without it, recover only
+  reports each un-finalized decision.
+- `--model-only` - accept a run against the in-memory model (see below).
+- `--json` - machine-readable output. The verdict carries `world`.
+
+`revl recover` cannot bind the real outside world yet, so it replays against an
+in-memory model (`DictWorld`). Every call it reports is marked `[modelled, not
+performed]`, the verdict carries `"world": "model"` and `"worldCalls"`, and a
+model run never writes an at-most-once fence to the WAL. Exit status: `0`
+clean (with `--model-only` if the model stood in for any call), `1` honest
+residue, `3` clean in the model after the model stood in for at least one call,
+without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
 
 ### `revl estop`
 
@@ -1235,6 +1253,14 @@ peers' public keys. A peer's identity is a key, not an address, and its join
 request pins the charter by digest, so a peer agrees to a set of terms rather
 than to a pool name. Every refusal names one lowercase link (`artifact-digest`,
 `replayed-join`, `grant-ceiling`, ...), and the verb exits nonzero on one.
+
+Several operator commands can run against one pool directory at once. Every
+verb that changes pool state (`init`, `register`, `rotate`, `revoke-key`,
+`join`, `withdraw`, `probe`, and `run --pool private`) holds an exclusive lock
+on `pool.lock` in the directory for its read-modify-write, never while waiting
+on a peer, and every state file is replaced atomically, so no update is lost
+and `status` never reads half a file. The lock is advisory: it binds `revl`
+processes, not other programs editing the files.
 
 A peer's identity is an asymmetric key pair by default (issue #1278): the peer
 draws it with `pool keygen`, the operator pins only the public half with `pool
@@ -1815,7 +1841,10 @@ projection cannot express - a resource handle (an `extern acquire` return), a
 generated file also ships an `httpTransport(base)` factory that drops straight
 onto a `revl serve --http` face (below): `base` is the service's route prefix
 `http://host:port/<composition>/<key>`, and each call POSTs its positional
-arguments as a JSON array.
+arguments as a JSON array. That face serves the canonical path only for an
+operation marked public, and none can be yet, so a client of `revl serve
+--http` today reaches the routed operations, which the generated class calls
+at their routes.
 
 `--face webui` projects a different typed boundary from the same IR: the Cordis
 WebUI channel of ONE component (item 457 slice S4, design note 530 Decision B;
@@ -1889,22 +1918,64 @@ array, or a `sourcesContent` whose length does not match `sources`.
 
 Serve a composition's OWN provided operations (the fourth quadrant: hints
 derived by the compiler), over one of two transports. Distinct from `revl mcp
-serve`, which serves the compiler itself. The transport decides nothing: the
-operation set, the checked emission hints and the wire shape are all the
-compiler's.
+serve`, which serves the compiler itself. The checked emission hints and the
+wire shape are the compiler's.
+
+Neither transport ever decodes an authority value from a request (item 569,
+issues #1502 and #1503). An operation with a parameter whose type carries
+`Principal` (directly, inside a generic, or inside a record or variant) or
+whose declared type carries `Trusted[...]` is withheld: it is not served, not
+listed, and a request naming it is refused with the operation, the parameter
+and its type. A `Principal` comes only from the validator that mints it
+(`Auth.validate`, `stdlib/auth.rvl`), and a `Trusted[...]` value only from
+first-party code, so `stdlib/admit.rvl`'s `admission.admit` (whose `granted` is
+`Trusted[List[Str]]`) is never served. `revl serve` prints each withheld
+operation to stderr at start.
+
+The face authenticates nobody itself: a routed handler that takes a `Bearer`
+runs `auth.validate`, and on the py tier `stdlib/auth.rvl` backs that with an
+HS256 JWT validator (issue #1554). It verifies the signature and requires
+`exp`, `iss`, `aud` and `sub`. Configure it through the environment of the
+`revl serve` process, never through `--config`:
+
+- `REVL_AUTH_HS256_SECRET` (or `REVL_AUTH_HS256_SECRET_FILE`, a file holding
+  it) - the shared key, at least 32 bytes.
+- `REVL_AUTH_ISSUER` - the exact `iss` a token must carry.
+- `REVL_AUTH_AUDIENCE` - the audience a token's `aud` must contain.
+- `REVL_AUTH_LEEWAY` - optional clock-skew allowance, 0 to 300 seconds.
+
+A valid token's `sub` becomes the `Principal`'s subject. A bad token is a `401`.
+With no validator configured, every authenticated route answers `503`
+`auth_not_configured`, naming the variables to set. The any-token test stub
+(a non-blank token is that subject) runs only with
+`REVL_AUTH_INSECURE_DEV_STUB=1`, and is refused if a key is also set. With
+that flag set to any value, `revl serve --http` refuses to start on a
+non-loopback `--host` (exit 2, naming the flag and the address), before it
+loads or binds anything; `127.0.0.1`, `::1` and names that resolve only to
+loopback still start. The ts,
+rust, go, java and wasm tiers have no validator body, so emitting a composition
+that composes `stdlib/auth.rvl` for them is refused at compile time.
 
 - `FILES` (required).
 - One transport (mutually exclusive; required):
-  - `--mcp` - serve over the MCP stdio protocol.
-  - `--http` - serve over HTTP. Each provided operation is
-    `POST /<composition>/<key>/<op>`, with the request and response bodies in
-    the canonical value encoding ([interop-bridge.md](interop-bridge.md)) - the
-    server face `revl export client` pairs with (item 424 gap (c), D-424c.6). A
-    request body is the operation's positional arguments as a JSON array (or an
-    object `{"args": [...]}`, or empty for a no-argument call); a success replies
+  - `--mcp` - serve over the MCP stdio protocol. Every provided operation that
+    is not withheld is a tool.
+  - `--http` - serve over HTTP. The face serves the composition's PUBLIC
+    SURFACE, not its wiring: the routed operations (a `route` clause, item 457)
+    at their declared method and path, plus any operation explicitly marked
+    public at `POST /<composition>/<key>/<op>`. The language has no public
+    marking yet, so today the face serves the routed operations only; a
+    canonical path answers `404`, and a withheld operation's canonical path or
+    route answers `403` naming the parameter. On the canonical path the request
+    and response bodies are the canonical value encoding
+    ([interop-bridge.md](interop-bridge.md)) - the server face
+    `revl export client` pairs with (item 424 gap (c), D-424c.6). A request
+    body is the operation's positional arguments as a JSON array (or an object
+    `{"args": [...]}`, or empty for a no-argument call); a success replies
     `{"ok": true, "value": <encoded result>}`, the exact shape the placement
-    bridge returns. `GET /` returns the manifest: the served operations, their
-    compiler-derived `readOnly`/`emission` hints, and the gate FRONTIER the face
+    bridge returns. `GET /` returns the manifest: exactly the served surface
+    (its canonical operations with their compiler-derived
+    `readOnly`/`emission` hints, and its routes) and the gate FRONTIER the face
     was projected under. The face is LOCAL contract only - it makes no safety
     claim about any callee it in turn reaches - and binds loopback by default.
 - `--host HOST` - `--http` bind address (default: `127.0.0.1`).

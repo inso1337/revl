@@ -606,10 +606,11 @@ a device fit is decided later, against a file the compiler never reads.
 
 ### 10.4 What S4 does not do, and which slice owns it
 
-* **Nothing is loaded.** The decision is printed and refused on, and not
-  passed to the child processes. The provision keyed by role, with one load,
-  one unload and `no_residue` for N consumers, is S2. The issue's exit
-  evidence is S2's and is not claimed here.
+* **Nothing is loaded.** The decision reaches the child and is enforced on
+  the questions the child is asked (section 10.5), but nothing in revl loads a
+  member. The provision keyed by role, with one load, one unload and
+  `no_residue` for N consumers, is S2, built on the provider adapters another
+  lane is writing. The issue's exit evidence is S2's and is not claimed here.
 * **No cost model.** Candidates rank by written order, not by load cost or
   residency over time. S3 owns both.
 * **No published profile.** The declared supply is not checked against what a
@@ -619,3 +620,44 @@ a device fit is decided later, against a file the compiler never reads.
   devices. Tested.
 * **A single-process run is not scheduled.** With no placement file there is
   no host to schedule against.
+
+### 10.5 The decision reaches the child
+
+A schedule the conductor prints and refuses on, but never hands to the process
+that runs the model, is a decision nothing enforces. So the handoff uses the
+channel `run_placement` already hands a child everything else through, its
+spec file, under one new key, `modelSchedule`: the host, its declared
+devices, and the decision (`model_schedule.handoff`).
+
+The child re-derives before it believes, which is the rule the runner already
+applies to the composition itself (`running_ir = compile_files(spec["files"])`
+rather than an IR read off the wire). `model_schedule.verify_handoff` recomputes
+the schedule from the files, the child's own components and the entry's
+devices, and the runner turns any difference, a missing entry where one is
+needed, or an entry where none is, into `BootRefused`. The result is installed
+in `revl.model_placement`, a process-local, read-only table that
+`device_for(role)` and `claim(role, device)` answer from and refuse by name.
+
+| # | The decision | Direction |
+| - | ------------ | --------- |
+| 20 | a host with no routed model action gets no `modelSchedule` key | additive: its spec is byte-identical |
+| 21 | a host that routes a model action and was handed no schedule does not boot | closed |
+| 22 | a schedule that differs from the re-derived one does not boot | closed |
+| 23 | a role not scheduled on this host, or a device other than the scheduled one, is refused at run time | closed |
+| 24 | a process with no schedule answers no device | closed: no "any free device" at run time either |
+| 25 | a scheduled host on a tier whose runner does not read the key is refused at plan time | closed |
+| 26 | a swap successor is scheduled for itself, or the swap refuses | closed |
+
+Decision 20 was measured across trees, not only asserted: a two-process
+composition with no `route model` block, placed on `origin/main` and on this
+branch, writes byte-identical specs for both processes once the per-boot
+values are normalised (the `mkdtemp` directory, the per-boot seam secrets,
+and the checkout path in `stdlibRefRoot`), and each process prints the same
+line sequence. Only the interleaving of the two processes' teardown lines
+differs between runs, which is concurrency and not this change.
+
+What 10.5 does not close: host code that never asks is not refused, and an
+edit that rewrites the devices and the decision in a spec together is a
+self-consistent declaration the child cannot tell from the conductor's. The
+first is S2's to close by making the provider adapters ask on every load; the
+second is the trust the runner already places in its spec's `files`.

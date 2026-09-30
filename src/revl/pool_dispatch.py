@@ -135,7 +135,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Mapping, Optional
 
-from . import peer_identity, peer_pool, pool_health, pool_receipt
+from . import peer_identity, peer_pool, pool_health, pool_receipt, pool_state
 from .lawful_retry import EffectClass
 
 # ---------------------------------------------------------------------------
@@ -498,9 +498,9 @@ class DeliveryLedger:
     this is the visible half; the impossible half is that the state machine has
     no edge from `delivered` back to `dispatched`.
 
-    The ledger is a JSON file with no concurrency control, the same limit
-    `peer_pool`'s roster carries and for the same assumed deployment: one
-    operator writing."""
+    Writers hold `pool_state.locked` from the read they decide on to the
+    write, and the file is replaced atomically, so two operator processes do
+    not lose each other's entries (issue #1198)."""
 
     def __init__(self, pool_id: str, charter_digest: str):
         self.pool_id = pool_id
@@ -699,10 +699,9 @@ def load_ledger(pool_dir) -> DeliveryLedger:
 
 
 def save_ledger(pool_dir, ledger: DeliveryLedger) -> None:
-    path = Path(pool_dir) / LEDGER_FILE
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(ledger.as_dict(), indent=2, sort_keys=True)
-                    + "\n", encoding="utf-8")
+    """Atomic. A caller that read the ledger to change it holds
+    `pool_state.locked` from that read to this write."""
+    pool_state.write_json(Path(pool_dir) / LEDGER_FILE, ledger.as_dict())
 
 
 # ---------------------------------------------------------------------------
@@ -1041,6 +1040,128 @@ def _note_contact(pool_dir, peer_id: str, state: str, host: str, port: int,
         addr=f"{host}:{port}", **detail))
 
 
+def _prepare(*, pool_dir, peer_id: str, source: bytes, runner: str,
+             task_id: str) -> dict:
+    """Everything before the task leaves, as one transaction under the pool
+    lock: the checks, and the dispatch written into the ledger.
+
+    Returns the refusal, or ``{"ok": True, ...}`` with what the send and the
+    settlement need. Holds the lock only for local work (the checks and a
+    compile), never across the network."""
+    from .compiler import compile_files  # noqa: PLC0415 (lazy)
+
+    with pool_state.locked(pool_dir):
+        charter_record, roster = peer_pool.load_pool(pool_dir)
+        ledger = load_ledger(pool_dir)
+
+        member = roster.members.get(peer_id)
+        if member is None:
+            return _refusal(LINK_NOT_A_MEMBER,
+                            f"{peer_id!r} is not a member of pool "
+                            f"{charter_record.get('pool_id')!r}; a task is "
+                            f"dispatched to an admitted peer or not at all")
+        digest = artifact_digest(source)
+        if digest != member.artifact_digest:
+            return _refusal(
+                LINK_ARTIFACT_DIGEST,
+                f"the artifact hashes to {digest[:16]} and {peer_id!r} was "
+                f"admitted for {member.artifact_digest[:16]}; the candidate "
+                f"a peer runs is the candidate it was admitted with")
+        if digest not in (charter_record.get("artifact_digests") or ()):
+            return _refusal(LINK_ARTIFACT_DIGEST,
+                            f"artifact {digest[:16]} is not one the charter "
+                            f"admits")
+        if runner not in RUNNERS:
+            return _refusal(LINK_UNKNOWN_RUNNER,
+                            f"runner {runner!r} is not one of "
+                            f"{', '.join(sorted(RUNNERS))}")
+
+        ir = compile_files(["artifact.rvl"],
+                           sources={"artifact.rvl": source.decode("utf-8")})
+        effect_class, reason, surface = classify_artifact(ir)
+        if effect_class is None:
+            return _refusal(LINK_EFFECT_CLASS_UNPROVEN, reason,
+                            surface=surface.as_dict())
+        admissible, why = peer_pool.work_admissible(member, effect_class)
+        if not admissible:
+            return _refusal(LINK_WORK_INADMISSIBLE, why,
+                            effect_class=effect_class.value, tier=member.tier)
+
+        import secrets  # noqa: PLC0415
+
+        task_id = task_id or secrets.token_hex(8)
+        written = ledger.dispatch(task_id=task_id, peer_id=peer_id,
+                                  artifact_digest=digest, runner=runner,
+                                  effect_class=effect_class.value)
+        if not written.get("ok"):
+            return written
+        roster.outstanding = ledger.outstanding()
+        peer_pool.save_roster(pool_dir, roster)
+        save_ledger(pool_dir, ledger)
+    return {"ok": True, "charter_record": charter_record, "member": member,
+            "digest": digest, "effect_class": effect_class,
+            "surface": surface, "task_id": task_id}
+
+
+def _settle(*, pool_dir, peer_id: str, task_id: str,
+            member: peer_pool.Membership, answer: Mapping[str, Any],
+            attesting_identity: peer_identity.PeerIdentity) -> dict:
+    """Everything after the answer came back, as a second transaction under the
+    pool lock.
+
+    The roster, the ledger and the directory are READ AGAIN here, not carried
+    over from before the send. Anything another operator command did while
+    the task was out (a withdrawal that orphaned it, a key revoked, another
+    task dispatched) is what this decides against and what it writes back
+    around. Carrying the old copies is what put a withdrawn peer back in the
+    roster (issue #1198)."""
+    with pool_state.locked(pool_dir):
+        charter_record, roster = peer_pool.load_pool(pool_dir)
+        directory = peer_pool.load_directory(pool_dir)
+        ledger = load_ledger(pool_dir)
+        outcome = _record_answer(ledger, charter_record=charter_record,
+                                 directory=directory, peer_id=peer_id,
+                                 task_id=task_id, member=member,
+                                 answer=answer,
+                                 attesting_identity=attesting_identity)
+        roster.outstanding = ledger.outstanding()
+        peer_pool.save_roster(pool_dir, roster)
+        save_ledger(pool_dir, ledger)
+    return outcome
+
+
+def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
+                   peer_id: str, task_id: str, member: peer_pool.Membership,
+                   answer: Mapping[str, Any],
+                   attesting_identity: peer_identity.PeerIdentity) -> dict:
+    """Decide what the answer means and write it into ``ledger``."""
+    if not answer.get("ok"):
+        link = str(answer.get("link", LINK_RECEIPT_REFUSED))
+        if link != LINK_PEER_UNREACHABLE:
+            # The peer answered and refused. That is a settled outcome, so the
+            # task is terminal. An unreachable peer is NOT settled and stays
+            # outstanding, which is the distinction a withdrawal reads.
+            ledger.refuse(task_id=task_id, link=link,
+                          reason=str(answer.get("reason", "")))
+        return dict(answer, task_id=task_id)
+    verdict = verify_delivery(answer, charter_record=charter_record,
+                              member=member, directory=directory,
+                              attesting_identity=attesting_identity)
+    if not verdict.get("ok"):
+        ledger.refuse(task_id=task_id, link=str(verdict.get("link", "")),
+                      reason=str(verdict.get("reason", "")))
+        return dict(verdict, task_id=task_id)
+    delivered = ledger.deliver(task_id=task_id, peer_id=peer_id,
+                               result_digest=verdict["result_digest"],
+                               receipt_digest=verdict["receipt_digest"],
+                               counts=verdict["counts"],
+                               receipt=answer.get("receipt"),
+                               attestation=verdict["attestation"])
+    if not delivered.get("ok"):
+        return dict(delivered, task_id=task_id)
+    return dict(verdict, ok=True, task_id=task_id)
+
+
 def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
                  source: bytes, runner: str,
                  dispatch_identity: peer_identity.PeerIdentity,
@@ -1053,119 +1174,48 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
     check the tier admits that class, WRITE THE DISPATCH DOWN, send, verify.
     The ledger entry is written before the task leaves, so a peer that takes
     the work and never answers leaves an outstanding task rather than no
-    record at all -- which is the case a withdrawal has to be able to see."""
-    from .compiler import compile_files  # noqa: PLC0415 (lazy)
+    record at all -- which is the case a withdrawal has to be able to see.
 
-    charter_record, roster = peer_pool.load_pool(pool_dir)
-    directory = peer_pool.load_directory(pool_dir)
-    ledger = load_ledger(pool_dir)
-
-    member = roster.members.get(peer_id)
-    if member is None:
-        return _refusal(LINK_NOT_A_MEMBER,
-                        f"{peer_id!r} is not a member of pool "
-                        f"{charter_record.get('pool_id')!r}; a task is "
-                        f"dispatched to an admitted peer or not at all")
-    digest = artifact_digest(source)
-    if digest != member.artifact_digest:
-        return _refusal(
-            LINK_ARTIFACT_DIGEST,
-            f"the artifact hashes to {digest[:16]} and {peer_id!r} was "
-            f"admitted for {member.artifact_digest[:16]}; the candidate a "
-            f"peer runs is the candidate it was admitted with")
-    if digest not in (charter_record.get("artifact_digests") or ()):
-        return _refusal(LINK_ARTIFACT_DIGEST,
-                        f"artifact {digest[:16]} is not one the charter "
-                        f"admits")
-    if runner not in RUNNERS:
-        return _refusal(LINK_UNKNOWN_RUNNER,
-                        f"runner {runner!r} is not one of "
-                        f"{', '.join(sorted(RUNNERS))}")
-
-    ir = compile_files(["artifact.rvl"],
-                       sources={"artifact.rvl": source.decode("utf-8")})
-    effect_class, reason, surface = classify_artifact(ir)
-    if effect_class is None:
-        return _refusal(LINK_EFFECT_CLASS_UNPROVEN, reason,
-                        surface=surface.as_dict())
-    admissible, why = peer_pool.work_admissible(member, effect_class)
-    if not admissible:
-        return _refusal(LINK_WORK_INADMISSIBLE, why,
-                        effect_class=effect_class.value, tier=member.tier)
-
-    import secrets  # noqa: PLC0415
-
-    task_id = task_id or secrets.token_hex(8)
-    written = ledger.dispatch(task_id=task_id, peer_id=peer_id,
-                              artifact_digest=digest, runner=runner,
-                              effect_class=effect_class.value)
-    if not written.get("ok"):
-        return written
-    roster.outstanding = ledger.outstanding()
-    peer_pool.save_roster(pool_dir, roster)
-    save_ledger(pool_dir, ledger)
-
+    The two writes are two transactions under the pool lock, and the send
+    between them holds no lock, so a slow peer stalls no other operator
+    command and nothing written in the meantime is lost."""
+    prepared = _prepare(pool_dir=pool_dir, peer_id=peer_id, source=source,
+                        runner=runner, task_id=task_id)
+    if not prepared.get("ok"):
+        return prepared
+    charter_record = prepared["charter_record"]
+    task_id = prepared["task_id"]
+    effect_class = prepared["effect_class"]
     body = build_task(pool_id=str(charter_record.get("pool_id", "")),
                       charter_digest=peer_pool.canonical_digest(charter_record),
                       peer_id=peer_id, task_id=task_id, artifact=source,
                       runner=runner, effect_class=effect_class)
-    task_record = sign_task(body, dispatch_identity)
-    answer = send_task(task_record, host=host, port=port, timeout=timeout)
-
-    if not answer.get("ok"):
-        link = str(answer.get("link", LINK_RECEIPT_REFUSED))
-        if link == LINK_PEER_UNREACHABLE:
-            _note_contact(pool_dir, peer_id, pool_health.HEALTH_UNREACHABLE,
-                          host, port,
-                          link=link, reason=str(answer.get("reason", "")))
-        else:
-            # The peer answered and refused. That is a settled outcome, so the
-            # task is terminal. An unreachable peer is NOT settled and stays
-            # outstanding, which is the distinction a withdrawal reads.
-            ledger.refuse(task_id=task_id, link=link,
-                          reason=str(answer.get("reason", "")))
-            roster.outstanding = ledger.outstanding()
-            peer_pool.save_roster(pool_dir, roster)
-        save_ledger(pool_dir, ledger)
-        return dict(answer, task_id=task_id)
-
-    verdict = verify_delivery(answer, charter_record=charter_record,
-                              member=member, directory=directory,
-                              attesting_identity=attesting_identity)
-    if not verdict.get("ok"):
-        ledger.refuse(task_id=task_id, link=str(verdict.get("link", "")),
-                      reason=str(verdict.get("reason", "")))
-        roster.outstanding = ledger.outstanding()
-        peer_pool.save_roster(pool_dir, roster)
-        save_ledger(pool_dir, ledger)
-        return dict(verdict, task_id=task_id)
-
-    delivered = ledger.deliver(task_id=task_id, peer_id=peer_id,
-                               result_digest=verdict["result_digest"],
-                               receipt_digest=verdict["receipt_digest"],
-                               counts=verdict["counts"],
-                               receipt=answer.get("receipt"),
-                               attestation=verdict["attestation"])
-    roster.outstanding = ledger.outstanding()
-    peer_pool.save_roster(pool_dir, roster)
-    save_ledger(pool_dir, ledger)
-    if not delivered.get("ok"):
-        return dict(delivered, task_id=task_id)
+    answer = send_task(sign_task(body, dispatch_identity), host=host,
+                       port=port, timeout=timeout)
+    outcome = _settle(pool_dir=pool_dir, peer_id=peer_id, task_id=task_id,
+                      member=prepared["member"], answer=answer,
+                      attesting_identity=attesting_identity)
+    if answer.get("link") == LINK_PEER_UNREACHABLE:
+        _note_contact(pool_dir, peer_id, pool_health.HEALTH_UNREACHABLE,
+                      host, port, link=LINK_PEER_UNREACHABLE,
+                      reason=str(answer.get("reason", "")))
+    if not outcome.get("ok"):
+        return outcome
     _note_contact(pool_dir, peer_id, pool_health.HEALTH_LIVE, host, port,
                   key_id=str((answer.get("receipt") or {}).get("key_id", "")))
     return {"ok": True, "kind": "revl.pool-delivery", "version": "1.0",
             "pool_id": str(charter_record.get("pool_id", "")),
             "peer_id": peer_id, "task_id": task_id,
-            "artifact_digest": digest, "runner": runner,
-            "effect_class": effect_class.value, "tier": member.tier,
-            "boundary": surface.as_dict(),
-            "result_digest": verdict["result_digest"],
-            "receipt_digest": verdict["receipt_digest"],
-            "counts_as_evidence": verdict["counts"],
+            "artifact_digest": prepared["digest"], "runner": runner,
+            "effect_class": effect_class.value,
+            "tier": prepared["member"].tier,
+            "boundary": prepared["surface"].as_dict(),
+            "result_digest": outcome["result_digest"],
+            "receipt_digest": outcome["receipt_digest"],
+            "counts_as_evidence": outcome["counts"],
             "result": answer.get("result"),
             "receipt": answer.get("receipt"),
-            "attestation": verdict["attestation"]}
-
+            "attestation": outcome["attestation"]}
 
 # ---------------------------------------------------------------------------
 # the CLI

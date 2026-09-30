@@ -20,11 +20,13 @@ baseline diff.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.util
 import json
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -32,14 +34,21 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _load(name, path):
-    spec = importlib.util.spec_from_file_location(name, path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module
+    """The module at `path`, registered as `name`, loaded at most once.
+
+    This used to build a fresh module and REPLACE the `sys.modules` entry,
+    while `tools/evolution_controller.py` had already imported
+    `evolution_reward` at collection time: its `Verdict` subclassed the first
+    module's class and every later `import evolution_reward` got the second, so
+    `tests/test_evolution_controller.py::test_the_stage_verdict_inherits_item_536s_rather_than_restating_it`
+    failed whenever this file ran first. `tests/_load_by_path.py` reuses an
+    entry loaded from the same file.
+    """
+    return load_by_path(name, path)
 
 
 @pytest.fixture(scope="module")
@@ -704,6 +713,90 @@ def real_candidate(reward):
     return _candidate(reward, ROOT, base=sha, scope=("**",))
 
 
+PROBE_DOC = ROOT / "docs" / "zz-evolution-reward-probe.md"
+PROBE_TEXT = "# probe\n\nstatus: scratch\n"
+
+# Runs beside the test and removes the probe doc once the test process is gone,
+# however it went. It blocks on its stdin, a pipe only the test process holds:
+# the read returns at EOF, which the kernel delivers when that process exits,
+# including by `os._exit` (pytest-timeout's thread method, which the pre-commit
+# hook uses) or SIGKILL, where no `finally` and no atexit handler runs.
+_REAPER = """
+import pathlib, sys
+sys.stdin.buffer.read()
+doc = pathlib.Path(sys.argv[1])
+try:
+    if doc.read_text(encoding="utf-8") == sys.argv[2]:
+        doc.unlink()
+except OSError:
+    pass
+"""
+
+
+@contextlib.contextmanager
+def probe_doc_in_tree():
+    """A new top-level doc in THIS tree, for as long as the block runs.
+
+    It has to be in the real tree: the fault is "a doc `docgen --check` has not
+    seen", and the probes run the candidate's own tools over the candidate's
+    own tree. So the cleanup has to outlive the test process. Issue #1449: the
+    hook's 60s timeout killed a run mid-probe, the `finally` never ran, the doc
+    stayed in the worktree, and every later run failed its
+    `not exists()` precondition. A doc with exactly the probe text is one of
+    ours left by a killed run and is removed; anything else there is somebody's
+    work and fails loudly.
+    """
+    with scratch_file(PROBE_DOC, PROBE_TEXT) as doc:
+        yield doc
+
+
+@contextlib.contextmanager
+def scratch_file(path: Path, text: str):
+    """`path` holds `text` for the block, and is gone after it even when the
+    process running the block is killed. See `probe_doc_in_tree`."""
+    if path.exists():
+        assert path.read_text(encoding="utf-8") == text, (
+            f"{path} exists and is not this test's probe; not touching it")
+        path.unlink()
+    reaper = subprocess.Popen(
+        [sys.executable, "-c", _REAPER, str(path), text],
+        stdin=subprocess.PIPE, start_new_session=True)
+    try:
+        path.write_text(text, encoding="utf-8")
+        yield path
+    finally:
+        path.unlink(missing_ok=True)
+        reaper.stdin.close()
+        reaper.wait(timeout=60)
+
+
+def test_the_probe_doc_is_removed_even_when_the_test_process_is_killed(tmp_path):
+    """What the pre-commit hook's timeout does to a slow test: `os._exit` from
+    a watchdog thread, so neither `finally` nor atexit runs. The same helper,
+    on a tmp path, in a process that dies inside the block."""
+    doc = tmp_path / "zz-probe.md"
+    script = (
+        "import importlib.util, os, pathlib, sys\n"
+        f"spec = importlib.util.spec_from_file_location('rew', {str(Path(__file__))!r})\n"
+        "mod = importlib.util.module_from_spec(spec); spec.loader.exec_module(mod)\n"
+        f"with mod.scratch_file(pathlib.Path({str(doc)!r}), 'probe\\n'):\n"
+        "    print('inside', flush=True)\n"
+        "    os._exit(1)\n")
+    proc = subprocess.run([sys.executable, "-c", script], cwd=str(ROOT),
+                          capture_output=True, text=True, timeout=120)
+    assert proc.stdout.strip() == "inside", proc.stdout + proc.stderr
+    assert proc.returncode == 1
+    deadline = time.monotonic() + 30
+    while doc.exists() and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert not doc.exists(), "the reaper did not remove the probe after a kill"
+
+
+# Issue #1449: two whole-tree tools, `docgen.py --check` and
+# `check_roadmap_claims.py --check`, nothing a session could share. Measured
+# 13s alone at load average 5, 34s and 41s inside hook-sized selections at
+# load 25-60, against the pre-commit hook's 60s default.
+@pytest.mark.timeout(300)
 def test_documentation_verifies_on_this_tree(reward, real_candidate):
     verdict = reward.probe_documentation(real_candidate)
     assert verdict.verified is True, verdict.reason
@@ -715,17 +808,19 @@ def test_documentation_fails_on_a_genuinely_stale_doc_inventory(
     of `docs/*.md`, so a new top-level doc makes `tools/docgen.py --check` stale.
     The file is created and removed inside this test; nothing else moves, which
     is what makes the control below meaningful."""
-    probe_doc = ROOT / "docs" / "zz-evolution-reward-probe.md"
-    assert not probe_doc.exists()
-    probe_doc.write_text("# probe\n\nstatus: scratch\n")
-    try:
+    with probe_doc_in_tree():
         verdict = reward.probe_documentation(real_candidate)
-    finally:
-        probe_doc.unlink()
     assert verdict.verified is False
     assert "docgen" in verdict.reason
 
 
+# Issue #1449: inherently slow, not re-deriving anything a session could share.
+# It is two full `tools/regen_goldens.py --all --check` runs (six backend golden
+# trees and both gate crates), once on the clean tree and once with the fault;
+# the two runs see different trees, so neither can stand in for the other.
+# Measured 20-23s alone at load average 5 and 57-63s inside hook-sized
+# selections at load 25-60, against the pre-commit hook's 60s default.
+@pytest.mark.timeout(300)
 def test_artifact_stability_is_the_control_and_passes_either_way(
         reward, real_candidate):
     """The control. The same fault that fails `documentation` leaves every
@@ -734,13 +829,8 @@ def test_artifact_stability_is_the_control_and_passes_either_way(
     clean = reward.probe_artifact_stability(real_candidate)
     assert clean.verified is True, clean.reason
 
-    probe_doc = ROOT / "docs" / "zz-evolution-reward-probe.md"
-    assert not probe_doc.exists()
-    probe_doc.write_text("# probe\n\nstatus: scratch\n")
-    try:
+    with probe_doc_in_tree():
         dirty = reward.probe_artifact_stability(real_candidate)
-    finally:
-        probe_doc.unlink()
     assert dirty.verified is True, dirty.reason
 
 
@@ -800,8 +890,22 @@ def crate_repo(tiny_repo):
     (crate / "Cargo.toml").write_text(
         "[package]\nname = \"revl-gate\"\nversion = \"0.1.0\"\n"
         "edition = \"2021\"\n\n[workspace]\n")
-    (crate / "src" / "lib.rs").write_text("pub fn admit(n: i64) -> i64 { n }\n")
+    (crate / "src" / "lib.rs").write_text(_LIB_RS % "n")
     return tiny_repo
+
+
+# The fixture crate's source. `%s` is the body of `admit`, so a test can break
+# the unit test without breaking the build.
+_LIB_RS = """pub fn admit(n: i64) -> i64 { %s }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn admits_its_input() {
+        assert_eq!(super::admit(7), 7);
+    }
+}
+"""
 
 
 def _with_matrix(tree, report):
@@ -829,6 +933,21 @@ def test_compiles_fails_on_source_that_does_not_compile(reward, crate_repo):
         _candidate(reward, crate_repo, base="HEAD", scope=("**",)))
     assert verdict.verified is False
     assert "cargo check" in verdict.reason
+
+
+def test_compiles_fails_when_the_crate_builds_but_a_unit_test_fails(
+        reward, crate_repo):
+    """Real rustc, real `cargo test`: the source compiles and the crate's own
+    unit test fails. A check alone verified this crate."""
+    _with_matrix(crate_repo, _matrix_report())
+    (crate_repo / "crates" / "revl-gate" / "src" / "lib.rs").write_text(
+        _LIB_RS % "n + 1")
+    candidate = _candidate(reward, crate_repo, base="HEAD", scope=("**",))
+    check = reward.check_crate(candidate, crate_repo / "crates" / "revl-gate")
+    assert check.ok is True, check.detail
+    verdict = reward.probe_compiles(candidate)
+    assert verdict.verified is False
+    assert "unit tests do not pass" in verdict.reason
 
 
 def test_compiles_fails_on_a_real_emitter_gap_and_passes_a_deliberate_limit(
@@ -901,9 +1020,16 @@ def test_compiles_fails_when_the_matrix_prints_nothing_readable(
     assert verdict.verified is False
 
 
+# Issue #1449: real cargo work in a cold scratch target directory, plus the
+# six-tier walk, and nothing another test has already built. Measured 26.5s
+# inside a hook-sized selection at load average 25 with `cargo check` alone;
+# building the crate's test profile as well (PR #1483) was measured at 60-75s
+# under load, past the pre-commit hook's 60s default.
+@pytest.mark.timeout(600)
 def test_compiles_verifies_on_this_tree(reward, real_candidate):
-    """The real artifact: the real gate crate and the real six-tier walk. About
-    twenty seconds, almost all of it a cold `cargo check`.
+    """The real artifact: the real gate crate, its real unit tests and the real
+    six-tier walk. Most of the cost is a cold `cargo check` and a cold
+    `cargo test --lib` build in one scratch target directory.
 
     Gated the way `tests/test_gate_crate_admit.py` gates the same crate: the
     assertion is that this tree compiles, which a machine that cannot resolve
@@ -942,6 +1068,20 @@ if mode == "broken":
     sys.exit(print(broken, file=sys.stderr) or 101)
 if mode == "cold-then-broken":
     sys.exit(print(broken if fetched.exists() else resolve, file=sys.stderr) or 101)
+if sys.argv[1] == "test":
+    tests = os.environ.get("STUB_CARGO_TESTS", "pass")
+    if tests == "pass":
+        print("test result: ok. 3 passed; 0 failed; 0 ignored")
+    elif tests == "fail":
+        print("test tests::admits ... FAILED")
+        print("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+        sys.exit(101)
+    elif tests == "fail-exit-0":
+        print("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+    elif tests == "none":
+        print("test result: ok. 0 passed; 0 failed; 0 ignored")
+    elif tests == "silent":
+        pass
 sys.exit(0)
 """
 
@@ -961,6 +1101,79 @@ def stub_cargo(tmp_path, monkeypatch):
     def calls():
         return log.read_text().splitlines() if log.exists() else []
     return (lambda mode: monkeypatch.setenv("STUB_CARGO_MODE", mode)), calls
+
+
+def _stub_build_and_test(reward, tiny_repo, monkeypatch, tests, mode="ok"):
+    monkeypatch.setattr(reward, "_index_reachable", lambda: True)
+    monkeypatch.setenv("STUB_CARGO_MODE", mode)
+    monkeypatch.setenv("STUB_CARGO_TESTS", tests)
+    candidate = _candidate(reward, tiny_repo, base="HEAD", scope=("**",))
+    return reward.build_and_test_crate(candidate, tiny_repo)
+
+
+_CHECK = "check --offline --quiet"
+_TEST = "test --offline --quiet --lib"
+
+
+def test_the_crate_is_checked_then_its_unit_tests_run(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """Issue #1206 named `cargo test --offline --lib`. The unit tests run after
+    the check, and the count they report is carried into the verdict."""
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass")
+    assert run.ok is True, run.detail
+    assert calls() == [_CHECK, _TEST]
+    assert "3 unit test(s) passed" in run.detail
+
+
+def test_a_build_whose_unit_tests_fail_is_not_a_pass(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    """The check is green and the crate's own unit tests are not: before this
+    change `compiles` verified exactly this case."""
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "fail")
+    assert run.ok is False
+    assert "unit tests do not pass" in run.detail
+    assert calls() == [_CHECK, _TEST]
+
+
+def test_a_failed_result_line_fails_even_on_exit_0(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, _ = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "fail-exit-0")
+    assert run.ok is False
+    assert "1 failed unit test(s)" in run.detail
+
+
+@pytest.mark.parametrize("tests,why", [
+    ("none", "ran zero unit tests"),
+    ("silent", "no `test result:` line"),
+])
+def test_a_unit_suite_that_ran_nothing_is_not_a_pass(
+        reward, tiny_repo, stub_cargo, monkeypatch, tests, why):
+    _, _ = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, tests)
+    assert run.ok is False
+    assert why in run.detail
+
+
+def test_a_crate_that_does_not_build_never_reaches_its_tests(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass",
+                               mode="broken")
+    assert run.ok is False
+    assert calls() == [_CHECK]
+
+
+def test_the_unit_tests_run_offline_after_a_cold_registry_is_filled(
+        reward, tiny_repo, stub_cargo, monkeypatch):
+    _, calls = stub_cargo
+    run = _stub_build_and_test(reward, tiny_repo, monkeypatch, "pass",
+                               mode="cold")
+    assert run.ok is True, run.detail
+    assert calls() == [_CHECK, "fetch", _CHECK, _TEST]
+    assert "after `cargo fetch`" in run.detail
 
 
 def _stub_check(reward, tiny_repo, monkeypatch, reachable):

@@ -41,14 +41,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _census():
-    spec = importlib.util.spec_from_file_location(
-        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "gate_reference_census",
+        ROOT / "tools" / "gate_reference_census.py")
     return module
 
 
@@ -284,11 +283,9 @@ def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measure
     the row has a blind family and the ratchet cannot see it go unreached.
 
     Here rather than beside the report because the run is already paid for."""
-    spec = importlib.util.spec_from_file_location(
-        "oracle_construct_reach", ROOT / "tools" / "oracle_construct_reach.py")
-    reach = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = reach
-    spec.loader.exec_module(reach)
+    reach = load_by_path(
+        "oracle_construct_reach",
+        ROOT / "tools" / "oracle_construct_reach.py")
     surveyed = reach._census_guarantees()
 
     _, (buckets, _) = measured

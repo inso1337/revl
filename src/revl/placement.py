@@ -2108,19 +2108,53 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
     return None
 
 
-def _model_schedule_problem(files, processes: dict) -> str | None:
+def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
     """Schedule the routed model actions onto each host's declared devices
     (item 515, `revl.model_schedule`). Prints the decision, one line per
-    placement, and returns the refusal text when a host cannot satisfy it."""
+    placement, and returns `(refusal, {host: spec entry})`. The entry is what
+    the host's child is handed under `model_schedule.SPEC_KEY`; a host with
+    no routed model action has none, so its spec is unchanged."""
     from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
     try:
         schedules = model_schedule.placement_schedules(files, processes)
     except model_schedule.ScheduleRefusal as exc:
-        return str(exc)
+        return str(exc), {}
+    for host in schedules:
+        backend = _canonical_backend(processes[host.host].get("backend", "py"))
+        if backend not in model_schedule.READING_TIERS:
+            return (f"host `{host.host}` routes model action(s) and is placed on "
+                    f"the {backend} tier, whose process runner does not read a "
+                    f"model schedule; a schedule its child never reads is a "
+                    f"decision nothing enforces, so the placement is refused. "
+                    f"Place the component on a "
+                    f"{' or '.join(model_schedule.READING_TIERS)} process "
+                    f"(item 515, docs/model-scheduling.md)"), {}
     for host in schedules:
         for line in host.lines():
             print(f"  {line}", flush=True)
-    return None
+    return None, {host.host: model_schedule.handoff(host) for host in schedules}
+
+
+def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
+                             to_backend: str) -> tuple[dict | None, str | None]:
+    """The model schedule a swap successor is handed (item 515), as
+    `(spec entry or None, refusal or None)`. Scheduled against the devices the
+    predecessor's host declared; None when the component routes no model
+    action."""
+    from . import model_schedule  # noqa: PLC0415
+    devices = (old_spec.get("modelSchedule") or {}).get("devices")
+    try:
+        decided = model_schedule.placement_schedules(
+            files, {succ: {"components": [component], "devices": devices}})
+    except model_schedule.ScheduleRefusal as exc:
+        return None, str(exc)
+    if not decided:
+        return None, None
+    if _canonical_backend(to_backend) not in model_schedule.READING_TIERS:
+        return None, (f"component {component!r} routes model action(s) and "
+                      f"the {to_backend} tier's runner does not read a model "
+                      f"schedule (item 515)")
+    return model_schedule.handoff(decided[0]), None
 
 
 # --------------------------------------------------------------------------
@@ -2456,6 +2490,31 @@ def placement_slice(ir: dict, kept) -> dict:
     out["functions"] = [f for f in functions if f.get("name") in reachable]
     out["externs"] = [e for e in externs if e.get("name") in reachable]
     return out
+
+
+def seam_typing(ir: dict, key_services: dict) -> dict:
+    """The declared types a node process needs to decode a seam value (issue
+    #1566): for each key it serves or proxies, each method's parameter types
+    and return type, plus the document's type table for the nested fields.
+
+    The wire carries an `Int` as a JSON number (docs/interop-bridge.md,
+    "Canonical value encoding"), which JSON.parse turns into a JS `number`,
+    while the ts tier's `Int` is a `bigint`. Nothing on the wire says which
+    numbers are `Int`s, so the node runner converts by the declared types it
+    is handed here (`bridge.ts` `decodeAs`). Only node specs carry this, so
+    every other tier's spec is unchanged."""
+    services = ir.get("services") or {}
+    signatures: dict = {}
+    for key, service in sorted(key_services.items()):
+        table = {}
+        for method, spec in ((services.get(service) or {}).get("methods") or {}).items():
+            spec = spec or {}
+            table[method] = {
+                "params": [(p or {}).get("type") for p in spec.get("params") or []],
+                "returns": spec.get("returns"),
+            }
+        signatures[key] = table
+    return {"signatures": signatures, "types": ir.get("types") or {}}
 
 
 def host_ref_pins(ir: dict, own, files) -> dict:
@@ -3703,7 +3762,7 @@ def run_placement(files, placement_path: str, once: bool = False,
     # candidates. No candidate fitting is a refusal here, before anything
     # spawns. A composition with no `route model` block schedules nothing and
     # prints nothing (docs/model-scheduling.md).
-    model_problem = _model_schedule_problem(files, processes)
+    model_problem, model_handoffs = _model_schedules(files, processes)
     if model_problem:
         return abort(model_problem)
 
@@ -4161,6 +4220,18 @@ def run_placement(files, placement_path: str, once: bool = False,
             # path calls too so the pins survive a re-host (see `do_swap`).
             **host_ref_pins(ir, own, files),
         }
+        if backend == "node":
+            # issue #1566: the declared types the node runner decodes seam
+            # values by (an `Int` arrives as a JSON number and must become a
+            # `bigint`). Absent on every other tier's spec.
+            key_services = dict(provides[pname])
+            key_services.update({k: e["service"] for k, e in proxies.items()})
+            spec["typing"] = seam_typing(ir, key_services)
+        if pname in model_handoffs:
+            # item 515: this host's model schedule, re-derived and installed
+            # by the child before any component activates. Absent for a host
+            # that routes no model action, so its spec is unchanged.
+            spec["modelSchedule"] = model_handoffs[pname]
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
             # declaration* admits for each exported key, read off the IR. The
@@ -4961,6 +5032,13 @@ def run_placement(files, placement_path: str, once: bool = False,
                 "methods": {k: methods.get(provides[old][k], []) for k in serve_keys},
             },
         }
+        if _canonical_backend(to_backend) == "node":
+            # issue #1566: the same declared seam types the boot path hands a
+            # node process, rebuilt for the successor's own keys.
+            key_services = dict(provides[old])
+            key_services.update({k: e.get("service") for k, e in succ_spec["proxies"].items()
+                                 if e.get("service")})
+            succ_spec["typing"] = seam_typing(ir, key_services)
         # roadmap 421 F8: carry the predecessor's correlation guard onto the
         # successor. Without this a swap SILENTLY DISARMS the seam, because the
         # successor's serve spec is built fresh from socket/keys/methods and a
@@ -4972,6 +5050,21 @@ def run_placement(files, placement_path: str, once: bool = False,
         # Carried only when the successor tier can actually RUN the guard: the
         # guard is built in `_process_runner.py`, so a swap onto a non-python
         # tier drops it, the same rule the boot path applies.
+        # item 515: the successor gets its OWN model schedule, re-derived for
+        # the component it hosts, on the devices the predecessor's host
+        # declared, from the files it is about to load. Copying the
+        # predecessor's entry would name the wrong host and the wrong
+        # component set, so the child would refuse it at boot. A candidate
+        # that no longer fits those devices, or a scheduled successor on a
+        # tier that does not read a schedule, refuses the swap here instead.
+        succ_model, model_refusal = _successor_model_schedule(
+            files, specs[old], succ, component, to_backend)
+        if model_refusal:
+            print(f"swap refused: {model_refusal}", flush=True)
+            print("  running composition untouched.", flush=True)
+            return
+        if succ_model is not None:
+            succ_spec["modelSchedule"] = succ_model
         _old_corr = old_serve.get("correlation")
         if _old_corr and to_backend in _CORRELATION_SEALING_TIERS:
             succ_spec["serve"]["correlation"] = {
