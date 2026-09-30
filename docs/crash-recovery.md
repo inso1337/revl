@@ -121,6 +121,11 @@ the write-ahead discipline). Three record shapes:
 {"record": "header", "walVersion": 1, "generation": 7, "guarantee": "…",
  "composition": "sha256:…"}
 
+// 1b. every LATER opening of the same file (a `--watch` reload, or a later
+//     run reusing it, #641/#642) records its own composition and the first
+//     seq it owns, when it was opened with an IR
+{"record": "generation", "generation": 8, "fromSeq": 42, "composition": "sha256:…"}
+
 // 2. one per committed effect, written as it commits
 {"record": "effect", "seq": 3, "component": "UserCache", "stepIndex": 4,
  "kind": "emission", "label": "db.execute", "site": "<gen1>:31", "source": "…",
@@ -443,14 +448,22 @@ revl recover --wal run.wal --composition agent.rvl [--config config.toml]
 `--composition` names the composition that wrote the WAL, as passed to `revl
 run`, and `--config` the config it ran with. Recover then:
 
-1. **Checks the composition against the log.** A WAL opened with an IR carries
-   the IR's digest in its header (`composition`, a sha256 over the canonical
-   IR with each `.rvl` path reduced to its basename, so the working directory
-   does not matter). Recover compiles the files and refuses, naming both
-   digests, when they differ. It also refuses a WAL whose header carries no
-   digest: one written before this change, or opened without an IR. Replaying a
-   log through another composition would call the wrong host bodies with the
-   right arguments.
+1. **Checks the composition against the log, opening by opening.** A WAL
+   opened with an IR carries the IR's digest in its header (`composition`, a
+   sha256 over the canonical IR with each `.rvl` path reduced to its basename,
+   so the working directory does not matter), and every later opening of the
+   same file writes a `generation` record with its own digest and the first
+   seq it owns. Each open call belongs to the opening that wrote it, and is
+   replayed only through that opening's composition. A call another opening
+   wrote is `generation-residue`, not attempted, and names the opening
+   ("generation 1 (opening 2 of this log, from seq 9)") and its digest: run
+   recover again with that composition. When the composition wrote none of the
+   open calls, recover refuses outright and names every opening it checked; an
+   opening with no digest (written before this change, or without an IR) is
+   named as such. Replaying a call through another composition would call the
+   wrong host bodies with the right arguments. Two runs of the same
+   composition may both say `generation 1`; the opening number tells them
+   apart.
 2. **Loads the composition's emitted module without activating it**, through
    the driver's own plug seam, so extern config and bound secrets are
    installed and no activation body runs again.
@@ -483,10 +496,31 @@ a compensation whose argument is itself a call) or were redacted as
 `Secret[T]` is never handed to the runtime: recover never guesses an argument.
 It is residue, named by its call, for example `a.y(<not captured>)`.
 
-The binding re-issues discharge descriptors and nothing else. A legacy
-boundary inverse (`record_boundary`), an owed deferred emission and a shared
-reclaim are reported as `unbound-residue` (or an unresolved reclaim), not
-attempted, and no fence is spent on them.
+What else the binding does, call family by call family. Each goes to its own
+runtime entry point, so the fences and settling records are the runtime's:
+
+- **A legacy boundary inverse** (an `effect` record with a reconstructible
+  `op`, written by `record_boundary`) is a named call with captured arguments,
+  so it goes to `runtime.replay_descriptors` as the transactional entry it is,
+  in the same batch as the descriptors: one seq space, one LIFO order, the
+  runtime's fence and `aborted` record. It lands in `ran`. The one py-tier
+  writer today is a durable-cursor subscription, whose op is
+  `Stream.close(cursor)`; the runtime resolves `Stream` to its own class and
+  closes whatever live subscription resumes from that cursor. In a fresh
+  process nothing is live, so the close has nothing left to do; the recorded
+  position is kept, which is the point of a durable cursor.
+- **An owed deferred emission** is re-fired through `runtime.reissue_deferred`,
+  the session's own flush: the same E-Stop check before the host body and the
+  same `flushed` (or `flush-residue`) record after it. Recover keeps what it
+  always owned: the operator's policy (`--policy` with `recovery may re-issue
+  owed emissions`), the tier, and the `reissue-fence` it writes before the
+  fire. A second recover reads `flushed` and fires nothing.
+- **A shared reclaim** runs through `runtime.reclaim_shared`, which writes the
+  handle's `shared-reclaim-fence` before the inverse and `shared-complete`
+  after it. A second recover finds the completion and reclaims nothing; a
+  fence with no completion is an unknown outcome and is not re-fired.
+
+Against the model none of these is performed, and none spends a fence.
 
 A compensated emission is **offset** once its compensation ran. Each
 compensation descriptor names the emission it offsets (`offsets`, the seq of

@@ -228,7 +228,8 @@ def test_a_composition_that_did_not_write_the_wal_is_refused_by_name(crashed):
     proc, report = _recover(crashed)
 
     assert proc.returncode == 1 and report is None
-    assert "agent.rvl is not the composition that wrote this WAL" in proc.stderr
+    assert ("agent.rvl is not the composition that wrote generation 1 "
+            "(opening 1 of this log, from seq 0)") in proc.stderr
     assert crashed["log"].read_text(encoding="utf-8").splitlines() == [
         "note:boot", "file:T1"]
     assert crashed["wal"].read_text(encoding="utf-8") == wal_before
@@ -332,20 +333,344 @@ def test_unresolved_stranded_and_uncaptured_descriptors_are_residue_by_name(tmp_
     assert "ran      compensation seq 0" in text
 
 
-def test_a_bound_world_attempts_no_call_it_cannot_make(tmp_path):
-    """A legacy boundary inverse is not a descriptor: the binding does not
-    re-issue it, spends no fence on it, and reports it as residue."""
-    path = tmp_path / "legacy.wal"
-    wal = replay.WriteAheadLog(str(path), ir={}, generation=1).open()
-    wal.record_boundary("Store", "scratch", resource="File",
-                        inverse_op={"receiver": "fs", "method": "unlink",
-                                    "args": ["/data/x"]})
+def _legacy_wal(path: Path, op: dict, *, ir: dict | None = None) -> str:
+    wal = replay.WriteAheadLog(str(path), ir=ir or {}, generation=1).open()
+    wal.record_boundary("Store", "scratch", resource="File", inverse_op=op)
     wal.close()
+    return str(path)
+
+
+def test_a_legacy_boundary_inverse_goes_to_the_binding_as_a_transactional_entry(tmp_path):
+    """A `record_boundary` inverse is a named call with captured arguments, so
+    the binding replays it as the transactional entry it is, in the same batch
+    as the descriptors. Recovery writes no fence of its own for it: the fence
+    and the `aborted` record are the runtime's."""
+    path = _legacy_wal(tmp_path / "legacy.wal",
+                       {"receiver": None, "method": "offset", "args": ["x"]})
+    before = Path(path).read_text(encoding="utf-8")
+    world = _StubBinding({0: "ran"})
+
+    report = recover(path, world=world)
+
+    assert world.handed == [0]
+    [entry] = report["ran"]
+    assert (entry["label"], entry["replay"], entry["op"]["method"]) == (
+        "scratch", "binding", "offset")
+    assert report["residue"]["clean"] is True
+    assert Path(path).read_text(encoding="utf-8") == before
+
+
+def test_a_legacy_inverse_the_binding_cannot_resolve_is_residue_by_name(tmp_path):
+    """The one py-tier writer of a reconstructible legacy inverse is a durable
+    cursor subscription, `Stream.close(cursor)`. `Stream` is not a module
+    binding or a required-service key, so the runtime answers `unresolved`, and
+    the verdict names the call against its `effect` record."""
+    path = _legacy_wal(tmp_path / "cursor.wal",
+                       {"receiver": "Stream", "method": "close", "args": ["orders"]})
+    report = recover(path, world=_StubBinding({0: "unresolved"}))
+
+    assert report["ran"] == []
+    [rec] = report["residue"]["outstanding"]
+    assert (rec["kind"], rec["referent"]) == ("unresolved-residue",
+                                              "Stream.close('orders')")
+    assert (rec["crossing"]["key"], rec["crossing"]["method"]) == ("Store", "scratch")
+
+
+@needs_cordis
+def test_a_real_recover_replays_a_legacy_inverse_through_the_runtime(tmp_path):
+    """End to end: a legacy inverse naming one of the composition's own
+    externs runs through `runtime.replay_descriptors`, and the runtime's
+    `aborted` record settles it."""
+    from revl.compiler import compile_files  # noqa: PLC0415
+    (tmp_path / "agent.rvl").write_text(COMPOSITION, encoding="utf-8")
+    ir = compile_files([str(tmp_path / "agent.rvl")])
+    _legacy_wal(tmp_path / "run.wal",
+                {"receiver": None, "method": "offset", "args": ["legacy"]}, ir=ir)
+    state = {"dir": tmp_path, "log": tmp_path / "world.log",
+             "wal": tmp_path / "run.wal"}
+
+    proc, report = _recover(state)
+
+    assert proc.returncode == 0, proc.stderr[-2000:]
+    assert state["log"].read_text(encoding="utf-8").splitlines() == ["offset:legacy"]
+    assert [(e["label"], e["replay"]) for e in report["ran"]] == [("scratch", "binding")]
+    assert report["binding"]["booted"] == []
+    [aborted] = [r for r in _records(state["wal"]) if r["record"] == "aborted"]
+    assert aborted["replayed"] == [0]
+
+
+def test_a_world_without_the_reissue_entry_point_says_why_and_spends_no_fence(tmp_path):
+    """A world with no entry point for owed emissions (the stub here) does not
+    fire one: the verdict names what would, and no `reissue-fence` is spent."""
+    path = tmp_path / "owed.wal"
+    wal = replay.WriteAheadLog(str(path), ir={}, generation=1).open()
+    wal.record_deferred_emission(receiver="ledger", method="post", args=["k1"],
+                                 register="keyed", idempotency="k1")
+    wal.record_commit_approved("h0")
+    wal.close()
+    before = path.read_text(encoding="utf-8")
+
+    report = recover(str(path), world=_StubBinding({}), reissue="keyed")
+
+    assert report["reissued"] == []
+    [rec] = report["residue"]["outstanding"]
+    assert rec["kind"] == "unbound-residue"
+    assert "no entry point that re-fires an owed deferred emission" in rec["error"]["message"]
+    assert "runtime.reissue_deferred" in rec["error"]["message"]
+    assert "reissue-fence" not in path.read_text(encoding="utf-8")[len(before):]
+
+
+def test_a_world_without_the_reclaim_entry_point_says_why_and_spends_no_fence(tmp_path):
+    """A world with no entry point for shared reclaims (the stub here) does not
+    attempt one: the verdict names what would, and no fence is spent."""
+    from revl.wal import WAL_VERSION  # noqa: PLC0415
+    path = tmp_path / "shared.wal"
+    path.write_text(
+        json.dumps({"record": "header", "walVersion": WAL_VERSION,
+                    "generation": 1, "guarantee": "g"}) + "\n"
+        + json.dumps({"record": "shared-grant", "handle": "h1",
+                      "inverse": {"receiver": None, "method": "close",
+                                  "args": ["h1"]},
+                      "holders": ["a"]}) + "\n", encoding="utf-8")
     before = path.read_text(encoding="utf-8")
 
     report = recover(str(path), world=_StubBinding({}))
 
-    assert report["ran"] == []
-    [rec] = report["residue"]["outstanding"]
-    assert (rec["kind"], rec["outcome"]) == ("unbound-residue", "not-attempted")
+    [reclaim] = report["shared"]["reclaims"]
+    assert reclaim["ok"] is False
+    assert "fenced by HANDLE" in reclaim["error"]["message"]
+    assert "runtime.reclaim_shared" in reclaim["error"]["message"]
     assert path.read_text(encoding="utf-8") == before
+
+
+# ------------------------------------------------ a WAL reused across generations
+#
+# A log is reopened by a `--watch` reload and by a later run reusing the file
+# (#641/#642). The header names only the first opening's composition, so every
+# later opening records its own (`generation` record: generation, fromSeq,
+# composition), and recover binds each opening's calls to its own composition.
+
+
+def _composition(tmp_path: Path, name: str, tag: str) -> Path:
+    path = tmp_path / name
+    path.write_text(COMPOSITION.replace('offset("boot")', f'offset("{tag}")')
+                    .replace('"T1"', f'"T-{tag}"'), encoding="utf-8")
+    return path
+
+
+def test_a_reopened_wal_records_each_openings_composition(tmp_path):
+    """The #641/#642 reuse path: run 1 opens the log, run 2 reopens it with a
+    different composition, a bare reopen (no IR) records nothing new."""
+    from revl.compiler import compile_files  # noqa: PLC0415
+    ir_a = compile_files([str(_composition(tmp_path, "a.rvl", "a"))])
+    ir_b = compile_files([str(_composition(tmp_path, "b.rvl", "b"))])
+    path = tmp_path / "reused.wal"
+    wal = replay.WriteAheadLog(str(path), ir=ir_a, generation=1).open()
+    wal.record_discharge_descriptor("compensation", receiver=None,
+                                    method="offset", args=["a"])
+    wal.close()
+    wal = replay.WriteAheadLog(str(path), ir=ir_b, generation=2).open()
+    wal.record_discharge_descriptor("compensation", receiver=None,
+                                    method="offset", args=["b"])
+    wal.close()
+    replay.WriteAheadLog(str(path), ir={}, generation=3).open().close()
+
+    records = _records(path)
+    assert records[0]["composition"] == replay.composition_digest(ir_a)
+    [opening] = [r for r in records if r["record"] == "generation"]
+    assert opening == {"record": "generation", "generation": 2, "fromSeq": 1,
+                       "composition": replay.composition_digest(ir_b)}
+
+
+def test_recover_binds_each_generations_calls_to_its_own_composition(tmp_path):
+    from revl.recover_binding import CompositionMismatch, plan_generations  # noqa: PLC0415
+    from revl.wal import read_wal  # noqa: PLC0415
+    path = tmp_path / "reused.wal"
+    wal = replay.WriteAheadLog(str(path), ir={"x": 1}, generation=1).open()
+    wal.record_discharge_descriptor("compensation", receiver=None,
+                                    method="offset", args=["a"])     # seq 0
+    wal.close()
+    wal = replay.WriteAheadLog(str(path), ir={"x": 2}, generation=2).open()
+    wal.record_discharge_descriptor("compensation", receiver=None,
+                                    method="offset", args=["b"])     # seq 1
+    wal.close()
+    log = read_wal(str(path))
+    a = replay.composition_digest({"x": 1})
+    b = replay.composition_digest({"x": 2})
+
+    assert [s["generation"] for s in plan_generations(log, a, ["a.rvl"]).values()] == [2]
+    assert list(plan_generations(log, a, ["a.rvl"])) == [1]
+    assert list(plan_generations(log, b, ["b.rvl"])) == [0]
+    with pytest.raises(CompositionMismatch) as refused:
+        plan_generations(log, "sha256:other", ["c.rvl"])
+    message = str(refused.value)
+    assert "generation 1 (opening 1 of this log, from seq 0)" in message
+    assert "generation 2 (opening 2 of this log, from seq 1)" in message
+
+
+@needs_cordis
+def test_two_runs_reusing_one_wal_recover_only_with_their_own_compositions(tmp_path):
+    """Two real runs of DIFFERENT compositions crash into the same WAL. Each
+    recover replays only the calls its own composition wrote, names the other
+    generation's calls as residue, and a composition that wrote neither is
+    refused naming both generations."""
+    for name, tag in (("a.rvl", "a"), ("b.rvl", "b"), ("c.rvl", "c")):
+        _composition(tmp_path, name, tag)
+    log = tmp_path / "world.log"
+    for name in ("a.rvl", "b.rvl"):
+        proc = _revl(["run", name, "--wal", "run.wal"], tmp_path, log)
+        assert proc.returncode == 3, proc.stderr[-3000:]
+    crashed = log.read_text(encoding="utf-8").splitlines()
+    assert crashed == ["note:boot", "file:T-a", "note:boot", "file:T-b"]
+
+    def recover_with(name: str) -> tuple:
+        proc = _revl(["recover", "--wal", "run.wal", "--composition", name,
+                      "--json"], tmp_path, log)
+        return proc, (json.loads(proc.stdout) if proc.stdout.strip() else None)
+
+    proc, report = recover_with("c.rvl")
+    assert report is None and proc.returncode == 1
+    assert "opening 1 of this log" in proc.stderr
+    assert "opening 2 of this log" in proc.stderr
+
+    proc, report = recover_with("a.rvl")
+    assert log.read_text(encoding="utf-8").splitlines()[len(crashed):] == [
+        "withdraw:T-a", "offset:a"]
+    other = [r for r in report["residue"]["outstanding"]
+             if r["kind"] == "generation-residue"]
+    assert sorted(r["referent"] for r in other) == [
+        "offset('b')", "tickets.withdraw('T-b')"]
+    assert all("opening 2 of this log" in r["error"]["message"] for r in other)
+    assert report["binding"]["otherGenerations"] == [
+        "generation 1 (opening 2 of this log, from seq 9)"]
+
+    proc, report = recover_with("b.rvl")
+    assert log.read_text(encoding="utf-8").splitlines()[len(crashed):] == [
+        "withdraw:T-a", "offset:a", "withdraw:T-b", "offset:b"]
+    assert sorted(e["referent"] for e in report["compensationsRan"]) == [
+        "offset('b')", "tickets.withdraw('T-b')"]
+    assert sorted(e["referent"] for e in report["settledByReplay"]) == [
+        "offset('a')", "tickets.withdraw('T-a')"]
+    assert not [r for r in report["residue"]["outstanding"]
+                if r["kind"] == "generation-residue"]
+
+
+# ------------------------------------ the other three call families, for real
+#
+# Through a composition binding each family goes to its own runtime entry point
+# (PR #1506): an owed deferred emission to `runtime.reissue_deferred`, a
+# durable-cursor legacy inverse to `Stream.close(cursor)` inside
+# `runtime.replay_descriptors`, a shared reclaim to `runtime.reclaim_shared`.
+# Each is performed once; a second real recover does nothing, and a model run
+# before it spends no fence.
+
+FAMILIES = COMPOSITION + f"""
+extern emission fn post(k: Str) -> Unit = @py {{
+{_host("post", "'post:' + k")}}}
+extern pure fn release_host(h: Str) -> Unit = @py {{
+{_host("release_host", "'release:' + h")}}}
+"""
+
+
+def _families_wal(tmp_path: Path, write) -> dict:
+    """A WAL opened with FAMILIES' IR, filled by ``write(wal)``, as a crash
+    would leave it: no terminal marker."""
+    from revl.compiler import compile_files  # noqa: PLC0415
+    (tmp_path / "agent.rvl").write_text(FAMILIES, encoding="utf-8")
+    ir = compile_files([str(tmp_path / "agent.rvl")])
+    wal = replay.WriteAheadLog(str(tmp_path / "run.wal"), ir=ir, generation=1).open()
+    write(wal)
+    wal.close()
+    return {"dir": tmp_path, "log": tmp_path / "world.log",
+            "wal": tmp_path / "run.wal"}
+
+
+def _model_then_real_then_again(state, *extra: str) -> tuple:
+    """A model recover (which must leave the WAL byte-identical), then two
+    real ones. Returns the two real reports and the log after each."""
+    before = state["wal"].read_text(encoding="utf-8")
+    model = _revl(["recover", "--wal", "run.wal", "--model-only", *extra],
+                  state["dir"], state["log"])
+    assert model.returncode in (0, 1), model.stderr[-2000:]
+    assert state["wal"].read_text(encoding="utf-8") == before
+    assert not state["log"].exists()
+    first_proc, first = _recover(state, *extra)
+    assert first_proc.returncode == 0, first_proc.stderr[-2000:]
+    log_first = _lines(state["log"])
+    wal_first = state["wal"].read_text(encoding="utf-8")
+    second_proc, second = _recover(state, *extra)
+    assert second_proc.returncode == 0, second_proc.stderr[-2000:]
+    assert _lines(state["log"]) == log_first
+    assert state["wal"].read_text(encoding="utf-8") == wal_first
+    return first, second, log_first
+
+
+def _lines(log: Path) -> list:
+    """The host bodies' log. `Stream.close` writes none, so it may not exist."""
+    return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+
+
+@needs_cordis
+def test_an_owed_deferred_emission_is_re_fired_through_the_runtime_flush(tmp_path):
+    def write(wal):
+        wal.record_deferred_emission(receiver="post", method="post", args=["k1"],
+                                     register="keyed", idempotency="k1")
+        wal.record_commit_approved("h0")
+    state = _families_wal(tmp_path, write)
+    (tmp_path / "policy.txt").write_text(
+        "recovery may re-issue owed emissions\n", encoding="utf-8")
+
+    first, second, log = _model_then_real_then_again(
+        state, "--policy", "policy.txt")
+
+    assert log == ["post:k1"]
+    assert first["world"] == "real"
+    [reissued] = first["reissued"]
+    assert (reissued["referent"], reissued["replay"]) == ("post.post", "binding")
+    assert first["residue"]["clean"] is True
+    records = _records(state["wal"])
+    kinds = [r["record"] for r in records]
+    assert kinds.index("reissue-fence") < kinds.index("flushed")
+    # the second recover reads the `flushed` record and fires nothing
+    assert second["reissued"] == []
+    assert [f["seq"] for f in second["flushed"]] == [reissued["seq"]]
+
+
+@needs_cordis
+def test_a_durable_cursor_inverse_is_replayed_as_stream_close(tmp_path):
+    def write(wal):
+        wal.record_boundary("Agent", "subscribe orders", resource="cursor:orders",
+                            inverse_op={"receiver": "Stream", "method": "close",
+                                        "args": ["orders"]})
+    state = _families_wal(tmp_path, write)
+
+    first, second, _log = _model_then_real_then_again(state)
+
+    [ran] = first["ran"]
+    assert (ran["label"], ran["replay"], ran["op"]["receiver"]) == (
+        "subscribe orders", "binding", "Stream")
+    assert first["residue"]["clean"] is True
+    [aborted] = [r for r in _records(state["wal"]) if r["record"] == "aborted"]
+    assert aborted["replayed"] == [0]
+    assert second["ran"] == []
+    assert [e["seq"] for e in second["settledByReplay"]] == [0]
+
+
+@needs_cordis
+def test_a_shared_reclaim_runs_through_the_runtime_once(tmp_path):
+    def write(wal):
+        wal._write({"record": "shared-grant", "handle": "h1",
+                    "inverse": {"receiver": None, "method": "release_host",
+                                "args": ["h1"]},
+                    "holders": ["a"]})
+    state = _families_wal(tmp_path, write)
+
+    first, second, log = _model_then_real_then_again(state)
+
+    assert log == ["release:h1"]
+    [reclaim] = first["shared"]["reclaims"]
+    assert (reclaim["handle"], reclaim["ok"]) == ("h1", True)
+    kinds = [r["record"] for r in _records(state["wal"])]
+    assert kinds.index("shared-reclaim-fence") < kinds.index("shared-complete")
+    # `shared-complete` settles it: the second recover reclaims nothing
+    assert second["shared"]["reclaims"] == []

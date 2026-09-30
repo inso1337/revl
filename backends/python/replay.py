@@ -2220,6 +2220,15 @@ class WriteAheadLog:
             if self._ir:
                 header["composition"] = composition_digest(self._ir)
             self._write(header)
+        elif self._ir:
+            # issue #1477: a REOPENED log (a `--watch` reload, or a later run
+            # reusing the file, #641/#642) may belong to a different
+            # composition than the one its header names. Record this opening's
+            # own digest, from the next seq on, so recover can bind each
+            # generation's records to the composition that wrote them.
+            self._write({"record": "generation", "generation": self._generation,
+                         "fromSeq": self._seq,
+                         "composition": composition_digest(self._ir)})
         return self
 
     def __enter__(self) -> "WriteAheadLog":
