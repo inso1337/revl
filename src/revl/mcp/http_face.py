@@ -37,8 +37,11 @@ runtime, exactly as `serve_composition` does.
 from __future__ import annotations
 
 import dataclasses
+import ipaddress
 import json
+import os
 import re
+import socket
 import sys
 import urllib.parse
 from contextlib import contextmanager
@@ -1334,6 +1337,47 @@ def _live_decoder(session):
         return None
 
 
+#: `stdlib/auth.rvl`'s dev flag: with it, `host_validate` accepts any non-blank
+#: token as that subject (issue #1554). It is for local development only.
+AUTH_DEV_STUB_FLAG = "REVL_AUTH_INSECURE_DEV_STUB"
+
+
+def _is_loopback_host(host: str) -> bool:
+    """True only when every address `host` names is a loopback address. A
+    name that does not resolve, or resolves to any non-loopback address
+    (`0.0.0.0`, `::`, a LAN address), is not loopback: the answer fails closed."""
+    literal = host.strip("[]")
+    try:
+        return ipaddress.ip_address(literal).is_loopback
+    except ValueError:
+        pass
+    try:
+        infos = socket.getaddrinfo(literal, None)
+    except (OSError, UnicodeError):
+        return False
+    addresses = {info[4][0].split("%", 1)[0] for info in infos}
+    try:
+        return bool(addresses) and all(
+            ipaddress.ip_address(a).is_loopback for a in addresses)
+    except ValueError:
+        return False
+
+
+def dev_stub_bind_refusal(host: str, environ=None) -> str | None:
+    """Design 569 question 5 (issue #1554): the any-token auth stub never
+    listens on the network. With the dev flag set (to anything) and a bind
+    address that is not loopback, name the flag and the address; else None."""
+    env = os.environ if environ is None else environ
+    if not env.get(AUTH_DEV_STUB_FLAG) or _is_loopback_host(host):
+        return None
+    return (f"refusing to serve on {host!r}: {AUTH_DEV_STUB_FLAG} is set, and "
+            f"with it stdlib/auth accepts any bearer token as that user. The "
+            f"dev stub is for local development only: bind a loopback address "
+            f"(--host 127.0.0.1 or ::1) or unset {AUTH_DEV_STUB_FLAG} and "
+            f"configure a real validator (REVL_AUTH_HS256_SECRET, "
+            f"REVL_AUTH_ISSUER, REVL_AUTH_AUDIENCE)")
+
+
 def serve_http(ir: dict, config: dict | None = None, *,
                composition: str = "revl", host: str = "127.0.0.1",
                port: int = 8080, exposure: Exposure | None = None,
@@ -1357,7 +1401,14 @@ def serve_http(ir: dict, config: dict | None = None, *,
     snapshotted, and so forked from the operator listener.
     `refuse_ungated_emissions` (569 section 6) refuses, by name, an app request
     that reaches a class-(c) crossing while no approval policy is loaded.
+
+    The auth dev stub refuses a non-loopback bind before anything is loaded or
+    bound (`dev_stub_bind_refusal`), and the call returns 2.
     """
+    refusal = dev_stub_bind_refusal(host)
+    if refusal is not None:
+        print(f"error: {refusal}", file=sys.stderr)
+        return 2
     from .session import Session  # noqa: PLC0415 — lazy: Session pulls cordis
 
     # refuse an unsafe listener BEFORE booting anything (issue #1463)
