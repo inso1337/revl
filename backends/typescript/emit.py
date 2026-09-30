@@ -357,6 +357,30 @@ def _ident(name: object, role: str) -> str:
     return _mangle(name)
 
 
+def _method_ident(name: object) -> str:
+    """The one spelling of a service method's name, at every site: the
+    interface member, the provided object's method, and every call through a
+    required service, a lifecycle `call` or a replayed compensation (issue
+    #1512).
+
+    It is the contract name, verbatim. A JS/TS reserved word is a legal
+    PROPERTY name (`{ delete(x) { .. } }` and `s.delete(x)` both parse), so a
+    method name needs no rename, and the bridge, the router and every other
+    dispatcher that looks a method up by its contract string finds it. The
+    definition used to go through `_ident`, which renamed `delete` to
+    `delete_` and then looked the renamed spelling up in the service, so 25
+    reserved words were refused ("method 'delete_' is not declared by service
+    'S'"); a call site renamed the same way and the interface did not. The
+    injective ladder shifted `delete_` to `delete__`, so those names were
+    refused as well. The interface member is quoted for a reserved word by
+    `_prop_key`, because a bare `new(..)` in an interface is a construct
+    signature, not a method named `new`.
+
+    Validation is `_raw_field`'s: the identifier shape and the emitter
+    scaffolding names."""
+    return _raw_field(name, "method")
+
+
 def _raw_ident(name: object, role: str) -> str:
     """Validate a user identifier and return it VERBATIM (no mangling). For a
     name emitted as a string literal the runtime dispatches or indexes by its
@@ -799,7 +823,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # (docs/conformance.md names this as the split's real failure).
         if "target" in node:
             target = node.get("target")
-            method = _ident(node.get("method"), "method")
+            method = _method_ident(node.get("method"))
             target_ts = _expr(target, ctx)
             if not (isinstance(target, dict) and target.get("kind") in _ATOMIC_KINDS):
                 target_ts = f"({target_ts})"
@@ -1490,7 +1514,7 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
 
     lines: list[str] = []
     for method in step.get("methods") or []:
-        name = _ident(method.get("name"), "method")
+        name = _method_ident(method.get("name"))
         if name not in declared:
             raise EmitError(
                 f"method {name!r} is not declared by service {service_name!r}"
@@ -1663,7 +1687,7 @@ def _replay_call(node: dict, target_ts: Optional[str], method: str, temps: list[
     argument expressions."""
     args = ", ".join(temps)
     if "target" in node and "method" in node:
-        return f"{target_ts}.{_ident(method, 'method')}({args})"
+        return f"{target_ts}.{_method_ident(method)}({args})"
     if node.get("kind") == "fn":
         return f"{_ident(method, 'name')}({args})"
     if node.get("kind") == "host":
@@ -4727,7 +4751,7 @@ def _emit_ts_lifecycle_tests(tests: list, types: dict, functions: list,
                     raise EmitError(f"{where}: unknown method {step['method']!r}")
                 args = ", ".join(_expr(arg, ctx) for arg in step.get("args") or [])
                 await_ = "await " if method.get("async") else ""
-                call = f"root.{_ident(key, 'provision key')}.{_ident(step['method'], 'method')}({args})"
+                call = f"root.{_ident(key, 'provision key')}.{_method_ident(step['method'])}({args})"
                 bind = step.get("bind")
                 if bind is not None:
                     body.append(f"  const {_ident(bind, 'lifecycle binding')} = {await_}{call}")
@@ -4929,7 +4953,7 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
         _ident(sname, "service")
         out.append(f"export interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
-            _ident(mname, "method")
+            mname = _method_ident(mname)
             # v1/A6: typed signatures derived from the service declaration
             params = ", ".join(
                 f"{_ident(p.get('name'), 'parameter')}: {_ts_type(p.get('type'))}"
@@ -4944,7 +4968,9 @@ def _emit_v1(ir: dict, *, runtime_import: str) -> str:
             if method.get("idempotent"):
                 out.append("  /** idempotent — safe to re-deliver; the runtime may "
                            "auto-retry a transient failure (item 44) */")
-            out.append(f"  {mname}({params}): {returns}")
+            # quoted for a reserved word: in an interface, a bare `new(..)`
+            # is a construct signature, not a method named `new`
+            out.append(f"  {_prop_key(mname, 'method')}({params}): {returns}")
         out.append("}")
         out.append("")
 
@@ -5059,7 +5085,7 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
         _ident(sname, "service")
         out.append(f"export interface {sname} {{")
         for mname, method in (service.get("methods") or {}).items():
-            _ident(mname, "method")
+            mname = _method_ident(mname)
             params = ", ".join(
                 f"{_ident(p.get('name'), 'parameter')}: {_ts_type(p.get('type'), known_types)}"
                 for p in method.get("params") or []
@@ -5074,7 +5100,9 @@ def _emit_v3(ir: dict, *, runtime_import: str) -> str:
             if method.get("idempotent"):
                 out.append("  /** idempotent — safe to re-deliver; the runtime may "
                            "auto-retry a transient failure (item 44) */")
-            out.append(f"  {mname}({params}): {returns}")
+            # quoted for a reserved word: in an interface, a bare `new(..)`
+            # is a construct signature, not a method named `new`
+            out.append(f"  {_prop_key(mname, 'method')}({params}): {returns}")
         out.append("}")
         out.append("")
 
