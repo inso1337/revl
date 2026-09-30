@@ -2122,6 +2122,35 @@ def _next_seq(path: str) -> int:
     return highest + 1
 
 
+#: The IR keys whose string values are where a document was read from, not
+#: what it says. `composition_digest` reduces them to a basename, so the same
+#: composition compiled from another working directory digests the same.
+_LOCATION_KEYS = frozenset({"file", "source"})
+
+
+def _without_locations(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {key: (os.path.basename(value)
+                      if key in _LOCATION_KEYS and isinstance(value, str)
+                      and value.endswith(".rvl") else _without_locations(value))
+                for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_without_locations(value) for value in node]
+    return node
+
+
+def composition_digest(ir: dict) -> str:
+    """The digest a WAL header carries for the composition that wrote it
+    (issue #1477): sha256 over the IR's canonical JSON, with each `.rvl` path
+    under a `file`/`source` key reduced to its basename. `revl recover
+    --composition FILE` compiles FILE, digests it the same way, and refuses to
+    replay the log through it unless the two agree."""
+    import hashlib  # noqa: PLC0415 - stdlib, only when a log is opened with an IR
+    canonical = json.dumps(_without_locations(ir), sort_keys=True,
+                           separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class WriteAheadLog:
     """A durable, append-only log of committed effects and their inverse
     descriptors (roadmap item 47).
@@ -2180,9 +2209,17 @@ class WriteAheadLog:
         self._seq = _next_seq(self.path)
         self._handle = open(self.path, "a", encoding="utf-8")
         if self._handle.tell() == 0:
-            self._write({"record": "header", "walVersion": WAL_VERSION,
-                         "generation": self._generation,
-                         "guarantee": WAL_GUARANTEE})
+            header = {"record": "header", "walVersion": WAL_VERSION,
+                      "generation": self._generation,
+                      "guarantee": WAL_GUARANTEE}
+            # issue #1477: name the composition this log belongs to, so
+            # `revl recover --composition FILE` can refuse to replay the log's
+            # descriptors through a DIFFERENT composition's host bodies. Only
+            # when the log was opened with an IR; a bare log (`ir={}`) keeps
+            # the header it always had.
+            if self._ir:
+                header["composition"] = composition_digest(self._ir)
+            self._write(header)
         return self
 
     def __enter__(self) -> "WriteAheadLog":

@@ -964,16 +964,25 @@ LIFO), ending in a checked verdict + residue proof
 - `--forward` - finalize forward a two-phase admission whose runtime advanced
   past the crash and whose surface still matches. Without it, recover only
   reports each un-finalized decision.
+- `--composition FILE...` - recover against the REAL world: the composition
+  that wrote the WAL. Refused, by name, unless it matches the digest in the WAL
+  header. The WAL's open discharge descriptors are re-issued through its own
+  host bodies and the providers they call through, by the runtime's abort
+  path, and the runtime's `aborted` record settles each one that ran.
+- `--config FILE` - with `--composition`, the config the composition ran with,
+  as for `revl run --config`.
 - `--model-only` - accept a run against the in-memory model (see below).
-- `--json` - machine-readable output. The verdict carries `world`.
+- `--json` - machine-readable output. The verdict carries `world`, and with
+  `--composition` a `binding` object naming the providers it booted.
 
-`revl recover` cannot bind the real outside world yet, so it replays against an
-in-memory model (`DictWorld`). Every call it reports is marked `[modelled, not
+Without `--composition`, `revl recover` replays against an in-memory model
+(`DictWorld`). Every call it reports is marked `[modelled, not
 performed]`, the verdict carries `"world": "model"` and `"worldCalls"`, and a
 model run never writes an at-most-once fence to the WAL. Exit status: `0`
 clean (with `--model-only` if the model stood in for any call), `1` honest
 residue, `3` clean in the model after the model stood in for at least one call,
-without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
+without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477)
+and, for `--composition`, [section 5c](crash-recovery.md#5c-recovering-against-the-real-world-issue-1477).
 
 ### `revl estop`
 
