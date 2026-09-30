@@ -170,7 +170,12 @@ def test_a_keyword_method_crosses_a_placement_seam_by_its_contract_name(tmp_path
         encoding="utf-8")
     placement = tmp_path / "seam.toml"
     placement.write_text(_SEAM, encoding="utf-8")
-    env = dict(os.environ, JAVA_HOME=str(Path(javac_gate.JAVA).parents[1]))
+    # The in-repo stub runner, even where real cordis4j classes are present
+    # (CI): RealPlacementRunner is consumer-only and serves no key, so a java
+    # provider process there answers nothing. Both runners translate the
+    # method name through the same table.
+    env = dict(os.environ, JAVA_HOME=str(Path(javac_gate.JAVA).parents[1]),
+               REVL_CORDIS4J_CLASSES="")
     ran = subprocess.run(
         [sys.executable, "-m", "revl", "run", str(source), "--placement", str(placement),
          "--once"], stdin=subprocess.DEVNULL, capture_output=True, text=True,
