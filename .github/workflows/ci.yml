@@ -36,8 +36,8 @@ on:
 # last one: the queue hit 16 runs deep with 2 executing, which made CI the
 # bottleneck the whole push-and-let-CI-test workflow exists to remove.
 # Superseded PR runs are cancelled because only the newest commit matters.
-# Runs on main are NOT cancelled: main's history is the signal, and dropping a
-# run there would leave a landed commit with no verdict.
+# A RUNNING main run is never cancelled; a newer main push replaces the pending
+# one (see cancel-in-progress below).
 concurrency:
   # One stable group per ref, for pushes and pull_requests alike: a newer run on
   # the same ref supersedes the older one.
@@ -55,7 +55,16 @@ concurrency:
   # MERGE INTERACTIONS at the tip. A green tip is the signal that matters, and
   # under this group the tip actually gets one as soon as merging pauses.
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull requests: a newer push cancels the running run (only the newest commit
+  # matters). Every other event (push to main, schedule, dispatch): NEVER cancel
+  # the running run. The group stays per
+  # ref, so GitHub still keeps at most one run in progress and ONE pending: a
+  # newer main push replaces the pending run instead of stacking behind it. That
+  # avoids the reverted per-sha design above (runs stacked, none completed) and
+  # the cancel-everything design (2026-09-30: every main run was cancelled by the
+  # next merge, so main went a day with no verdict at all). Under this rule the
+  # running main commit always reports, and the newest tip is always next.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
 # out the repository and runs tests: none opens an issue, writes a check, pushes
@@ -480,7 +489,7 @@ jobs:
       # --check` drift growing from 3 findings to 9 with nothing reporting it.
       #
       # `!cancelled()` and not `always()`, deliberately. This workflow sets
-      # `cancel-in-progress: true`, so a superseded run is cancelled mid-job;
+      # `cancel-in-progress` for pull requests, so a superseded PR run is cancelled mid-job;
       # under `always()` that run would still push through `pytest tests/`,
       # spending the runner minutes that are this repository's actual
       # throughput limit. `!cancelled()` runs after a FAILED step and stops
