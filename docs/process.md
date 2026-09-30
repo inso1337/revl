@@ -256,6 +256,10 @@ happens to.
   `mcp/session.py::Session._live_fingerprint` claims the output shape
   `apply.py::fingerprint` produces, which it does, and the extra token is an
   input key `fingerprint` reads and the session copy reaches another way.
+  Since issue #1513 the session copy resolves each provision in its own realm
+  and reads `isolate`, so the two differ by two tokens (`isolate` only in the
+  session copy, `manifest` only in `fingerprint`). That is beyond the one-token
+  slack, the claim no longer anchors, and its ledger entry was deleted.
 * **The same ratchet.** Near misses live beside the classes in
   `tests/fixtures/vocabulary_mirror_ledger.json`, each with a written reason.
   An unrecorded near miss reds, a recorded one whose difference moved reds, and
