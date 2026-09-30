@@ -1,24 +1,21 @@
 """Non-vacuity, shape and ratchet checks for the construct-reach report."""
 
 import copy
-import importlib.util
 import inspect
 import json
-import sys
 from pathlib import Path
 
 import pytest
+from _load_by_path import load_by_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    spec = importlib.util.spec_from_file_location(
-        "oracle_construct_reach", ROOT / "tools" / "oracle_construct_reach.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "oracle_construct_reach",
+        ROOT / "tools" / "oracle_construct_reach.py")
     return module
 
 
@@ -195,11 +192,9 @@ def test_the_gate_census_row_does_not_read_the_census_baseline(data):
     # ... and the reference set is the census's guarantee vocabulary, read from
     # the classifier the census imports. Held against the module itself, so the
     # static reading cannot drift from the function it claims to be reading.
-    spec = importlib.util.spec_from_file_location(
-        "selfhost_lower_oracle", ROOT / "tests" / "test_selfhost_lower.py")
-    oracle = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = oracle
-    spec.loader.exec_module(oracle)
+    oracle = load_by_path(
+        "selfhost_lower_oracle",
+        ROOT / "tests" / "test_selfhost_lower.py")
     source = inspect.getsource(oracle._classify)
     for tag in report["reference"]:
         assert f'"{tag}"' in source, f"{tag} is not a tag _classify can name"
@@ -280,11 +275,9 @@ def test_the_compile_row_measures_the_corpus_its_oracle_runs_on(data):
     report = data["compile"]
     assert set(report["reached"]) >= {"functions", "components", "externs", "types"}
 
-    spec = importlib.util.spec_from_file_location(
-        "compile_oracle_corpus", ROOT / "tests" / "test_selfhost_compile.py")
-    oracle = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = oracle
-    spec.loader.exec_module(oracle)
+    oracle = load_by_path(
+        "compile_oracle_corpus",
+        ROOT / "tests" / "test_selfhost_compile.py")
     expected = {str((ROOT / "tests" / "fixtures" / subdir / name).relative_to(ROOT))
                 for _tier, subdir, name in
                 [*oracle.NATIVE_CORPUS, *oracle.COMPONENT_CORPUS]}
