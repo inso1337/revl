@@ -122,6 +122,16 @@ def _replay_tier(register: Optional[str], declared_idempotent: bool) -> str:
 # the world an inverse acts on
 # ---------------------------------------------------------------------------
 
+#: issue #1477. The two values of a verdict's ``world`` field. A verdict whose
+#: world is the model describes what an in-memory stand-in did; nothing it
+#: reports as ran, re-issued or reclaimed happened outside the process.
+WORLD_MODEL = "model"
+WORLD_REAL = "real"
+
+#: The phrase every model-run line carries, so no line of a model verdict can be
+#: read as an effect that was undone in the outside world.
+MODELLED = "modelled, not performed"
+
 
 class World:
     """The external state a reconstructed inverse acts on, in a fresh process.
@@ -132,7 +142,16 @@ class World:
     :class:`DictWorld` models it as a set of durable referents (files, rows) so
     the demo and tests are deterministic; a real host would supply an adapter
     over the actual filesystem/database.
+
+    ``kind`` says which of the two an adapter is, and the verdict carries it as
+    ``world`` (issue #1477). ``"model"`` is an in-memory stand-in: what it
+    "applies" never leaves the process. ``"real"`` is an adapter over the actual
+    outside world. The default is ``"model"``, so an adapter that does not
+    declare itself real is reported as a model. That is the direction that
+    under-claims.
     """
+
+    kind = WORLD_MODEL
 
     def key(self, op: dict) -> str:
         args = op.get("args") or []
@@ -293,6 +312,14 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     except OSError as error:
         raise RecoveryError(f"cannot read WAL {wal_path}: {error}") from None
 
+    # issue #1477: every call recover makes against a world goes through
+    # `_Counted`, so the verdict can say how many calls the world (and, for a
+    # model, the model instead of the world) stood in for.
+    tally: list = []
+
+    def bound() -> World:
+        return _Counted(world if world is not None else DictWorld(), tally)
+
     records = wal["records"]
     frozen = next((r for r in records
                    if r.get("record") == "fork-frozen"), None)
@@ -302,7 +329,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # recover treats it as RETIRED at k — a terminal, non-live state — and
         # does NOT re-admit it as a callable continuation. The branch (its own
         # distinct WAL) recovers independently to its own fork point.
-        return _fork_retired(wal, frozen)
+        return _with_world(_fork_retired(wal, frozen), world, tally)
     approved = next((r for r in records
                      if r.get("record") == "commit-approved"), None)
     if wal["complete"]:
@@ -314,10 +341,9 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # proof; recover replays no inverse and rolls the missing discharge
         # forward. This dominates the discharge-set skip for a session-owned WAL.
         report = _roll_forward_window(wal_path, wal, approved,
-                                      world=world or DictWorld(),
-                                      reissue=reissue)
+                                      world=bound(), reissue=reissue)
     else:
-        report = _roll_back(wal, world=world or DictWorld(), wal_path=wal_path)
+        report = _roll_back(wal, world=bound(), wal_path=wal_path)
 
     # design 460 §5: the forward-recovery scan runs in BOTH branches — an
     # admission can be owed under either verdict, because the session's activation
@@ -335,8 +361,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     # grant a whole-process crash left with holders still counted, exactly once
     # (fenced by `shared-reclaim-fence`). A no-op for a WAL with no shared grant,
     # so every non-shared recover report is byte-identical.
-    shared = recover_shared_grants(wal, wal_path=wal_path,
-                                   world=world or DictWorld())
+    shared = recover_shared_grants(wal, wal_path=wal_path, world=bound())
     if shared is not None:
         report["shared"] = shared
         # a failed (or fenced-unknown) shared reclaim is honest RESIDUE and must
@@ -354,7 +379,91 @@ def recover(wal_path: str, *, world: Optional[World] = None,
                     + (" | " if residue.get("proof") else "")
                     + f"{len(unclean)} shared reclaim(s) unresolved: "
                     + ", ".join(f"{r['handle']} ({r['outcome']})" for r in unclean))
-    return _with_lineage(report, records)
+    return _with_world(_with_lineage(report, records), world, tally)
+
+
+def world_kind(world: Optional[World]) -> str:
+    """``"real"`` only for an adapter that declares itself real; everything
+    else, including no adapter at all (recover then builds a
+    :class:`DictWorld`), is ``"model"``."""
+    if world is not None and getattr(world, "kind", None) == WORLD_REAL:
+        return WORLD_REAL
+    return WORLD_MODEL
+
+
+class _Counted(World):
+    """A world that tallies every call recover makes against it, then passes
+    the call on unchanged. It is the adapter the caller supplied (or the
+    default model) in every other respect, so a caller that inspects its own
+    adapter afterwards sees exactly what it saw before. A call is tallied
+    BEFORE it is made: one that raises was still attempted against the world."""
+
+    def __init__(self, inner: World, tally: list) -> None:
+        self._inner = inner
+        self._tally = tally
+        self.kind = world_kind(inner)
+
+    def key(self, op: dict) -> str:
+        return self._inner.key(op)
+
+    def present(self, referent: str) -> bool:
+        return self._inner.present(referent)
+
+    def seed(self, referent: str, value: Any = True) -> None:
+        self._inner.seed(referent, value)
+
+    def apply_inverse(self, op: dict) -> None:
+        self._tally.append(("inverse", op))
+        self._inner.apply_inverse(op)
+
+    def apply_compensation(self, op: dict) -> None:
+        self._tally.append(("compensation", op))
+        self._inner.apply_compensation(op)
+
+    def reissue(self, op: dict) -> None:
+        self._tally.append(("reissue", op))
+        self._inner.reissue(op)
+
+    def remaining(self) -> list:
+        return self._inner.remaining()
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._inner, name)
+
+
+def _spends_fences(world: Optional[World]) -> bool:
+    """Whether an attempt against ``world`` may spend a durable at-most-once
+    fence (`replay-fence`, `reissue-fence`, `shared-reclaim-fence`).
+
+    Only a real world may (issue #1477). A fence says "an attempt against the
+    outside world was about to start". A model run attempts nothing out there,
+    so a fence it wrote would be false, and it would block the real recovery
+    that comes later: that run would find the fence and refuse an inverse that
+    never ran anywhere."""
+    return world_kind(world) == WORLD_REAL
+
+
+def _with_world(report: dict, world: Optional[World],
+                tally: Optional[list] = None) -> dict:
+    """Stamp the verdict with the world it ran against (issue #1477).
+
+    A model verdict's residue proof is prefixed so the proof itself cannot be
+    read as a claim about the outside world: "N inverse(s) ran and cleared every
+    referent" is true of the model and says nothing about the files, rows or
+    messages the WAL describes. A real-world verdict is left as it was."""
+    kind = world_kind(world)
+    report["world"] = kind
+    # how many calls recover made against that world. For a model it is how
+    # many calls the model stood in for; 0 means the verdict never depended on
+    # the world, so it is as true of the outside world as of the model.
+    report["worldCalls"] = len(tally or [])
+    residue = report.get("residue")
+    if kind == WORLD_MODEL and residue is not None and "proof" in residue:
+        residue["proof"] = (
+            f"world: model. Every inverse, compensation, re-issue and reclaim "
+            f"counted here was {MODELLED}: it ran against an in-memory model, "
+            f"not the outside world. {residue['proof']}")
+    return report
 
 
 def _with_lineage(report: dict, records: list) -> dict:
@@ -1231,7 +1340,7 @@ def recover_shared_grants(wal: dict, *, wal_path: Optional[str],
             # accumulator, nothing owed.
             continue
         inverse = grant.get("inverse") or {}
-        if wal_path is not None:
+        if wal_path is not None and _spends_fences(world):
             _append_shared_reclaim_fence(wal_path, handle)
         try:
             world.apply_inverse(inverse)
@@ -1513,7 +1622,7 @@ def _reissue_owed(wal_path: str, world: Optional[World], descriptor: dict,
                     hint="a confidential value is never written to the WAL. "
                          "Finish this flush by hand with the value from its own "
                          "store, or carry a non-confidential idempotency key")}
-    if wal_path is not None and seq is not None:
+    if wal_path is not None and seq is not None and _spends_fences(world):
         _append_reissue_fence(wal_path, seq, register)
     try:
         if world is None:  # pragma: no cover — recover always supplies one
@@ -1712,7 +1821,8 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
             # single fenced attempt: the fence is fsync'd BEFORE the apply so
             # a crash between them leaves a fence and no double-apply (§3a,
             # consume-before-fire).
-            if tier == "fenced" and wal_path is not None and seq is not None:
+            if (tier == "fenced" and wal_path is not None and seq is not None
+                    and _spends_fences(world)):
                 _append_replay_fence(wal_path, seq)
                 fenced_seqs.add(seq)
             world.apply_inverse(op)
@@ -1844,7 +1954,7 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
         # declared subset (§3a). An UNDECLARED one takes its single fenced
         # attempt: the fence is fsync'd BEFORE the apply so a crash between them
         # leaves a fence and no double-apply (§3a, consume-before-fire).
-        if tier == "fenced" and wal_path is not None:
+        if tier == "fenced" and wal_path is not None and _spends_fences(world):
             _append_replay_fence(wal_path, seq)
             fenced_seqs.add(seq)
         # ABORTED / undischarged: reconstruct and run the declared inverse.
@@ -2020,7 +2130,18 @@ def _guarantee() -> str:
 
 
 def render(report: dict) -> str:
-    lines = [f"verdict: {report['verdict'].upper()}", report["decision"], ""]
+    # issue #1477: a model run says so on its second line and on every line
+    # that reports a call against the world, so none of them reads as an effect
+    # undone out there. A verdict with no `world` (a hand-built report) renders
+    # as before.
+    model = report.get("world") == WORLD_MODEL
+    tag = f" [{MODELLED}]" if model else ""
+    lines = [f"verdict: {report['verdict'].upper()}"]
+    if model:
+        lines.append(f"world: MODEL. Recovery ran against an in-memory model; "
+                     f"every call below was {MODELLED}. The outside world was "
+                     f"not touched.")
+    lines += [report["decision"], ""]
     if report["verdict"] == "rolled-forward" and "owedFlushes" in report:
         # item 245's approved-to-discharged window verdict shares the
         # `rolled-forward` name but carries a different body (no
@@ -2037,7 +2158,7 @@ def render(report: dict) -> str:
             under = (f"register {entry.get('register')!r}"
                      + (f", key {key!r}" if key else ""))
             lines.append(f"  re-issued seq {entry['seq']:<3} {entry['referent']} "
-                         f"— auto-fired by the item-440 seam ({under})")
+                         f"— auto-fired by the item-440 seam ({under}){tag}")
         for entry in report.get("owedFlushes") or []:
             lines.append(f"  OWED     seq {entry['seq']:<3} {entry['referent']} "
                          f"— {entry['outcome']}")
@@ -2078,7 +2199,7 @@ def render(report: dict) -> str:
             op = entry.get("op") or {}
             call = (f"{op.get('receiver')}.{op.get('method')}"
                     f"({', '.join(map(repr, op.get('args') or []))})")
-            lines.append(f"  ran      {entry['label']:<22} {call}")
+            lines.append(f"  ran      {entry['label']:<22} {call}{tag}")
         for entry in report.get("moot") or []:
             lines.append(f"  moot     {entry['label']:<22} in-process (memory gone)")
         for entry in report.get("unreconstructible") or []:
@@ -2086,21 +2207,21 @@ def render(report: dict) -> str:
                          f"{entry['still_out']}")
         for entry in report.get("transactionalRolledBack") or []:
             lines.append(f"  rolled-back  seq {entry['seq']:<3} transactional inverse "
-                         f"re-issued — {entry['referent']}")
+                         f"re-issued — {entry['referent']}{tag}")
         for entry in report.get("dischargedSkipped") or []:
             tag = "retained (committed)" if entry.get("retained") else "discharged"
             lines.append(f"  skipped   seq {entry['seq']:<3} {tag} — not rolled back: "
                          f"{entry['referent']}")
         for entry in report.get("compensationsReissued") or []:
             lines.append(f"  RESIDUE  compensation seq {entry['seq']:<3} re-attempted "
-                         f"best-effort — still out: {entry['referent']}")
+                         f"best-effort — still out: {entry['referent']}{tag}")
         for entry in report.get("fencedDeferred") or []:
             lines.append(f"  FENCED   seq {entry['seq']:<3} undeclared inverse — "
                          f"fenced-before-attempt, will not re-run: {entry['referent']}")
         for entry in report.get("ran") or []:
             if entry.get("replay") == "read":
                 lines.append(f"  read     {entry['label']:<22} re-dispatched freely "
-                             f"— the inverse changes nothing (item 440)")
+                             f"— the inverse changes nothing (item 440){tag}")
     # design 460 §5: one line per un-finalized two-phase admission, in either
     # verdict. Present only when the WAL carried an admission the scan classified,
     # so a session that never admitted renders byte-identically.
@@ -2134,9 +2255,11 @@ def render(report: dict) -> str:
             lines.append(
                 f"  {tag} {entry['handle']:<20} shared last holder gone "
                 f"({entry['basis']}, holders={entry['holders']}) — "
-                f"{entry['outcome']}")
+                f"{entry['outcome']}{tag}")
     residue = report["residue"]
-    lines += ["", f"residue proof [{'CLEAN' if residue['clean'] else 'RESIDUE'}]:",
+    state = "CLEAN" if residue["clean"] else "RESIDUE"
+    where = " in the model" if model else ""
+    lines += ["", f"residue proof [{state}]{where}:",
               f"  {residue['proof']}"]
     lineage = report.get("lineage")
     if lineage:

@@ -11,6 +11,7 @@ import ast
 import subprocess
 import importlib.util
 import io
+import re
 import sys
 import tokenize
 from pathlib import Path
@@ -552,6 +553,24 @@ def test_every_site_wheel_input_selects_the_site_wheel_gate():
     )
 
 
+def test_the_word_index_answers_what_the_word_regex_answers():
+    """Issue #1449. `_word_tests` answers from a per-session index of bare words
+    instead of re-running its regex over every test for every token. The index
+    is only a speed-up if it selects exactly what the regex selected, so both
+    are asked here: a leaf module, a dunder (read from the test's own text
+    only), and a token that is not a single word (which keeps the regex)."""
+    for token in ("a2a_boundary", "__main__", "audit", "revl-gate"):
+        word = re.compile(
+            rf"(?<![A-Za-z0-9_]){re.escape(token)}(?![A-Za-z0-9_])")
+        idiom = token.startswith("__") and token.endswith("__")
+        want = {
+            at._node(p) for p in at._test_files(ROOT)
+            if word.search(p.name) or word.search(
+                at._read(p) if idiom else at._companion_text(ROOT, p))
+        }
+        assert at._word_tests(ROOT, token) == want, token
+
+
 def test_every_selection_carries_the_vocabulary_gate():
     """Issue #1332. `tools/check_vocabulary_mirrors.py` walks every `.py` under
     `src/revl` and `tools` and reports a RELATION between two of them, so the
@@ -630,6 +649,15 @@ def test_census_change_selects_the_construct_reach_ledger():
             "this one file; a rule that answers only some of them is the "
             "shadowing this test exists to catch."
         )
+
+
+def test_a_tier_oracle_corpus_change_selects_the_progress_counters():
+    """Issue #1224. The native-chain progress counter reads every tier oracle's
+    `CORPUS_DIR` and `CORPUS` by AST, so a change to one of those files can red
+    tests/test_evolution_progress.py without either file naming the other."""
+    for tier in ("py", "wasm"):
+        r = sel(f"tests/test_selfhost_emit_{tier}.py")
+        assert "tests/test_evolution_progress.py" in r["pytest"], tier
 
 
 def test_provenance_change_keeps_its_own_coupling_only():

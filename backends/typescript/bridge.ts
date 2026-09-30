@@ -128,7 +128,9 @@ function dial() {
   s.on('data', (d) => {
     buf += d
     const i = buf.indexOf('\\n')
-    if (i >= 0) { s.destroy(); done(JSON.parse(buf.slice(0, i))) }
+    // The reply line is passed through VERBATIM (issue #1566): a parse and
+    // re-stringify here rounds an Int past 2^53 before the parent sees it.
+    if (i >= 0) { s.destroy(); if (timer) clearTimeout(timer); process.stdout.write(buf.slice(0, i)); process.exit(0) }
   })
   s.on('error', () => {
     s.destroy()
@@ -160,12 +162,18 @@ function isNativeAdt(o: Record<string, unknown>): boolean {
  *  Rounding at a seam is the silent precision loss this tier's BigInt port
  *  exists to remove; a 64-bit `Int` that does not fit the wire is a limit of
  *  the wire, and it should say so rather than hand over a different number. */
-function bigintToWire(v: bigint): number {
+function bigintToWire(v: bigint): unknown {
   if (v > BigInt(Number.MAX_SAFE_INTEGER) || v < BigInt(Number.MIN_SAFE_INTEGER)) {
-    throw new RangeError(
-      `revl: Int ${v} is outside the range a JSON number represents exactly ` +
-        `(docs/interop-bridge.md encodes Int as a number)`,
-    )
+    // A JSON number has no size limit; only a JS `number` does. `JSON.rawJSON`
+    // writes the exact digits (issue #1566), so a 64-bit `Int` crosses whole.
+    const raw = (JSON as unknown as { rawJSON?: (text: string) => unknown }).rawJSON
+    if (typeof raw !== 'function') {
+      throw new RangeError(
+        `revl: Int ${v} is outside the range a JS number represents exactly, and ` +
+          `this node has no JSON.rawJSON to write its digits`,
+      )
+    }
+    return raw(v.toString())
   }
   return Number(v)
 }
@@ -216,6 +224,136 @@ export function decodeValue(v: unknown): unknown {
     return rec
   }
   return v
+}
+
+// --- issue #1566: decode a seam value by its DECLARED type ---
+//
+// `Int` crosses as a JSON number and JSON.parse makes that a JS `number`, but
+// the ts tier's `Int` is a `bigint`: a provider method doing `n + 1n` on it
+// threw `Cannot mix BigInt and other types`, and a value past 2^53 lost digits
+// before any code saw it. Nothing on the wire says which numbers are `Int`s, so
+// the conversion follows the IR's declared types, which the conductor hands a
+// node process in its spec (`src/revl/placement.py` `seam_typing`): each served
+// or proxied key's method parameter and return types, plus the type table for
+// nested record fields and variant payloads.
+
+/** One method's declared types, as IR type strings (`Int`, `List[Pair]`). */
+export interface SeamSignature {
+  params: Array<string | null>
+  returns: string | null
+}
+
+/** What a node process knows about the types crossing its seams. */
+export interface SeamTyping {
+  signatures: Record<string, Record<string, SeamSignature>>
+  types: Record<string, any>
+}
+
+/** JSON.parse that keeps an integer literal past 2^53 exact, as a `bigint`
+ *  (the reviver's `source` is the literal's own text, node 21+). A number
+ *  within the safe range stays a `number`; `decodeAs` makes it a `bigint` when
+ *  the declared type is `Int`. */
+export function parseWire(text: string): any {
+  return JSON.parse(text, function (this: unknown, _key: string, value: unknown,
+    context?: { source?: string }) {
+    if (typeof value === 'number' && !Number.isSafeInteger(value)
+      && typeof context?.source === 'string' && /^-?\d+$/.test(context.source)) {
+      return BigInt(context.source)
+    }
+    return value
+  } as (this: unknown, key: string, value: unknown) => unknown)
+}
+
+function splitTypeArgs(inner: string): string[] {
+  const out: string[] = []
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < inner.length; i++) {
+    const c = inner[i]
+    if (c === '[' || c === '(') depth++
+    else if (c === ']' || c === ')') depth--
+    else if (c === ',' && depth === 0) {
+      out.push(inner.slice(start, i).trim())
+      start = i + 1
+    }
+  }
+  out.push(inner.slice(start).trim())
+  return out
+}
+
+function typeHead(type: string): { head: string; args: string[] } {
+  const t = type.trim()
+  const open = t.indexOf('[')
+  if (open < 0 || !t.endsWith(']')) return { head: t, args: [] }
+  return { head: t.slice(0, open).trim(), args: splitTypeArgs(t.slice(open + 1, -1)) }
+}
+
+/** A generic type's parameters replaced by the arguments it was used with. */
+function substitute(type: string, env: Record<string, string>): string {
+  const { head, args } = typeHead(type)
+  if (args.length === 0) return env[head] ?? head
+  return `${head}[${args.map((a) => substitute(a, env)).join(', ')}]`
+}
+
+function toBigInt(v: unknown): unknown {
+  if (typeof v === 'bigint') return v
+  if (typeof v === 'number' && Number.isInteger(v)) return BigInt(v)
+  return v // not an integer: leave it for the method to refuse loudly
+}
+
+/** A wire value decoded as `type` declares: `Int` becomes a `bigint`, and the
+ *  containers, records, variants and Results it can nest in are walked. A type
+ *  this does not model falls back to `decodeValue`, so an undeclared shape is
+ *  handled exactly as before. */
+export function decodeAs(v: unknown, type: string | null | undefined,
+  types: Record<string, any> = {}): unknown {
+  if (type == null) return decodeValue(v)
+  const { head, args } = typeHead(type)
+  if (head === 'Int') return toBigInt(v)
+  if (head === 'Float') return typeof v === 'bigint' ? Number(v) : v
+  if (v === null || v === undefined) return v
+  if (head === 'List' && Array.isArray(v)) return v.map((x) => decodeAs(x, args[0], types))
+  if (head === 'Opt') return decodeAs(v, args[0], types)
+  const tagged = typeof v === 'object' && !Array.isArray(v)
+    && typeof (v as Record<string, unknown>).$kind === 'string'
+    ? (v as Record<string, unknown>) : null
+  if (head === 'Result' && tagged) {
+    const out: Record<string, unknown> = { kind: tagged.$kind }
+    const payload = tagged.$kind === 'Ok' ? args[0] : args[1]
+    if ('$value' in tagged) out.value = decodeAs(tagged.$value, payload, types)
+    return out
+  }
+  const decl = types[head]
+  if (decl && typeof decl === 'object') {
+    const env: Record<string, string> = {}
+    ;(decl.params ?? []).forEach((p: string, i: number) => { if (args[i]) env[p] = args[i] })
+    if (decl.kind === 'record' && typeof v === 'object' && !Array.isArray(v) && !tagged) {
+      const fields = (decl.fields ?? {}) as Record<string, string>
+      const o = v as Record<string, unknown>
+      const rec: Record<string, unknown> = {}
+      for (const k of Object.keys(o)) {
+        rec[k] = k in fields ? decodeAs(o[k], substitute(fields[k], env), types) : decodeValue(o[k])
+      }
+      return rec
+    }
+    if (decl.kind === 'variant' && tagged) {
+      const arm = (decl.cases ?? []).find((c: any) => c && c.name === tagged.$kind)
+      const out: Record<string, unknown> = { kind: tagged.$kind }
+      if ('$value' in tagged) {
+        out.value = arm && arm.payload != null
+          ? decodeAs(tagged.$value, substitute(arm.payload, env), types)
+          : decodeValue(tagged.$value)
+      }
+      return out
+    }
+  }
+  return decodeValue(v)
+}
+
+/** The declared signature of `key.method`, when the spec carried one. */
+export function signatureOf(typing: SeamTyping | null | undefined, key: string,
+  method: string): SeamSignature | null {
+  return typing?.signatures?.[key]?.[method] ?? null
 }
 
 // --- item 118: the correlation envelope this consumer stamps on every call ---
@@ -328,6 +466,7 @@ function seamCall(
   args: unknown[],
   deadlineMs: number | null,
   correlation: Correlation | null = null,
+  typing: SeamTyping | null = null,
 ): unknown {
   const envelope = correlationFor(correlation, key, method)
   const body: Record<string, unknown> = { key, method, args: args.map(encodeBigInts) }
@@ -351,7 +490,7 @@ function seamCall(
     }
     throw error
   }
-  const reply = JSON.parse(out)
+  const reply = parseWire(out)
   if (reply.seamDeadline) throw new SeamDeadlineError(key, method, deadlineMs ?? 0)
   // item 421 F5 — the consumer runs the same two-stage scrub the provider does,
   // rather than trusting that it already ran. `serve` funnels every dispatch
@@ -365,7 +504,8 @@ function seamCall(
   // logs the thrown error. Same `seamFailure`, same two markers, so a consumer
   // cannot tell which side redacted, and does not need to.
   if (!reply.ok) throw new Error(seamFailure(reply.error, args))
-  return decodeValue(reply.value)
+  const sig = signatureOf(typing, key, method)
+  return sig ? decodeAs(reply.value, sig.returns, typing?.types) : decodeValue(reply.value)
 }
 
 /** Watch a provider for death: connect an idle monitor to `target` (UDS or
@@ -446,6 +586,7 @@ export function makeProxy(
   target: SeamTarget,
   deadlineMs: number | null = null,
   correlation: Correlation | null = null,
+  typing: SeamTyping | null = null,
 ) {
   const lostCallbacks: Array<() => void> = []
   let fired = false
@@ -487,7 +628,7 @@ export function makeProxy(
       // 440). `finally` clears it whether the call returns or throws.
       const seq = beginCrossing(key, method, 'dispatch')
       try {
-        return seamCall(target, key, method, args, deadlineMs, correlation)
+        return seamCall(target, key, method, args, deadlineMs, correlation, typing)
       } catch (error) {
         // A network seam that breaches its deadline withdraws: the remote
         // provider is unreachable-in-time, so the consumer stops depending on
@@ -653,6 +794,7 @@ export async function serve(
   ctx: Context,
   exports: string[] | Record<string, string[]>,
   socketPath: string,
+  typing: SeamTyping | null = null,
 ): Promise<net.Server> {
   const table = exportTable(exports)
 
@@ -671,7 +813,7 @@ export async function serve(
         // assigns it, and an empty needle set leaves the text alone.
         let callArgs: unknown[] = []
         try {
-          const req = JSON.parse(line)
+          const req = parseWire(line)
           callArgs = req.args ?? []
           if (estopEngaged()) {
             // The E-Stop verdict, not a fault: an armed latch means an operator
@@ -709,7 +851,14 @@ export async function serve(
               // registry clean (`estop.ts::endCrossing`).
               const seq = beginCrossing(req.key, req.method, 'accept')
               try {
-                let result = service[req.method](...(req.args ?? []))
+                // issue #1566: each argument decoded by its declared type,
+                // so an `Int` reaches the method as a `bigint`. Without a
+                // signature the arguments pass as they arrived, as before.
+                const sig = signatureOf(typing, req.key, req.method)
+                const args: unknown[] = sig
+                  ? callArgs.map((a, i) => decodeAs(a, sig.params[i], typing?.types))
+                  : callArgs
+                let result = service[req.method](...args)
                 if (result && typeof result.then === 'function') result = await result
                 reply = { ok: true, value: encodeValue(result ?? null) }
               } finally {

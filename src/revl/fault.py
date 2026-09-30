@@ -40,7 +40,7 @@ import copy
 import sys
 import types
 
-from ._paths import backends_root
+from ._paths import backends_root, python_backend_emitter
 from .refusal import is_refusal
 
 BACKENDS = backends_root()
@@ -500,10 +500,7 @@ def _load_py_tier():
     """Import the cordis-py reference tier: ``(emit, runtime, Context,
     FiberState)``.  Raises ``ModuleNotFoundError`` when the runtime is absent —
     the caller decides whether that is a skip or an error."""
-    backend_dir = BACKENDS / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415 — backend import after path setup
+    emit = python_backend_emitter()
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
@@ -2274,11 +2271,7 @@ def _load_py_emitter():
     """Import the cordis-py backend *emitter only* (no cordis runtime): a prop
     test's body is a pure function, so it needs the emitter to lower+exec it but
     never a live ``Context``.  Returns the ``emit`` module."""
-    backend_dir = BACKENDS / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415 — backend import after path setup
-    return emit
+    return python_backend_emitter()
 
 
 def _prop_module(ir: dict, unit: dict, index: int, emit):
