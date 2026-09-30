@@ -16,6 +16,15 @@ names a key, not a realm.
 The runtime tests boot real JVM processes through `revl run --placement
 --once` and need a JDK; without one they skip, and a skip is not a pass. CI's
 `backend-java` job provisions a JDK.
+
+TWO RUNNERS. `revl run --placement` picks `RealPlacementRunner` when real
+cordis4j classes are present (`REVL_CORDIS4J_CLASSES`, set in CI) and
+`PlacementRunner` on the in-repo stubs otherwise. The stub-runner tests pin
+the stubs by clearing that variable: the real runner is consumer-only (it does
+not serve a key), and real cordis4j has no by-label realm read (core
+`Context.isolate` mints a fresh store per call, docs/contract-errata.md), so on
+it an isolated key is refused by name. The last test pins that refusal, and
+runs only where the real classes are.
 """
 
 from __future__ import annotations
@@ -87,10 +96,14 @@ probe = ["kv.get('who')"]
 """
 
 
-def _run(tmp_path: Path, source: str, placement: str) -> str:
+_REAL_CLASSES = os.environ.get("REVL_CORDIS4J_CLASSES", "")
+
+
+def _run(tmp_path: Path, source: str, placement: str, real: bool = False) -> str:
     (tmp_path / "p.rvl").write_text(source, encoding="utf-8")
     (tmp_path / "p.toml").write_text(placement, encoding="utf-8")
-    env = dict(os.environ, PYTHONPATH=str(ROOT / "src"))
+    env = dict(os.environ, PYTHONPATH=str(ROOT / "src"),
+               REVL_CORDIS4J_CLASSES=_REAL_CLASSES if real else "")
     if javac_gate.JAVA:
         env["JAVA_HOME"] = str(Path(javac_gate.JAVA).parents[1])
     ran = subprocess.run(
@@ -153,3 +166,23 @@ def test_the_shared_realm_provision_answers_first(tmp_path):
     another component isolates the same key."""
     out = _run(tmp_path, SHARED_AND_ISOLATED, ONE_PROCESS)
     assert _probe(out, "kv.get('who')") == '=> "b:who"'
+
+
+ONE_ISOLATED = """\
+[processes.walled]
+backend = "java"
+components = ["Walled"]
+probe = ["kv.get('p')"]
+"""
+
+
+@needs_jdk
+@pytest.mark.skipif(not (_REAL_CLASSES and Path(_REAL_CLASSES).is_dir()),
+                    reason="needs real cordis4j classes (REVL_CORDIS4J_CLASSES); "
+                           "CI's backend-java job builds them")
+def test_on_real_cordis4j_an_isolated_key_is_refused_by_name(tmp_path):
+    out = _run(tmp_path, ISOLATED.split("service Ops", 1)[0], ONE_ISOLATED, real=True)
+    assert "RealPlacementRunner" in out or "real cordis4j" in out, out
+    answer = _probe(out, "kv.get('p')")
+    assert answer.startswith("ERROR RuntimeException: key 'kv' is provided in realm `wa` "
+                             "by `Walled`, which the real cordis4j runtime cannot reach"), out

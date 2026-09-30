@@ -478,7 +478,8 @@ public final class RealPlacementRunner {
     // key used to be read with a shared-realm `ctx.get`, so a provider placed
     // with `isolate kv in realm("wa")` answered `no provider`. The order is the
     // py tier's `resolve_key`: the shared realm when the key is provided there,
-    // else its one isolated realm, read strictly. A key isolated in two or more
+    // else its one isolated realm, which this runtime cannot read by label and
+    // so refuses by name (see below). A key isolated in two or more
     // realms has no single provider for a call that names only the key, so it
     // is refused naming each provider and realm. A key this process does not
     // provide (a proxy) resolves in the shared realm, as before.
@@ -496,13 +497,17 @@ public final class RealPlacementRunner {
             return ctx.get(ServiceKey.of((Class) iface, key));
         }
         if (at.size() == 1) {
+            // The real cordis4j runtime has no by-label realm read: core
+            // `Context.isolate` mints a fresh store on every call, so the
+            // provision a component isolated is visible only through that
+            // component's own context, which the runner never holds. Refused
+            // by name rather than read from the shared realm, where it is not.
             String realm = (String) at.get(0).get("realm");
-            java.util.Optional<?> found = ctx.serviceInRealm(iface, realm);
-            if (found.isEmpty()) {
-                throw new RuntimeException("key '" + key + "' is provided in realm `" + realm
-                        + "` by `" + at.get(0).get("component") + "`, and that provider is not active");
-            }
-            return found.get();
+            throw new RuntimeException("key '" + key + "' is provided in realm `" + realm
+                    + "` by `" + at.get(0).get("component") + "`, which the real cordis4j "
+                    + "runtime cannot reach from outside that component: Context.isolate mints "
+                    + "a fresh store per call (docs/contract-errata.md, \"cordis4j global-realm "
+                    + "divergence\")");
         }
         StringBuilder where = new StringBuilder();
         for (Map<String, Object> p : at) {
