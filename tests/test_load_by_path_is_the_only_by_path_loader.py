@@ -78,10 +78,6 @@ ALLOWED = {
         "pins the bare names `emit` and `runtime` to the python backend's own "
         "copies before this directory's tests are collected, on purpose: a "
         "combined session may have put another backend's directory first",
-    ("backends/typescript/test_temporal_target.py", "_emit_module"):
-        "binds the bare `emit` to the typescript emitter because its sibling "
-        "`emit_temporal.py` imports `from emit import`; returns the module "
-        "first when `emit` is already that file",
     ("backends/wasm/test_accessor_exec.py", "_cordis_runtime"): _EXTERNAL,
     ("backends/wasm/test_router_exec_wasm.py", "_cordis_runtime"): _EXTERNAL,
     ("backends/wasm/test_spawn_exec.py", "_cordis_runtime"): _EXTERNAL,
