@@ -2513,6 +2513,31 @@ def placement_slice(ir: dict, kept) -> dict:
     return out
 
 
+def seam_typing(ir: dict, key_services: dict) -> dict:
+    """The declared types a node process needs to decode a seam value (issue
+    #1566): for each key it serves or proxies, each method's parameter types
+    and return type, plus the document's type table for the nested fields.
+
+    The wire carries an `Int` as a JSON number (docs/interop-bridge.md,
+    "Canonical value encoding"), which JSON.parse turns into a JS `number`,
+    while the ts tier's `Int` is a `bigint`. Nothing on the wire says which
+    numbers are `Int`s, so the node runner converts by the declared types it
+    is handed here (`bridge.ts` `decodeAs`). Only node specs carry this, so
+    every other tier's spec is unchanged."""
+    services = ir.get("services") or {}
+    signatures: dict = {}
+    for key, service in sorted(key_services.items()):
+        table = {}
+        for method, spec in ((services.get(service) or {}).get("methods") or {}).items():
+            spec = spec or {}
+            table[method] = {
+                "params": [(p or {}).get("type") for p in spec.get("params") or []],
+                "returns": spec.get("returns"),
+            }
+        signatures[key] = table
+    return {"signatures": signatures, "types": ir.get("types") or {}}
+
+
 def host_ref_pins(ir: dict, own, files) -> dict:
     """The three host-module pin keys a placement spec carries for a process
     hosting the components `own` (item 396 option B / 410).
@@ -4216,6 +4241,13 @@ def run_placement(files, placement_path: str, once: bool = False,
             # path calls too so the pins survive a re-host (see `do_swap`).
             **host_ref_pins(ir, own, files),
         }
+        if backend == "node":
+            # issue #1566: the declared types the node runner decodes seam
+            # values by (an `Int` arrives as a JSON number and must become a
+            # `bigint`). Absent on every other tier's spec.
+            key_services = dict(provides[pname])
+            key_services.update({k: e["service"] for k, e in proxies.items()})
+            spec["typing"] = seam_typing(ir, key_services)
         if pname in model_handoffs:
             # item 515: this host's model schedule, re-derived and installed
             # by the child before any component activates. Absent for a host
@@ -5022,6 +5054,13 @@ def run_placement(files, placement_path: str, once: bool = False,
                 "methods": {k: methods.get(provides[old][k], []) for k in serve_keys},
             },
         }
+        if _canonical_backend(to_backend) == "node":
+            # issue #1566: the same declared seam types the boot path hands a
+            # node process, rebuilt for the successor's own keys.
+            key_services = dict(provides[old])
+            key_services.update({k: e.get("service") for k, e in succ_spec["proxies"].items()
+                                 if e.get("service")})
+            succ_spec["typing"] = seam_typing(ir, key_services)
         # roadmap 421 F8: carry the predecessor's correlation guard onto the
         # successor. Without this a swap SILENTLY DISARMS the seam, because the
         # successor's serve spec is built fresh from socket/keys/methods and a
