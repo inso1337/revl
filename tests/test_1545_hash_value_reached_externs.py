@@ -30,7 +30,9 @@ if str(SRC) not in sys.path:
 _BACKEND = ROOT / "backends" / "python"
 if str(_BACKEND) not in sys.path:
     sys.path.insert(0, str(_BACKEND))
+sys.path.insert(0, str(ROOT / "tests"))
 
+from _load_by_path import load_by_path  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
 from revl.mcp.approval import ApprovalRequired, ClassMap  # noqa: E402
 
@@ -41,21 +43,9 @@ needs_cordis = pytest.mark.skipif(
 )
 
 
-def _spellings_module():
-    """`tests/test_deploy_118.py`, imported by path under a unique name, so the
-    eight spellings have one source of truth."""
-    name = "revl_test_1545_spellings"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(
-        name, ROOT / "tests" / "test_deploy_118.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_T118 = _spellings_module()
+# `tests/test_deploy_118.py` holds the eight spellings; loading it under its
+# own module name shares one copy with pytest's collection of that file.
+_T118 = load_by_path("test_deploy_118", ROOT / "tests" / "test_deploy_118.py")
 SPELLINGS = sorted(_T118._FN_VALUE_SPELLINGS)
 # `r.f(n)` on a record holding a function value raises AttributeError on the
 # py tier today, with or without an emission in it, so the record-field
