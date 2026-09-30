@@ -1718,6 +1718,71 @@ def _crossing_of_descriptor(descriptor: dict) -> dict:
     }
 
 
+class _CompensationPairing:
+    """Which emission a compensation descriptor offsets, read off the WAL
+    (issue #1369).
+
+    A compensation's discharge descriptor names the `seq` of the emission's
+    `effect` record in `offsets`; the effect record cannot name the descriptor,
+    because it is written ahead of the host body and the descriptor only after
+    it returns. The timeline also writes a `compensation` effect record for the
+    same compensation, whose `boundary.for` is the emission's STEP index.
+
+    `offset_by(record)` is the descriptor seq for an emission effect record
+    whose compensation descriptor is SETTLED, meaning a `discharge` or `aborted`
+    record names it; None otherwise, and always None for an emission with no
+    compensation. `described(record)` is the descriptor seq for a `compensation`
+    effect record whose compensation has a descriptor."""
+
+    def __init__(self, records: list, effects: list, descriptors: list) -> None:
+        self._settled: set = set()
+        #: seqs an `aborted` record names: their compensation already ran
+        self.ran_by_abort: set = set()
+        for r in records:
+            if r.get("record") == "discharge":
+                self._settled.update(r.get("discharged") or [])
+            elif r.get("record") == "aborted":
+                self.ran_by_abort.update(r.get("replayed") or [])
+        self._settled |= self.ran_by_abort
+        self._by_emission: dict = {
+            d.get("offsets"): d.get("seq") for d in descriptors
+            if d.get("entry") == "compensation" and isinstance(d.get("offsets"), int)}
+        self._emission_seq: dict = {
+            (r.get("component"), r.get("stepIndex")): r.get("seq")
+            for r in effects if r.get("kind") == "emission"}
+
+    def offset_by(self, record: dict) -> Optional[int]:
+        if record.get("kind") != "emission":
+            return None
+        return self.offset_by_seq(record.get("seq"))
+
+    def offset_by_seq(self, effect_seq: Any) -> Optional[int]:
+        """The settled compensation descriptor seq for the emission whose
+        `effect` record has `effect_seq`, or None."""
+        seq = self._by_emission.get(effect_seq)
+        return seq if seq in self._settled else None
+
+    def settle(self, seqs) -> None:
+        """Mark descriptor seqs settled that a replay in THIS run just ran or
+        found settled, which the WAL read at the start does not show yet. A
+        caller that replays descriptors after classifying effect records uses
+        it, then asks `offset_by_seq` of each `unreconstructible` entry's
+        `seq` again."""
+        self._settled.update(seqs)
+
+    def described(self, record: dict) -> Optional[int]:
+        if record.get("kind") != "compensation":
+            return None
+        emission = self._emission_seq.get(
+            (record.get("component"), (record.get("boundary") or {}).get("for")))
+        return self._by_emission.get(emission)
+
+
+def _compensation_pairing(records: list, effects: list,
+                          descriptors: list) -> "_CompensationPairing":
+    return _CompensationPairing(records, effects, descriptors)
+
+
 def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> dict:
     """Activation did not complete: reconstruct and run boundary inverses LIFO,
     then state a checked verdict with a residue proof.
@@ -1737,11 +1802,14 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     for r in wal["records"]:
         if r.get("record") == "discharge":
             discharged.update(r.get("discharged") or [])
+    pairing = _compensation_pairing(wal["records"], effects, descriptors)
 
     # seed the world with every boundary referent the WAL says was created and
     # outlives the process — this is the external state a crash orphaned.
     seeded: dict = {}
     for record in effects:
+        if pairing.described(record) is not None or pairing.offset_by(record) is not None:
+            continue   # reported by its descriptor, or offset: not out
         referent = _referent_key(record, world)
         if referent is not None:
             world.seed(referent, record.get("label"))
@@ -1762,6 +1830,7 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
 
     outstanding: list = []
     ran, moot, unreconstructible = [], [], []
+    offset, described = [], []
     # newest-first: an L-Raise teardown runs inverses in reverse commit order
     for record in reversed(effects):
         boundary = record.get("boundary") or {}
@@ -1773,7 +1842,22 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
             "kind": record.get("kind"),
             "class": boundary.get("class"),
             "referent": boundary.get("referent"),
+            "seq": record.get("seq"),   # the effect record's, for the pairing
         }
+        if pairing.described(record) is not None:
+            # the timeline's own record of a compensation that ALSO has a
+            # discharge descriptor: the descriptor is the re-issuable form and
+            # the descriptor lane below reports it. Counting it here too would
+            # report one compensation twice, once as closure-only.
+            described.append({**entry, "descriptor": pairing.described(record)})
+            continue
+        if pairing.offset_by(record) is not None:
+            # an emission whose compensation descriptor is SETTLED (issue
+            # #1369): a discharge or `aborted` record names it, so the
+            # compensation ran. An emission cannot be inverted, only offset,
+            # and this one was.
+            offset.append({**entry, "compensation": pairing.offset_by(record)})
+            continue
         if referent is None:
             # in-process: the memory it acted on died with the process; running
             # its inverse would be a no-op. Moot, not residue.
@@ -1852,6 +1936,8 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     # call keys off, so a transactional re-issue pops exactly it and a
     # compensation leaves exactly it out.
     for d in descriptors:
+        if d.get("entry") == "compensation" and d.get("seq") in pairing.ran_by_abort:
+            continue   # already ran: nothing of it is owed
         world.seed(world.key(d.get("call") or {}), d.get("entry"))
 
     transactional = [d for d in descriptors if d.get("entry") == "transactional"]
@@ -1976,9 +2062,16 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
 
     # Phase 2: owed compensations, reverse-seq, best-effort — RECORD not clear.
     compensations_reissued = []
+    compensations_settled = []
     for d in sorted(compensations, key=lambda x: x.get("seq", 0), reverse=True):
         call = d.get("call") or {}
         referent = world.key(call)
+        if d.get("seq") in pairing.ran_by_abort:
+            # an `aborted` record names it: an in-process abort or a replay in
+            # a fresh process (`runtime.replay_descriptors`) already ran this
+            # compensation. Re-issuing it would run it twice (issue #1369).
+            compensations_settled.append({"seq": d.get("seq"), "referent": referent})
+            continue
         if d.get("seq") in discharged:
             # discharged on a clean unload: a compensation is never owed on
             # success (the forward emission was the deliverable). Skip, no residue.
@@ -2066,9 +2159,14 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
         "ran": ran,
         "moot": moot,
         "unreconstructible": unreconstructible,
+        # issue #1369: emissions whose compensation descriptor is settled, and
+        # compensation records the descriptor lane reports instead
+        "offset": offset,
+        "compensationRecordsDescribed": described,
         "transactionalRolledBack": transactional_rolled_back,
         "dischargedSkipped": discharged_skipped,
         "compensationsReissued": compensations_reissued,
+        "compensationsSettled": compensations_settled,
         # item 309 §3a: undeclared inverses whose single at-most-once attempt was
         # already spent (fenced), refused this run and deferred to a human.
         "fencedDeferred": fenced_deferred,
@@ -2205,6 +2303,12 @@ def render(report: dict) -> str:
         for entry in report.get("unreconstructible") or []:
             lines.append(f"  RESIDUE  {entry['label']:<22} closure-only — still out: "
                          f"{entry['still_out']}")
+        for entry in report.get("offset") or []:
+            lines.append(f"  offset   {entry['label']:<22} its compensation, seq "
+                         f"{entry['compensation']}, is settled")
+        for entry in report.get("compensationRecordsDescribed") or []:
+            lines.append(f"  paired   {entry['label']:<22} reported by its "
+                         f"descriptor, seq {entry['descriptor']}")
         for entry in report.get("transactionalRolledBack") or []:
             lines.append(f"  rolled-back  seq {entry['seq']:<3} transactional inverse "
                          f"re-issued — {entry['referent']}{tag}")
@@ -2212,6 +2316,9 @@ def render(report: dict) -> str:
             tag = "retained (committed)" if entry.get("retained") else "discharged"
             lines.append(f"  skipped   seq {entry['seq']:<3} {tag} — not rolled back: "
                          f"{entry['referent']}")
+        for entry in report.get("compensationsSettled") or []:
+            lines.append(f"  settled  compensation seq {entry['seq']:<3} an `aborted` "
+                         f"record names it — ran, not re-issued: {entry['referent']}")
         for entry in report.get("compensationsReissued") or []:
             lines.append(f"  RESIDUE  compensation seq {entry['seq']:<3} re-attempted "
                          f"best-effort — still out: {entry['referent']}{tag}")
