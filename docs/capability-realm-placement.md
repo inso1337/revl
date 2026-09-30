@@ -73,6 +73,11 @@ isolates into no named realm is never constrained, and an unpinned host with no
 validates trivially and produces **byte-identical** specs and output to before
 this item. The existing placement examples set neither and are unchanged.
 
+A host may also declare the devices it offers to model loads
+(`[[processes.<p>.devices]]`, item 515). That is a separate check with the
+same shape: a routed model action whose candidates need a device the host does
+not list is refused before anything spawns. See `docs/model-scheduling.md`.
+
 ## Optimization: the co-location advisory (conservative, opt-in)
 
 There is a real optimization angle — a provider and consumer of the same key in

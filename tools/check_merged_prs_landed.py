@@ -88,18 +88,66 @@ so before this the gate's own evidence read as noise. Asking the remote for
 the commit by sha resolves the stranding and leaves only the genuinely
 unanswerable as UNRESOLVED.
 
+THE NOTE IS RE-MEASURED TOO (issue #1434). Ancestry is the one property of
+a stranded PR that never changes, so on its own this check stayed green while
+five of eight baseline notes went stale. Each entry therefore carries a
+structured witness beside its prose, and `tools/landing_witness.py` re-checks
+it on every run: the merge's ADDED inventory, the byte-identity of every file
+claimed CARRIED at the commit that carried it (not at HEAD, so later edits
+cost nothing), and the tests named for a file that was carried modified.
+The recorded `merge` sha is also cross-checked against the one GitHub reports,
+so the witness is never measured against the wrong commit. An entry whose
+claim cannot be checked (REWORKED) is printed as UNCHECKED, never as verified.
+
+HISTORY REWRITE MAP. GitHub's pull request records keep the commit ids they
+were given when the PR merged. A rewrite of this repository's history (a
+change of author, a stripped trailer) gives every commit a new id, and
+GitHub's `mergeCommit.oid` cannot be updated to follow it. Without help, every
+merged PR from before the rewrite would name a commit the rewritten clone does
+not have, and the check would report them all UNRESOLVED, for good.
+
+So when `tools/history_rewrite_map.tsv` exists, every commit id this tool
+reads from GitHub is translated through it before git is asked anything. The
+only such id is `mergeCommit.oid`: GH_FIELDS asks for no other commit field,
+and the head and base are read as branch NAMES, for the report only. The
+baseline's recorded ids are translated too, for the same reason: each entry's
+`merge` is a copy of GitHub's `mergeCommit.oid`, and its `carried_at` names a
+commit on `main`, so both were written before the rewrite. The MERGE SHA
+cross-check therefore compares two translated ids, and the witness is
+measured against the rewritten commits. The file is one `old_sha<TAB>new_sha`
+pair per line, full ids, with an optional `old_sha<TAB>new_sha` header line;
+it is written by the rewrite, never by hand.
+
+    lookup     by full id, or by any unique prefix of at least 7 characters.
+               An id the map does not hold passes through unchanged, which is
+               the case for every PR merged after the rewrite.
+    no file    behaviour is exactly what it was before the map existed.
+    malformed  the run stops with exit 2 and names the file and the line. A
+               map that is quietly skipped would bring the ~200 false
+               UNRESOLVED lines back with no hint of why, and a map that is
+               half read would translate some ids and not others.
+
+A translated line in the report shows the id git was asked about and says
+which id GitHub records, so a human can find the PR's commit either way.
+
 USAGE
     python3 tools/check_merged_prs_landed.py                  # live, via gh
     python3 tools/check_merged_prs_landed.py --from-json f.json  # offline
     python3 tools/check_merged_prs_landed.py --no-fetch       # never touch the network
+    python3 tools/check_merged_prs_landed.py --witness-only   # no gh; notes only
+    python3 tools/check_merged_prs_landed.py --pinned run     # run the pins (CI)
+    python3 tools/check_merged_prs_landed.py --rewrite-map m.tsv  # another map
 Exit 0 when every merged PR is accounted for, 1 on any finding, 2 when the
-question could not be asked (no `gh`, no network, an absent merge commit). An
-unanswered question is never reported as a pass.
+question could not be asked (no `gh`, no network, an absent merge commit, a
+malformed rewrite map). An unanswered question is never reported as a pass.
 """
 from __future__ import annotations
 
 import argparse
+import importlib.util
+import bisect
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -112,15 +160,171 @@ DEFAULT_MAIN = "origin/main"
 # The GitHub fields this needs. `mergeCommit` is the load-bearing one; the rest
 # are for the report, so a finding names the PR a human can go and look at.
 GH_FIELDS = "number,title,state,baseRefName,headRefName,mergeCommit,mergedAt"
+# See HISTORY REWRITE MAP in the module docstring.
+REWRITE_MAP = ROOT / "tools" / "history_rewrite_map.tsv"
+REWRITE_MAP_HEADER = "old_sha\tnew_sha"
+MIN_PREFIX = 7
+_FULL_SHA = re.compile(r"[0-9a-f]{40}|[0-9a-f]{64}")
+_HEX = re.compile(r"[0-9a-f]+")
 
 
-def load_baseline(path: Path) -> dict[str, str]:
+class RewriteMapError(ValueError):
+    """The rewrite map exists and cannot be trusted. Never swallowed."""
+
+
+class RewriteMap:
+    """Old commit id -> new commit id, as written by a history rewrite."""
+
+    def __init__(self, pairs: dict[str, str], path: Path) -> None:
+        self.pairs = pairs
+        self.path = path
+        self._keys = sorted(pairs)
+
+    @classmethod
+    def load(cls, path: Path) -> "RewriteMap | None":
+        """None when there is no file. Anything else that goes wrong is a
+        RewriteMapError naming the file, and the line where there is one.
+        `open` rather than `Path.exists()`: from 3.13 the latter swallows an
+        OSError, which would read an unreadable map as an absent one."""
+        try:
+            with open(path, "rb") as fh:
+                raw = fh.read()
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise RewriteMapError(f"{path}: cannot be read: {exc}") from exc
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise RewriteMapError(f"{path}: not UTF-8 text: {exc}") from exc
+        return cls(parse_rewrite_map(text, path), path)
+
+    def translate(self, sha: str) -> str:
+        """The id to ask git about. Unknown ids pass through unchanged."""
+        key = sha.lower()
+        if key in self.pairs:
+            return self.pairs[key]
+        if len(key) < MIN_PREFIX or not _HEX.fullmatch(key):
+            return sha
+        i = bisect.bisect_left(self._keys, key)
+        hits = []
+        while (i < len(self._keys) and self._keys[i].startswith(key)
+               and len(hits) < 2):
+            hits.append(self._keys[i])
+            i += 1
+        if len(hits) > 1:
+            raise RewriteMapError(
+                f"{self.path}: `{sha}` is a prefix of more than one old id "
+                f"({hits[0]}, {hits[1]}); refusing to guess which")
+        return self.pairs[hits[0]] if hits else sha
+
+
+def parse_rewrite_map(text: str, path: Path) -> dict[str, str]:
+    """Strict: every line is a pair of full ids, or the whole map is refused.
+    Blank lines are allowed; an optional header may open the file."""
+    pairs: dict[str, str] = {}
+    seen_data = False
+    for lineno, line in enumerate(text.splitlines(), 1):
+        if not line:
+            continue
+        if not seen_data and line == REWRITE_MAP_HEADER:
+            seen_data = True
+            continue
+        seen_data = True
+        where = f"{path}: line {lineno}"
+        fields = line.split("\t")
+        if len(fields) != 2:
+            raise RewriteMapError(
+                f"{where}: expected `old_sha<TAB>new_sha`, found "
+                f"{len(fields)} tab-separated field(s): {line[:100]!r}")
+        old, new = (f.lower() for f in fields)
+        for label, value in (("old", old), ("new", new)):
+            if not _FULL_SHA.fullmatch(value):
+                raise RewriteMapError(
+                    f"{where}: the {label} id is not a full commit id "
+                    f"(40 or 64 hex characters): {value[:100]!r}")
+        if old in pairs and pairs[old] != new:
+            raise RewriteMapError(
+                f"{where}: {old} is mapped twice, to {pairs[old]} and {new}")
+        pairs[old] = new
+    if not pairs:
+        raise RewriteMapError(
+            f"{path}: holds no `old_sha<TAB>new_sha` entries. An empty map "
+            f"translates nothing; delete the file rather than keep it empty")
+    return pairs
+
+
+def load_entries(path: Path) -> dict:
+    """The raw `unreachable` entries, each an object with a witness."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    entries = data.get("unreachable", {})
-    return {str(k): str(v) for k, v in entries.items()}
+    return {str(k): v for k, v in data.get("unreachable", {}).items()}
+
+
+def load_baseline(path: Path) -> dict[str, str]:
+    """{PR number: prose note}, which is all the ancestry audit reads."""
+    return {k: str(v.get("note", "")) if isinstance(v, dict) else str(v)
+            for k, v in load_entries(path).items()}
+
+
+def load_witness_module():
+    """`tools/landing_witness.py`, loaded by PATH under a name nothing else
+    uses. A bare `import` would bind whichever same-named module is found
+    first, and it would also need `tools/` on `sys.path`, which a test that
+    loads this file by path does not have."""
+    spec = importlib.util.spec_from_file_location(
+        "revl_tools_landing_witness",
+        Path(__file__).resolve().with_name("landing_witness.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+#: The commit ids a baseline entry records, each translated through a
+#: history rewrite map. See HISTORY REWRITE MAP in the module docstring.
+ENTRY_SHA_FIELDS = ("merge", "carried_at")
+
+
+def translate_entries(entries: dict, rewrite: "RewriteMap") -> tuple[dict, int]:
+    """The baseline entries with their recorded commit ids translated, and
+    how many ids changed. Entries that are not objects, and fields that are
+    not strings, are left exactly as they are for the witness to judge."""
+    out: dict = {}
+    changed = 0
+    for num, raw in entries.items():
+        if isinstance(raw, dict):
+            raw = dict(raw)
+            for field in ENTRY_SHA_FIELDS:
+                old = raw.get(field)
+                if isinstance(old, str):
+                    raw[field] = rewrite.translate(old)
+                    changed += raw[field] != old
+        out[num] = raw
+    return out, changed
+
+
+def merge_sha_mismatches(prs, entries: dict,
+                         rewrite: "RewriteMap | None" = None) -> list[str]:
+    """A baselined PR whose recorded `merge` is not the commit GitHub reports.
+    The witness is measured against the recorded sha, so a wrong one would
+    check some other commit's files and call it this PR's."""
+    out = []
+    for pr in prs:
+        num = str(pr.get("number"))
+        raw = entries.get(num)
+        oid = (pr.get("mergeCommit") or {}).get("oid")
+        if oid and rewrite is not None:
+            # `entries` arrive translated, so GitHub's id must be too, or
+            # every pre-rewrite entry would read as a mismatch
+            oid = rewrite.translate(oid)
+        if isinstance(raw, dict) and oid and raw.get("merge") != oid:
+            out.append(f"#{num}: the baseline records merge commit "
+                       f"{str(raw.get('merge'))[:12]}, GitHub reports "
+                       f"{oid[:12]}. The witness would be measured against "
+                       f"the wrong commit")
+    return out
 
 
 def fetch_merged_prs(repo: str, limit: int) -> list[dict]:
@@ -248,16 +452,22 @@ class Audit(NamedTuple):
     known: list[str]
     unresolved: list[str]
     unrecorded: list[str]
+    # How many GitHub merge commit ids the rewrite map translated. Always 0
+    # without a map.
+    translated: int = 0
 
 
 def audit(prs, root: Path, main_ref: str, baseline: dict[str, str],
-          remote: "Remote | None" = None) -> Audit:
+          remote: "Remote | None" = None,
+          rewrite: "RewriteMap | None" = None) -> Audit:
     """Read every PR's merge commit against `main_ref`. One git call per PR on
-    the happy path; a refresh only where a commit does not resolve."""
+    the happy path; a refresh only where a commit does not resolve. With a
+    `rewrite` map, GitHub's merge commit id is translated first."""
     findings: list[str] = []
     known: list[str] = []
     unresolved: list[str] = []
     unrecorded: list[str] = []
+    translated = 0
     for pr in prs:
         num = str(pr.get("number"))
         title = (pr.get("title") or "").strip()
@@ -268,6 +478,15 @@ def audit(prs, root: Path, main_ref: str, baseline: dict[str, str],
                 f"#{num}: GitHub records no merge commit, so whether its work "
                 f"reached {main_ref} cannot be decided here ({title})")
             continue
+        recorded = merge
+        if rewrite is not None:
+            merge = rewrite.translate(recorded)
+        if merge != recorded:
+            translated += 1
+            # Only on a translated line, so a run without a map prints
+            # exactly what it always did.
+            title = (f"{title}; GitHub records {recorded[:12]}, "
+                     f"{rewrite.path.name} maps it")
         if not is_ancestor(root, merge, main_ref):
             # The miss path, and the only place that touches the network. A
             # commit that does not resolve has decided nothing yet; one that
@@ -291,7 +510,8 @@ def audit(prs, root: Path, main_ref: str, baseline: dict[str, str],
                     f"commit {merge[:12]} IS now reachable from {main_ref}. It "
                     f"was merged properly after all; delete the entry from "
                     f"{BASELINE.relative_to(ROOT)} so the ratchet keeps "
-                    f"shrinking.")
+                    f"shrinking." + (f" ({title})" if merge != recorded
+                                     else ""))
             continue
         line = (f"#{num}: MERGED into `{base}`, but its merge commit "
                 f"{merge[:12]} is NOT reachable from {main_ref} ({title})")
@@ -299,10 +519,10 @@ def audit(prs, root: Path, main_ref: str, baseline: dict[str, str],
             known.append(f"{line} [known: {baseline[num]}]")
         else:
             findings.append(line)
-    return Audit(findings, known, unresolved, unrecorded)
+    return Audit(findings, known, unresolved, unrecorded, translated)
 
 
-def main(argv=None) -> int:
+def _parse_args(argv):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--repo", default=DEFAULT_REPO)
     ap.add_argument("--limit", type=int, default=200,
@@ -316,8 +536,24 @@ def main(argv=None) -> int:
                     help="never refresh from the remote. A merge commit this "
                          "clone cannot resolve is then reported UNRESOLVED "
                          "rather than looked up, which is honest but weaker.")
-    args = ap.parse_args(argv)
+    ap.add_argument("--witness-only", action="store_true",
+                    help="skip the ancestry audit (no gh) and re-measure only "
+                         "the baseline's witnesses")
+    ap.add_argument("--pinned", choices=("collect", "run"), default="collect",
+                    help="for the tests an entry names: `collect` proves they "
+                         "exist, `run` proves they pass (CI runs them)")
+    ap.add_argument("--python", default=sys.executable,
+                    help="the interpreter that runs pytest over the pins")
+    ap.add_argument("--rewrite-map", type=Path, default=REWRITE_MAP,
+                    help="old_sha<TAB>new_sha map from a history rewrite; "
+                         "GitHub's merge commit ids and the baseline's "
+                         "recorded ids are translated through it when the "
+                         "file exists")
+    return ap.parse_args(argv)
 
+
+def _read_prs(args) -> list[dict] | None:
+    """The merged PR list, or None when the question could not be asked."""
     if args.from_json is not None:
         prs = json.loads(args.from_json.read_text(encoding="utf-8"))
     else:
@@ -328,8 +564,7 @@ def main(argv=None) -> int:
                   file=sys.stderr)
             print("the question was not asked, so it has not been answered "
                   "green", file=sys.stderr)
-            return 2
-
+            return None
     # An empty list is not "nothing is stranded". A repository this old has
     # hundreds of merged pull requests, so no rows means the read failed in a
     # way that still exited 0 -- a token without `pull-requests: read`, a
@@ -340,13 +575,16 @@ def main(argv=None) -> int:
               "repository has hundreds, so an empty list means the read "
               "failed. Check the token's `pull-requests: read` scope and "
               "`--limit`.", file=sys.stderr)
-        return 2
+        return None
+    return prs
 
-    baseline = load_baseline(args.baseline)
-    remote = Remote(args.root, args.main_ref, enabled=not args.no_fetch)
-    result = audit(prs, args.root, args.main_ref, baseline, remote=remote)
 
-    print(f"read {len(prs)} merged pull request(s) against {args.main_ref}")
+def _print_ancestry(result: Audit, n_prs: int, main_ref: str,
+                    rewrite: "RewriteMap | None" = None) -> None:
+    print(f"read {n_prs} merged pull request(s) against {main_ref}")
+    if rewrite is not None:
+        print(f"translated {result.translated} GitHub merge commit id(s) "
+              f"through {rewrite.path} ({len(rewrite.pairs)} entries)")
     for line in result.known:
         print(f"  known       {line}")
     for line in result.findings:
@@ -356,27 +594,101 @@ def main(argv=None) -> int:
     for line in result.unrecorded:
         print(f"  UNRECORDED  {line}")
 
-    if result.findings:
-        print(f"\n{len(result.findings)} merged pull request(s) whose work is "
-              f"not in {args.main_ref}.", file=sys.stderr)
-        return 1
-    # Not a finding and not a pass. These two say the check did not get an
-    # answer, and they are counted apart so the line says which it was.
-    if result.unresolved or result.unrecorded:
-        bits = []
-        if result.unresolved:
-            bits.append(f"{len(result.unresolved)} whose merge commit this "
-                        f"clone could not resolve")
-        if result.unrecorded:
-            bits.append(f"{len(result.unrecorded)} for which GitHub records "
-                        f"no merge commit")
-        print(f"\nnothing is claimed about {args.main_ref} for "
-              f"{', '.join(bits)}.", file=sys.stderr)
+
+def _print_witness(report, n_entries: int, root: Path, mode: str) -> None:
+    print(f"\nre-measured the witness of {n_entries} baselined entr"
+          f"{'y' if n_entries == 1 else 'ies'} against the tree at {root} "
+          f"(pinned tests: {mode})")
+    for line in report.verified:
+        print(f"  verified    {line}")
+    for line in report.unchecked:
+        print(f"  UNCHECKED   {line}")
+    for line in report.findings:
+        print(f"  WITNESS     {line}")
+    for line in report.unresolved:
+        print(f"  UNRESOLVED  {line}")
+    print(f"  {len(report.verified)} verified, {len(report.unchecked)} "
+          f"unchecked, {len(report.findings)} finding(s), "
+          f"{len(report.unresolved)} unresolved")
+
+
+def main(argv=None) -> int:
+    args = _parse_args(argv)
+    try:
+        return _main(args)
+    except RewriteMapError as exc:
+        print(f"refusing the history rewrite map: {exc}", file=sys.stderr)
+        print("the question was not asked, so it has not been answered "
+              "green", file=sys.stderr)
         return 2
-    if result.known:
-        print(f"\nno new finding: {len(result.known)} merged pull request(s) "
+
+
+def _main(args) -> int:
+    # Loaded first, so a malformed map is refused before anything is read.
+    rewrite = RewriteMap.load(args.rewrite_map)
+    entries = load_entries(args.baseline)
+    translated_entries = 0
+    if rewrite is not None:
+        entries, translated_entries = translate_entries(entries, rewrite)
+    remote = Remote(args.root, args.main_ref, enabled=not args.no_fetch)
+
+    findings: list[str] = []
+    unanswered: list[str] = []
+    known: list[str] = []
+    if not args.witness_only:
+        prs = _read_prs(args)
+        if prs is None:
+            return 2
+        result = audit(prs, args.root, args.main_ref, load_baseline(
+            args.baseline), remote=remote, rewrite=rewrite)
+        _print_ancestry(result, len(prs), args.main_ref, rewrite)
+        mismatches = merge_sha_mismatches(prs, entries, rewrite)
+        for line in mismatches:
+            print(f"  MERGE SHA   {line}")
+        findings += result.findings + mismatches
+        known = result.known
+        if result.unresolved:
+            unanswered.append(f"{len(result.unresolved)} whose merge commit "
+                              f"this clone could not resolve")
+        if result.unrecorded:
+            unanswered.append(f"{len(result.unrecorded)} for which GitHub "
+                              f"records no merge commit")
+
+    if rewrite is not None:
+        print(f"translated {translated_entries} recorded baseline commit "
+              f"id(s) ({', '.join(ENTRY_SHA_FIELDS)}) through {rewrite.path}")
+    witness = load_witness_module().audit(
+        entries, args.root, remote.resolve, mode=args.pinned,
+        python=args.python)
+    if entries:
+        _print_witness(witness, len(entries), args.root, args.pinned)
+    findings += witness.findings
+    if witness.unresolved:
+        unanswered.append(f"{len(witness.unresolved)} baselined entr"
+                          f"{'y' if len(witness.unresolved) == 1 else 'ies'}"
+                          f" whose witness could not be measured")
+
+    if findings:
+        print(f"\n{len(findings)} finding(s): a merged pull request whose "
+              f"work is not in {args.main_ref}, or a baseline entry whose "
+              f"recorded claim is false.", file=sys.stderr)
+        return 1
+    # Not a finding and not a pass: the check did not get an answer, and the
+    # line says which part it was.
+    if unanswered:
+        print(f"\nnothing is claimed for {', '.join(unanswered)}.",
+              file=sys.stderr)
+        return 2
+    if args.witness_only:
+        print(f"\nno finding: {len(witness.verified)} witness(es) verified, "
+              f"{len(witness.unchecked)} entr"
+              f"{'y' if len(witness.unchecked) == 1 else 'ies'} not "
+              f"machine-checkable (listed UNCHECKED above).")
+    elif known:
+        print(f"\nno new finding: {len(known)} merged pull request(s) "
               f"have an unreachable merge commit and are accounted for in "
-              f"{args.baseline}.")
+              f"{args.baseline}; {len(witness.verified)} of their witnesses "
+              f"verified, {len(witness.unchecked)} not machine-checkable.")
     else:
         print(f"every merged pull request's merge commit is reachable from "
               f"{args.main_ref}")

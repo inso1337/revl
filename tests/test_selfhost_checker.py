@@ -655,6 +655,39 @@ component P requires s: Stat {
   let r = effect s.sample(3) undo s.sample(4)
 }
 """),
+    # Issue #1453: a name an `if` arm binds leaves scope where the arm ends.
+    # The block reader reads arms inline; without the scope marks, `slot`
+    # after the block resolved to the arm's Int binding and `db.put` refused.
+    ("arm binding leaves scope at the arm's end", """
+service Db { fn put(k: Str) -> Int }
+service K { fn f(k: Str) -> Int }
+component C requires db: Db provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") {
+        let slot = 1
+      }
+      let slot = "x"
+      let r = db.put(slot)
+      return 0
+    }
+  }
+}
+"""),
+    # Issue #1453: a `for` element is a name of unknown type inside the body,
+    # judged as leniently as the reference judges an unknown.
+    ("for element passed to a typed parameter", """
+service Db { fn put(k: Str) -> Int }
+service K { fn f(k: Str) -> Int }
+component C requires db: Db provides k: K {
+  provide k {
+    fn f(k) {
+      for (x of ["a"]) { let r = db.put(x) }
+      return 0
+    }
+  }
+}
+"""),
 ]
 
 # (name, source, expected message). The message pins are the reference's own
@@ -1084,6 +1117,55 @@ component Bookkeeper provides ledger: Ledger {
 """,
      "`Ledger.post` is declared `emission[db]`, but this implementation emits "
      "through `audit_log`, `pg_write` (reaching `pg_write()`, `audit_log()`)"),
+    # Issue #1453: statements inside and after a block are read. Each of these
+    # was no objection before the block reader, because the checker stopped at
+    # the `if`'s closing brace or skipped the one-line block whole.
+    ("call-site type error inside a one-line if arm", """
+service Db { fn put(k: Str) -> Int }
+service K { fn f(k: Str) -> Int }
+component C requires db: Db provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") { let r = db.put(42) }
+      return 0
+    }
+  }
+}
+""",
+     "`db.put` argument `k` expects `Str`, got `Int`"),
+    ("emission in a braceless else arm", """
+extern emission[net] fn zz_write(t: Str) -> Int = @py { return 1 }
+service K { fn f(k: Str) -> Int }
+component C provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") return 1 else return emit zz_write(k)
+      return 0
+    }
+  }
+}
+""",
+     "`K.f` is declared plain, but this implementation reaches `zz_write()`"),
+    # A module fn body is read by the same reader, so an emission after a block
+    # in a helper still reaches the emission fixed point.
+    ("emission after a block in a module fn", """
+extern emission[net] fn zz_write(t: Str) -> Int = @py { return 1 }
+fn mid(t: Str) -> Int {
+  if (t == "a") {
+    return 0
+  }
+  return zz_write(t)
+}
+service K { fn f(k: Str) -> Int }
+component C provides k: K {
+  provide k {
+    fn f(k) {
+      return emit mid(k)
+    }
+  }
+}
+""",
+     "`K.f` is declared plain, but this implementation reaches `mid()`"),
 ]
 
 

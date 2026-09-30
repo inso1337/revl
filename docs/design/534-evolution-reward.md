@@ -18,10 +18,12 @@ Sources studied, all at `c136eae6`: `tools/gate_reference_census.py` (`bucket`,
 ## 0. The decision in one paragraph
 
 The reward is a **conjunction, not a scalar**, and retention is that same
-conjunction. Nine components each answer `verified` or `failed` (item 536's
-eight, plus the `held-out` component design doc 535 owns), every answer is read
-off an artifact the repository owns, and a trajectory is retained only when all
-nine say `verified`. No weight, no threshold, no partial credit, and no
+conjunction. Ten components each answer `verified` or `failed` (item 536's
+eight, plus the `held-out` component design doc 535 owns and the `progress`
+component design doc 546 owns), every answer is read off an artifact the
+repository owns, and a trajectory is retained only when all ten say `verified`.
+`progress` is the one that requires an IMPROVEMENT, so the empty diff is not
+retained. No weight, no threshold, no partial credit, and no
 number exported anywhere a threshold could later be attached to it. The scorer is
 `tools/evolution_reward.py`; the candidate hands it a tree, a base ref and a
 declared scope, and every other key in the candidate's record is dropped by name
@@ -53,7 +55,7 @@ reported success.
 
 | component | the artifact | how it is read | slice |
 |---|---|---|---|
-| `compiles` | the gate crate and the six-tier matrix | `cargo check --offline` on `crates/revl-gate` (after one `cargo fetch` when the registry is cold and the index answers), plus `tools/conformance.py --json` with zero REAL gaps on all six tiers | **2** |
+| `compiles` | the gate crate, its unit tests and the six-tier matrix | `cargo check --offline` then `cargo test --offline --lib` on `crates/revl-gate` (after one `cargo fetch` when the registry is cold and the index answers), plus `tools/conformance.py --json` with zero REAL gaps on all six tiers | **2** |
 | `tests` | the affected suite | `tools/affected_tests.py` selection, then that selection run, with a non-zero collected count | **2** |
 | `no-new-false-admits` | the census buckets and `tools/gate_reference_census_baseline.json` | `gate_reference_census.py --check` exit status, AND a subset read of the baseline against `base` | **1** |
 | `conformance` | the two divergence registers | `tools/tier_guarantees.py --json`, ratcheted against the committed matrix at `base` | **3** |
@@ -62,6 +64,7 @@ reported success.
 | `scope` | the changed-file set | `git diff --name-only <base>` plus untracked files, against the declared globs | **1** |
 | `documentation` | the citation gate and the generated blocks | `tools/docgen.py --check` and `tools/check_roadmap_claims.py --check` exit status | **1** |
 | `held-out` | a draw the candidate could not read | `tools/heldout_scoring.py --diff-base`, where a REFUSAL is a fail | **1b** |
+| `progress` | the census allowance, the native-chain residual, the reach ledger | `tools/evolution_progress.py`, against the merge base of the candidate's `HEAD` and `base`: none regressed and at least one improved | **5** |
 
 Four notes on the table.
 
@@ -69,10 +72,12 @@ Four notes on the table.
 gates compare BYTES: `tools/build_gate_crate.py --check` is happy with a
 regenerated crate that does not compile, and that has happened here. No cargo on
 the machine is a FAILURE, which is the 7-of-8 case section 3 argues from, stated
-as code rather than as a hypothetical. It covers `crates/revl-gate` only:
-`crates/revl-gate-wasm` needs a `wasm32-wasip2` target and `crates/revl-lsp`
-needs its dependencies fetched, and a component that can never verify is one
-nobody reads. Section 9 records that as an uncovered edge.
+as code rather than as a hypothetical. After the check it runs the crate's own
+unit tests, `cargo test --offline --lib`, which is what issue #1206 named: a
+check proves the crate builds and says nothing about whether the tests shipped
+inside it still pass. The test run is read, not trusted by exit status: a
+`FAILED` result line, no result line, or zero tests passed all fail. It covers
+`crates/revl-gate` only; section 9 lists what that leaves.
 
 `compiles` also distinguishes a REAL gap from a deliberate tier limit, which is
 `tools/conformance.py`'s own split, keyed on whether the emitter raised its own
@@ -347,8 +352,8 @@ count -- and requires the component to fail on it.
 shrink directions, and `test_the_tier_roster_is_not_re_declared_here` holds the
 module to reading the roster rather than spelling it.
 `compiles` is also verified against the real tree
-(`test_compiles_verifies_on_this_tree`, about twenty seconds for the real
-`cargo check` and the real six-tier walk). `tests` is not: running the real
+(`test_compiles_verifies_on_this_tree`: the real `cargo check`, the real
+`cargo test --lib` over the crate's unit tests, and the real six-tier walk). `tests` is not: running the real
 affected selection inside a test of that selection would be the suite running
 itself, so its real-tree exercise is the pre-merge gate rather than a case here.
 
@@ -372,19 +377,6 @@ Parser: `test_the_committed_block_parser_reads_the_real_one` holds the base-side
 parser against the real generated block rather than against the fixture that
 mimics it.
 
-**Not folded in here: the progress conjunct.** Issue #1224 / item 545 found that
-all eight of item 536's components are PRESERVATION checks, so the reward's
-maximum is attained by the empty diff and a loop trained against it learns
-caution rather than capability. `tools/evolution_progress.py` landed with three
-monotone repository counters, each a `value` over a `universe` so that deleting
-the measured surface does not read as progress. It is NOT registered in
-`PROBES`: its verdict shape would slot in without adaptation, but adding a tenth
-conjunct changes the retention rule for every caller, and issue #1206 owns the
-eight rather than the roster. Recorded here so the dangling edge is visible: the
-tool exists, nothing folds it in, and whoever owns item 545 decides whether it
-should be a conjunct or stay a generation-level existential in
-`evolution_progress.promote`.
-
 **Slice 4: the negative promotion bar.** Item 536 states seven entries that green
 tests alone must not carry: no new false admits, no widened capability reach at
 the G8 boundary, no weakened refusal, no reduced formal coverage, no unexplained
@@ -395,16 +387,40 @@ capability reach at the G8 boundary, an unbounded resource path, a hidden host
 fallback -- need their own reads and are not folded into an existing component,
 because a component that fails for two unrelated reasons cannot be acted on.
 
+**Slice 5: the progress conjunct (issue #1224, item 545).** All eight of item
+536's components are PRESERVATION checks, so a reward made of them alone is
+maximised by the empty diff and a loop trained against it learns caution rather
+than capability. `progress` is registered in `COMPONENTS` and `PROBES` and
+verifies only when a monotone repository counter strictly improved and none
+regressed, measured against the candidate's own merge base. The scorecard
+carries the counter ledger under `progress`, which is what
+`evolution_progress.promote` reads. The rules that keep the counters from being
+padded, and the improvements they cannot see, are design doc 546's sections 4
+and 6.
+Oracle: `tests/test_evolution_progress.py` and the `progress` block of
+`tests/test_evolution_reward.py`.
+
 ## 9. What this design does not verify
 
 * It does not check that a component's tool is itself correct. The reward is only
   as strong as the gates it reads, and it says which gate it read in every
   verdict's `evidence` so that dependence is visible.
-* `compiles` covers `crates/revl-gate` and no other crate.
-  `crates/revl-gate-wasm` and `crates/revl-lsp` are held by their BYTES
-  (`artifact-stability`) and by CI, not by this component: requiring a
-  `wasm32-wasip2` target and a fetched dependency graph would make the component
-  unverifiable rather than strict.
+* `compiles` builds and unit-tests `crates/revl-gate` and no other crate.
+  What that leaves uncovered:
+  * `crates/revl-lsp`. It is a binary with no `[lib]` target, its unit and
+    integration tests need `REVL_LSP_PYTHON` and a fetched dependency graph,
+    and it is not a generated artifact, so `artifact-stability` does not hold
+    its bytes either. Only CI's `cargo test --manifest-path
+    crates/revl-lsp/Cargo.toml` covers it.
+  * `crates/revl-gate-wasm`'s component BUILD, which needs a `wasm32-wasip2`
+    target. Its bytes are held by `artifact-stability`
+    (`tools/build_gate_wasm.py --check` through `tools/regen_goldens.py`). It
+    has no unit test to run: no `#[test]` and no `#[cfg(test)]` in its source.
+  * `crates/revl-gate/tests/*.rs`, the crate's integration tests. `--lib` does
+    not run them; `tests/test_gate_crate_admit.py` does, when the `tests`
+    component's selection includes it.
+  * A candidate that deletes unit tests. The run must pass at least one, but
+    the count is not ratcheted against `base`.
 * `tests` runs the pytest selection and the per-backend emit suites it can run.
   It does NOT run the `ruff` or `site-wheel` gates the selector can also name.
   Those are named in the evidence and left to CI; `conformance`, `formal` and
@@ -435,7 +451,10 @@ because a component that fails for two unrelated reasons cannot be acted on.
   complementary rather than redundant.
 * Nothing here has been run against a trajectory produced by a model. The
   scorer's input is a tree, and every test supplies one directly.
-* Nothing here reads `tools/evolution_progress.py`. Every registered component
-  is a preservation check plus `held-out`, so the reward still cannot tell a
-  candidate that advanced something from one that changed nothing safely. That
-  is issue #1224 / item 545's question and it is open, not answered here.
+* `progress` rejects a real improvement that no repository counter measures:
+  a refactor, a new feature, a performance fix, a documentation correction.
+  That is the price of a reward whose maximum is not the empty diff, and design
+  doc 546 section 6 lists what the counters cannot see.
+* Only `progress` resolves the merge base. The other nine components read
+  `candidate.base` verbatim, which against a moving ref errs toward failing
+  (`scope` would count the trunk's own changes), never toward crediting.

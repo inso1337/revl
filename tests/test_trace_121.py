@@ -1382,7 +1382,8 @@ service Loop { emission fn go(p: Str) -> Int }
 
 
 def _emit_flow(body: str) -> str:
-    import emit as py_emit
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    py_emit = python_backend_emitter()
 
     src = (_FLOW_PRELUDE + """
 component Agent requires model: Model, tool: Tool provides agent: Loop {
