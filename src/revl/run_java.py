@@ -229,6 +229,28 @@ def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False,
     return str(out)
 
 
+def _placements(ir: dict) -> list[dict]:
+    """Every provision of the composition, one entry per (component, key),
+    with the realm an `isolate` places it in (None for the shared realm).
+
+    Issue #1550: the once runner's UP and no-residue proofs resolved every
+    provided key in the SHARED realm. A key a component isolates
+    (`isolate kv in realm("tenant_a")`) is published in its realm only, so the
+    proof threw `no provider` for a composition that had loaded cleanly, and
+    `examples/tenants.rvl` could not run on java at all. Each provision is now
+    checked where it is published: two tenants providing `kv` are two
+    provisions, `kv@tenant_a` and `kv@tenant_b`, and each must be live while
+    the composition is up and gone after teardown."""
+    out: list[dict] = []
+    for comp in ir.get("components") or []:
+        isolate = comp.get("isolate") or {}
+        for key, service in (comp.get("provides") or {}).items():
+            out.append({"component": comp.get("name"), "key": key,
+                        "iface": f"revl.Components${service}",
+                        "realm": isolate.get(key)})
+    return out
+
+
 def _spec(ir: dict, config: dict) -> dict:
     key_service = _key_service(ir)
     return {
@@ -238,6 +260,7 @@ def _spec(ir: dict, config: dict) -> dict:
         "config": config,
         "provides": list(key_service),
         "ifaces": {k: f"revl.Components${s}" for k, s in key_service.items()},
+        "placements": _placements(ir),
     }
 
 
