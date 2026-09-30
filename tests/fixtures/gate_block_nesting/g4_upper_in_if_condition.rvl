@@ -1,0 +1,20 @@
+// REFUSED G4 (provider upper bound): `K.f` is declared plain but reaches `zz_write()`.
+//
+// The crossing is in the block's CONDITION, which is read like any expression.
+//
+// One document per rule and block form, so the gate/reference census measures
+// each (tools/gate_reference_census.py). The file name's prefix is the
+// expected verdict; tests/test_gate_reference_census.py holds it.
+
+extern emission[net] fn zz_write(t: Str) -> Int = @py { return 1 }
+service K { fn f(k: Str) -> Int }
+component C provides k: K {
+  provide k {
+    fn f(k) {
+      if (zz_write(k) == 1) {
+        return 1
+      }
+      return 0
+    }
+  }
+}

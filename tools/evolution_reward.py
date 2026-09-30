@@ -68,8 +68,9 @@ WHAT EACH COMPONENT READS
 Every component names a tool or a committed artifact the repository already
 owns. None of them is a new gate, and none of them reads a candidate's prose:
 
-    compiles              `cargo check --offline` on crates/revl-gate (after
-                          one `cargo fetch` if the registry is cold), PLUS
+    compiles              `cargo check` and `cargo test --lib`, offline, on
+                          crates/revl-gate (after one `cargo fetch` if the
+                          registry is cold), PLUS
                           tools/conformance.py --json with zero REAL gaps (a
                           crash, as against a named tier limit) on every tier
     tests                 tools/affected_tests.py's own selection, then that
@@ -89,9 +90,26 @@ owns. None of them is a new gate, and none of them reads a candidate's prose:
                           because a component that was not scored was not
                           verified
 
+    progress              tools/evolution_progress.py: the monotone repository
+                          counters, read on both sides of the candidate's own
+                          merge base; verified only when none regressed AND at
+                          least one improved
+
 No component is a placeholder any more. See
-`docs/design/534-evolution-reward.md` for the slice plan and
-`docs/design/535-held-out-scoring.md` for the ninth component's.
+`docs/design/534-evolution-reward.md` for the slice plan,
+`docs/design/535-held-out-scoring.md` for `held-out`'s, and
+`docs/design/546-evolution-progress-term.md` for `progress`'s.
+
+THE EMPTY DIFF IS NOT RETAINED
+------------------------------
+Every component above `progress` is a preservation check, and a reward made of
+preservation checks alone is maximised by the empty diff (issue #1224, roadmap
+item 545). `progress` is the one component that requires the candidate to have
+IMPROVED something a repository counter measures. It is a conjunct like the
+others, so it adds a requirement and trades nothing: a candidate that improves a
+counter and fails `tests` is not retained. The cost is that a real improvement
+no counter measures is not retained either; the design doc lists what the
+counters cannot see.
 
 THE TOOL ITEM 536 NAMED FOR `conformance` HAS NEVER EXISTED
 -----------------------------------------------------------
@@ -140,7 +158,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 
-# Item 536's eight components in the order it lists them, then the ninth.
+# Item 536's eight components in the order it lists them, then `held-out`
+# (item 537), then `progress` (item 545).
 #
 # `held-out` is not one of item 536's: it comes from item 537 (issue #1207) and
 # it is the only component whose subject the candidate could not read. The other
@@ -163,6 +182,10 @@ COMPONENTS = (
     "scope",
     "documentation",
     "held-out",
+    # issue #1224 / item 545: the one component that rises when the system gets
+    # better. Last because it is the most expensive to explain when it fails,
+    # not because it is weighed differently: the rule is still `all()`.
+    "progress",
 )
 
 # Programs in a promotion draw. Larger than the suite's 60: a promotion is paid
@@ -630,14 +653,15 @@ def _in_scope(path: str, scope) -> bool:
 
 # --------------------------------------------------- compiles, and its bounds
 
-#: The crate whose build is the crate half of `compiles`. The gate crate only:
-#: `crates/revl-gate-wasm` needs a `wasm32-wasip2` target installed and
-#: `crates/revl-lsp` needs its dependencies fetched, so requiring either would
-#: make the component unverifiable rather than strict, and a component that can
-#: never verify is one nobody reads. Their BYTES are held by
-#: `artifact-stability`; what is uncovered here is that they compile, and
-#: section 9 of the design doc says so.
+#: The crate whose build AND unit tests are the crate half of `compiles`. The
+#: gate crate only. `crates/revl-gate-wasm` is a `cdylib` wrapper with no unit
+#: test of its own (no `#[test]` and no `#[cfg(test)]` in its source), so a
+#: `cargo test --lib` there would build a host copy and run nothing; its
+#: component build needs a `wasm32-wasip2` target. `crates/revl-lsp` needs its
+#: dependencies fetched. Their BYTES are held by `artifact-stability`; what is
+#: uncovered here is that they compile, and section 9 of the design doc says so.
 GATE_CRATE = "crates/revl-gate"
+CRATE_EVIDENCE = f"cargo check + cargo test --lib --offline in {GATE_CRATE}"
 CARGO_TIMEOUT = 1800
 
 #: How many host tiers the matrix must still carry. The six tier NAMES are
@@ -651,7 +675,7 @@ MIN_TIERS = 6
 
 
 def run_cargo(candidate: Candidate, args, cwd: Path,
-              timeout: int = CARGO_TIMEOUT) -> Run:
+              timeout: int = CARGO_TIMEOUT, target_dir=None) -> Run:
     """`Run` for a cargo invocation in the candidate tree. Fail-closed.
 
     `CARGO_TARGET_DIR` is a scratch directory, never `crates/*/target` inside
@@ -659,6 +683,7 @@ def run_cargo(candidate: Candidate, args, cwd: Path,
     that tree's own `scope` verdict, and a measurement that perturbs its subject
     is not a measurement. It costs a cold build every run, which is the right
     trade for a component whose whole claim is that this source compiles.
+    `target_dir` lets consecutive steps on one crate share that scratch build.
     """
     cargo = shutil.which("cargo")
     if cargo is None:
@@ -666,7 +691,7 @@ def run_cargo(candidate: Candidate, args, cwd: Path,
                           "gate crate compiles")
     env = candidate_env()
     with tempfile.TemporaryDirectory(prefix="evolution-reward-cargo-") as raw:
-        env["CARGO_TARGET_DIR"] = raw
+        env["CARGO_TARGET_DIR"] = str(target_dir) if target_dir else raw
         try:
             proc = subprocess.run(
                 [cargo] + [str(a) for a in args], cwd=str(cwd), env=env,
@@ -708,7 +733,7 @@ def _index_reachable() -> bool:
     return _crates_io_reachable()
 
 
-def check_crate(candidate: Candidate, crate: Path) -> Run:
+def check_crate(candidate: Candidate, crate: Path, target_dir=None) -> Run:
     """`cargo check` on `crate`, under the repository's cargo policy.
 
     The policy is `revl.run_rust.rust_runtime_reason`'s and
@@ -723,8 +748,13 @@ def check_crate(candidate: Candidate, crate: Path) -> Run:
     the second check exactly as it failed the first. A registry that cannot be
     filled is a failure named as such, never a skip.
     """
-    check = ["check", "--offline", "--quiet"]
-    first = run_cargo(candidate, check, cwd=crate)
+    return _cargo_offline(candidate, crate, ["check", "--offline", "--quiet"],
+                          target_dir)
+
+
+def _cargo_offline(candidate: Candidate, crate: Path, args, target_dir) -> Run:
+    """One offline cargo step under the policy `check_crate` describes."""
+    first = run_cargo(candidate, args, cwd=crate, target_dir=target_dir)
     if first.ok or not _offline_resolve_miss(first):
         return first
     if not _index_reachable():
@@ -735,9 +765,55 @@ def check_crate(candidate: Candidate, crate: Path) -> Run:
     if not fetched.ok:
         return Run(False, "the local cargo registry could not be filled: "
                    + fetched.detail)
-    second = run_cargo(candidate, check, cwd=crate)
+    second = run_cargo(candidate, args, cwd=crate, target_dir=target_dir)
     return Run(second.ok, second.detail + " (offline, after `cargo fetch` "
                "filled the local registry)", second.stdout, second.stderr)
+
+
+#: One `test result:` line of `cargo test`. Every test binary prints one.
+_CARGO_TEST_RESULT = re.compile(
+    r"test result: (ok|FAILED)\. (\d+) passed; (\d+) failed")
+
+
+def build_and_test_crate(candidate: Candidate, crate: Path) -> Run:
+    """`cargo check`, then `cargo test --lib`, on `crate`, in one scratch build.
+
+    Issue #1206 named `cargo test --offline --lib` for `compiles`. A check
+    alone proves the crate builds and says nothing about whether the unit tests
+    that ship inside it still pass, which is the immutable half verified and the
+    moving half not. Both steps run under `check_crate`'s policy, so a cold
+    registry is filled once and the verdict is always an offline run.
+
+    The test step is READ, not trusted by exit status. It fails on a nonzero
+    exit, on any `FAILED` result line, on no result line at all, and on a run
+    whose result lines add up to zero passed tests: a unit suite that ran
+    nothing is not a pass, the same rule `tests` applies to pytest.
+    """
+    with tempfile.TemporaryDirectory(prefix="evolution-reward-cargo-") as build:
+        built = check_crate(candidate, crate, target_dir=build)
+        if not built.ok:
+            return built
+        tested = _cargo_offline(
+            candidate, crate, ["test", "--offline", "--quiet", "--lib"], build)
+    results = _CARGO_TEST_RESULT.findall(tested.stdout + tested.stderr)
+    if not tested.ok:
+        return Run(False, "the gate crate builds but its unit tests do not "
+                   "pass: " + tested.detail, tested.stdout, tested.stderr)
+    if not results:
+        return Run(False, "cargo test --lib printed no `test result:` line, so "
+                   "no unit test is known to have run")
+    failing = sum(int(f) for _, _, f in results)
+    passed = sum(int(p) for _, p, _ in results)
+    if failing or any(status != "ok" for status, _, _ in results):
+        return Run(False, f"cargo test --lib reported {failing} failed unit "
+                   "test(s) despite its exit status")
+    if passed == 0:
+        return Run(False, "cargo test --lib ran zero unit tests, and a unit "
+                   "suite that ran nothing is not a pass")
+    return Run(True, f"cargo check and cargo test --lib exited 0; {passed} "
+               "unit test(s) passed" + (" (offline, after `cargo fetch` filled "
+               "the local registry)" if "after `cargo fetch`" in built.detail
+               else ""), tested.stdout, tested.stderr)
 
 
 def _walked_tiers(cases):
@@ -777,10 +853,10 @@ def _walked_tiers(cases):
 def probe_compiles(candidate: Candidate) -> Verdict:
     """Item 536's two readings of `compiles`: the crate build and the matrix.
 
-    Half one is the gate crate. `cargo check --offline` on
-    `crates/revl-gate` compiles the candidate's own `selfhost.rs`, which is the
-    largest generated artifact in the tree and the one a digest gate cannot
-    speak for: `tools/build_gate_crate.py --check` compares BYTES, so a
+    Half one is the gate crate: `cargo check --offline` on `crates/revl-gate`,
+    then `cargo test --offline --lib` there, which is what issue #1206 named.
+    The check compiles the candidate's own `selfhost.rs`, which is the largest
+    generated artifact in the tree and the one a digest gate cannot speak for: `tools/build_gate_crate.py --check` compares BYTES, so a
     regenerated crate can be byte-correct and not compile. That has happened
     here. No cargo on the machine is a FAILURE, not a skip, and it is the exact
     case the module docstring's 7-of-8 argument is about. A registry with no
@@ -804,14 +880,13 @@ def probe_compiles(candidate: Candidate) -> Verdict:
     if not (crate / "Cargo.toml").is_file():
         return failed(name,
                       f"{GATE_CRATE}/Cargo.toml is not present in the candidate tree")
-    run = check_crate(candidate, crate)
+    run = build_and_test_crate(candidate, crate)
     if not run.ok:
-        return failed(name, run.detail, [f"cargo check --offline in {GATE_CRATE}"])
+        return failed(name, run.detail, [CRATE_EVIDENCE])
 
     walk = run_tool(candidate, ["tools/conformance.py", "--json"])
     if not walk.ok:
-        return failed(name, walk.detail,
-                      [f"cargo check --offline in {GATE_CRATE}"])
+        return failed(name, walk.detail, [CRATE_EVIDENCE])
     try:
         report = json.loads(walk.stdout)
     except ValueError as exc:
@@ -835,9 +910,10 @@ def probe_compiles(candidate: Candidate) -> Verdict:
             ["tools/conformance.py --json"])
     return verified(
         name,
-        f"the gate crate compiles and all {len(tiers)} tiers "
-        f"({', '.join(tiers)}) emit {len(cases)} construct(s) with no real gap",
-        [f"cargo check --offline in {GATE_CRATE}", "tools/conformance.py --json"])
+        f"the gate crate compiles, {run.detail.split('; ')[-1]}, and all "
+        f"{len(tiers)} tiers ({', '.join(tiers)}) emit {len(cases)} "
+        "construct(s) with no real gap",
+        [CRATE_EVIDENCE, "tools/conformance.py --json"])
 
 
 # ------------------------------------------------------ tests, actually run
@@ -1208,6 +1284,45 @@ def probe_formal(candidate: Candidate) -> Verdict:
         evidence + [f"{FORMAL_AXIOMS}@{_sha256(candidate.tree / FORMAL_AXIOMS)}"])
 
 
+# ------------------------------------------------ progress, from the counters
+
+def _progress_module():
+    """`tools/evolution_progress.py` from THIS checkout, never the candidate's.
+
+    A function-local import, because that module imports `Verdict` from this
+    one at module level and the two would otherwise import each other. The
+    scorer's own `tools/` directory is put on `sys.path` for the import and
+    taken off again in a `finally`, so the process is left as it was found.
+    `evolution_progress` itself only ever adds that same directory.
+    """
+    tools = str(ROOT / "tools")
+    added = tools not in sys.path
+    if added:
+        sys.path.insert(0, tools)
+    try:
+        import evolution_progress  # noqa: PLC0415
+    finally:
+        if added and tools in sys.path:
+            sys.path.remove(tools)
+    return evolution_progress
+
+
+def probe_progress(candidate: Candidate) -> Verdict:
+    """Did the candidate IMPROVE something, and break no counter doing it.
+
+    Reads the three repository counters of `tools/evolution_progress.py` on
+    the candidate's tree and on its own base, which is the merge base of its
+    `HEAD` and `candidate.base` rather than `candidate.base` itself: a
+    candidate is neither credited for trunk work it merged in nor charged for
+    trunk work that landed after it forked. Verified only when every counter
+    was read on both sides, none regressed, and at least one strictly improved.
+
+    The measuring code is the scorer's, never the candidate's: the module is
+    imported from this checkout, and it reads the candidate's tree as data.
+    """
+    return _progress_module().probe(candidate.tree, candidate.base)
+
+
 # The registry. A component with no probe FAILS (see `score`); it is never
 # absent from the scorecard and never defaults to pass.
 PROBES = {
@@ -1220,6 +1335,7 @@ PROBES = {
     "scope": probe_scope,
     "documentation": probe_documentation,
     "held-out": probe_held_out,
+    "progress": probe_progress,
 }
 
 
@@ -1234,9 +1350,10 @@ class Scorecard:
     def retained(self) -> bool:
         """The retention rule, stated once: every component verified.
 
-        Not a threshold, not a majority, not a weighted sum. `all()` over the
-        eight, and `all()` of an incomplete list is not reachable because
-        `score()` always emits one verdict per component in `COMPONENTS`.
+        Not a threshold, not a majority, not a weighted sum. `all()` over
+        `COMPONENTS`, and `all()` of an incomplete list is not reachable
+        because `score()` always emits one verdict per component. Since
+        `progress` is one of them, the empty diff is not retained.
         """
         by_name = {v.component: v for v in self.verdicts}
         return all(
@@ -1247,7 +1364,8 @@ class Scorecard:
         return tuple(v.component for v in self.verdicts if not v.verified)
 
     def as_dict(self) -> dict:
-        return {
+        blob = {
+            "candidate": str(self.candidate.tree),
             "retained": self.retained,
             "blockers": list(self.blockers),
             "components": [v.as_dict() for v in self.verdicts],
@@ -1255,6 +1373,16 @@ class Scorecard:
             "base": self.candidate.base,
             "scope": list(self.candidate.scope),
         }
+        # The counter ledger the `progress` verdict was decided on, in the
+        # shape `evolution_progress.promote` reads, so a generation is judged
+        # from these scorecards directly and re-reads measured directions
+        # rather than trusting `retained`. Absent only when no progress probe
+        # produced a ledger (a stub, or a probe that raised), and `promote`
+        # reads an absent block as no advance.
+        for verdict in self.verdicts:
+            if verdict.component == "progress" and hasattr(verdict, "ledger"):
+                blob["progress"] = verdict.ledger()
+        return blob
 
     def render(self) -> str:
         lines = [f"evolution reward over {self.candidate.tree}",

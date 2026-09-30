@@ -94,7 +94,9 @@ class _StubSession:
 def _serving():
     """The face on a real loopback socket, with a stub session behind it."""
     session = _StubSession()
-    face = HttpComposedServer(session, composition="app")
+    # the canonical path serves only operations declared public (item 569 B1)
+    face = HttpComposedServer(session, composition="app",
+                              public={("cache", "get"), ("cache", "size")})
     httpd = build_http_server(face, "127.0.0.1", 0)
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()

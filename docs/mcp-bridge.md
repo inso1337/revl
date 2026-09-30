@@ -498,12 +498,25 @@ revl serve --mcp examples/user_cache.rvl
 ```
 
 Every provided operation becomes a tool named `<prefix>.<key>.<op>` (the
-prefix is `--composition`, default `revl`), projected by the exact same
+prefix is `--composition`, default `revl`), except one that takes an authority
+value, projected by the exact same
 `tools_from_ir` that `revl mcp schema` uses — so the tool a client *sees* and
 the tool it *calls* are the same definition, at two lifecycles. A `tools/call`
 maps the named MCP arguments back onto the declared parameter order and lands
 on `Session.call` against the running composition — the same entry point
 `revl_call` drives.
+
+**Authority is never read from the wire** (item 569, issues #1502 and #1503).
+An operation with a parameter whose type carries `Principal` (directly,
+inside a generic, or inside a record or variant) or whose declared type
+carries `Trusted[...]` is withheld: it is not listed by `tools/list`, and a
+`tools/call` naming it is a `-32602` error that names the operation, the
+parameter and its type, before the session is touched. Without this a caller
+could write the `Principal` that only `Auth.validate` mints into the call's
+arguments, or choose the `Trusted[List[Str]]` grant list of
+`stdlib/admit.rvl`'s `admission.admit`. `Trusted[...]` does not survive into
+the IR, so `revl serve` reads the declared parameter types back from the same
+files it compiled (`src/revl/mcp/surface.py`).
 
 **The trust claim, sharpened.** Everywhere else in MCP, `readOnlyHint` is an
 assertion by the tool's author, and nothing checks it — the tool-poisoning
@@ -544,14 +557,22 @@ preflight, not `mcp serve`'s protocol.
 
 `--http` is that second frontend (item 424 gap (c), slice C1, D-424c.6). It is
 the same booted composition and the same `tools_from_ir` projection, put on HTTP
-instead of stdio: each provided operation is `POST /<composition>/<key>/<op>`,
-and the request and response bodies are the canonical value encoding the four
-bridges already speak ([interop-bridge.md](interop-bridge.md)).
+instead of stdio, and narrowed to the composition's PUBLIC SURFACE (item 569
+B1). An HTTP caller is the application's user, so the face serves what the
+program declares public, never its internal wiring: the routed operations
+(item 457) at their declared method and path, plus any operation explicitly
+marked public at `POST /<composition>/<key>/<op>`, whose request and response
+bodies are the canonical value encoding the four bridges already speak
+([interop-bridge.md](interop-bridge.md)). The language has no public marking
+yet, so today `revl serve --http` serves the routed operations only, and every
+canonical path answers `404`. Withheld operations (above) answer `403` on
+either path, naming the parameter.
 
 ```bash
-revl serve --http --port 8080 examples/user_cache.rvl
-# GET  /                          -> the manifest (operations, hints, frontier)
-# POST /revl/cache/get   ["k9"]   -> {"ok": true, "value": ...}
+revl serve --http --port 8080 examples/app/notes.rvl
+# GET  /                          -> the manifest (routes, operations, hints, frontier)
+# GET  /notes/n1                  -> the routed operation
+# POST /revl/store/get  [...]     -> 404: not on the public surface
 ```
 
 Requests are served **one at a time** (issue #1488). The composition runs in
@@ -564,9 +585,10 @@ The reply shape is the placement bridge's own, `{"ok": true, "value":
 <encoded>}`, so a value marshals the same bytes here as over the placement seam,
 and a `revl export client` TS client (whose types *are* that encoding) reads it
 back without a second marshalling spec. The generated `httpTransport` factory
-targets exactly this route shape. `GET /` carries the compiler-derived
-`readOnly`/`emission` hint on every operation and the gate FRONTIER (item 338)
-the face was projected under. This face is the SERVER side of a seam and holds
+targets exactly this route shape. `GET /` lists exactly the served surface:
+its routes, and its canonical operations with the compiler-derived
+`readOnly`/`emission` hint on each, plus the gate FRONTIER (item 338) the face
+was projected under. This face is the SERVER side of a seam and holds
 no gate over anything it in turn reaches: it is LOCAL contract only, makes no
 safety claim about a callee (D-424c.8, no verified-remote badge), and binds
 loopback by default. `--http` shares the identical compile/admit/config

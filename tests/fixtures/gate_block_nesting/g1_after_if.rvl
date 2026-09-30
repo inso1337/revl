@@ -1,0 +1,22 @@
+// REFUSED G1: `db` is not a declared requirement of C.
+//
+// A provide-method `if` over several lines. The crossing is written AFTER the
+// block, so the reader has to find the block's closing brace by nesting depth
+// to reach it.
+//
+// One document per rule and block form, so the gate/reference census measures
+// each (tools/gate_reference_census.py). The file name's prefix is the
+// expected verdict; tests/test_gate_reference_census.py holds it.
+
+service K { emission fn f(k: Str) -> Int }
+component C provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") {
+        return 1
+      }
+      emit db.put(k)
+      return 0
+    }
+  }
+}
