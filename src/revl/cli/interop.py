@@ -275,12 +275,17 @@ def _run_serve(args) -> int:
         return 2
 
     from ..holes import refuse_admission  # noqa: PLC0415
+    from ..mcp.surface import declared_param_types  # noqa: PLC0415
 
     try:
         ir = compile_files(args.files)
         # booting is admission: a draft with open obligations may not become a
         # running composition, however it was compiled (docs/holes.md)
         refuse_admission(ir)
+        # item 569 B1: the declared parameter types, read before the checker
+        # strips `Trusted[...]`, so both faces withhold every operation that
+        # takes an authority value.
+        declared = declared_param_types(args.files)
         config = _load_config(getattr(args, "config", None))
         env = _load_env(getattr(args, "env", None))
     except RevlError as error:
@@ -318,9 +323,11 @@ def _run_serve(args) -> int:
         if http:
             from ..mcp.http_face import serve_http  # noqa: PLC0415
             return serve_http(ir, config, composition=args.composition,
-                              host=args.host, port=args.port)
+                              host=args.host, port=args.port,
+                              declared=declared)
         from ..mcp.composed import serve_composition  # noqa: PLC0415
-        return serve_composition(ir, config, composition=args.composition)
+        return serve_composition(ir, config, composition=args.composition,
+                                 declared=declared)
     except SessionError as error:
         print(f"error: {error}", file=sys.stderr)
         return 3

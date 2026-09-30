@@ -1894,7 +1894,41 @@ def build_parser() -> argparse.ArgumentParser:
                              help="the pool directory")
     pool_status.add_argument("--json", action="store_true",
                              help="the charter and the full roster, including "
-                                  "the append-only event ledger")
+                                  "the append-only event ledger, and the "
+                                  "health record")
+    pool_status.add_argument(
+        "--require-live", type=float, default=None, metavar="SECONDS",
+        help="exit 1, naming them, if any member was not verified live "
+             "within SECONDS (by `pool probe` or a delivered task). A health "
+             "check: it withdraws nobody")
+
+    pool_probe = pool_sub.add_parser(
+        "probe",
+        help="ask members to prove they are there: send a signed probe, "
+             "verify the signed heartbeat under the member's pinned key, and "
+             "record the answer in health.json. Changes no authority")
+    pool_probe.add_argument("--dir", required=True, metavar="DIR",
+                            help="the pool directory")
+    pool_probe.add_argument("--peer", action="append", metavar="ID",
+                            help="a member to probe. Repeatable. Default: "
+                                 "every member")
+    pool_probe.add_argument("--peer-addr", default=None, metavar="HOST:PORT",
+                            help="where that member's `pool serve` listens. "
+                                 "Needs exactly one --peer. Without it, the "
+                                 "address of the member's last verified "
+                                 "contact is used")
+    pool_probe.add_argument("--dispatch-identity", required=True,
+                            metavar="PATH",
+                            help="the operator's PRIVATE identity file, the "
+                                 "one tasks are signed with. The peer refuses "
+                                 "a probe that does not verify under the "
+                                 "operator key it pinned")
+    pool_probe.add_argument("--timeout", type=float, default=10.0,
+                            metavar="SECONDS",
+                            help="how long to wait for each member "
+                                 "(default: 10)")
+    pool_probe.add_argument("--json", action="store_true",
+                            help="every probe outcome as JSON")
 
     pool_withdraw = pool_sub.add_parser(
         "withdraw",
