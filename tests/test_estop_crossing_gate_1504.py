@@ -212,3 +212,15 @@ def test_a_remote_bridge_call_is_refused_before_it_is_sent():
             client.call("db", "execute", ["x"])
     finally:
         rt.clear_estop()
+
+
+def test_a_component_free_document_stays_importable_without_the_runtime():
+    """A document with no component runs no activation, so nothing the runtime
+    governs can cross its externs: they are host code a test drives directly,
+    and the emitted module must import without `runtime` on the path (the
+    shape `tests/test_async_arrow_polymorphism_phase2.py` runs standalone)."""
+    from _backend_import import backend_emitter
+    code = backend_emitter("python").emit(compile_source(
+        "extern emission fn shout(t: Str) -> Str = @py { return t }\n"
+        'test "t" { let r = shout("x")\n assert r == "x" }\n', "free.rvl"))
+    assert "estop_gated" not in code

@@ -1174,7 +1174,7 @@ fn gated_extern_class(cls: Str) -> Bool {
   return cls == "emission" || cls == "witnessed" || cls == "acquire"
 }
 
-fn emit_externs(externs: List[Any]) -> List[Str] {
+fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   var out = []
   for (ext of externs) {
     let name = mangle(value_str(value_field(ext, "name")))
@@ -1193,7 +1193,7 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     // byte-identical.
     // issue #1504: an extern whose body crosses a boundary checks the E-Stop
     // before its body runs; the gate is the outermost decorator.
-    if (gated_extern_class(value_str(value_field(ext, "class")))) {
+    if (gated && gated_extern_class(value_str(value_field(ext, "class")))) {
       out = out.push(`@${runtime_ref("estop_gated")}(${py_repr(value_str(value_field(ext, "name")))})`)
     }
     if (value_bool(value_field(ext, "secret_return"))) {
@@ -3039,7 +3039,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   var need_estop_gated = false
   for (e of value_list(value_field(ir, "externs"))) {
     if (value_bool(value_field(e, "secret_return"))) { need_secret_result = true }
-    if (gated_extern_class(value_str(value_field(e, "class")))) { need_estop_gated = true }
+    if (components.length() > 0 && gated_extern_class(value_str(value_field(e, "class")))) { need_estop_gated = true }
   }
   // Collect the needed imports in any order; `list_sort` fixes the canonical
   // codepoint order below. Each alias-bearing name carries its `_revl_` alias.
@@ -3116,7 +3116,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // Externs (slice 4): `def <name>(...)` + dedented verbatim body, gated on a
   // non-empty extern list, between the functions and the SERVICES table.
   let externs = value_list(value_field(ir, "externs"))
-  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs, components.length() > 0)) }
   out = out.concat(emit_services_table(value_field(ir, "services")))
   out = out.push("")
   out = out.push("")
