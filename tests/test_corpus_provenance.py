@@ -25,32 +25,25 @@ worth nothing. Every claim below is held by an assertion:
     the authorship axis carries no floor.
 """
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
+from _load_by_path import load_by_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    spec = importlib.util.spec_from_file_location(
-        "corpus_provenance", ROOT / "tools" / "corpus_provenance.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("corpus_provenance", ROOT / "tools" / "corpus_provenance.py")
     return module
 
 
 def _census():
-    spec = importlib.util.spec_from_file_location(
-        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "gate_reference_census",
+        ROOT / "tools" / "gate_reference_census.py")
     return module
 
 

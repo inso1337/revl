@@ -23,7 +23,6 @@ pins the `P` / `W` rows.
 
 from __future__ import annotations
 
-import importlib.util
 import re
 import sys
 from pathlib import Path
@@ -32,6 +31,7 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from _load_by_path import load_by_path  # noqa: E402
 
 #: The refused shape: an acquisition, a provision, then a second acquisition.
 FIXTURE = "examples/rejections/a2_acquire_after_provide.rvl"
@@ -67,11 +67,9 @@ REGISTRY = ROOT / "formal" / "scripts" / "nonvacuity.tsv"
 
 @pytest.fixture(scope="module")
 def harness():
-    spec = importlib.util.spec_from_file_location(
-        "formal_diff_corpus_a2", ROOT / "formal" / "harness" / "diff_corpus.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "formal_diff_corpus_a2",
+        ROOT / "formal" / "harness" / "diff_corpus.py")
     return module
 
 
