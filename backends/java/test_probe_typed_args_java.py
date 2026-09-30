@@ -43,8 +43,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import javac_gate  # noqa: E402
 
 needs_jdk = pytest.mark.skipif(javac_gate.JAVAC is None, reason=javac_gate.NO_JDK)
-ENV = (dict(os.environ, JAVA_HOME=str(Path(javac_gate.JAVA).parents[1]))
-       if javac_gate.JAVA else dict(os.environ))
+# The in-repo stub runner, even where real cordis4j classes are present (CI):
+# `revl run --placement` picks RealPlacementRunner then, and that runner is
+# consumer-only. It serves no key, so a java provider process answers nothing
+# and the consumer's probe fails on a missing socket before any argument
+# crosses. The typed-argument path under test is the same in both runners.
+ENV = dict(os.environ, REVL_CORDIS4J_CLASSES="")
+if javac_gate.JAVA:
+    ENV["JAVA_HOME"] = str(Path(javac_gate.JAVA).parents[1])
 
 
 @needs_jdk
