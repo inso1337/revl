@@ -4255,15 +4255,33 @@ def _settled_seqs(wal_path: str) -> tuple:
     return settled, fenced
 
 
+#: Runtime host builtins a WAL call may name as its receiver: a durable-cursor
+#: subscription's inverse is `Stream.close(cursor)` (item 130 §4.9).
+_HOST_RECEIVERS = ("Stream",)
+
+
 def _resolve_call(module: Any, services: dict, call: dict) -> Optional[Callable]:
-    """The host body a descriptor's `call` names: a module-level binding of the
-    emitted module when `receiver` is `None`, else `method` on the live
-    provider the caller supplied for that required-service key."""
+    """The host body a WAL call names, in a fresh process.
+
+    * a required-service key the caller supplied a live provider for: `method`
+      on that provider;
+    * `receiver` `None`, or equal to `method` (a deferred extern emission names
+      itself as its receiver): the emitted module's own binding of `method`;
+    * a runtime host builtin (`Stream`): its classmethod `method`.
+
+    None when nothing here answers to the call."""
     method = call.get("method")
     if not isinstance(method, str):
         return None
     receiver = call.get("receiver")
-    owner = module if receiver is None else services.get(receiver)
+    if receiver is not None and receiver in services:
+        owner = services[receiver]
+    elif receiver is None or receiver == method:
+        owner = module
+    elif receiver in _HOST_RECEIVERS:
+        owner = globals().get(receiver)
+    else:
+        owner = None
     target = getattr(owner, method, None) if owner is not None else None
     return target if callable(target) else None
 
@@ -4347,6 +4365,151 @@ def replay_descriptors(module: Any, wal_path: str, descriptors: list, *,
         ran = sorted(seq for seq, state in outcome.items() if state == "ran")
         if ran:
             wal.record_aborted(ran)
+    finally:
+        wal.close()
+    return outcome
+
+
+def _halted_now(where: str) -> bool:
+    """Whether an E-Stop is in force, engaging one an operator armed through
+    the latch file: the crossing seam's own check, asked without raising."""
+    try:
+        _estop_check(where)
+    except EstopHalted:
+        return True
+    return False
+
+
+def _wal_records(wal_path: str) -> list:
+    records: list = []
+    if not os.path.exists(wal_path):
+        return records
+    with open(wal_path, encoding="utf-8") as handle:
+        for line in handle:
+            try:
+                records.append(json.loads(line))
+            except ValueError:
+                continue   # a torn tail; the WAL seals it on open
+    return records
+
+
+def reissue_deferred(module: Any, wal_path: str, descriptors: list, *,
+                     services: Optional[dict] = None) -> dict:
+    """Fire owed deferred emissions in a fresh process (issue #1477).
+
+    `descriptors` are the WAL's `deferred-emission` records whose flush a
+    crashed session never reached. Each is rebuilt as the `_Deferred` entry it
+    was, under its original `seq`, and they fire through the session's own
+    flush (`SessionOwner._flush`), in program order: the same E-Stop check
+    before each host body, the same continue-and-record, and the same
+    `flushed` or `flush-residue` record after each fire. The recover side keeps
+    the tier policy and its `reissue-fence`; this only performs.
+
+    Returns `{seq: outcome}`: `ran` (fired, `flushed` written), `failed` (the
+    host body raised, `flush-residue` written), `settled` (a `flushed` or
+    `flush-residue` record already names it, so it is not fired again),
+    `unresolved` (the call names no host body here, or its arguments are not a
+    list), or `stranded` (an E-Stop is in force, nothing fires)."""
+    services = dict(services or {})
+    settled = {r.get("seq") for r in _wal_records(wal_path)
+               if r.get("record") in ("flushed", "flush-residue")}
+    outcome: dict = {}
+    queue: list = []
+    for descriptor in sorted(descriptors, key=lambda d: d.get("seq") or 0):
+        seq = descriptor.get("seq")
+        call = descriptor.get("call") or {}
+        if seq in settled:
+            outcome[seq] = "settled"
+            continue
+        target = _resolve_call(module, services, call)
+        if target is None or not isinstance(call.get("args"), list):
+            outcome[seq] = "unresolved"
+            continue
+        args = list(call["args"])
+        entry = _Deferred(call.get("receiver") or call["method"], call["method"],
+                          args, lambda _t=target, _a=args: _t(*_a))
+        entry.seq = seq
+        queue.append(entry)
+    if not queue:
+        return outcome
+    if _halted_now("reissue_deferred"):
+        outcome.update({entry.seq: "stranded" for entry in queue})
+        return outcome
+    wal = _replay_wal_module().WriteAheadLog(wal_path).open()
+    try:
+        owner = SessionOwner(wal_getter=lambda: wal)
+        owner._queue = queue
+        owner._flush()
+    finally:
+        wal.close()
+    for entry in queue:
+        outcome[entry.seq] = ("stranded" if isinstance(entry.error, EstopHalted)
+                              else "failed" if entry.error is not None
+                              else "ran")
+    return outcome
+
+
+def reclaim_shared(module: Any, wal_path: str, grants: list, *,
+                   services: Optional[dict] = None) -> dict:
+    """Re-fire the declared inverse of every `shared` grant a crash left
+    counted, in a fresh process, exactly once (item 308 S1, issue #1477).
+
+    `grants` are the WAL's `shared-grant` records; the latest per handle wins,
+    as it does for `revl recover`. The records the runtime's shared book
+    writes are honoured: a handle with `shared-complete` is `settled`, one with
+    `shared-reclaim-fence` is `fenced` (an earlier attempt's outcome is unknown,
+    so it is not re-fired), and one whose latest count is empty is `settled`. A
+    handle still counted is fenced durably BEFORE its inverse runs, and
+    `shared-complete` is written only after the inverse returns, so a raise or
+    a crash in between leaves the fence a later run reads as outcome unknown.
+
+    Returns `{handle: outcome}`: `ran`, `failed`, `fenced`, `settled`,
+    `unresolved` (the inverse names no host body here, or its arguments are not
+    a list), or `stranded` (an E-Stop is in force, nothing is fenced or run)."""
+    services = dict(services or {})
+    records = _wal_records(wal_path)
+    completed = {r.get("handle") for r in records if r.get("record") == "shared-complete"}
+    fenced = {r.get("handle") for r in records if r.get("record") == "shared-reclaim-fence"}
+    latest: dict = {}
+    for grant in grants:
+        latest[grant.get("handle")] = grant
+    outcome: dict = {}
+    owed: list = []
+    for handle, grant in sorted(latest.items(), key=lambda kv: str(kv[0])):
+        if handle in completed or not (grant.get("holders") or []) and handle not in fenced:
+            outcome[handle] = "settled"
+            continue
+        if handle in fenced:
+            outcome[handle] = "fenced"
+            continue
+        call = grant.get("inverse") or {}
+        target = _resolve_call(module, services, call)
+        if target is None or not isinstance(call.get("args"), list):
+            outcome[handle] = "unresolved"
+            continue
+        owed.append((handle, target, list(call["args"]), call))
+    if not owed:
+        return outcome
+    if _halted_now("reclaim_shared"):
+        outcome.update({handle: "stranded" for handle, *_ in owed})
+        return outcome
+    wal = _replay_wal_module().WriteAheadLog(wal_path).open()
+    try:
+        for handle, target, args, call in owed:
+            wal._write({"record": "shared-reclaim-fence", "handle": handle})
+            try:
+                _estop_check(f"shared {handle}")
+                with _InFlight(component="shared", method=call.get("method"),
+                               seq=None, entry="reclaim"):
+                    target(*args)
+            except EstopHalted:
+                outcome[handle] = "stranded"
+                continue
+            except BaseException:  # noqa: BLE001 — the fence records it as unknown
+                outcome[handle] = "failed"
+                continue
+            wal._write({"record": "shared-complete", "handle": handle})
+            outcome[handle] = "ran"
     finally:
         wal.close()
     return outcome
@@ -6539,6 +6702,24 @@ class Stream:
         (no backlog). Emitted only when DECLARED, so a replay-free program still
         emits the exact zero-argument call."""
         return StreamSource(replay=replay)
+
+    @classmethod
+    def close(cls, cursor: str) -> bool:
+        """Close every live subscription that resumes from the durable cursor
+        `cursor`: the re-issuable inverse a durable subscription's WAL record
+        names (`Stream.close(<cursor>)`, item 130 §4.9), callable in a fresh
+        process (issue #1477). The recorded position is kept, which is the point
+        of a durable cursor: a later subscription resumes from it.
+
+        Returns whether it closed anything. In a fresh process after a crash the
+        listener died with the process that held it, so there is nothing live
+        to close and the answer is False, which is the inverse having nothing
+        left to do, not a failure. Idempotent."""
+        closed = False
+        for sub in list(cls._subs):
+            if getattr(sub, "_cursor", None) == cursor and not sub._closed:
+                closed = sub.close() or closed
+        return closed
 
     @classmethod
     def cursor_at(cls, name: str) -> int:

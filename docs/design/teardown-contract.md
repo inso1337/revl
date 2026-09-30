@@ -638,6 +638,32 @@ neighbour.
 
 An emission with no compensation is still out.
 
+### Three more fresh-process entry points (py tier, issue #1477)
+
+`replay_descriptors` covers the abort path. Three call families it does not
+cover each have their own entry point in `backends/python/runtime.py`, and
+`revl recover` keeps the policy for all of them (tiers, fences it spends,
+what it reports):
+
+- `reissue_deferred(module, wal_path, descriptors, services=...)` fires owed
+  `deferred-emission`s a crashed session never flushed. They go through the
+  session's own flush (`SessionOwner._flush`), in program order: the E-Stop
+  check before each host body, continue-and-record, and a `flushed` or
+  `flush-residue` record after each fire. A seq that already has either record
+  is `settled` and is not fired again.
+- `Stream.close(cursor)` is now a classmethod, so the `Stream.close(<cursor>)`
+  a durable-cursor subscription's record names resolves. It closes any live
+  subscription on that cursor and keeps the recorded position. In a fresh
+  process nothing is live, so it has nothing to close and returns False.
+- `reclaim_shared(module, wal_path, grants, services=...)` re-fires the inverse
+  of a `shared` grant a crash left counted, once. It honours the shared book's
+  records: `shared-complete` is `settled`, `shared-reclaim-fence` is `fenced`
+  (outcome unknown, not re-fired). A counted grant is fenced durably before its
+  inverse runs, and `shared-complete` is written only after it returns.
+
+Each returns an outcome per seq or handle, and under an E-Stop each strands
+everything and writes nothing.
+
 ### Owned deliverable: the recovery.py/replay.py WAL migration (py tier, landed)
 
 The WAL discharge-descriptor, the discharge record, discharged-seq skipping, the
