@@ -27,6 +27,15 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from revl.recovery import recover, recover_shared_grants, DictWorld  # noqa: E402
 from revl.wal import WAL_VERSION, read_wal  # noqa: E402
 
+
+class _RealWorld(DictWorld):
+    """An in-memory world that declares itself REAL (issue #1477). recover
+    writes its at-most-once fences only against a real world, because a model
+    run attempts nothing out there; the fence tests below exercise that
+    discipline, so they bind a world that claims to be the outside one."""
+
+    kind = "real"
+
 _INVERSE = {"receiver": "pool", "method": "close", "args": ["db#1"]}
 _REFERENT = "pool:db#1"  # World.key(_INVERSE)
 
@@ -93,7 +102,7 @@ def test_reclaim_record_is_not_a_bracket_fault(tmp_path):
 def test_shared_reclaim_fence_is_durably_appended(tmp_path):
     path = str(tmp_path / "shared.wal")
     _write_wal(path, [_grant(["A"])])
-    recover(path, world=DictWorld())
+    recover(path, world=_RealWorld())
     kinds = [r.get("record") for r in read_wal(path)["records"]]
     assert "shared-reclaim-fence" in kinds
 
@@ -102,11 +111,11 @@ def test_a_second_recover_run_does_not_double_close(tmp_path):
     path = str(tmp_path / "shared.wal")
     _write_wal(path, [_grant(["A"])])
 
-    recover(path, world=DictWorld())  # first run: fires + fences
+    recover(path, world=_RealWorld())  # first run: fires + fences
 
     # a fresh world for the re-run; if the fence did not hold, the inverse would
     # fire again and pop the (re-seeded) referent.
-    world2 = DictWorld()
+    world2 = _RealWorld()
     world2.seed(_REFERENT)
     report2 = recover(path, world=world2)
 
@@ -185,7 +194,7 @@ def test_a_failing_reclaim_inverse_is_residue_not_a_silent_success(tmp_path):
     path = str(tmp_path / "shared.wal")
     _write_wal(path, [_grant(["A"])])
 
-    class _BoomWorld(DictWorld):
+    class _BoomWorld(_RealWorld):
         def apply_inverse(self, op):
             raise RuntimeError("remote close refused")
 

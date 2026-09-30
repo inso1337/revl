@@ -1035,14 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**502 .rvl files -> 373 components -> 971 statements = 258 modeled + 216
-componentless + 28 refused at parse**, and **5646 verdicts compared (258
-files + 373 components + 80 provide methods + 19 spawn edges + 28 parse
-refusals + 267 teardown scenarios + 1620 recoveries + 971 confinements +
-971 surfaces + 340 teardowns + 265 provide-clause components + 81 config
-fields + 373 A2 bodies), 5646 agree, 0 mismatches**.
+**544 .rvl files -> 415 components -> 1088 statements = 300 modeled +
+216 componentless + 28 refused at parse**, and **6077 verdicts compared
+(300 files + 415 components + 105 provide methods + 19 spawn edges + 28
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1088
+confinements + 1088 surfaces + 346 teardowns + 305 provide-clause
+components + 81 config fields + 415 A2 bodies), 6077 agree, 0
+mismatches**.
 
-Checker alignment over the 258 modeled files. Every bucket recording a
+Checker alignment over the 300 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1066,9 +1067,9 @@ with corpus work that never touched this layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 28 | informational |
+| `agree-G4` | 48 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 170 | informational |
+| `agree-accept` | 176 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1076,7 +1077,7 @@ with corpus work that never touched this layer.
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
-| `out-of-fragment` | 41 | informational |
+| `out-of-fragment` | 57 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 

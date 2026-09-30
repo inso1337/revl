@@ -33,7 +33,8 @@ sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(BACKEND))
 
 from revl import compile_source  # noqa: E402
-import emit as pyemit  # noqa: E402  (backends/python)
+from revl._paths import python_backend_emitter  # noqa: E402
+pyemit = python_backend_emitter()
 
 
 # A supervisor spawns a worker whose service op is `async`, then delegates to
