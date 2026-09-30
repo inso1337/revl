@@ -42,6 +42,53 @@ public final class RunOnce {
                 + PlacementRunner.redactSecrets(detail)).stripTrailing());
     }
 
+    /** The spec's provisions: each (key, iface, realm) the composition
+     *  publishes. A spec written before issue #1550 carries only `provides` +
+     *  `ifaces`, which are read as shared-realm provisions. */
+    @SuppressWarnings("unchecked")
+    static List<Map<String, Object>> placementsOf(Map<String, Object> spec) {
+        Object placements = spec.get("placements");
+        if (placements != null) {
+            return (List<Map<String, Object>>) placements;
+        }
+        Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
+        List<Map<String, Object>> out = new ArrayList<>();
+        for (Object key : (List<Object>) spec.getOrDefault("provides", List.of())) {
+            Object iface = ifaces.get((String) key);
+            if (iface != null) {
+                Map<String, Object> p = new java.util.HashMap<>();
+                p.put("key", key);
+                p.put("iface", iface);
+                out.add(p);
+            }
+        }
+        return out;
+    }
+
+    /** `kv` for a shared-realm provision, `kv@tenant_a` for an isolated one
+     *  (the `revl audit` spelling). */
+    static String label(Map<String, Object> p) {
+        Object realm = p.get("realm");
+        return realm == null ? (String) p.get("key") : p.get("key") + "@" + realm;
+    }
+
+    /** Whether the provision answers now: a shared-realm read for a shared
+     *  provision, a STRICT single-realm read (no fallback) for an isolated
+     *  one, so a withdrawn tenant never reads as the other tenant's live one. */
+    static boolean isLive(Context ctx, Map<String, Object> p) throws ClassNotFoundException {
+        Class<?> type = Class.forName((String) p.get("iface"));
+        Object realm = p.get("realm");
+        if (realm != null) {
+            return ctx.serviceInRealm(type, (String) realm).isPresent();
+        }
+        try {
+            ctx.get(type);
+            return true;
+        } catch (RuntimeException notLive) {
+            return false;
+        }
+    }
+
     static String pad(String s, int n) {
         StringBuilder b = new StringBuilder(s);
         while (b.length() < n) b.append(' ');
@@ -55,8 +102,6 @@ public final class RunOnce {
         String container = (String) spec.getOrDefault("module", "revl.Components");
         PlacementRunner.bindSecretRegistry(container); // before the first line is printed
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
-        Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
-        List<Object> provides = (List<Object>) spec.getOrDefault("provides", List.of());
         List<Object> components = (List<Object>) spec.getOrDefault("components", List.of());
 
         Context ctx = new Context();
@@ -94,28 +139,27 @@ public final class RunOnce {
             log("load", cname, "state=Active");
         }
 
-        // 2. every provided key resolves while the composition is up. When a
-        //    component FAULTED during load (a `fail`; the fault sweep) the keys
-        //    it would have provided are legitimately absent — the composition
-        //    is up minus the failed provision — so a non-resolving key is
+        // 2. every provision resolves while the composition is up, in the realm
+        //    it is published in (issue #1550: an isolated key is not in the
+        //    shared realm, so a shared-realm read threw `no provider` for a
+        //    composition that had loaded cleanly). When a component FAULTED
+        //    during load (a `fail`; the fault sweep) the provisions it would
+        //    have made are legitimately absent, so a non-resolving one is
         //    expected there, not an error. On a normal run (nothing faulted)
-        //    the UP proof stays strict: an absent key is a real failure and
-        //    still aborts, exactly as before.
-        for (Object key : provides) {
-            String iface = (String) ifaces.get((String) key);
-            if (iface == null) {
-                continue;
-            }
-            try {
-                ctx.get(Class.forName(iface)); // throws (no provider) if it is NOT up
-            } catch (RuntimeException notUp) {
+        //    the UP proof stays strict: an absent provision is a real failure
+        //    and still aborts, exactly as before.
+        List<Map<String, Object>> placements = placementsOf(spec);
+        for (Map<String, Object> p : placements) {
+            String iface = (String) p.get("iface");
+            if (!isLive(ctx, p)) {
                 if (faulted.isEmpty()) {
-                    throw notUp;
+                    throw new io.cordis4j.core.CordisException(
+                            "no provider for " + iface + " at " + label(p));
                 }
-                log("provide", (String) key, "not live (a component faulted this run)");
+                log("provide", label(p), "not live (a component faulted this run)");
                 continue;
             }
-            log("provide", (String) key, "live [" + simple(iface) + "]");
+            log("provide", label(p), "live [" + simple(iface) + "]");
         }
 
         System.out.println("[" + name + "] UP");
@@ -131,19 +175,13 @@ public final class RunOnce {
             log("swap", order.get(idx), "dispose -> inverses replay (LIFO)");
         }
 
-        // 4. no-residue proof: after teardown no provided key still resolves
+        // 4. no-residue proof: after teardown no provision still resolves, each
+        //    read in the realm it was published in (issue #1550)
         int live = 0;
-        for (Object key : provides) {
-            String iface = (String) ifaces.get((String) key);
-            if (iface == null) {
-                continue;
-            }
-            try {
-                ctx.get(Class.forName(iface));
+        for (Map<String, Object> p : placements) {
+            if (isLive(ctx, p)) {
                 live++;
-                log("residue", (String) key, "STILL LIVE [" + simple(iface) + "]");
-            } catch (RuntimeException expected) {
-                // good: the provider was withdrawn, nothing answers for this key
+                log("residue", label(p), "STILL LIVE [" + simple((String) p.get("iface")) + "]");
             }
         }
         log("residue", "provisions", live + " service(s) still provided");

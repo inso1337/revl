@@ -342,9 +342,15 @@ needs_runtime = pytest.mark.skipif(
 
 
 @needs_runtime
-def test_live_forged_principal_is_refused_and_the_route_still_serves(tmp_path):
+def test_live_forged_principal_is_refused_and_the_route_still_serves(
+        tmp_path, monkeypatch):
     from revl.mcp.session import Session
 
+    # The any-token stub runs only behind its explicit dev flag (issue #1554);
+    # the real validator is pinned in tests/test_auth_validator_1554.py.
+    for name in ("REVL_AUTH_HS256_SECRET", "REVL_AUTH_HS256_SECRET_FILE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("REVL_AUTH_INSECURE_DEV_STUB", "1")
     ir, declared = _notes(tmp_path)
     session = Session()
     session.load(ir, {}, origin=None)
@@ -353,7 +359,7 @@ def test_live_forged_principal_is_refused_and_the_route_still_serves(tmp_path):
         forged = _post(face, "/revl/store/get", [FORGED, "n1"])
         assert forged.status == 403
         assert face.dispatch_http("GET", "/notes/n1", b"", {}).status == 401
-        # the py auth stub maps a bearer token to that subject
+        # the dev-flag stub maps a bearer token to that subject
         owner = face.dispatch_http("GET", "/notes/n1", b"",
                                    {"Authorization": "Bearer alice"})
         assert owner.status == 200
