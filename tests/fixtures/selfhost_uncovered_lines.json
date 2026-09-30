@@ -51,7 +51,7 @@
     "reference": {
       "go": 3348,
       "java": 986,
-      "py": 667,
+      "py": 660,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 91,
       "java": 175,
-      "py": 104,
+      "py": 103,
       "rust": 286,
       "ts": 97,
       "wasm": 63
@@ -719,8 +719,8 @@
         "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run.": {
           "_ComponentEmitter._compensated_extern": 3
         },
-        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; host/spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, advance.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, so its statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds four statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. Both are threaded only when declared, so no existing corpus document can reach them, and the port has no stream arm to reach them with.": {
-          "_ComponentEmitter._expr": 88
+        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal).": {
+          "_ComponentEmitter._expr": 81
         },
         "Declared-`Secret[Map[K, V]]` marking (item 481): `_split_type_name` splits a declared type spelling into its head and its generic arguments, and `_secret_shape_facts` walks a document's declared secret roots transitively to answer whether any shape reachable from one is a `Map` and to render the field table the runtime needs so a map's keys and values are routed through their own declared types. The python corpus reaches both, but only through the non-generic splitter path and the no-Map answers; the branches that fire for a declared `Map` reachable from a secret root are not reached, because no `emit_py_corpus` document declares one. `selfhost/emit_py.rvl` carries the declared-`Secret[T]` marking import line only, not the call-site shape (item-429(d)), so a corpus document that reached them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by tests/test_secret_map_key_redaction.py.": {
           "_secret_shape_facts": 3,
@@ -791,7 +791,7 @@
         "Inlining template exclusions: _fn_inline_template rejects async functions (retained async boundary) and guarded returns whose return expression/condition is absent. inline.rvl covers legal guarded returns; frontend value-returning guards cannot omit either expression. Port has the same null checks.": {
           "_fn_inline_template": 2
         },
-        "Item 130 §4.5 replay rendering: backends/python/emit.py::_replay_kwarg renders the `replay=` keyword for a provider declaration or a consumer request. Only a program that declares replay reaches it, and selfhost/emit_py.rvl ports no part of the stream surface, so a corpus document here would flip the byte-agreement oracle RED rather than close the gap (item-429(d)). The reference half is pinned by tests/test_stream_reactive.py and the runtime half by backends/python/tests/test_stream_runtime.py.": {
+        "Item 130 §4.5 replay rendering: backends/python/emit.py::_replay_kwarg renders the `replay=` keyword for a provider declaration or a consumer request. selfhost/emit_py.rvl ports the component `host` call but refuses a replay-declaring `Stream.source()` by name, and no corpus document can declare replay yet: the self-host gate refuses the `replay(…)` clause with G1, a false reject the gate/reference census reports for any census-directory document. The reference half is pinned by tests/test_stream_reactive.py, the port's refusal by tests/test_selfhost_emit_py.py::test_a_declared_stream_replay_is_named_not_dropped, and the runtime half by backends/python/tests/test_stream_runtime.py.": {
           "_replay_kwarg": 3
         },
         "Lifecycle-harness boundary: _emit_lifecycle_harness installs acquire/driver source; _emit_lifecycle_test manages Context, optional clock/session owner, tracing, fibers and finally disposal; _lifecycle_step lowers load/unload/call/advance/abort/assert_no_residue/assert; detectors select abort/clock support. examples/lifecycle_wasm.rvl and tests/test_lifecycle_abort.py are representative inputs. Port has no lifecycle harness, explicitly distinguished from supported component activation.": {
@@ -886,7 +886,7 @@
           "_method_def_name": 2
         }
       },
-      "uncovered_statements": 649
+      "uncovered_statements": 642
     },
     "rust": {
       "statements": 3771,
@@ -1755,7 +1755,7 @@
       "uncovered_statements": 175
     },
     "py": {
-      "statements": 2105,
+      "statements": 2118,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1802,8 +1802,8 @@
         "Module expr_inner residuals: bare Some identity, legacy field.sized_length branch and explicit unsupported-kind marker. Module .length currently lowers kind=len while component .length reaches field.sized_length (both in branches.rvl). Some-call construction is covered separately; no claim that all historical IR shapes are source-reachable.": {
           "expr_inner": 4
         },
-        "Module host-root discovery: emit_py_src imports Job when found; ir_uses_host_root's tests subtree is the retained test-harness boundary. Existing module corpus reaches Map/Pool while component host calls are separately deferred. Job uses the same sorted runtime-import mechanism, not a missing port implementation.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
-          "emit_py_src": 2,
+        "Module host-root discovery: ir_uses_host_root's tests subtree is the retained test-harness boundary. All four roots reach the sorted runtime import: Map/Pool from the module corpus, Job and Stream from the component host calls in services_host.rvl. emit_py_src's one uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+          "emit_py_src": 1,
           "ir_uses_host_root": 1
         },
         "Owned Map.set computed-key order: inplace_stmts emits _revl_key then the assignment when the key is not trivial. Reference _py_inplace_stmts emits the same sequence. in_place.rvl's keys are trivial, but supported map ownership/copy/remove paths are covered; no exclusion of mutation is claimed.": {
@@ -1873,7 +1873,7 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 104
+      "uncovered_statements": 103
     },
     "rust": {
       "statements": 4092,

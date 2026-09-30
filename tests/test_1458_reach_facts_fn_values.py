@@ -23,7 +23,6 @@ since #1459). Each test below fails on the base this issue was filed against.
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -33,27 +32,16 @@ ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+sys.path.insert(0, str(ROOT / "tests"))
 
+from _load_by_path import load_by_path  # noqa: E402
 from revl import erase_report, query  # noqa: E402
 from revl.compiler import compile_source  # noqa: E402
 from revl.mcp.approval import ClassMap, _cache_scope_findings  # noqa: E402
 
-
-def _spellings_module():
-    """`tests/test_deploy_118.py`, imported by path under a unique name, so the
-    eight spellings have one source of truth."""
-    name = "revl_test_1458_spellings"
-    if name in sys.modules:
-        return sys.modules[name]
-    spec = importlib.util.spec_from_file_location(
-        name, ROOT / "tests" / "test_deploy_118.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-_T118 = _spellings_module()
+# `tests/test_deploy_118.py` holds the eight spellings; loading it under its
+# own module name shares one copy with pytest's collection of that file.
+_T118 = load_by_path("test_deploy_118", ROOT / "tests" / "test_deploy_118.py")
 SPELLINGS = sorted(_T118._FN_VALUE_SPELLINGS)
 EXTERNS = {"bare": _T118._BARE_CHARGE, "deferred": _T118._DEFERRED_CHARGE}
 SCOPE = "C:s.go"
