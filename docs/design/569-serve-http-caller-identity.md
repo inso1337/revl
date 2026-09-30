@@ -214,6 +214,10 @@ host code, granted-only reach, additive only), but the caller picked the grant.
 * `auth.validate` is backed by a real validator. The py stub accepts any
   non-blank token as that subject; that is documented as a test stub
   (`stdlib/auth.rvl`) and the real binding is item 457 Slice 3 / design 529.
+  Since issue #1554 the py body is an HS256 JWT validator configured from the
+  environment, the stub runs only behind `REVL_AUTH_INSECURE_DEV_STUB=1`, and
+  an unconfigured deployment refuses every call with `503`
+  `auth_not_configured` (see `revl serve` in `docs/commands-reference.md`).
 
 ## 4. Option C: hybrids
 
