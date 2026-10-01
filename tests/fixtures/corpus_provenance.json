@@ -44,6 +44,7 @@
    "backends/go/scenarios/witnessed_teardown.rvl",
    "backends/go/testdata/opt_gaps_280.rvl",
    "backends/go/testdata/result_ctor_302.rvl",
+   "backends/go/testdata/result_erased_1631.rvl",
    "backends/go/testdata/stream_130.rvl",
    "backends/go/testdata/stream_event_130.rvl",
    "backends/java/scenarios/instance_accessor.rvl",
