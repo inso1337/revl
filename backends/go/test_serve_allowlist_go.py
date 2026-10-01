@@ -54,21 +54,17 @@ component P provides s: S, h: Hidden {
 """
 
 
-class _Provider:
-    def __init__(self, methods: dict):
-        # a unix socket path is capped near 104 bytes; pytest's tmp_path on
-        # macOS is longer, so the socket and spec live in a short dir
-        self.dir = tempfile.mkdtemp(prefix="g1599", dir="/tmp")
-        tmp = Path(self.dir)
-        binary = placement._build_go(compile_source(SOURCE, "p.rvl"), tmp)
-        self.sock = str(tmp / "s.sock")
-        spec = {"name": "provider", "components": ["P"], "config": {},
-                "provides": ["s", "h"], "proxies": {}, "probe": [],
-                "serve": {"socket": self.sock, "keys": ["s"], "methods": methods}}
-        (tmp / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
+class _Runner:
+    """One runner process from a hand-written spec, with a raw client on its
+    serve socket."""
+
+    def __init__(self, binary: str, spec: dict, workdir: Path, label: str):
+        self.sock = spec["serve"]["socket"]
+        spec_path = workdir / f"{label}.json"
+        spec_path.write_text(json.dumps(spec), encoding="utf-8")
         # stdin stays open: the runner treats EOF on it as the conductor
         # going away and stops
-        self.proc = subprocess.Popen([binary, str(tmp / "spec.json")],
+        self.proc = subprocess.Popen([binary, str(spec_path)],
                                      stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                      stderr=subprocess.STDOUT, text=True)
         self.lines: list[str] = []
@@ -97,6 +93,26 @@ class _Provider:
                 self.proc.wait(timeout=30)
             except subprocess.TimeoutExpired:
                 self.proc.kill()
+
+
+def _short_dir() -> Path:
+    # a unix socket path is capped near 104 bytes; pytest's tmp_path on macOS
+    # is longer, so sockets and specs live in a short dir
+    return Path(tempfile.mkdtemp(prefix="g1599", dir="/tmp"))
+
+
+class _Provider(_Runner):
+    def __init__(self, methods: dict):
+        self.dir = _short_dir()
+        binary = placement._build_go(compile_source(SOURCE, "p.rvl"), self.dir)
+        spec = {"name": "provider", "components": ["P"], "config": {},
+                "provides": ["s", "h"], "proxies": {}, "probe": [],
+                "serve": {"socket": str(self.dir / "s.sock"), "keys": ["s"],
+                          "methods": methods}}
+        super().__init__(binary, spec, self.dir, "provider")
+
+    def close(self):
+        super().close()
         shutil.rmtree(self.dir, ignore_errors=True)
 
 
@@ -140,3 +156,50 @@ def test_the_methods_allowlist_is_read_not_just_the_service():
         assert p.call("s", "bump", [4]) == {"ok": True, "value": 5}
     finally:
         p.close()
+
+
+# --------------------------------------------------------------------------
+# the relay case: a key this process only holds a PROXY for
+# --------------------------------------------------------------------------
+
+RELAY_SOURCE = """\
+service K { fn get(x: Int) -> Int }
+service J { fn ask(x: Int) -> Int }
+component Store provides k: K { provide k { fn get(x) { return x + 1000 } } }
+component User requires k: K provides j: J {
+  provide j { fn ask(x) { return k.get(x) } }
+}
+"""
+
+
+def test_a_key_held_only_as_a_proxy_is_not_relayed():
+    """`store` serves `k`. `user` consumes `k` through a proxy and serves only
+    `j`. A raw call for `k` on `user`'s socket used to resolve the proxy and
+    cross on to `store`, answering 1001 under `user`'s identity: a relay
+    through a process the placement never made a provider of `k`."""
+    workdir = _short_dir()
+    binary = placement._build_go(compile_source(RELAY_SOURCE, "r.rvl"), workdir)
+    store_sock = str(workdir / "store.sock")
+    store = _Runner(binary, {
+        "name": "store", "components": ["Store"], "config": {}, "provides": ["k"],
+        "proxies": {}, "probe": [],
+        "serve": {"socket": store_sock, "keys": ["k"], "methods": {"k": ["get"]}},
+    }, workdir, "store")
+    user = None
+    try:
+        user = _Runner(binary, {
+            "name": "user", "components": ["User"], "config": {}, "provides": ["j"],
+            "proxies": {"k": {"socket": store_sock, "methods": ["get"], "service": "K"}},
+            "probe": [],
+            "serve": {"socket": str(workdir / "user.sock"), "keys": ["j"],
+                      "methods": {"j": ["ask"]}},
+        }, workdir, "user")
+        assert user.call("j", "ask", [1]) == {"ok": True, "value": 1001}   # the seam works
+        assert user.call("k", "get", [1]) == {
+            "ok": False, "error": "key 'k' is not exported by this process"}
+    finally:
+        if user is not None:
+            user.close()
+        store.close()
+        shutil.rmtree(workdir, ignore_errors=True)
+
