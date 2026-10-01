@@ -132,6 +132,13 @@ export function emitFixtures(): void {
   // `generated_coverage.test.ts`'s scan, like the fixtures above.
   const emitReservedMethodNames = emitFixture
   emitReservedMethodNames('reserved_method_names.ir.json', 'reserved_method_names.ts')
+  // issue #1592: an emission extern that DECLARES its own `compensate` (item
+  // 254), emitted from an activation body, a provide-method body and a timer
+  // firing; each site registers the declared compensation
+  // (extern_compensate.test.ts). Carries no `test` blocks, so the alias keeps
+  // the pair off `generated_coverage.test.ts`'s scan, like the fixtures above.
+  const emitExternCompensate = emitFixture
+  emitExternCompensate('extern_compensate.ir.json', 'extern_compensate.ts')
 }
 
 // Allow running directly (`node scripts/emit-fixtures.ts`) as a standalone
