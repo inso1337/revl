@@ -427,6 +427,26 @@ _DS_RECORD = '''type Envelope = {
 '''
 
 
+# An emission extern carrying the declaration-owned `requires approval` floor
+# (item 246), and an activation body that mints an approval and threads it.
+_AP_HEAD = """extern emission fn charge(sink: Str, msg: Str) requires approval = @py { return }
+service Ops { fn ping() -> Int }
+"""
+_AP_BODY = """component Biller provides ops: Ops {{
+  let a = await approval[{token}] {{ amount: 1 }}
+  emit charge("s", "m") with a
+  provide ops {{ fn ping() = 1 }}
+}}
+"""
+_AP_REFUSAL = ("crossing capability `charge` requires approval, but this "
+               "`emit` carries no covering `with` edge")
+
+# Two host emission externs, shared by the marker-rule programs below.
+_MK_HEAD = """extern emission fn log_line(n: Int) -> Int = @py { return 1 }
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+"""
+
+
 ACCEPTED_PROGRAMS = [
     # `pub` is a visibility PREFIX, not a declaration head — the single largest
     # parse gap on this surface, and the one that made every `stdlib/*.rvl` and
@@ -655,6 +675,111 @@ component P requires s: Stat {
   let r = effect s.sample(3) undo s.sample(4)
 }
 """),
+    # Issue #1453: a name an `if` arm binds leaves scope where the arm ends.
+    # The block reader reads arms inline; without the scope marks, `slot`
+    # after the block resolved to the arm's Int binding and `db.put` refused.
+    ("arm binding leaves scope at the arm's end", """
+service Db { fn put(k: Str) -> Int }
+service K { fn f(k: Str) -> Int }
+component C requires db: Db provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") {
+        let slot = 1
+      }
+      let slot = "x"
+      let r = db.put(slot)
+      return 0
+    }
+  }
+}
+"""),
+    # Issue #1453: a `for` element is a name of unknown type inside the body,
+    # judged as leniently as the reference judges an unknown.
+    ("for element passed to a typed parameter", """
+service Db { fn put(k: Str) -> Int }
+service K { fn f(k: Str) -> Int }
+component C requires db: Db provides k: K {
+  provide k {
+    fn f(k) {
+      for (x of ["a"]) { let r = db.put(x) }
+      return 0
+    }
+  }
+}
+"""),
+    # ---- one `emit` marker per crossing: what stays admitted ---------------
+    # Negative controls for the marker port below. A marked head's argument
+    # list may hold any call that is not itself a crossing, a crossing bound by
+    # `let` first and passed by name is two marked steps, and an arrow written
+    # inline in the arguments runs when CALLED, so the `emit` in its body is
+    # not nested in the outer marker (the reference clears `_in_emit_args` for
+    # an arrow body).
+    ("a pure fn in a host emit's arguments", _MK_HEAD + """
+fn twice(n: Int) -> Int { return n * 2 }
+component C {
+  emit log_line(twice(2))
+}
+"""),
+    ("a plain read in a service emit's arguments", """
+service A { emission fn send(x: Str) -> Int }
+service B { fn read() -> Str }
+component C requires a: A, b: B {
+  emit a.send(b.read())
+}
+"""),
+    ("two host crossings, one marker each", _MK_HEAD + """
+component C {
+  emit charge(1)
+  emit log_line(2)
+}
+"""),
+    ("a crossing bound by let and then passed", """
+service A { emission fn send(x: Str) -> Int }
+service B { emission fn fetch() -> Str }
+service R { emission fn once() -> Int }
+component C requires a: A, b: B provides r: R {
+  provide r {
+    fn once() {
+      let v = emit b.fetch()
+      emit a.send(v)
+      return 1
+    }
+  }
+}
+"""),
+    ("an inline arrow argument that emits in its body",
+     (ROOT / "tests" / "fixtures" /
+      "g4_emit_arrow_argument_inline.rvl").read_text()),
+    # ---- the declaration-owned approval floor: what is admitted (item 246) --
+    # A covering `with` edge, by exact token, by a `*` or `?` glob, and by a
+    # dotted-ident token; an extern without the floor; and a scoped extern,
+    # which crosses its declared scope rather than its name, so the floor keyed
+    # on the name does not reach it (the reference's `_emit_crossed_caps`).
+    ("an approval edge that names the capability",
+     _AP_HEAD + _AP_BODY.format(token='"charge"')),
+    ("an approval edge whose `*` glob covers the capability",
+     _AP_HEAD + _AP_BODY.format(token='"char*"')),
+    ("an approval edge whose `?` glob covers the capability",
+     _AP_HEAD + _AP_BODY.format(token='"charg?"')),
+    ("an approval edge named by a dotted-ident token",
+     _AP_HEAD + _AP_BODY.format(token="charge")),
+    ("a crossing of an extern with no approval floor", """
+extern emission fn charge(sink: Str, msg: Str) = @py { return }
+service Ops { fn ping() -> Int }
+component Biller provides ops: Ops {
+  emit charge("s", "m")
+  provide ops { fn ping() = 1 }
+}
+"""),
+    ("a service crossing scoped to the floor, covered", _AP_HEAD + """
+service Pay { emission[charge] fn go() -> Int }
+component B requires pay: Pay provides ops: Ops {
+  let a = await approval["charge"] { amount: 1 }
+  emit pay.go() with a
+  provide ops { fn ping() = 1 }
+}
+"""),
 ]
 
 # (name, source, expected message). The message pins are the reference's own
@@ -667,6 +792,17 @@ def _fixture(name: str) -> str:
 
 
 REJECTED_PROGRAMS = [
+    # A scoped extern that declares the floor is required under its SCOPE token
+    # (issue #1437): the reference's required set and `crossed_caps` both key
+    # by `capabilities or [name]`, so this crossing needs a `pay.card` edge.
+    ("a scoped extern crosses its scope, not its name", """
+extern emission[pay.card] fn charge(sink: Str, msg: Str) requires approval = @py { return }
+service Ops { fn ping() -> Int }
+component Biller provides ops: Ops {
+  emit charge("s", "m")
+  provide ops { fn ping() = 1 }
+}
+""", "crossing capability `pay.card` requires approval, but this `emit` carries no covering `with` edge"),
     # ---- the top-level heads, negative controls (item 391) -----------------
     # The same head in front of a component the checker must still REFUSE.
     # Every one of these drew a parse `(bad)` before, which a verdict-direction
@@ -1084,6 +1220,155 @@ component Bookkeeper provides ledger: Ledger {
 """,
      "`Ledger.post` is declared `emission[db]`, but this implementation emits "
      "through `audit_log`, `pg_write` (reaching `pg_write()`, `audit_log()`)"),
+    # Issue #1453: statements inside and after a block are read. Each of these
+    # was no objection before the block reader, because the checker stopped at
+    # the `if`'s closing brace or skipped the one-line block whole.
+    ("call-site type error inside a one-line if arm", """
+service Db { fn put(k: Str) -> Int }
+service K { fn f(k: Str) -> Int }
+component C requires db: Db provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") { let r = db.put(42) }
+      return 0
+    }
+  }
+}
+""",
+     "`db.put` argument `k` expects `Str`, got `Int`"),
+    ("emission in a braceless else arm", """
+extern emission[net] fn zz_write(t: Str) -> Int = @py { return 1 }
+service K { fn f(k: Str) -> Int }
+component C provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") return 1 else return emit zz_write(k)
+      return 0
+    }
+  }
+}
+""",
+     "`K.f` is declared plain, but this implementation reaches `zz_write()`"),
+    # A module fn body is read by the same reader, so an emission after a block
+    # in a helper still reaches the emission fixed point.
+    ("emission after a block in a module fn", """
+extern emission[net] fn zz_write(t: Str) -> Int = @py { return 1 }
+fn mid(t: Str) -> Int {
+  if (t == "a") {
+    return 0
+  }
+  return zz_write(t)
+}
+service K { fn f(k: Str) -> Int }
+component C provides k: K {
+  provide k {
+    fn f(k) {
+      return emit mid(k)
+    }
+  }
+}
+""",
+     "`K.f` is declared plain, but this implementation reaches `mid()`"),
+    # ---- one `emit` marker per crossing (issues #1175, #1427) -------------
+    # An `emit` marks its HEAD call; the argument list is lowered in the
+    # enclosing mode. None of these was decided here: the marked flag reached
+    # the arguments, so a second crossing under one marker read as marked. The
+    # ten checked-in fixtures first, then three shapes they do not spell: a fn
+    # that REACHES an emission, a crossing nested below a binary operator, and
+    # one inside a list literal.
+    ("g4_nested_unmarked_emission", _fixture("g4_nested_unmarked_emission.rvl"),
+     "call to emission `b.fetch` must be marked `emit` (G4)"),
+    ("g4_nested_unmarked_emission_method", _fixture("g4_nested_unmarked_emission_method.rvl"),
+     "call to emission `b.fetch` must be marked `emit` (G4)"),
+    ("g4_nested_emit_expression", _fixture("g4_nested_emit_expression.rvl"),
+     "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"),
+    ("g4_nested_emit_expression_host", _fixture("g4_nested_emit_expression_host.rvl"),
+     "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)"),
+    ("g4_nested_host_emission_activation", _fixture("g4_nested_host_emission_activation.rvl"),
+     "call to emission `charge` must be marked `emit` (G4)"),
+    ("g4_nested_host_emission_method", _fixture("g4_nested_host_emission_method.rvl"),
+     "call to emission `charge` must be marked `emit` (G4)"),
+    ("g4_nested_host_emission_scoped", _fixture("g4_nested_host_emission_scoped.rvl"),
+     "call to emission `charge` must be marked `emit` (G4)"),
+    ("g4_nested_host_emission_scoped_method", _fixture("g4_nested_host_emission_scoped_method.rvl"),
+     "call to emission `charge` must be marked `emit` (G4)"),
+    ("g4_nested_host_emission_in_service_emit", _fixture("g4_nested_host_emission_in_service_emit.rvl"),
+     "call to emission `charge` must be marked `emit` (G4)"),
+    ("g4_nested_service_emission_in_host_emit", _fixture("g4_nested_service_emission_in_host_emit.rvl"),
+     "call to emission `ledger.fetch` must be marked `emit` (G4)"),
+    ("a fn reaching an emission in a host emit's arguments", _MK_HEAD + """
+fn wrap(n: Int) -> Int {
+  return charge(n)
+}
+component C {
+  emit log_line(wrap(2))
+}
+""", "call to emission `wrap` must be marked `emit` (G4)"),
+    ("a host crossing below an operator in the arguments", _MK_HEAD + """
+component C {
+  emit log_line(1 + charge(2))
+}
+""", "call to emission `charge` must be marked `emit` (G4)"),
+    ("a host crossing inside a list argument", _MK_HEAD + """
+service A { emission fn send(x: List[Int]) -> Int }
+component C requires a: A {
+  emit a.send([charge(1)])
+}
+""", "call to emission `charge` must be marked `emit` (G4)"),
+    # ---- the declaration-owned approval floor (item 246, Decision 3) -------
+    # `_lower_emit_approval`: an emit step crossing a capability an extern
+    # declared `requires approval` for needs a covering `with` edge, and the
+    # edge must be an `Approval[C]`. Admitted here before: the checker read
+    # neither the floor nor the edge.
+    ("a floor crossing with no edge", _AP_HEAD + """
+component Biller provides ops: Ops {
+  emit charge("s", "m")
+  provide ops { fn ping() = 1 }
+}
+""", _AP_REFUSAL),
+    ("a floor crossing whose edge names another capability",
+     _AP_HEAD + _AP_BODY.format(token='"refund"'), _AP_REFUSAL),
+    ("a floor crossing whose `?` glob does not cover it",
+     _AP_HEAD + _AP_BODY.format(token='"chang?"'), _AP_REFUSAL),
+    ("one edge covers one step, not the next", _AP_HEAD + """
+component Biller provides ops: Ops {
+  let a = await approval["charge"] { amount: 1 }
+  emit charge("s", "m") with a
+  emit charge("s", "n")
+  provide ops { fn ping() = 1 }
+}
+""", _AP_REFUSAL),
+    ("a floor crossing in a provide method", _AP_HEAD + """
+service P { emission fn go() -> Int }
+component B provides p: P {
+  provide p {
+    fn go() {
+      emit charge("s", "m")
+      return 1
+    }
+  }
+}
+""", _AP_REFUSAL),
+    ("a service crossing scoped to the floor, with no edge", _AP_HEAD + """
+service Pay { emission[charge] fn go() -> Int }
+component B requires pay: Pay provides ops: Ops {
+  emit pay.go()
+  provide ops { fn ping() = 1 }
+}
+""", _AP_REFUSAL),
+    ("an edge that is not an approval", _AP_HEAD + """
+service P { emission fn go() -> Int }
+component B provides p: P {
+  provide p {
+    fn go() {
+      let a = 1
+      emit charge("s", "m") with a
+      return 1
+    }
+  }
+}
+""", "`with` on `emit` expects an `Approval[C]` value, but the expression "
+     "has type Int"),
 ]
 
 

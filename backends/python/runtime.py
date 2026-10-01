@@ -1392,28 +1392,36 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
 # ---------------------------------------------------------------------------
 
 class _RealmLabel:
-    """A realm identity. cordis compares isolate labels by object identity,
-    so same-string sharing must go through one object — never rely on
-    string interning."""
+    """The isolation label of one key in one realm. cordis compares isolate
+    labels by object identity, so same-string sharing must go through one
+    object — never rely on string interning."""
 
-    __slots__ = ("name",)
+    __slots__ = ("name", "key")
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, key: str) -> None:
         self.name = name
+        self.key = key
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
-        return f"<realm {self.name}>"
+        return f"<realm {self.name}/{self.key}>"
 
 
 _REALM_LABELS: dict = {}
 
 
-def realm_label(name: str) -> "_RealmLabel":
-    """Process-wide string -> label-object registry: equal strings share a
-    realm (the paper §5.2.1 global-realm convention)."""
-    label = _REALM_LABELS.get(name)
+def realm_label(name: str, key: str) -> "_RealmLabel":
+    """Process-wide `(realm, key)` -> label-object registry: equal realm
+    strings share a realm (the paper §5.2.1 global-realm convention).
+
+    Keyed by the key too, not by the realm string alone (issue #1543). cordis
+    stores a provision under its isolation label (`ctx.isolate(name, label)`
+    then `reflect.store[label]`), which is why its own loader mints one label
+    per key inside a realm (`loader.Realm.access`). One label for the whole
+    realm put `isolate db in realm("wa")` and `isolate api in realm("wa")` in
+    the same slot."""
+    label = _REALM_LABELS.get((name, key))
     if label is None:
-        label = _REALM_LABELS[name] = _RealmLabel(name)
+        label = _REALM_LABELS[(name, key)] = _RealmLabel(name, key)
     return label
 
 
@@ -1429,7 +1437,7 @@ def plug(ctx, component: dict, config=None):
     _estop_check(f"plug {component.get('name') or '<component>'}")
     scoped = ctx
     for key, realm in (component.get("isolate") or {}).items():
-        scoped = scoped.isolate(key, realm_label(realm))
+        scoped = scoped.isolate(key, realm_label(realm, key))
     return scoped.plugin(component, config)
 
 
@@ -4603,7 +4611,12 @@ class SessionOwner:
         write the `aborted` completion record naming every seq whose inverse
         actually ran (Decision 5). The absence of `commit-approved` is the
         verdict; this record only lets recover tell a completed abort from a
-        crashed one."""
+        crashed one.
+
+        An inverse that RAISED did not run to completion: it is recorded as
+        `restore-residue` (continue-and-record, issue #1473) and is not named in
+        the `aborted` record, so recover does not read it as done. Every older
+        entry still replays."""
         replayed: list = []
         # escrow replays reverse-seq, in its own two phases (transactional
         # inverses, then owed compensations) — the contract's phase rules.
@@ -4621,9 +4634,27 @@ class SessionOwner:
                         reverse=True)
         transactional = [e for e in escrow if isinstance(e, _Transactional)]
         compensations = [e for e in escrow if isinstance(e, _Compensation)]
+        # issue #1473: continue-and-record, the teardown contract's Phase-1 rule
+        # (teardown-contract.md, "Phase-1 failure"), exactly as a live frame's
+        # `drain` applies it. A raising restore is recorded as `restore-residue`
+        # and the older escrowed entries still replay. Before this the first
+        # raise escaped `Session.abort`: every older undo was skipped and the
+        # session was left loaded, with its owner half settled.
+        failed: set = set()
         for entry in transactional:
-            entry()   # verdict is settled (abort), so this replays
-            if entry.replayed and entry.seq is not None:
+            try:
+                entry()   # verdict is settled (abort), so this replays
+            except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                failed.add(id(entry))
+                self.compensation_residue.append(_residue_record(
+                    entry, kind=_RESTORE_RESIDUE, outcome="failed",
+                    attempted_flag=True, attempted={"phase": 1},
+                    error={"type": type(error).__name__,
+                           "message": str(error)}))
+            # a restore that raised did not run to completion, so the `aborted`
+            # record does not name it as replayed
+            if entry.replayed and entry.seq is not None \
+                    and id(entry) not in failed:
                 replayed.append(entry.seq)
         for entry in compensations:
             entry._run_phase2()
@@ -4640,8 +4671,11 @@ class SessionOwner:
         # collect the seqs the live frames replayed too (their inverses ran
         # during the driver's unload)
         for frame in self._registry:
+            raised = {r.get("seq") for r in frame.compensation_residue
+                      if r.get("kind") == _RESTORE_RESIDUE}
             for entry in frame._transactional:
-                if entry.replayed and entry.seq is not None:
+                if entry.replayed and entry.seq is not None \
+                        and entry.seq not in raised:
                     replayed.append(entry.seq)
         replayed = sorted(set(replayed))
         wal = self._wal()

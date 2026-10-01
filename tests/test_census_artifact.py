@@ -5,11 +5,13 @@ with a hand-transcribed number is a mirror that rots against what it mirrors,
 and that shape has cost this repository real wrong claims. So the tests here
 hold three separate things, and only one of them is about the tool:
 
-  1. THE COMMITTED ARTIFACT IS NOT STALE where staleness would make it wrong.
-     Not by re-running the census on every PR, which would red any branch that
-     adds a corpus file, but by coupling the named residuals to the committed
-     baseline. When issue #106's work closes the false-admit allowance, the
-     published table stops matching the baseline and this suite says so.
+  1. THE COMMITTED ARTIFACT IS NOT STALE where staleness would make it wrong,
+     by coupling the named residuals to the committed baseline. When issue
+     #106's work closes the false-admit allowance, the published table stops
+     matching the baseline and this suite says so. The census itself is re-run
+     by CI's `census-artifact` job (`--verify --strict`), only on a pull
+     request that moves an input, which then regenerates the artifact in the
+     same diff (issue #1572); section 5 holds that gate's logic.
 
   2. THE MECHANISM THE ARTIFACT CLAIMS IS THE ONE THE CODE HAS. The report says
      a `false-admission` cannot be written into the baseline and cannot be
@@ -26,7 +28,6 @@ programs), so it happens once per module.
 
 from __future__ import annotations
 
-import importlib.util
 import json
 import sys
 from pathlib import Path
@@ -36,13 +37,11 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _load(rel: str, name: str):
-    spec = importlib.util.spec_from_file_location(name, ROOT / rel)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(name, ROOT / rel)
     return module
 
 
@@ -514,3 +513,314 @@ def test_the_headline_claim_is_stated_on_the_distinct_count(committed):
     head = committed["claims"][0]["text"]
     assert f"{c['n_distinct']} distinct programs" in head
     assert f"{c['n']} runs" in head
+
+
+# --- 4. the pins and the verifier (issue #1268) --------------------------------
+#
+# `judge` is pure, so every verdict arm is driven here with synthetic rows and
+# pins, and no census runs. The one real end-to-end pass (`--verify` against the
+# committed file) is a manual step recorded in docs/design/560, because it costs
+# a full census run.
+
+_SHA_A = "a" * 64
+_SHA_B = "b" * 64
+
+
+def _published(rows, **pins):
+    table = {}
+    for _, _, name in rows:
+        table[name] = table.get(name, 0) + 1
+    return {
+        "buckets": [{"bucket": k, "count": v} for k, v in table.items()],
+        "cases": [list(r) for r in rows],
+        "false_admission": {"members": [], "mechanism": {"holds": True}},
+        "pins": {
+            "decides_verdicts": pins.get("deciding",
+                                         {"tools/gate_reference_census.py": _SHA_A}),
+            "reference": pins.get("reference", {"src/revl/compiler.py": _SHA_A}),
+            "report_inputs": pins.get("report", {"tests/fixtures/x.json": _SHA_A}),
+        },
+    }
+
+
+def _local(rows, *, holds=True, **pins):
+    return {
+        "cases": [list(r) for r in rows],
+        "mechanism_holds": holds,
+        "pins": {
+            "decides_verdicts": pins.get("deciding",
+                                         {"tools/gate_reference_census.py": _SHA_A}),
+            "reference": pins.get("reference", {"src/revl/compiler.py": _SHA_A}),
+            "report_inputs": pins.get("report", {"tests/fixtures/x.json": _SHA_A}),
+        },
+    }
+
+
+_ROWS = [("a.rvl", _SHA_A, "agree-admit"),
+         ("b.rvl", _SHA_B, "agree-refuse/G4"),
+         ("oracle-reject:twice", _SHA_A, "agree-refuse/G1"),
+         ("oracle-reject:twice", _SHA_A, "agree-refuse/G1")]
+
+
+def test_verify_reproduces_on_identical_inputs(artifact):
+    result = artifact.judge(_published(_ROWS), _local(_ROWS))
+    assert result["verdict"] == "reproduced" and result["exit"] == 0
+    assert result["checked"] == result["agree"] == len(_ROWS)
+
+
+def test_verify_refutes_a_verdict_that_differs_on_identical_inputs(artifact):
+    local = list(_ROWS)
+    local[1] = ("b.rvl", _SHA_B, "agree-admit")
+    result = artifact.judge(_published(_ROWS), _local(local))
+    assert result["verdict"] == "refuted" and result["exit"] == 1
+    assert result["differ"] == [{"case": "b.rvl", "published": "agree-refuse/G4",
+                                 "local": "agree-admit"}]
+    assert "verdict differs: b.rvl" in artifact.render_verdict(result)
+
+
+def test_verify_refutes_a_table_that_is_not_the_sum_of_its_rows(artifact):
+    """Editing a count without editing the rows is caught with no run at all."""
+    pub = _published(_ROWS)
+    for row in pub["buckets"]:
+        if row["bucket"] == "agree-admit":
+            row["count"] += 1
+    result = artifact.judge(pub, _local(_ROWS))
+    assert result["verdict"] == "refuted"
+    assert any("agree-admit" in c for c in result["self_contradictions"])
+
+
+def test_a_moved_deciding_file_is_different_inputs_not_a_refutation(artifact):
+    """A reader on another tree gets a new measurement, never a false alarm
+    about the published one, even when verdicts also differ."""
+    local = list(_ROWS)
+    local[0] = ("a.rvl", _SHA_A, "agree-refuse/G1")
+    result = artifact.judge(
+        _published(_ROWS),
+        _local(local, deciding={"tools/gate_reference_census.py": _SHA_B}))
+    assert result["verdict"] == "different-inputs" and result["exit"] == 3
+    assert result["decides_verdicts"]["moved"] == [
+        "tools/gate_reference_census.py"]
+
+
+def test_a_file_the_run_read_but_the_publication_never_pinned_is_named(artifact):
+    """The hole a declared list leaves: the emitter decides verdicts and was
+    in no published identity. Measured pins name it on the reader's side."""
+    deciding = {"tools/gate_reference_census.py": _SHA_A,
+                "backends/python/emit.py": _SHA_A}
+    result = artifact.judge(_published(_ROWS), _local(_ROWS, deciding=deciding))
+    assert result["verdict"] == "different-inputs"
+    assert result["unpinned_inputs"] == ["backends/python/emit.py"]
+    assert "UNPINNED INPUT" in artifact.render_verdict(result)
+
+
+def test_a_moved_reference_file_is_different_inputs(artifact):
+    result = artifact.judge(
+        _published(_ROWS),
+        _local(_ROWS, reference={"src/revl/compiler.py": _SHA_B}))
+    assert result["verdict"] == "different-inputs"
+
+
+def test_a_moved_report_input_does_not_change_the_verdict(artifact):
+    """The baseline or the provenance manifest shapes the report, not any
+    program's verdict, so it is named and nothing more."""
+    result = artifact.judge(
+        _published(_ROWS),
+        _local(_ROWS, report={"tests/fixtures/x.json": _SHA_B}))
+    assert result["verdict"] == "reproduced"
+    assert result["report_inputs"]["moved"] == ["tests/fixtures/x.json"]
+
+
+def test_an_edited_or_removed_program_makes_the_check_partial(artifact):
+    local = [("a.rvl", _SHA_B, "agree-admit")] + list(_ROWS[2:])
+    result = artifact.judge(_published(_ROWS), _local(local))
+    assert result["verdict"] == "partial" and result["exit"] == 3
+    assert result["edited"] == ["a.rvl"]
+    assert result["gone"] == ["b.rvl"]
+    assert result["checked"] == 2
+
+
+def test_new_programs_do_not_stop_a_reproduction(artifact):
+    """The corpus grows weekly. A published copy stays checkable."""
+    local = list(_ROWS) + [("new.rvl", _SHA_B, "agree-admit")]
+    result = artifact.judge(_published(_ROWS), _local(local))
+    assert result["verdict"] == "reproduced"
+    assert result["new"] == ["new.rvl"]
+
+
+def test_a_repeated_case_id_is_compared_occurrence_by_occurrence(artifact):
+    local = list(_ROWS)
+    local[3] = ("oracle-reject:twice", _SHA_A, "agree-admit")
+    result = artifact.judge(_published(_ROWS), _local(local))
+    assert result["verdict"] == "refuted"
+    assert [d["case"] for d in result["differ"]] == ["oracle-reject:twice"]
+
+
+def test_a_false_admission_in_the_local_run_refutes(artifact):
+    local = list(_ROWS) + [("new.rvl", _SHA_B, "false-admission")]
+    result = artifact.judge(_published(_ROWS), _local(local))
+    assert result["verdict"] == "refuted"
+    assert result["local_false_admissions"] == ["new.rvl"]
+
+
+def test_a_mechanism_that_does_not_hold_refutes(artifact):
+    result = artifact.judge(_published(_ROWS), _local(_ROWS, holds=False))
+    assert result["verdict"] == "refuted"
+
+
+def test_a_published_false_admission_refutes_the_published_file(artifact):
+    rows = list(_ROWS) + [("x.rvl", _SHA_A, "false-admission")]
+    result = artifact.judge(_published(rows), _local(rows))
+    assert result["verdict"] == "refuted"
+    assert result["self_contradictions"]
+
+
+def test_verify_refuses_a_file_with_nothing_to_verify_against(artifact,
+                                                              tmp_path):
+    """Exit 2 before any census runs: a report without rows and pins cannot be
+    checked case by case, and saying so beats a vacuous pass."""
+    stale = tmp_path / "old.json"
+    stale.write_text(json.dumps({"census": {"schema": artifact.CENSUS_SCHEMA}}))
+    code, text = artifact.verify(stale)
+    assert code == 2 and "predates" in text
+    code, _ = artifact.verify(tmp_path / "absent.json")
+    assert code == 2
+
+
+def test_recording_reads_sees_an_open_and_leaves_no_state(artifact, tmp_path):
+    """The audit hook cannot be removed, so it must be inert outside a block.
+    Process-global state is compared before and after."""
+    before = list(artifact._READS)
+    target = tmp_path / "read-me.txt"
+    target.write_text("x")
+    with artifact.recording_reads() as outer:
+        with artifact.recording_reads() as inner:
+            target.read_text()
+        (tmp_path / "second.txt").write_text("y")
+    assert str(target) in {str(Path(p)) for p in inner}
+    assert str(target) not in {str(Path(p)) for p in outer}
+    assert artifact._READS == before == []
+    target.read_text()
+    assert artifact._READS == []
+
+
+def test_a_bytecode_read_is_pinned_as_its_source(artifact):
+    pyc = (artifact.ROOT / "tools" / "__pycache__"
+           / "gate_reference_census.cpython-312.pyc")
+    assert artifact.tree_file(str(pyc)) == "tools/gate_reference_census.py"
+    assert artifact.tree_file("/definitely/not/in/the/tree.py") is None
+
+
+def test_the_published_rows_add_up_to_the_published_table(committed):
+    c = committed["census"]
+    counts: dict[str, int] = {}
+    for _, _, name in c["cases"]:
+        counts[name] = counts.get(name, 0) + 1
+    assert counts == {row["bucket"]: row["count"] for row in c["buckets"]}
+    assert len(c["cases"]) == c["n"]
+
+
+def test_the_published_pins_cover_what_the_checker_version_does_not(committed):
+    """The emitter that turns the gate into python and the classifier that
+    turns a reference error into a tag both decide verdicts and neither is in
+    `CHECKER_SOURCES`. The measured pins carry them."""
+    deciding = committed["census"]["pins"]["decides_verdicts"]
+    for rel in ("backends/python/emit.py", "tests/test_selfhost_lower.py",
+                "tools/gate_reference_census.py"):
+        assert rel in deciding, f"{rel} decides verdicts and is not pinned"
+    for rel, sha in deciding.items():
+        assert len(sha) == 64 and not rel.startswith("/")
+
+
+# --- 5. the repository's gate on its own committed copy (issue #1572) --------
+#
+# `--verify` answers a reader holding an old copy, so new programs and moved
+# report inputs do not stop it. The repository's own copy is held to more:
+# `--verify --strict` in CI, on every pull request that moves an input. These
+# drive each arm of that stricter answer and of the diff filter that decides
+# when it runs, with no census run.
+
+
+def test_strict_accepts_only_a_full_reproduction_with_nothing_left_over(artifact):
+    result = artifact.judge(_published(_ROWS), _local(_ROWS))
+    assert artifact.current_problems(result) == []
+
+
+def test_strict_fails_on_a_program_the_committed_copy_does_not_carry(artifact):
+    """The reader's verdict stays `reproduced` here; the gate must not."""
+    local = list(_ROWS) + [("new.rvl", _SHA_B, "agree-admit")]
+    result = artifact.judge(_published(_ROWS), _local(local))
+    assert result["verdict"] == "reproduced"
+    assert artifact.current_problems(result) == [
+        "1 program in the corpus is not in the committed artifact"]
+
+
+def test_strict_fails_on_a_moved_report_input(artifact):
+    result = artifact.judge(
+        _published(_ROWS),
+        _local(_ROWS, report={"tests/fixtures/x.json": _SHA_B}))
+    assert result["verdict"] == "reproduced"
+    assert artifact.current_problems(result) == [
+        "report input moved: tests/fixtures/x.json"]
+
+
+def test_strict_fails_on_every_verdict_but_reproduced(artifact):
+    moved = artifact.judge(
+        _published(_ROWS),
+        _local(_ROWS, reference={"src/revl/compiler.py": _SHA_B}))
+    assert moved["verdict"] == "different-inputs"
+    assert artifact.current_problems(moved) == [
+        "the verdict is different-inputs, not reproduced"]
+    edited = list(_ROWS)
+    edited[0] = ("a.rvl", _SHA_B, "agree-admit")
+    partial = artifact.judge(_published(_ROWS), _local(edited))
+    assert partial["verdict"] == "partial"
+    assert artifact.current_problems(partial) == [
+        "the verdict is partial, not reproduced"]
+
+
+def _committed_for_filter():
+    return {"census": {
+        "cases": [["examples/a.rvl", _SHA_A, "agree-admit"],
+                  ["oracle-reject:twice", _SHA_A, "agree-refuse/G1"]],
+        "pins": {"decides_verdicts": {"backends/python/emit.py": _SHA_A},
+                 "reference": {"src/revl/lower.py": _SHA_A},
+                 "report_inputs": {"tools/gate_reference_census_baseline.json":
+                                   _SHA_A}}}}
+
+
+def test_the_diff_filter_names_every_kind_of_input(artifact):
+    committed = _committed_for_filter()
+    inputs = ["backends/python/emit.py", "src/revl/lower.py",
+              "tools/gate_reference_census_baseline.json", "examples/a.rvl",
+              "tests/fixtures/brand_new.rvl", "crates/revl-gate/src/admission.rs",
+              "crates/revl-gate/Cargo.toml", "tools/census_artifact.py",
+              "docs/census-artifact.json", "selfhost/lower.rvl"]
+    assert artifact.moved_inputs(inputs, committed) == inputs
+
+
+def test_the_diff_filter_ignores_what_the_census_does_not_read(artifact):
+    """A reference module the census never opens is not an input: this is
+    what keeps an unrelated compiler change from owing a regeneration."""
+    committed = _committed_for_filter()
+    unrelated = ["src/revl/mcp/http_face.py", "docs/v2.0-roadmap.md",
+                 "bench/results/x.rvl", "backends/python/.venv/lib/y.rvl",
+                 "crates/revl-gate/README.md", ""]
+    assert artifact.moved_inputs(unrelated, committed) == []
+
+
+def test_an_unreadable_artifact_makes_every_path_an_input(artifact):
+    """A broken committed copy cannot switch its own gate off."""
+    assert artifact.moved_inputs(["docs/x.md"], None) == ["docs/x.md"]
+
+
+def test_the_committed_reference_pins_are_what_the_run_opened(committed):
+    """Measured, not globbed: a subset of `src/revl`, and not all of it."""
+    reference = committed["census"]["pins"]["reference"]
+    assert reference and all(rel.startswith("src/revl/") and rel.endswith(".py")
+                             for rel in reference)
+    everything = list((ROOT / "src" / "revl").rglob("*.py"))
+    assert len(reference) < len(everything)
+    assert "src/revl/compiler.py" in reference
+    # The MCP HTTP face is never imported by a census run. Under the old glob
+    # it was pinned anyway, so a change to it made the artifact stale.
+    assert "src/revl/mcp/http_face.py" not in reference

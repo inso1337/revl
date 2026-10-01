@@ -59,7 +59,8 @@ def _emit_app_module():
     """Compile demo/live_systems/app.rvl to a live python module."""
     sys.path.insert(0, str(ROOT / "backends" / "python"))
     from revl.compiler import compile_files  # noqa: PLC0415
-    import emit  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     source = emit.emit(compile_files([str(APP)]))
     module = __import__("types").ModuleType("revl_app_331")
     exec(compile(source, "<app-331>", "exec"), module.__dict__)

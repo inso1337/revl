@@ -26,7 +26,7 @@ from fnmatch import fnmatchcase
 
 from .. import cap_order
 from .. import intent as _intent
-from .._paths import backends_root
+from .._paths import backends_root, python_backend_emitter
 from ..holes import collect as collect_holes
 from ..holes import summarize as summarize_holes
 from ..refusal import refusals
@@ -456,10 +456,8 @@ def _emitter_refused(refusal: BaseException) -> "SessionError":
 def _backend():
     """Import the cordis-py runtime, with the same guidance `revl run` gives."""
     backend_dir = backends_root() / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
     try:
-        import emit  # noqa: PLC0415 — backend import after path setup
+        emit = python_backend_emitter()
         import runtime as runtime_mod  # noqa: PLC0415
         from cordis import Context  # noqa: PLC0415
         from cordis.fiber import FiberState  # noqa: PLC0415
@@ -2722,11 +2720,13 @@ class Session:
     def _provided_keys(self) -> list[str]:
         """The keys currently *served* — a declared key whose provider is
         inactive reads as absent, which is what drift and step-verification
-        both want to see."""
+        both want to see. Resolved in each provider's placement realm
+        (`resolved_keys`, the same surface as `state()`'s `providedKeys`), so
+        a key isolated in `realm("wa")` is served, not absent (issue #1513)."""
         driver = self._driver
         if driver is None:
             return []
-        return sorted(k for k, v in driver._namespace().items() if v is not None)
+        return sorted(driver.resolved_keys())
 
     def _live_fingerprint(self) -> dict:
         """The live composition in the same shape `apply.fingerprint` derives
@@ -2736,11 +2736,15 @@ class Session:
         from ..run import _components, _load_order  # noqa: PLC0415 — lazy
 
         ir = self.ir or {}
-        served = set(self._provided_keys())
+        driver = self._driver
         provisions = []
         for comp in _components(ir):
+            isolate = comp.get("isolate") or {}
             for key in comp.get("provides") or {}:
-                if key in served:
+                # per provider, in ITS placement realm (issue #1513): a key
+                # provided in two realms is two provisions, each live or not.
+                if driver is not None and driver._resolve_provision(
+                        key, isolate.get(key)) is not None:
                     provisions.append({"key": key, "provider": comp["name"]})
         return {
             "components": sorted(c["name"] for c in _components(ir)),
@@ -4807,8 +4811,7 @@ class Session:
                                f"(provided: {', '.join(sorted(namespace)) or 'none'})")
         service = namespace[key]
         if service is None:
-            raise SessionError(f"key {key!r} is declared but not currently provided "
-                               "— its provider is inactive")
+            raise SessionError(_unserved_key_message(driver, key))
         target = getattr(service, method, None)
         if target is None or not callable(target):
             raise SessionError(f"`{key}.{method}` is not callable on the provided value")
@@ -8382,8 +8385,7 @@ class Session:
         if self._driver is not None:
             self._run(self._driver._flush())
             report["trace"] = self._driver.drain_events()
-            report["providedKeys"] = sorted(
-                k for k, v in self._driver._namespace().items() if v is not None)
+            report["providedKeys"] = sorted(self._driver.resolved_keys())
         return report
 
     def replay_forward(self, component: str | None, frm: int) -> dict:
@@ -8724,6 +8726,15 @@ def _ir_has_approval_edges(ir: dict) -> bool:
             return any(walk(v) for v in node)
         return False
     return walk(ir.get("components") or [])
+
+
+def _unserved_key_message(driver, key: str) -> str:
+    """Why a declared key has no value to call (issue #1513), naming the
+    provider and its realm rather than guessing "inactive"."""
+    from ..run import unserved_key_reason  # noqa: PLC0415 (lazy: run pulls cordis)
+    return (unserved_key_reason(driver.ir or {}, key)
+            or f"key {key!r} is declared but not currently provided "
+               "— its provider is inactive")
 
 
 def _plain(value):

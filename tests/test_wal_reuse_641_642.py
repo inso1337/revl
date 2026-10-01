@@ -343,8 +343,13 @@ def test_cli_recover_over_reused_wal_all_clean_exits_zero(tmp_path, capsys):
     rc = main(["recover", "--wal", path, "--json"])
     out = capsys.readouterr().out
 
+    # issue #1477: recover ran against the in-memory model, but this
+    # roll-forward made no call against any world, so the model stood in for
+    # nothing and exit 0 is true of the outside world too.
     assert rc == 0
     report = json.loads(out)
     assert report["verdict"] == "rolled-forward"
+    assert report["world"] == "model"
+    assert report["worldCalls"] == 0
     assert report["residue"]["clean"] is True
     assert report["steadyState"]["outstanding"] == []

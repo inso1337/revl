@@ -246,7 +246,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="a TOML/JSON placement map: also print the item-411 sandbox "
              "envelope per sandboxed process: the fs/net grant, the effective "
              "reach of each seam-served key, and the externs the [sandbox.needs] "
-             "table vouches (claimed, unverified). Human output only.")
+             "table vouches (claimed, unverified); and each model role's "
+             "binding per host with the model bindings digest (item 515). "
+             "Human output only.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
@@ -959,7 +961,54 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_import.add_argument("--key", default="imported", help="provision key")
     mcp_import.add_argument("--backend", default="ts", choices=("ts", "py"),
                             help="host block backend for the generated externs")
+    mcp_import.add_argument("--undo", action="append", default=[],
+                            metavar="TOOL=INVERSE[:result]",
+                            help="declare INVERSE as the tool that reverts TOOL, "
+                                 "making TOOL `witnessed` (repeatable). INVERSE "
+                                 "receives TOOL's arguments, or with `:result` its "
+                                 "structuredContent. Your assertion, not the server's")
     mcp_import.add_argument("-o", "--output", default=None, help="output path (default: stdout)")
+    # `revl mcp proxy` (issue #1463, docs/mcp-proxy.md): gate an existing MCP
+    # server with the surface `revl mcp import` derives, no .rvl written.
+    mcp_proxy = mcp_sub.add_parser(
+        "proxy", help="gate an existing MCP server: classify its tools as `revl mcp "
+                      "import` does and enforce approval, WAL and undo at call time")
+    mcp_proxy.add_argument("upstream", nargs=argparse.REMAINDER,
+                           metavar="-- COMMAND [ARG ...]",
+                           help="the upstream MCP server to spawn, spoken to over "
+                                "its stdio")
+    mcp_proxy.add_argument("--undo", action="append", default=[],
+                           metavar="TOOL=INVERSE[:result]",
+                           help="declare INVERSE as the upstream tool that reverts "
+                                "TOOL (repeatable): TOOL becomes `witnessed`, runs "
+                                "without a prompt, and is reverted on abort. INVERSE "
+                                "receives TOOL's arguments, or with `:result` its "
+                                "structuredContent")
+    mcp_proxy.add_argument("--trust-read-only-hints", action="store_true",
+                           help="admit a tool whose uncontradicted `readOnlyHint: "
+                                "true` revl cannot check, without a prompt. By "
+                                "default the proxy does not trust an unchecked "
+                                "claim and gates the tool like any emission")
+    mcp_proxy.add_argument("--upstream-timeout", type=float, default=120.0,
+                           metavar="SECONDS",
+                           help="how long to wait for one upstream answer "
+                                "(default: 120)")
+    mcp_proxy.add_argument("--wal", default=None, metavar="PATH",
+                           help="the session write-ahead log (default: the "
+                                "per-user state directory)")
+    mcp_proxy.add_argument("--operator-profile", default=None, metavar="PROFILE",
+                           help="an operator profile (item 55); grant `approve` "
+                                "only to the human, or the agent can answer its "
+                                "own tickets")
+    mcp_proxy.add_argument("--operator", default=None, metavar="TOKEN",
+                           help="which operator in the profile this session runs as")
+    mcp_proxy.add_argument("--policy", default=None, metavar="POLICY",
+                           help="a boundary-policy file (item 33) bound to the session")
+    mcp_proxy.add_argument("--approval-record-values", default="withheld",
+                           choices=("bound", "withheld"),
+                           help="whether an approved crossing's caller-supplied "
+                                "resource value is written to the durable approval "
+                                "log (default: withheld)")
 
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
@@ -1274,6 +1323,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--env", default=None,
                      help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
+    run.add_argument("--providers", default=None, metavar="FILE",
+                     help="JSON/TOML provider configuration binding each "
+                          "`model role` to a runtime adapter (OpenAI-compatible, "
+                          "Anthropic, Gemini). Checked before boot against the "
+                          "program's placement: an on_device role bound off the "
+                          "device, a crossing on an unbound or undeclared role, "
+                          "or a credential in the file refuses the run. "
+                          "Credentials come from the environment variables the "
+                          "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
                      help="boundary policy file (item 33). With --backend wasm it "
                           "enforces the item-289 least-authority chain (host "
@@ -1423,6 +1481,15 @@ def build_parser() -> argparse.ArgumentParser:
                               "recover reports the classification per un-finalized "
                               "decision and changes nothing, matching `revl estop "
                               "--report`")
+    recover.add_argument("--model-only", action="store_true",
+                         help="accept a run against the in-memory model (issue "
+                              "#1477). recover has no real world binding yet, so "
+                              "every inverse, compensation and re-issue it "
+                              "reports is modelled, not performed, and when the "
+                              "model stood in for any call it exits 3 rather "
+                              "than claim reconciliation. With this "
+                              "flag the exit status follows the modelled "
+                              "residue instead (0 clean, 1 residue)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     estop = sub.add_parser(
@@ -1872,7 +1939,41 @@ def build_parser() -> argparse.ArgumentParser:
                              help="the pool directory")
     pool_status.add_argument("--json", action="store_true",
                              help="the charter and the full roster, including "
-                                  "the append-only event ledger")
+                                  "the append-only event ledger, and the "
+                                  "health record")
+    pool_status.add_argument(
+        "--require-live", type=float, default=None, metavar="SECONDS",
+        help="exit 1, naming them, if any member was not verified live "
+             "within SECONDS (by `pool probe` or a delivered task). A health "
+             "check: it withdraws nobody")
+
+    pool_probe = pool_sub.add_parser(
+        "probe",
+        help="ask members to prove they are there: send a signed probe, "
+             "verify the signed heartbeat under the member's pinned key, and "
+             "record the answer in health.json. Changes no authority")
+    pool_probe.add_argument("--dir", required=True, metavar="DIR",
+                            help="the pool directory")
+    pool_probe.add_argument("--peer", action="append", metavar="ID",
+                            help="a member to probe. Repeatable. Default: "
+                                 "every member")
+    pool_probe.add_argument("--peer-addr", default=None, metavar="HOST:PORT",
+                            help="where that member's `pool serve` listens. "
+                                 "Needs exactly one --peer. Without it, the "
+                                 "address of the member's last verified "
+                                 "contact is used")
+    pool_probe.add_argument("--dispatch-identity", required=True,
+                            metavar="PATH",
+                            help="the operator's PRIVATE identity file, the "
+                                 "one tasks are signed with. The peer refuses "
+                                 "a probe that does not verify under the "
+                                 "operator key it pinned")
+    pool_probe.add_argument("--timeout", type=float, default=10.0,
+                            metavar="SECONDS",
+                            help="how long to wait for each member "
+                                 "(default: 10)")
+    pool_probe.add_argument("--json", action="store_true",
+                            help="every probe outcome as JSON")
 
     pool_withdraw = pool_sub.add_parser(
         "withdraw",

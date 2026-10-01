@@ -13,10 +13,10 @@ revl has two independently written implementations of its own semantics.
 same corpus and classifies every disagreement. Agreement means the same
 TAG and the same MESSAGE, not merely the same verdict.
 
-Distinct programs: **888**. Programs run: **894**.
-Checker version: `GATE-CENSUS-1+378bb31fb76b`.
+Distinct programs: **1013**. Programs run: **1019**.
+Checker version: `GATE-CENSUS-1+ee46da7324ac`.
 Engine: `selfhost`.
-Run: `census-selfhost-71f2f8f1e6f9`.
+Run: `census-selfhost-fa58bc994a8a`.
 
 The two numbers differ because 6 case ids reach
 the corpus twice, from two entries that spell the same
@@ -32,13 +32,16 @@ named so the gap is checkable rather than asserted:
 - `oracle-reject:two unmarked emissions in one expression name the first (G4)`
 
 Neither identity is a commit or a clock. `run` is a sha256 over the corpus
-this run read; the checker version is a sha256 over the files that decide
-what the census does. Every file name inside a digest is relative to the
-checkout root, so both are recomputable from any clone, at any path.
+this run read; the checker version is a sha256 over five named files the
+crate reproduction is keyed on. Neither is the complete list of what
+decides a verdict: that list is measured, not named, and is pinned file by
+file in `census.pins` (see "Verifying a published copy" below). Every
+file name inside a digest is relative to the checkout root, so all of them
+are recomputable from any clone, at any path.
 
 ## The claim, and why it is not the corpus size
 
-The interesting property is not that the two agree over 888 programs.
+The interesting property is not that the two agree over 1013 programs.
 It is that the bucket that matters **cannot be written**.
 
 `false-admission` is an issued admission for a program the reference
@@ -136,24 +139,24 @@ Read the two columns below as two different questions, because they are:
 
 | corpus | loop-authored | human-authored | total | independent of the loop | floor | undeclared | verdict |
 |---|---|---|---|---|---|---|---|
-| `census` | 0 | 0 | 894 | 100.0% | 80% | 0 | ok |
-| `emit_go_corpus` | 0 | 0 | 19 | 100.0% | 75% | 0 | ok |
+| `census` | 0 | 0 | 1019 | 100.0% | 80% | 0 | ok |
+| `emit_go_corpus` | 0 | 0 | 24 | 100.0% | 75% | 0 | ok |
 | `emit_java_corpus` | 0 | 0 | 34 | 100.0% | 75% | 0 | ok |
-| `emit_py_corpus` | 0 | 0 | 66 | 100.0% | 75% | 0 | ok |
+| `emit_py_corpus` | 0 | 0 | 68 | 100.0% | 75% | 0 | ok |
 | `emit_rust_corpus` | 0 | 0 | 41 | 100.0% | 75% | 0 | ok |
 | `emit_ts_corpus` | 0 | 0 | 42 | 100.0% | 75% | 0 | ok |
 | `emit_wasm_corpus` | 0 | 0 | 22 | 100.0% | 75% | 0 | ok |
-| `selfhost_oracle` | 0 | 0 | 328 | 100.0% | 90% | 0 | ok |
+| `selfhost_oracle` | 0 | 0 | 343 | 100.0% | 90% | 0 | ok |
 
 ## Full bucket table
 
 | bucket | count |
 |---|---|
-| `agree-admit` | 480 |
-| `agree-refuse/G4` | 77 |
+| `agree-admit` | 510 |
+| `agree-refuse/G4` | 156 |
+| `agree-refuse/G1` | 73 |
 | `agree-refuse/T1` | 71 |
-| `agree-refuse/G1` | 57 |
-| `no-objection-out-of-slice` | 54 |
+| `no-objection-out-of-slice` | 53 |
 | `agree-refuse/A1` | 40 |
 | `agree-refuse/G6` | 21 |
 | `refuse-out-of-slice/FOREIGN` | 21 |
@@ -172,9 +175,9 @@ Read the two columns below as two different questions, because they are:
 | `agree-refuse/HANDOFF` | 2 |
 | `agree-refuse/MODEL` | 2 |
 | `agree-refuse/T2` | 2 |
+| `refuse-out-of-slice/G4` | 2 |
 | `agree-refuse/BOOT` | 1 |
 | `agree-refuse/COUNCIL` | 1 |
-| `refuse-out-of-slice/G4` | 1 |
 
 ## Reproduction
 
@@ -184,10 +187,10 @@ mirrors. The reproduction asks the REAL crate, built by cargo, and is
 recorded in `tests/fixtures/census_crate_reproduction.json` because it needs a rust toolchain
 and minutes rather than seconds.
 
-- programs: **894**
+- programs: **1019**
 - tracked buckets agree: **yes**
 - crate `false-admission` members: **0**
-- recorded at checker version: `GATE-CENSUS-1+378bb31fb76b`
+- recorded at checker version: `GATE-CENSUS-1+ee46da7324ac`
 - current for this run: **yes**
 
 What it does not establish: The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.
@@ -217,11 +220,11 @@ below are the values you should get.
 
 | number here | what recomputes it |
 |---|---|
-| distinct programs, 888 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
-| programs run, 894 | the length of the same list, repeats included |
-| run `census-selfhost-71f2f8f1e6f9` | sha256 over every `(case id, source)` the run read, ids repo-relative |
-| checker version `GATE-CENSUS-1+378bb31fb76b` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
-| `src/revl@sha256:63ca4121d9ff` | sha256 over `src/revl/**/*.py` |
+| distinct programs, 1013 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
+| programs run, 1019 | the length of the same list, repeats included |
+| run `census-selfhost-fa58bc994a8a` | sha256 over every `(case id, source)` the run read, ids repo-relative |
+| checker version `GATE-CENSUS-1+ee46da7324ac` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
+| `src/revl@sha256:f29b1f5ca5f1` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
 | every bucket count | `tools/gate_reference_census.py --json out.json` |
 | the false-admit allowance | `tools/gate_reference_census_baseline.json`, which is in the tree |
 | the provenance columns | `tools/corpus_provenance.py` over `tests/fixtures/corpus_provenance.json` |
@@ -233,6 +236,65 @@ program lists in `tests/test_selfhost_lower.py` and
 `tools/gate_reference_census.py`, and `--json` writes out the per-case
 classification if you want to audit an individual verdict.
 
+## Verifying a published copy
+
+`--check` asks whether this file is what today's tree produces, and it
+fails as soon as the corpus grows. A reader holding a copy published
+earlier needs a different question answered: were the numbers true on
+the inputs they name? That is `--verify`:
+
+```
+.venv/bin/python tools/census_artifact.py --verify path/to/census-artifact.json
+```
+
+It re-runs the census in your clone and compares in two steps. First the
+pins: every file the published verdicts depend on, each by sha256. Then
+the verdicts, one row per program: this file carries 1019
+rows of case id, sha256 of the source and bucket, and every row whose
+source is byte-identical in your clone is recomputed and compared.
+
+| verdict | exit | meaning |
+|---|---|---|
+| reproduced | 0 | the inputs that decide a verdict are byte-identical and every published row matched |
+| refuted | 1 | same inputs, different verdict; or the file contradicts itself; or a false admission; or the mechanism does not hold |
+| partial | 3 | same inputs, every row still present matched, but some programs were edited or removed since |
+| different-inputs | 3 | a file that decides a verdict differs, so the run is a new measurement and not a check |
+
+The files that decide a verdict are MEASURED rather than listed. The
+generator records, through a Python audit hook, every file under the
+checkout the census run opens, and pins each one. For this run that is
+the corpus (per row), the `src/revl/**/*.py` modules it opened (38 files), and:
+
+- `backends/python/emit.py`
+- `tests/test_selfhost_lower.py`
+- `tools/build_gate_crate.py`
+- `tools/gate_reference_census.py`
+
+`--verify` measures the same set on your side, and a file your run
+opened that the publication does not pin is reported by name as an
+UNPINNED INPUT. A list someone wrote down can forget a file. This one
+cannot, short of the file being opened by something the hook does not
+see, such as a subprocess.
+
+### What each way of cooking this runs into
+
+| move | what stops it | by the tool, or by history |
+|---|---|---|
+| record a `false-admission` into the baseline | `--record` drops it (`NEVER_BASELINED`) | tool |
+| hand-edit the baseline to tolerate one | `--check` fails on any member whatever the baseline says | tool |
+| edit a count in `census-artifact.json` | its bucket table must equal the sum of its per-case rows, and `--verify` recomputes every row | tool |
+| edit a row and the count together | `--verify` recomputes the row from pinned inputs and reports the case by name | tool |
+| measure with one gate, emitter or classifier and publish another | each is pinned by sha256, measured; a reader's run names any file that moved or was never pinned | tool |
+| quote the fast engine where the real crate disagrees | the crate run is recorded at a checker version, and a stale one lifts no claim | tool |
+| drop hard programs from the corpus before publishing | the corpus is every `.rvl` under fixed directories plus three inline lists, globbed and not selected; a removal is a public diff | history |
+| bend the reference until it agrees with the gate | the reference is pinned, so the bent version is the one published and readable | history |
+| mislabel a document's provenance | nothing; stated below | history |
+
+The rows marked tool are closed by construction: no edit to the
+published JSON survives `--verify` on the pinned inputs, and no edit to
+the baseline can tolerate a `false-admission`. The rows marked history are closed only because the repository
+is public and every one of those moves is a diff somebody can read.
+
 ## What this does not establish
 
 - This report says nothing about any implementation other than revl's own two. It is not a comparison and carries no comparative claim.
@@ -240,7 +302,7 @@ classification if you want to audit an individual verdict.
 - Generation zero in the provenance manifest is a declaration about the tree as it stood, not a measurement. What holds from there on is that an arriving document must name its generation, and that an undeclared one counts as loop-authored.
 - Generation zero does not mean a person typed it. Issue #1397 measured the generation-zero set against the commits that introduced it: 153 of 850 entries arrived on a branch named agent/*, 132 more on a commit carrying an AI co-author trailer, 415 on commits pushed to the trunk with no branch to read, and the repository's root commit carries such a trailer itself. Both signals are lower bounds. The honest reading is that this corpus is model-written and pre-loop, and the floors gate the second word, not the first.
 - A mislabelled provenance entry defeats the provenance measurement exactly as re-recording the baseline would defeat the census. Neither is detected by a tool; both are edits in a diff somebody reads.
-- The corpus holds 6 case ids that appear twice, so `n` (894) counts 6 programs twice and `n_distinct` (888) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported.
+- The corpus holds 6 case ids that appear twice, so `n` (1019) counts 6 programs twice and `n_distinct` (1013) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported.
 
 ## Schema
 

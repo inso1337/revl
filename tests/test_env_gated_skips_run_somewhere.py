@@ -129,6 +129,14 @@ _INTENTIONALLY_LOCAL: dict[str, str] = {
         "which is the one job that runs `npm ci`. The variable itself stays a "
         "developer convenience."
     ),
+    "REVL_LIVE_OLLAMA_MODEL": (
+        "Opt-in live test of the OpenAI-compatible adapter against a local "
+        "Ollama (issue #1461). Issue #1461 forbids real network calls in CI and "
+        "no CI runner has Ollama or model weights, so it can never be set "
+        "there. Every other adapter test in tests/test_model_providers_1461.py "
+        "runs in CI against a loopback fake server speaking the same wire "
+        "format, so the gate hides a machine, not a code path."
+    ),
 }
 
 # Reading one of these is a read of the CHILD process's environment being

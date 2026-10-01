@@ -53,7 +53,8 @@ def _load_module(name: str, path: Path):
 # imported under their canonical names on purpose: emitted modules do
 # `from runtime import ...`, so an aliased copy would be a *different* module
 # object and the trace fixture would observe nothing.
-import emit as py_emit  # noqa: E402
+from revl._paths import python_backend_emitter  # noqa: E402
+py_emit = python_backend_emitter()
 import replay  # noqa: E402
 import runtime as runtime_mod  # noqa: E402
 
@@ -725,6 +726,26 @@ def _call(tool: str, arguments: dict) -> dict:
     return response["result"]["structuredContent"]
 
 
+@pytest.fixture
+def fresh_server_session(monkeypatch):
+    """A fresh MCP server session for one test, unloaded and put back after.
+
+    Two tests below used to assign `server.SESSION = Session()` and load a
+    composition into it with no teardown, so every later test in the process
+    that drives the server met "a composition is already loaded" (seen in
+    `tests/test_mcp.py::test_revl_call_surfaces_ticket_for_class_c_crossing`
+    whenever this file ran first). `monkeypatch` restores the module global;
+    the unload releases what the test booted."""
+    import revl.mcp.server as _server
+    from revl.mcp.session import Session as _Session
+
+    session = _Session()
+    monkeypatch.setattr(_server, "SESSION", session)
+    yield session
+    if session.loaded:
+        session.unload()
+
+
 def test_the_replay_tools_are_advertised_with_honest_annotations():
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
@@ -742,13 +763,11 @@ def test_the_replay_tools_are_advertised_with_honest_annotations():
     assert "record" in tools["revl_load"]["inputSchema"]["properties"]
 
 
-def test_replay_tools_say_recording_must_be_switched_on_at_load():
+def test_replay_tools_say_recording_must_be_switched_on_at_load(
+        fresh_server_session):
     # Deterministic precondition instead of relying on prior tests' shared
     # global session: a fresh session loaded WITHOUT record, so revl_timeline
     # reports that recording must be switched on regardless of test order.
-    import revl.mcp.server as _server
-    from revl.mcp.session import Session as _Session
-    _server.SESSION = _Session()
     _call("revl_load", {"source": (
         "service Notes { fn put(k: Str, v: Str) }\n"
         "component N provides notes: Notes {\n"
@@ -1003,10 +1022,7 @@ def test_real_cordis_bisect_finds_the_first_emission_step(session):
 
 
 @needs_cordis
-def test_real_cordis_bisect_is_exposed_as_an_mcp_tool():
-    import revl.mcp.server as _server
-    from revl.mcp.session import Session as _Session
-    _server.SESSION = _Session()
+def test_real_cordis_bisect_is_exposed_as_an_mcp_tool(fresh_server_session):
     _call("revl_load", {"source": USER_CACHE, "config": PG_CONFIG,
                         "record": True})
     _call("revl_call", {"key": "cache", "method": "put", "args": ["a", "1"]})

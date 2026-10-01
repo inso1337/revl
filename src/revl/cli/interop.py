@@ -92,8 +92,91 @@ def _run_fmt(args: argparse.Namespace) -> int:
     return exit_code
 
 
+def _bind_session_authority(args) -> int | None:
+    """Bind the operator profile, boundary policy and approval policy named
+    on the command line to the compiler server's session. Shared by
+    `revl mcp serve` and `revl mcp proxy`, so a proxied session answers to the
+    same authority a served one does. Returns an exit code on a refusal."""
+    # operator capabilities (docs/operator-capabilities.md, item 55): bind
+    # the served session to one operator identity, so its management verbs
+    # are scoped by that operator's grants. No profile => ungated (today's
+    # root-over-transport), so this is opt-in for networked/multi-operator
+    # use.
+    if getattr(args, "operator_profile", None):
+        from ..mcp.operator import ProfileError, load_profile
+        from ..mcp.server import SESSION
+
+        try:
+            registry = load_profile(args.operator_profile)
+        except (OSError, ProfileError) as error:
+            print(f"error: cannot load operator profile "
+                  f"{args.operator_profile}: {error}", file=sys.stderr)
+            return 1
+        token = getattr(args, "operator", None)
+        operator = registry.get(token) if token else registry.sole()
+        if operator is None:
+            if token:
+                print(f"error: operator profile names no operator {token!r} "
+                      f"(known: {', '.join(sorted(registry.operators)) or 'none'})",
+                      file=sys.stderr)
+            else:
+                print("error: the operator profile declares multiple "
+                      "operators — pass --operator to select which identity "
+                      "this session runs as", file=sys.stderr)
+            return 1
+        SESSION.operator = operator
+        # item 471 / issue #979: the session runs AS one operator, but a
+        # multi-party question is answered by several. The whole registry is
+        # what a cast attributed to another operator is checked against
+        # (`revl.mcp.quorum.resolve_cast`); without it, a second identity
+        # cannot be proven and every such cast is refused.
+        SESSION.operator_registry = registry
+    # boundary policy (item 33): bind a policy to the session so its agent
+    # sandbox is enforced and, with `leases enforced`, the item-61 lease
+    # advisory becomes an admission refusal. Opt-in, like the profile above.
+    if getattr(args, "policy", None):
+        from ..policy import PolicyError, load_policy
+        from ..mcp.server import SESSION
+
+        try:
+            SESSION.sandbox = load_policy(args.policy)
+        except (OSError, PolicyError) as error:
+            print(f"error: cannot load policy {args.policy}: {error}",
+                  file=sys.stderr)
+            return 1
+    # auto-approve policy (item 246): the second orthogonal gate, off unless
+    # named here. Enabling it REQUIRES recording (enforced at load). With no
+    # operator profile that WITHHOLDS `approve` from the calling identity, the
+    # class-(c) prompt is self-answerable and the gate is advisory — warn at
+    # startup naming the hole (Decision 4; the diagnostic is not optional).
+    if getattr(args, "approval_policy", None):
+        from ..mcp.server import SESSION
+
+        SESSION.approval_policy = args.approval_policy
+        operator = getattr(SESSION, "operator", None)
+        self_approvable = operator is None or any(
+            g.allow and g.covers_verb("approve")
+            for g in getattr(operator, "grants", ()))
+        if self_approvable:
+            print("warning: the approval policy is enabled but the calling "
+                  "identity can answer its own class-(c) tickets (no operator "
+                  "profile withholds `approve`), so the per-call prompt is "
+                  "advisory, not a gate — bind --operator-profile that grants "
+                  "`approve` only to the human's identity (item 246, "
+                  "Decision 4)", file=sys.stderr)
+    # roadmap 425 F3 / 427 F5: the durability posture for an approved
+    # crossing's caller-supplied resource value. Read unconditionally (it has
+    # a default), so it applies whether or not the approval policy is on.
+    values = getattr(args, "approval_record_values", None)
+    if values:
+        from ..mcp.server import SESSION
+
+        SESSION.approval_record_values = values
+    return None
+
+
 def _run_mcp(args) -> int:
-    """`revl mcp {serve,schema,import}` — the MCP bridge (docs/mcp-bridge.md)."""
+    """`revl mcp {serve,schema,import,proxy}`: the MCP bridge (docs/mcp-bridge.md)."""
     from ..mcp.schema import import_tools, tools_from_ir
     from ..mcp.server import serve
 
@@ -120,81 +203,9 @@ def _run_mcp(args) -> int:
             providers=providers or None,
             roots=tuple(getattr(args, "root", None) or ()) or None,
         )
-        # operator capabilities (docs/operator-capabilities.md, item 55): bind
-        # the served session to one operator identity, so its management verbs
-        # are scoped by that operator's grants. No profile => ungated (today's
-        # root-over-transport), so this is opt-in for networked/multi-operator
-        # use.
-        if getattr(args, "operator_profile", None):
-            from ..mcp.operator import ProfileError, load_profile
-            from ..mcp.server import SESSION
-
-            try:
-                registry = load_profile(args.operator_profile)
-            except (OSError, ProfileError) as error:
-                print(f"error: cannot load operator profile "
-                      f"{args.operator_profile}: {error}", file=sys.stderr)
-                return 1
-            token = getattr(args, "operator", None)
-            operator = registry.get(token) if token else registry.sole()
-            if operator is None:
-                if token:
-                    print(f"error: operator profile names no operator {token!r} "
-                          f"(known: {', '.join(sorted(registry.operators)) or 'none'})",
-                          file=sys.stderr)
-                else:
-                    print("error: the operator profile declares multiple "
-                          "operators — pass --operator to select which identity "
-                          "this session runs as", file=sys.stderr)
-                return 1
-            SESSION.operator = operator
-            # item 471 / issue #979: the session runs AS one operator, but a
-            # multi-party question is answered by several. The whole registry is
-            # what a cast attributed to another operator is checked against
-            # (`revl.mcp.quorum.resolve_cast`); without it, a second identity
-            # cannot be proven and every such cast is refused.
-            SESSION.operator_registry = registry
-        # boundary policy (item 33): bind a policy to the session so its agent
-        # sandbox is enforced and, with `leases enforced`, the item-61 lease
-        # advisory becomes an admission refusal. Opt-in, like the profile above.
-        if getattr(args, "policy", None):
-            from ..policy import PolicyError, load_policy
-            from ..mcp.server import SESSION
-
-            try:
-                SESSION.sandbox = load_policy(args.policy)
-            except (OSError, PolicyError) as error:
-                print(f"error: cannot load policy {args.policy}: {error}",
-                      file=sys.stderr)
-                return 1
-        # auto-approve policy (item 246): the second orthogonal gate, off unless
-        # named here. Enabling it REQUIRES recording (enforced at load). With no
-        # operator profile that WITHHOLDS `approve` from the calling identity, the
-        # class-(c) prompt is self-answerable and the gate is advisory — warn at
-        # startup naming the hole (Decision 4; the diagnostic is not optional).
-        if getattr(args, "approval_policy", None):
-            from ..mcp.server import SESSION
-
-            SESSION.approval_policy = args.approval_policy
-            operator = getattr(SESSION, "operator", None)
-            self_approvable = operator is None or any(
-                g.allow and g.covers_verb("approve")
-                for g in getattr(operator, "grants", ()))
-            if self_approvable:
-                print("warning: the approval policy is enabled but the calling "
-                      "identity can answer its own class-(c) tickets (no operator "
-                      "profile withholds `approve`), so the per-call prompt is "
-                      "advisory, not a gate — bind --operator-profile that grants "
-                      "`approve` only to the human's identity (item 246, "
-                      "Decision 4)", file=sys.stderr)
-        # roadmap 425 F3 / 427 F5: the durability posture for an approved
-        # crossing's caller-supplied resource value. Read unconditionally (it has
-        # a default), so it applies whether or not the approval policy is on.
-        values = getattr(args, "approval_record_values", None)
-        if values:
-            from ..mcp.server import SESSION
-
-            SESSION.approval_record_values = values
+        refused = _bind_session_authority(args)
+        if refused is not None:
+            return refused
         # composition persistence (docs/persistence.md): a snapshot passed on
         # the command line is re-admitted through the same gate a live restore
         # runs — a component the current checker rejects aborts the boot loudly
@@ -228,6 +239,9 @@ def _run_mcp(args) -> int:
                          indent=2))
         return 0
 
+    if args.mcp_command == "proxy":
+        return _run_mcp_proxy(args)
+
     # import
     try:
         with open(args.manifest, encoding="utf-8") as handle:
@@ -235,14 +249,50 @@ def _run_mcp(args) -> int:
     except (OSError, json.JSONDecodeError) as error:
         print(f"error: cannot read {args.manifest}: {error}", file=sys.stderr)
         return 1
-    source = import_tools(manifest, service=args.service, key=args.key,
-                          backend=args.backend)
+    from ..mcp.schema import parse_undo_specs
+    try:
+        source = import_tools(manifest, service=args.service, key=args.key,
+                              backend=args.backend,
+                              undo=parse_undo_specs(getattr(args, "undo", None)))
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
     if args.output:
         with open(args.output, "w", encoding="utf-8") as handle:
             handle.write(source)
     else:
         print(source, end="")
     return 0
+
+
+def _run_mcp_proxy(args) -> int:
+    """`revl mcp proxy [OPTIONS] -- COMMAND...` (issue #1463, docs/mcp-proxy.md)."""
+    from ..mcp import proxy
+    from ..mcp.schema import parse_undo_specs
+    from ..mcp.server import SESSION
+
+    command = list(args.upstream or [])
+    if command and command[0] == "--":
+        command = command[1:]
+    if not command:
+        print("error: name the upstream server to gate: "
+              "`revl mcp proxy [OPTIONS] -- COMMAND [ARG ...]`", file=sys.stderr)
+        return 1
+    try:
+        undo = parse_undo_specs(args.undo)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    # the proxy always runs the approval policy: gating is its whole purpose
+    args.approval_policy = "auto"
+    refused = _bind_session_authority(args)
+    if refused is not None:
+        return refused
+    if args.wal:
+        SESSION._wal_path = args.wal
+    return proxy.run(command, undo=undo,
+                     trust_read_only=args.trust_read_only_hints,
+                     timeout=args.upstream_timeout)
 
 
 def _run_serve(args) -> int:
@@ -275,12 +325,17 @@ def _run_serve(args) -> int:
         return 2
 
     from ..holes import refuse_admission  # noqa: PLC0415
+    from ..mcp.surface import declared_param_types  # noqa: PLC0415
 
     try:
         ir = compile_files(args.files)
         # booting is admission: a draft with open obligations may not become a
         # running composition, however it was compiled (docs/holes.md)
         refuse_admission(ir)
+        # item 569 B1: the declared parameter types, read before the checker
+        # strips `Trusted[...]`, so both faces withhold every operation that
+        # takes an authority value.
+        declared = declared_param_types(args.files)
         config = _load_config(getattr(args, "config", None))
         env = _load_env(getattr(args, "env", None))
     except RevlError as error:
@@ -318,9 +373,11 @@ def _run_serve(args) -> int:
         if http:
             from ..mcp.http_face import serve_http  # noqa: PLC0415
             return serve_http(ir, config, composition=args.composition,
-                              host=args.host, port=args.port)
+                              host=args.host, port=args.port,
+                              declared=declared)
         from ..mcp.composed import serve_composition  # noqa: PLC0415
-        return serve_composition(ir, config, composition=args.composition)
+        return serve_composition(ir, config, composition=args.composition,
+                                 declared=declared)
     except SessionError as error:
         print(f"error: {error}", file=sys.stderr)
         return 3

@@ -36,8 +36,8 @@ on:
 # last one: the queue hit 16 runs deep with 2 executing, which made CI the
 # bottleneck the whole push-and-let-CI-test workflow exists to remove.
 # Superseded PR runs are cancelled because only the newest commit matters.
-# Runs on main are NOT cancelled: main's history is the signal, and dropping a
-# run there would leave a landed commit with no verdict.
+# A RUNNING main run is never cancelled; a newer main push replaces the pending
+# one (see cancel-in-progress below).
 concurrency:
   # One stable group per ref, for pushes and pull_requests alike: a newer run on
   # the same ref supersedes the older one.
@@ -55,7 +55,16 @@ concurrency:
   # MERGE INTERACTIONS at the tip. A green tip is the signal that matters, and
   # under this group the tip actually gets one as soon as merging pauses.
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull requests: a newer push cancels the running run (only the newest commit
+  # matters). Every other event (push to main, schedule, dispatch): NEVER cancel
+  # the running run. The group stays per
+  # ref, so GitHub still keeps at most one run in progress and ONE pending: a
+  # newer main push replaces the pending run instead of stacking behind it. That
+  # avoids the reverted per-sha design above (runs stacked, none completed) and
+  # the cancel-everything design (2026-09-30: every main run was cancelled by the
+  # next merge, so main went a day with no verdict at all). Under this rule the
+  # running main commit always reports, and the newest tip is always next.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
 # out the repository and runs tests: none opens an issue, writes a check, pushes
@@ -338,10 +347,11 @@ jobs:
       # repo). A new open item with no tracked state is now a red rather than
       # a line that quietly rots in the roadmap.
       #
-      # D (--check-tier-parity) is the only one still off: it has two real
-      # findings on main (items 421 F6 and 422 F6, python-only fixes to a
-      # language-wide guarantee). Turn it on here as its findings are
-      # dispatched.
+      # D (--check-tier-parity) is on since issue #1572. It was the one check
+      # left off while it had real findings on main (items 421 F6 and 422 F6,
+      # one-tier fixes to a language-wide guarantee); 422 F6 was answered
+      # first, and 421 F6(i) now names every tier's scope, so it is clean and
+      # an off check would only be silence read as success.
       #
       # Never add `|| true`, and never narrow a check to make this line pass.
       # `make roadmap-check-all` runs all five locally.
@@ -366,6 +376,7 @@ jobs:
             --check-duplicate-headers \
             --check-orphan \
             --require-issue \
+            --check-tier-parity \
             --head-branch "$HEAD_BRANCH"
       # The citation half of the same question. check_roadmap_markers above
       # resolves the roadmap's MARKERS against git and says so itself: it
@@ -437,6 +448,11 @@ jobs:
         python: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # Full history: `pytest tests/` includes the real-history tests in
+          # tests/test_landing_witness.py, which FAIL by name on a shallow
+          # clone. They used to skip there, and a skip reads as a pass.
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: ${{ matrix.python }}
@@ -475,7 +491,7 @@ jobs:
       # --check` drift growing from 3 findings to 9 with nothing reporting it.
       #
       # `!cancelled()` and not `always()`, deliberately. This workflow sets
-      # `cancel-in-progress: true`, so a superseded run is cancelled mid-job;
+      # `cancel-in-progress` for pull requests, so a superseded PR run is cancelled mid-job;
       # under `always()` that run would still push through `pytest tests/`,
       # spending the runner minutes that are this repository's actual
       # throughput limit. `!cancelled()` runs after a FAILED step and stops
@@ -601,6 +617,16 @@ jobs:
       # tests/test_backend_suite_roots_combine.py, which needs no toolchain and
       # so covers the tiers this job cannot install.
       - run: cd backends/python && .venv/bin/pytest ../wasm/ tests/ -q
+      # Issue #1465: tck/tests/test_tck.py was collected in NO CI job (it sits
+      # outside tests/, so the root `pytest tests/ -q` runs never touch it, and
+      # no other job named it either). tck/README.md documents exactly this
+      # invocation -- `backends/python/.venv/bin/python -m pytest
+      # tck/tests/test_tck.py -q` -- run under the cordis-py venv this job
+      # already built above, because the kit's own worked-example test
+      # (test_py_reference_run_is_ok_and_a8_async_now_conforms) drives the real
+      # cordis-py runtime and otherwise just skips. Verified locally: 6 passed
+      # 1 skipped without cordis-py, 7 passed with the pinned fork installed.
+      - run: backends/python/.venv/bin/python -m pytest tck/tests/test_tck.py -q
 
   # The root `tests/` suite, WITH the cordis-py runtime.
   #
@@ -624,6 +650,11 @@ jobs:
     if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          # Full history: `pytest tests/` includes the real-history tests in
+          # tests/test_landing_witness.py, which FAIL by name on a shallow
+          # clone. They used to skip there, and a skip reads as a pass.
+          fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
           python-version: "3.12"
@@ -722,8 +753,10 @@ jobs:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
           # full history so the PR base and the previous push tip are both real
-          # locally; the explicit base fetch below is the belt-and-braces guard
-          # that a shallow checkout still works, the same shape `changes` uses.
+          # locally, and so the real-history tests can answer ancestry
+          # questions (they FAIL by name on a shallow clone rather than skip).
+          # The base fetch below must not pass `--depth`: into a full clone
+          # that re-shallows it.
           fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
         with:
@@ -759,7 +792,13 @@ jobs:
           # to the FULL selection on its own, which is the wanted answer there.
           base_arg=""
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch --no-tags --depth=1 origin \
+            # No `--depth` here. A `--depth=1` fetch into this FULL clone
+            # grafts the base tip, which makes the repository shallow again:
+            # every commit older than that tip then reads as "not an
+            # ancestor" of HEAD, and the real-history tests in
+            # tests/test_landing_witness.py measured six carried entries as
+            # carried by nothing (issue #1434).
+            git fetch --no-tags origin \
               "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
             base_arg="--base origin/${BASE_REF}"
           elif [ -n "${BEFORE_SHA}" ] \
@@ -808,7 +847,8 @@ jobs:
   # like `root-suite-affected` and for the same reason: the defect it covers is
   # "nobody was looking", and a check with an `if:` can report `skipping`,
   # which is indistinguishable from a pass in the merge box. It costs one
-  # `gh pr list` and one `git merge-base --is-ancestor` per pull request.
+  # `gh pr list` and one `git merge-base --is-ancestor` per pull request, plus
+  # the baseline's pinned tests (about a minute).
   #
   # `fetch-depth: 0` is load-bearing twice over. The merge commits live on the
   # base branches, not on main, so a single-branch clone does not have them --
@@ -840,9 +880,22 @@ jobs:
       # step stays because it keeps the common case to zero network calls
       # inside the checker.
       - run: git fetch --no-tags --prune origin "+refs/heads/*:refs/remotes/origin/*"
+      # The same run re-measures each baseline entry's WITNESS (issue #1434):
+      # the merge's added inventory, the byte-identity of every file claimed
+      # carried AT the commit that carried it (so a later edit to one of
+      # those files costs nothing), and the tests named for a file that was
+      # carried already modified.
+      # `--pinned run` executes those tests rather than only collecting them,
+      # so the job needs revl and pytest installed; a skipped pin fails, since
+      # a skip is not a pass. Entries it cannot check (REWORKED) are printed
+      # UNCHECKED rather than counted as verified.
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[test]"
       - env:
           GH_TOKEN: ${{ github.token }}
-        run: python3 tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}"
+        run: python tools/check_merged_prs_landed.py --repo "${GITHUB_REPOSITORY}" --pinned run
 
   # The held-out scoring set (roadmap item 537, issue #1207). Every other
   # corpus that scores a change here is a file in this repository, so the
@@ -941,6 +994,75 @@ jobs:
           echo "  REVL_HELDOUT_SEED=$seed python3 tools/heldout_scoring.py \\"
           echo "    --diff-base $base --count 200"
           exit 1
+
+  # Issue #1572: the committed census artifact (`docs/census-artifact.{md,json}`,
+  # roadmap item 549) had drifted from main with nothing reporting it, because
+  # no step ran its check. A check nobody runs reads as a pass.
+  #
+  # This job keeps the committed copy CURRENT. On a pull request it asks
+  # `census_artifact.py --moved-inputs` whether the diff moves an input of the
+  # artifact: a file its pins name (a deciding file, a reference module the
+  # census run opens, a report input), a program it carries, a new `.rvl` under
+  # a census directory, a gate crate source, or the tool and the artifact
+  # themselves. If one moved, `--verify --strict` re-runs the census (about 20
+  # seconds) and fails unless the committed file reproduces program by program
+  # with no program missing and no report input moved. The fix is to run
+  # `python3 tools/census_artifact.py --write` in the same pull request.
+  #
+  # A diff that moves no input is not checked, and says so. On every other
+  # event (push to main, schedule, dispatch) it always checks, so a merge race
+  # between two regenerating pull requests shows up on main. The filter's exit
+  # 2 (it could not decide) runs the check, never skips it.
+  census-artifact:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - id: decide
+        env:
+          # attacker-controllable text reaches the shell through env: only,
+          # the same rule `changes` and `held-out` follow.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): the committed artifact is checked"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          changed=$(git diff --name-only "origin/${BASE_REF}" HEAD)
+          if [ -z "$changed" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "no changed paths (unresolved base ref?): checking anyway"
+            exit 0
+          fi
+          status=0
+          printf '%s\n' "$changed" \
+            | python3 tools/census_artifact.py --moved-inputs || status=$?
+          if [ "$status" = "1" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "this diff moves no input of the census artifact: not checked"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "the inputs above moved (filter exit $status): checking"
+          fi
+      - if: steps.decide.outputs.run == 'true'
+        run: pip install -e ".[test]"
+      - name: the committed census artifact is current
+        if: steps.decide.outputs.run == 'true'
+        run: python3 tools/census_artifact.py --verify --strict
 
   # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
   # container: a sandboxed process runs inside a boundary whose confinement
@@ -1047,14 +1169,6 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7 (v7.6.0)
       # the CONDUCTOR needs cordis-py, same as the container rung.
       - run: sh backends/python/setup.sh
-      # a hosted ubuntu-latest runner exposes /dev/kvm but the runner user is not
-      # in the `kvm` group; open it so the hypervisor can. Fail loudly if the
-      # device is gone (a runner image that dropped KVM must not go quietly).
-      - name: open /dev/kvm
-        run: |
-          ls -l /dev/kvm
-          sudo chmod 666 /dev/kvm
-          test -w /dev/kvm
       # qemu is not preinstalled; the kernel build needs the usual toolchain.
       - name: install qemu + kernel build deps
         run: |
@@ -1062,6 +1176,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 build-essential bc bison flex \
             libelf-dev libssl-dev xz-utils e2fsprogs
+      # a hosted ubuntu-latest runner exposes /dev/kvm but the runner user is not
+      # in the `kvm` group. This step runs AFTER the qemu install on purpose:
+      # installing qemu-system-x86 ships udev rules whose trigger resets
+      # /dev/kvm to root:kvm 0660, which silently undid a chmod done earlier.
+      # A persistent udev rule survives later triggers. Fail loudly if the
+      # device is gone (a runner image that dropped KVM must not go quietly).
+      - name: open /dev/kvm
+        run: |
+          ls -l /dev/kvm
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+          test -r /dev/kvm -a -w /dev/kvm
       # the guest kernel is a small delta over defconfig; cache it so only the
       # first run (or a config/version bump) pays the ~10min build.
       - name: cache guest kernel
@@ -1799,6 +1929,7 @@ jobs:
           tests/test_run_ts_stdlib_fs_root.py
           tests/test_stdlib_version.py
           tests/test_total_field_surface.py
+          tests/test_ts_seam_int_1566.py
           tests/test_value_stdlib.py
           -q
         env:

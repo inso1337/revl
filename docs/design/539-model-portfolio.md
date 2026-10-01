@@ -1,7 +1,10 @@
 # 539: The model portfolio as a device-profiled, schedulable placement
 
 Roadmap: item 515 (issue #1189), from the 2026-09-19 external review. Slice 1
-is LANDED with this note; slices 2 to 5 are designed here and not written.
+is LANDED with this note. Slice S4, the scheduler against a host's DECLARED
+devices, is LANDED and described in section 10. Slice S5, each role's binding
+recorded on the placement side, is LANDED in section 10.6. Slices 2 and 3 are
+designed here and not written.
 
 Number 539 was taken because 531 to 538 are claimed: 531 merged (PR #1220,
 extended by #1243), 532 by PR #1228 and #1242, 533 by #1232, 534 by #1231,
@@ -497,16 +500,20 @@ profile and a residency claim the scheduler can read. Both are provider facts
 demand, what the provider publishes is the residency, and the scheduler is the
 only thing that sees both.
 
-**S4. The scheduler.** Reads a candidate set and picks. It becomes writable
-once S2 and S3 exist, and section 4 says why not before. The refusals of S1 are
-what make it safe: the set is closed, the residence is uniform, and every
-candidate is comparable, so the scheduler chooses within a placement rather
-than about one.
+**S4. The scheduler. LANDED against DECLARED supply (section 10).** Reads a
+candidate set and picks. Section 4 said it needed S2 and S3 first; the part
+that did not is landed: the decision against the devices a placement host
+DECLARES, with its refusal. What still waits on S2 and S3 is recorded in
+section 10.4. The refusals of S1 are what make it safe: the set is closed, the
+residence is uniform, and every candidate is comparable, so the scheduler
+chooses within a placement rather than about one.
 
-**S5. The role in the manifest.** 531's own S5, which this item needs: a role
-declared in the composition manifest and bound to a member by configuration,
-which is what item 538 means by "a role is declared once and bound to a member
-by configuration". S2's provision key is the natural place that binding lands.
+**S5. The role in the manifest. LANDED on the placement side (section 10.6).**
+531's own S5, which this item needs: a role bound to a member by
+configuration, which is what item 538 means by "a role is declared once and
+bound to a member by configuration". It lands in the placement-side record,
+not in the compiler IR's composition manifest, for the reason 10.6 gives. S2's
+provision key will read the same binding.
 
 ---
 
@@ -528,7 +535,8 @@ by configuration". S2's provision key is the natural place that binding lands.
 * **That the ten decisions are complete.** They are the ones a declaration and
   a candidate set can be wrong in. The value side is item 514's and has landed
   on its own branch; the crossing side is 512's slice 4 and is open; the
-  scheduler's own decisions are S4's and do not exist.
+  scheduler's own decisions are S4's and are listed separately in section
+  10.2.
 * **Anything about tiers other than the reference.** Nothing in this slice
   reaches an emitter, so there is nothing tier-specific to be right or wrong
   about, but that is an argument from the file list and not a measurement. The
@@ -537,3 +545,191 @@ by configuration". S2's provision key is the natural place that binding lands.
   of the same gate on the same construct, not re-measured here. What was
   re-measured is that no corpus `.rvl` uses the construct, which is what keeps
   the census unmoved.
+
+---
+
+## 10. S4: the scheduler against declared devices
+
+`src/revl/model_schedule.py`, called from `run_placement` in
+`src/revl/placement.py` right after the item-475 TEE check and before any
+seam is wired or process spawned. `docs/model-scheduling.md` is the user-facing
+page and `tests/test_model_schedule_515.py` the executable spec.
+
+### 10.1 Why the supply can be declared after all
+
+Section 4 said the scheduler needs "a published profile to compare the demand
+against (item 538, upstream)". That is still true of the PROVIDER's profile:
+what a member was actually loaded onto. But the roadmap item's exit sentence
+is about a different object: "a placement onto a host whose declared device
+cannot satisfy the profile is refused". A host's declared device is operator
+configuration, exactly as item 119's `[processes.<p>] capabilities = [...]`
+is, and it lives in the same file. So the supply this slice reads is
+`[[processes.<p>.devices]]`, with the keys `name`, `device`, `memory_mib` and
+`quantisation`, the last three spelled as `declared_floor()` spells the
+demand.
+
+This does not contradict section 2.2. The compiler still never compares the
+demand against a machine. The conductor compares two declarations, one in the
+program and one in the placement file, and neither is evidence about
+hardware. The provider's published profile, and the `placement_digest` over
+it, remain the only statement about what was loaded.
+
+### 10.2 The decisions
+
+| # | The decision | Direction |
+| - | ------------ | --------- |
+| 11 | a candidate fits a device when the class is equal, the role's `quant` is in the device's list, and the device has the memory free | closed: an `npu` never stands in for a `gpu` |
+| 12 | a role arm is placed on ONE of its candidates, in written order; devices in declared order | the written order is the preference |
+| 13 | a council arm is placed only when EVERY member is | a council asks every member |
+| 14 | a role is loaded once per host; a later step choosing it reuses its device and memory | the issue's "share one provision rather than loading twice", at the schedule level |
+| 15 | the search backtracks, and the first complete assignment in that order is the answer | deterministic; an earlier action gets its preference first |
+| 16 | no assignment exists: refused, naming host, action, origin, and why each candidate missed | closed: no "any free device" |
+| 17 | a host with no `devices` offers none | closed, item 119's rule for capabilities |
+| 18 | a malformed `devices` table is refused by name, on every host | closed: an omitted field is not read as offering anything |
+| 19 | the search stops after `SEARCH_BUDGET` attempts and refuses | closed: an unfinished search is not an admission |
+
+An `off_device` role and an unprofiled single-candidate role reserve nothing,
+and the schedule reports both rather than omitting them.
+
+Decision 14 is the one test that shows sharing changing the answer: two
+components routing to one 6144 MiB role both fit an 8192 MiB GPU, and the
+control, the same two components on two different 6144 MiB roles, sends the
+second to its CPU fallback. Decision 15 has its own test: greedy first-fit
+would refuse a placement the search finds.
+
+### 10.3 Why this is not a rule module
+
+The scheduler refuses a PLACEMENT of an admitted composition, never a program.
+Nothing under `compile_files` imports it (measured: running the compiler over
+all 238 `.rvl` files under `examples/` leaves `revl.model_schedule` out of
+`sys.modules`), so its bytes cannot move the frontend's refusal set. It is classified in
+`attest.NOT_A_RULE` beside `deploy` and `distribute`, and it cites no
+guarantee code. `G-MODEL-PLACE` is a compile-time code about the declaration;
+a device fit is decided later, against a file the compiler never reads.
+
+### 10.4 What S4 does not do, and which slice owns it
+
+* **Nothing is loaded.** The decision reaches the child and is enforced on
+  the questions the child is asked (section 10.5), but nothing in revl loads a
+  member. The provision keyed by role, with one load, one unload and
+  `no_residue` for N consumers, is S2, built on the provider adapters another
+  lane is writing. The issue's exit evidence is S2's and is not claimed here.
+* **No cost model.** Candidates rank by written order, not by load cost or
+  residency over time. S3 owns both.
+* **No published profile.** The declared supply is not checked against what a
+  provider loaded. Item 538 owns that comparison.
+* **The `[tiers]` form has no devices.** Its processes are synthesized, so a
+  profiled program placed with it is refused as placed on a host with no
+  devices. Tested.
+* **A single-process run is not scheduled.** With no placement file there is
+  no host to schedule against.
+
+### 10.5 The decision reaches the child
+
+A schedule the conductor prints and refuses on, but never hands to the process
+that runs the model, is a decision nothing enforces. So the handoff uses the
+channel `run_placement` already hands a child everything else through, its
+spec file, under one new key, `modelSchedule`: the host, its declared
+devices, and the decision (`model_schedule.handoff`).
+
+The child re-derives before it believes, which is the rule the runner already
+applies to the composition itself (`running_ir = compile_files(spec["files"])`
+rather than an IR read off the wire). `model_schedule.verify_handoff` recomputes
+the schedule from the files, the child's own components and the entry's
+devices, and the runner turns any difference, a missing entry where one is
+needed, or an entry where none is, into `BootRefused`. The result is installed
+in `revl.model_placement`, a process-local, read-only table that
+`device_for(role)` and `claim(role, device)` answer from and refuse by name.
+
+| # | The decision | Direction |
+| - | ------------ | --------- |
+| 20 | a host with no routed model action gets no `modelSchedule` key | additive: its spec is byte-identical |
+| 21 | a host that routes a model action and was handed no schedule does not boot | closed |
+| 22 | a schedule that differs from the re-derived one does not boot | closed |
+| 23 | a role not scheduled on this host, or a device other than the scheduled one, is refused at run time | closed |
+| 24 | a process with no schedule answers no device | closed: no "any free device" at run time either |
+| 25 | a scheduled host on a tier whose runner does not read the key is refused at plan time | closed |
+| 26 | a swap successor is scheduled for itself, or the swap refuses | closed |
+
+Decision 20 was measured across trees, not only asserted: a two-process
+composition with no `route model` block, placed on `origin/main` and on this
+branch, writes byte-identical specs for both processes once the per-boot
+values are normalised (the `mkdtemp` directory, the per-boot seam secrets,
+and the checkout path in `stdlibRefRoot`), and each process prints the same
+line sequence. Only the interleaving of the two processes' teardown lines
+differs between runs, which is concurrency and not this change.
+
+What 10.5 does not close: host code that never asks is not refused, and an
+edit that rewrites the devices and the decision in a spec together is a
+self-consistent declaration the child cannot tell from the conductor's. The
+first is S2's to close by making the provider adapters ask on every load.
+
+**The second is a stated limit, accepted.** The spec is not signed. Its
+`modelSchedule` entry gets exactly the trust the runner already gives
+`spec["files"]`: both are written by the conductor into the `0700` placement
+directory, and a party able to rewrite them consistently can already hand the
+child different source. Signing one key while the file list beside it stays
+unsigned would buy nothing.
+
+**The per-child re-parse was measured, and left in.** Every child, including
+the child of a composition with no `route model` block, re-reads the
+composition to decide whether it needed a schedule. On a one-process plain
+composition, `verify_handoff` costs a median of 2.80 ms against 6.05 ms for
+the `compile_files` the child already runs (median of 10 each), and the whole
+`revl run --placement --once` boot is a median of 1.393 s with it against
+1.392 s without (10 interleaved A/B runs each, on a machine with a load
+average near 25, so the end-to-end number is noise-bound; the in-process
+number puts the cost near 0.2% of a boot). That is under the 5% threshold set
+for skipping it, so the child keeps re-deriving rather than trusting the
+parent's word that nothing was routed, which would be the unsigned-spec trust
+applied to a second question.
+
+### 10.6 S5: each role's binding, recorded on the placement side
+
+A role is bound to a member by configuration, so the binding belongs with the
+configuration. It is recorded where the placement is: in the record the
+conductor prints at boot and `revl audit --placement` prints on request, both
+computed by the same scheduler. `model_schedule.binding_manifest` builds it:
+
+    {"version": "revl-model-bindings-v1",
+     "hosts": [{"host": "edge",
+                "devices": [...the host's declared devices...],
+                "bindings": [{"role": "fast", "residence": "on_device",
+                              "demand": {"device": "gpu", "memory_mib": 6144,
+                                         "quant": "q4_k_m"},
+                              "device": "gpu0", "device_class": "gpu",
+                              "consumers": ["First.classify confidential",
+                                            "Second.classify confidential"]}]}],
+     "digest": "<64 hex>"}
+
+One row per role per host, however many actions share it, which is the
+issue's "two consumers that inject `small` share one provision" written down
+where an operator reads it. The digest is sha256 over the version line, a LF,
+and the canonical JSON of `hosts` (sorted keys, no whitespace, ASCII), so a
+change to one role's device, quantisation or memory, to which actions share
+it, or to a host's declared devices changes it. A composition with no routed
+model action has no record at all, and both outputs print nothing new.
+
+**Why not the compiler IR's composition manifest.** "Model roles write no IR"
+is a pinned property (`tests/test_1311_model_routes_not_in_ir.py`,
+`test_a_profiled_placement_writes_no_ir`), and it is deliberate: the compiler
+decides what a program may do, and deployment decides where it runs. Putting
+the binding in the IR would make a placement decision part of the admitted
+artifact and move every emitter's golden with it. `src/revl/lower.py` is
+untouched.
+
+**Not the same digest as item 517's `placement_digest`.** That one is the
+PROVIDER's digest over what it actually loaded (section 5). This one is over
+what the placement DECLARED and the scheduler DECIDED. A verifier holding both
+can compare them; revl computes only this one.
+
+**Where an operator reads it.** `revl audit FILES --placement MAP` prints the
+rows and the digest (human output; the `--json` audit body is unchanged,
+because it must stay byte-identical to `audit_report`). `revl run --placement`
+prints the same lines before anything spawns. `revl deploy` does not print it
+yet: `src/revl/deploy.py` was owned by another change when this landed.
+
+What 10.6 does not do: the record is printed, not persisted or signed, and a
+composition DOCUMENT argument to `revl audit` gets a one-line note instead of
+the rows, because the view reads modules and a composition's rows are
+resolved rather than parsed.

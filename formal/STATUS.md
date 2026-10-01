@@ -1064,15 +1064,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**581 .rvl files -> 455 components -> 1185 statements = 337 modeled +
-216 componentless + 28 refused at parse**, and **6487 verdicts compared
-(337 files + 455 components + 133 provide methods + 20 spawn edges + 28
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1185
-confinements + 1185 surfaces + 351 teardowns + 345 provide-clause
-components + 81 config fields + 455 A2 bodies + 25 approval crossings),
-6487 agree, 0 mismatches**.
+**590 .rvl files -> 460 components -> 1192 statements = 340 modeled +
+222 componentless + 28 refused at parse**, and **6522 verdicts compared
+(340 files + 460 components + 133 provide methods + 20 spawn edges + 28
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1192
+confinements + 1192 surfaces + 356 teardowns + 346 provide-clause
+components + 83 config fields + 460 A2 bodies + 25 approval crossings),
+6522 agree, 0 mismatches**.
 
-Checker alignment over the 337 modeled files. Every bucket recording a
+Checker alignment over the 340 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1098,7 +1098,7 @@ with corpus work that never touched this layer.
 | `agree-G3` | 1 | informational |
 | `agree-G4` | 85 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 176 | informational |
+| `agree-accept` | 179 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |

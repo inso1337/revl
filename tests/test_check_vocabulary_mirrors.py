@@ -2,20 +2,17 @@
 each way a mirror goes wrong, and it still names the three instances the issue
 was filed for."""
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    spec = importlib.util.spec_from_file_location(
-        "check_vocabulary_mirrors", ROOT / "tools" / "check_vocabulary_mirrors.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "check_vocabulary_mirrors",
+        ROOT / "tools" / "check_vocabulary_mirrors.py")
     return module
 
 
@@ -207,24 +204,35 @@ def test_issue_1336s_own_copy_is_imported_rather_than_restated():
 
 
 def test_a_claim_that_drifts_by_one_token_reds_where_exact_equality_is_silent():
-    """Issue #1336's shape, run against the real tree: the recorded near miss
-    gains a token on the side that claims, and the class rule stays green.
+    """Issue #1336's shape, on the real tree's sites: a claim that holds
+    exactly is silent, and the same claim with one token more reds, while the
+    class rule stays green throughout.
 
     This is the whole argument for a second rule. `Session._live_fingerprint`
-    says it produces the shape `apply.fingerprint` does; move the one token
-    that differs and the claim is about a different difference than the one the
-    ledger has a reason for."""
+    says it produces the shape `apply.fingerprint` does. Give the claim exactly
+    `fingerprint`'s vocabulary and it is satisfied; add one token and it is a
+    near miss nobody recorded. The class rule, which only compares equal
+    vocabularies, sees neither. (Since issue #1513 the real session copy
+    differs by two tokens, beyond the slack, so it is no longer a recorded
+    near miss; this test builds the one-token case itself.)"""
     tool, sites, claims, entries, err = _claim_state()
     site = "src/revl/mcp/session.py::Session._live_fingerprint"
-    drifted = [
-        c if c.site != site
-        else tool.Claim(c.site, c.tokens | {"schemaVersion"}, c.cue, c.cited)
-        for c in claims
-    ]
+    target = next(s for s in sites if s.sid == "src/revl/apply.py::fingerprint")
+
+    def claiming(tokens):
+        return [c if c.site != site
+                else tool.Claim(c.site, frozenset(tokens), c.cue, c.cited)
+                for c in claims]
+
+    exact = claiming(target.tokens)
+    assert tool.check_claims(exact, tool.near_misses(sites, exact),
+                             entries, err) == []
+    drifted = claiming(target.tokens | {"schemaVersion"})
     problems = tool.check_claims(drifted, tool.near_misses(sites, drifted),
                                  entries, err)
     assert len(problems) == 1, problems
-    assert "NO LONGER OBSERVED" in problems[0]
+    assert "UNRECORDED NEAR MISS" in problems[0]
+    assert "schemaVersion" in problems[0]
     # The class rule saw nothing: the vocabularies were never equal.
     class_entries, class_err = tool.load_ledger(tool.LEDGER)
     assert tool.check(sites, class_entries, class_err) == []
