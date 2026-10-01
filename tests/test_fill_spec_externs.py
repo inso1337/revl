@@ -142,3 +142,23 @@ def test_the_mcp_check_states_the_servers_authoring_trust():
     assert hole_closed["fillSpec"]["externs"]["mayDeclare"] is False
     assert "untrusted-author profile" in hole_closed["fillSpec"]["externs"]["reason"]
     assert hole_opened["fillSpec"]["externs"]["mayDeclare"] is True
+
+
+def test_a_jailed_file_candidate_is_operator_authored(tmp_path):
+    """`compile_under_authoring` compiles a jailed `files` candidate with no
+    transport-carried text as operator-authored, so its fillSpec says what
+    the operator may do, not the agent."""
+    from revl.mcp import server
+    draft = tmp_path / "draft.rvl"
+    draft.write_text("service Box { fn digest(text: Str) -> Str }\n"
+                     "component C provides box: Box {\n"
+                     '  provide box { fn digest(text) = hole[Str] "hash" }\n'
+                     "}\n")
+    previous = server.AUTHORING
+    try:
+        server.set_authoring_trust(host_code=False, roots=(str(tmp_path),))
+        checked = server._tool_check({"files": [str(draft)]})
+    finally:
+        server.AUTHORING = previous
+    (hole,) = checked["holes"]
+    assert hole["fillSpec"]["externs"]["mayDeclare"] is True
