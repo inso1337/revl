@@ -325,35 +325,30 @@ def check_digest(wal: dict, digest: str, files: list) -> None:
     plan_generations(wal, digest, files)
 
 
-def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> CompositionWorld:
-    """Compile ``files``, check them against the WAL at ``wal_path``, load
-    their emitted module without activating it, and boot the providers the
-    open descriptors call through. Raises :class:`CompositionMismatch` for a
-    log the composition did not write, and `RecoveryError` for a composition
-    that cannot be bound."""
+def compile_composition(files: list) -> tuple:
+    """``(ir, digest)`` for ``files``, digested exactly as a WAL header's
+    `composition` is (`replay.composition_digest`)."""
     from .compiler import compile_files  # noqa: PLC0415
     from .errors import RevlError  # noqa: PLC0415
-    from .mcp.session import Session, SessionError, _backend  # noqa: PLC0415
-    from .run import _Driver  # noqa: PLC0415
-    from .wal import read_wal  # noqa: PLC0415
 
     try:
         ir = compile_files(list(files))
     except RevlError as error:
         raise RecoveryError(f"cannot compile {', '.join(files)}: {error}") from None
-    digest = _replay_module().composition_digest(ir)
-    wal = read_wal(wal_path)
-    foreign = plan_generations(wal, digest, list(files))
-    grants = _open_grants(wal)
-    foreign_handles = {h: seg for h, (_g, seg) in grants.items()
-                       if seg["composition"] != digest}
+    return ir, _replay_module().composition_digest(ir)
+
+
+def emit_unactivated(ir: dict, config: dict, cleanup: list) -> tuple:
+    """``(module, runtime)``: the composition's emitted module, loaded through
+    the driver's own plug seam (extern config, bound secrets) and NOT
+    activated. Forgetting the module is pushed onto ``cleanup``."""
+    from .mcp.session import SessionError, _backend  # noqa: PLC0415
+    from .run import _Driver  # noqa: PLC0415
 
     try:
         emit, runtime, Context, FiberState = _backend()
     except SessionError as error:
         raise RecoveryError(str(error)) from None
-    config = dict(config or {})
-    cleanup: list = []
     driver = _Driver(ir, config, emit, runtime, Context, FiberState)
     module = driver._emit_module(ir)
     name = module.__name__
@@ -362,35 +357,80 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
         if sys.modules.get(name) is module:
             del sys.modules[name]
     cleanup.append(_forget_module)
+    return module, runtime
 
-    session = None
-    booted: list = []
-    services: dict = {}
+
+def open_keys(wal: dict, foreign: dict, grants: dict, foreign_handles: dict) -> set:
+    """The required-service keys this composition's open calls and open
+    `shared` grants call through."""
+    keys = {call.get("receiver")
+            for seq, call in _open_calls(wal["records"]).items()
+            if seq not in foreign and call.get("receiver") is not None}
+    keys |= {(g.get("inverse") or {}).get("receiver")
+             for h, (g, _seg) in grants.items()
+             if h not in foreign_handles
+             and (g.get("inverse") or {}).get("receiver") is not None}
+    return keys
+
+
+def boot_providers(ir: dict, keys: set, config: dict) -> tuple:
+    """``(session, booted, services)``: the components that provide ``keys``,
+    and what they require, booted as a composition of their own. Booting a
+    provider runs its activation, which is why the verdict names each one."""
+    from .mcp.session import Session, SessionError  # noqa: PLC0415
+
+    booted = _provider_closure(ir, keys)
+    if not booted:
+        return None, [], {}
+    session = Session()
     try:
-        keys = {call.get("receiver")
-                for seq, call in _open_calls(wal["records"]).items()
-                if seq not in foreign and call.get("receiver") is not None}
-        keys |= {(g.get("inverse") or {}).get("receiver")
-                 for h, (g, _seg) in grants.items()
-                 if h not in foreign_handles
-                 and (g.get("inverse") or {}).get("receiver") is not None}
-        booted = _provider_closure(ir, keys)
-        if booted:
-            session = Session()
-            session.load(_sub_composition(ir, booted), config)
-            for key in sorted(keys):
-                provider = session._driver.root.get(key)
-                if provider is not None:
-                    services[key] = provider
+        session.load(_sub_composition(ir, booted), config)
     except Exception as error:
-        if session is not None and session.loaded:
+        if session.loaded:
             session.unload()
-        while cleanup:
-            cleanup.pop()()
         if isinstance(error, SessionError):
             raise RecoveryError(
                 f"cannot boot the providers {', '.join(booted)} the WAL's "
                 f"descriptors call through: {error}") from None
+        raise
+    services = {}
+    for key in sorted(keys):
+        provider = session._driver.root.get(key)
+        if provider is not None:
+            services[key] = provider
+    return session, booted, services
+
+
+def plan_wal(wal_path: str, digest: str, files: list) -> tuple:
+    """``(wal, foreign, grants, foreign_handles)`` for one WAL checked against
+    this composition (see :func:`plan_generations`)."""
+    from .wal import read_wal  # noqa: PLC0415
+
+    wal = read_wal(wal_path)
+    foreign = plan_generations(wal, digest, list(files))
+    grants = _open_grants(wal)
+    foreign_handles = {h: seg for h, (_g, seg) in grants.items()
+                       if seg["composition"] != digest}
+    return wal, foreign, grants, foreign_handles
+
+
+def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> CompositionWorld:
+    """Compile ``files``, check them against the WAL at ``wal_path``, load
+    their emitted module without activating it, and boot the providers the
+    open descriptors call through. Raises :class:`CompositionMismatch` for a
+    log the composition did not write, and `RecoveryError` for a composition
+    that cannot be bound."""
+    ir, digest = compile_composition(files)
+    wal, foreign, grants, foreign_handles = plan_wal(wal_path, digest, files)
+    config = dict(config or {})
+    cleanup: list = []
+    module, runtime = emit_unactivated(ir, config, cleanup)
+    try:
+        session, booted, services = boot_providers(
+            ir, open_keys(wal, foreign, grants, foreign_handles), config)
+    except Exception:
+        while cleanup:
+            cleanup.pop()()
         raise
     return CompositionWorld(files=list(files), digest=digest, module=module,
                             runtime=runtime, wal_path=wal_path,

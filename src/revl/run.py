@@ -2421,7 +2421,8 @@ def run_command(args, hold_once: bool = False) -> int:
         # only the py tier honors the latch at its own seams.
         return run_placement(args.files, args.placement,
                              once=getattr(args, "once", False),
-                             estop_latch=getattr(args, "estop_latch", None))
+                             estop_latch=getattr(args, "estop_latch", None),
+                             wal=getattr(args, "wal", None))
 
     backend = getattr(args, "backend", "py")
     if backend not in KNOWN_BACKENDS:

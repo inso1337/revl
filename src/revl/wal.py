@@ -96,6 +96,13 @@ class WALIntegrityError(RuntimeError):
     """
 
 
+class PlacementIndexNotAWAL(WALIntegrityError):
+    """The file is a placement run's index (`revl run --placement --wal`),
+    not a WAL (issue #1477). Read as a WAL it has no records, and a reader
+    would report a crashed placement as clean. `revl recover --wal` reads the
+    index itself and recovers every process WAL it names."""
+
+
 #: The single sentence recovery is allowed to claim. Deliberately narrow. Kept
 #: byte-identical to ``replay.WAL_GUARANTEE`` (pinned by a test) because it is
 #: written verbatim into every WAL header, py or non-py.
@@ -281,6 +288,14 @@ def read_wal(path: str) -> dict:
                     "to read past it would silently drop committed records."
                 ) from None
             kind = entry.get("record")
+            if kind == "placement-index":
+                names = ", ".join(p.get("wal", "?")
+                                  for p in entry.get("processes") or [])
+                raise PlacementIndexNotAWAL(
+                    f"{path} is the index of a placement run, not a WAL: each "
+                    f"process wrote its own ({names}). `revl recover --wal "
+                    f"{path}` recovers all of them; read one process's WAL by "
+                    f"its own path.")
             if kind == "header":
                 header = entry
                 _check_version(header, path)

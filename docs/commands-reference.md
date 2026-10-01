@@ -860,7 +860,10 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   (`:timeline`, `:back k`); see [replay.md](replay.md).
 - `--wal FILE` - persist the effect accumulator as a durable write-ahead log
   (implies `--record`). On restart, `revl recover --wal FILE` rolls forward or
-  back with a checked verdict ([crash-recovery.md](crash-recovery.md)).
+  back with a checked verdict ([crash-recovery.md](crash-recovery.md)). With
+  `--placement`, each process writes its own WAL (`FILE.<process>`) and FILE
+  is the run's index; py processes only, unsandboxed, and no `revl swap`
+  ([section 5d](crash-recovery.md#5d-recovering-a-placement-run-issue-1477)).
 - `--estop-latch FILE` - watch FILE for an operator E-Stop, so `revl estop
   --latch FILE` from another terminal halts this run immediately
   ([443-estop.md](design/443-estop.md)). Unarmed by default; an unarmed run
@@ -953,6 +956,9 @@ LIFO), ending in a checked verdict + residue proof
 ([crash-recovery.md](crash-recovery.md)).
 
 - `--wal FILE` - a write-ahead log written by `revl run --wal` (required).
+  For a `--placement` run, the index: recover finds every process WAL it
+  names, recovers them consumers first, and gives one verdict naming each
+  process's residue ([section 5d](crash-recovery.md#5d-recovering-a-placement-run-issue-1477)).
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
 - `--approval-policy auto` - on `--restore`, re-arm the auto-approve policy the

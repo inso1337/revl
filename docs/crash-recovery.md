@@ -531,6 +531,69 @@ bare emission (one with no compensation) still crossed the boundary and stays
 residue. So a crash whose every emission was compensated recovers CLEAN, exit
 `0`; the exit status follows the residue as always.
 
+### 5d. Recovering a placement run (issue #1477)
+
+```
+revl run app.rvl --placement p.toml --wal run.wal
+revl recover --wal run.wal --composition app.rvl
+```
+
+A placement runs each process on its own runtime, so it writes **one WAL per
+process**. With `--wal FILE`, every py process records its own crossings to
+`FILE.<process>` (for `run.wal` and processes `desk` and `agent`:
+`run.wal.desk`, `run.wal.agent`), through the same recorder a single-process
+run uses. FILE itself is the run's **index**, JSON Lines:
+
+- `placement-index` (first line): `placementVersion` and `processes`, each
+  with its `name`, `components`, `backend` and `wal` (a file name relative to
+  the index, so the set moves as one);
+- `opened` (`run`) per run that armed the index;
+- `committed` (`run`) once every process of that run was UP.
+
+**The commit is the placement's, not a process's.** A placement's activation
+is the whole composition's, so no process stamps its own `activation-complete`
+when its components finish. Once every process says UP, the conductor writes
+`committed` to the index, then tells each process to stamp its marker. A crash
+before that leaves every process WAL uncommitted, and recover rolls all of them
+back, as it would the same composition run in one process. A crash between the
+index's `committed` and a process's marker is completed by recover: it stamps
+that process's `activation-complete` from the index (`commitStamped` in the
+verdict), so the process rolls forward with the others instead of back alone.
+
+`revl recover --wal FILE` on an index recovers the whole run:
+
+1. **Finds every process WAL the index names.** A missing one is residue named
+   by its process (`missing-wal`): recover cannot tell what it crossed. An
+   empty one was created by the conductor and never opened by its process,
+   which crossed nothing.
+2. **Recovers processes consumers first**: a process that requires a key from
+   another is recovered before it, so compensations run newest first across
+   the run as within one process.
+3. **Replays each WAL through the composition's binding** (section 5c), with
+   one emitted module and one boot of the providers the open calls of every
+   process go through. A compensation declared in one process through a
+   service another process provides reaches the component that provides it;
+   the process verdict's `binding.reached` names that component and the
+   process the placement hosted it in. A key no process provides is listed in
+   `binding.unreached`, and the runtime reports its calls as residue.
+4. **Gives one verdict** (`"verdict": "placement"`): `placement` (the index,
+   the run, whether it committed, the recovery order), `processes` (each
+   process's own verdict), and one `residue` whose `outstanding` entries carry
+   their `process` and whose proof names each process's residue. It is clean
+   only when every process is clean. A second recover performs nothing.
+
+Read as a WAL, an index has no records, so a reader would call a crashed
+placement clean. Every WAL reader refuses it instead
+(`PlacementIndexNotAWAL`), naming the process WALs.
+
+`--wal` with `--placement` is refused for a process on a tier other than py
+(its placement runner writes no WAL) and for a sandboxed process (its WAL
+would sit outside the sandbox). `revl swap` is refused while a WAL is armed: a
+successor would write a WAL the index does not name. An existing index is
+reused only for the same processes and components; recover a different
+placement's run first, or name a new path. `--restore` does not apply to a
+placement run.
+
 ### Recovering a session that was forked (item 250)
 
 Two WALs read differently once a session has been forked.
