@@ -209,3 +209,97 @@ def test_each_child_runner_tags_its_proof_and_people_see_no_token(
                      "residueLeft": False}, out
     assert "[run] UP" in out and "[run] NO-RESIDUE" in out and "[run] DOWN" in out
     assert "[run#" not in out, "the token must never reach the human output"
+
+
+# ------------------------------------------- the wasm record channel's frames
+#
+# In record mode (`REVL_WAL` set) the wasm harness relays one `[wal] {...}`
+# frame per witnessed registration on the same stdout, and the runner drains
+# each into the durable WAL. An undischarged descriptor there is what
+# `revl recover` replays. No direct route from a wasm guest to stdout was found
+# (the runtime defines no WASI imports), so tagging the frames with the run's
+# token is defence in depth: only the harness's own channel reaches the WAL.
+
+import json  # noqa: E402
+
+from revl import run_wasm as run_wasm_module  # noqa: E402
+
+CRASHPROOF = ROOT / "backends" / "wasm" / "scenarios" / "crashproof" / "crashproof.rvl"
+_FRAME = {"seq": 9, "receiver": "deleteRow", "method": "deleteRow",
+          "witness": "row#9"}
+
+
+def test_the_proof_names_a_tagged_prefix_for_another_channel():
+    assert OnceProof("run", token="t0k3n").tag("wal") == "[wal#t0k3n] "
+
+
+def test_an_untagged_wal_frame_is_not_drained(tmp_path):
+    wal = tmp_path / "w.wal"
+    with open(wal, "w", encoding="utf-8") as handle:
+        seq = run_wasm_module.drain_wal_frame(
+            handle, "[wal] " + json.dumps(_FRAME) + "\n", "[wal#t0k3n] ")
+    assert seq is None
+    assert wal.read_text(encoding="utf-8") == ""
+
+
+def test_a_tagged_wal_frame_is_drained(tmp_path):
+    wal = tmp_path / "w.wal"
+    with open(wal, "w", encoding="utf-8") as handle:
+        seq = run_wasm_module.drain_wal_frame(
+            handle, "[wal#t0k3n] " + json.dumps(_FRAME) + "\n", "[wal#t0k3n] ")
+    assert seq == 9
+    record = json.loads(wal.read_text(encoding="utf-8"))
+    assert record["record"] == "discharge-descriptor" and record["seq"] == 9
+
+
+_WASM_REASON = wasm_runtime_reason()
+needs_wasm = pytest.mark.skipif(_WASM_REASON is not None,
+                                reason=f"no cordis-wasm runtime: {_WASM_REASON}")
+
+
+@needs_wasm
+def test_the_harness_tags_its_wal_frames_with_the_runs_token(tmp_path):
+    """The real cordis-wasm harness, in record mode, handed a token on stdin
+    as `run_wasm` does: every frame it relays carries the token. On the base
+    it printed bare `[wal] ` frames."""
+    import os
+    import subprocess
+
+    ir = compile_source(CRASHPROOF.read_text(encoding="utf-8"), str(CRASHPROOF))
+    order = run_wasm_module._load_order(ir)
+    modules = run_wasm_module._emit_modules(ir, record=True)
+    spec = tmp_path / "run.spec.json"
+    spec.write_text(json.dumps({
+        "name": "run", "once": True, "record": True, "order": order,
+        "modules": {name: modules[name] for name in order},
+        SPEC_FLAG: True}), encoding="utf-8")
+    env = dict(os.environ)
+    env["CORDIS_WASM"] = str(run_wasm_module._cordis_wasm_dir())
+    proc = subprocess.run(
+        [run_wasm_module._cordis_wasm_python(), str(run_wasm_module._HARNESS),
+         str(spec)], input="t0k3n\n", capture_output=True, text=True, env=env,
+        check=False)
+    assert proc.returncode == 0, proc.stdout + proc.stderr
+    frames = [ln for ln in proc.stdout.splitlines() if ln.startswith("[wal")]
+    assert frames, proc.stdout
+    assert all(ln.startswith("[wal#t0k3n] {") for ln in frames), frames
+
+
+@needs_wasm
+def test_a_wasm_record_run_still_lands_its_descriptor_in_the_wal(
+        tmp_path, monkeypatch):
+    """End to end through `run_wasm` with `REVL_WAL` set: the tagged frame is
+    drained, the run commits, and no token reaches the human output."""
+    wal = tmp_path / "run.wal"
+    monkeypatch.setenv("REVL_WAL", str(wal))
+    ir = compile_source(CRASHPROOF.read_text(encoding="utf-8"), str(CRASHPROOF))
+    proof: dict = {}
+    code, out = _captured(run_wasm, ir, {}, [str(CRASHPROOF)], once=True,
+                          proof_out=proof)
+    assert code == 0, out
+    assert proof["noResidue"] is True, out
+    records = [json.loads(ln) for ln in wal.read_text(encoding="utf-8").splitlines()]
+    kinds = [r["record"] for r in records]
+    assert kinds.count("discharge-descriptor") == 1, kinds
+    assert "discharge" in kinds and "activation-complete" in kinds, kinds
+    assert "[run#" not in out and "[wal#" not in out, out
