@@ -148,6 +148,7 @@ was corrected by hand and had drifted back within a day.
 | interop-bridge.md | needs-work | 51 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
 | mcp-bridge.md | needs-work | 76 |  |
+| mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 6 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 0 |  |

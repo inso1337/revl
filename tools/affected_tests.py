@@ -107,6 +107,12 @@ BENCH_DEPENDENT_TESTS = (
     # resolving. Declared because the guard below is mention-based, and
     # over-selecting is the safe direction for this gate.
     "tests/test_roadmap_claims_gate.py",
+    # Does not READ bench. Its diff-filter test (issue #1572) names a
+    # `bench/results/...` path as one the census does NOT read, since `bench`
+    # is outside the census's corpus directories. Declared for the same reason
+    # as the entry above: the guard below is mention-based, and over-selecting
+    # is the safe direction.
+    "tests/test_census_artifact.py",
     # The self-host capstone oracle pins four `bench/results/…` candidate
     # documents as members of the emit_java corpus (roadmap item 146 gap 2's
     # located-gap ratchet), so a bench change must re-run it.

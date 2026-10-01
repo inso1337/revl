@@ -192,7 +192,8 @@ def _estop_watch(name: str, runtime_mod, poll: float = _ESTOP_POLL) -> None:
         time.sleep(poll)
 
 
-def _eval_probe(expr: str, namespace: dict, args_out: list | None = None):
+def _eval_probe(expr: str, namespace: dict, args_out: list | None = None,
+                reasons: dict | None = None):
     """Evaluate one probe: `key.method(literal, ...)` — and nothing else.
 
     A placement file is *data*, not a program. Probes are therefore parsed and
@@ -201,6 +202,10 @@ def _eval_probe(expr: str, namespace: dict, args_out: list | None = None):
     call on one key this process holds, with literal arguments
     (`ast.literal_eval`). No builtins, no imports, no attribute chains, no
     expressions. Anything else is refused with a message naming the form.
+
+    `reasons` maps a held key with no live value to why (issue #1513: a key
+    isolated in several realms, or an inactive provider in a named realm), so
+    the refusal names the realm instead of reporting a missing method.
     """
     try:
         tree = ast.parse(expr.strip(), mode="eval")
@@ -225,6 +230,8 @@ def _eval_probe(expr: str, namespace: dict, args_out: list | None = None):
         # can run the two-stage funnel (the call's own argument values first)
         # even when the DISPATCH raises after the parse succeeded.
         args_out.extend(args)
+    if namespace[key] is None and (reasons or {}).get(key):
+        raise ValueError(reasons[key])
     target = getattr(namespace[key], method, None)
     if not callable(target):
         raise ValueError(f"{key!r} has no method {method!r}")
@@ -760,6 +767,22 @@ def _apply_repoint(cmd: dict, clients: dict, spec_files: list, running_ir: dict,
         return False
 
 
+class _RealmView:
+    """What `bridge.serve` reads a served key through: `get(key)` resolves it
+    the way a caller outside every realm does (`revl.run.resolve_key`), so a
+    key provided in `realm("wa")` is served from `wa`, not looked up in the
+    shared root realm where it is not (issue #1513)."""
+
+    def __init__(self, root, runtime_mod, ir: dict) -> None:
+        self._root = root
+        self._runtime = runtime_mod
+        self._ir = ir
+
+    def get(self, key: str):
+        from revl.run import resolve_key  # noqa: PLC0415
+        return resolve_key(self._root, self._runtime, self._ir, key)
+
+
 async def _flush() -> None:
     for _ in range(20):
         await asyncio.sleep(0)
@@ -815,6 +838,10 @@ async def run(spec: dict, spec_path=None) -> None:
     # manifest a re-pointed successor must re-admit against at the seam (item
     # 337, `_repoint_decision`); it also feeds the emitter for this slice.
     running_ir = compile_files(spec["files"])
+    # issue #1513: every by-key lookup in this process (the probe namespace, the
+    # served seam) goes through run.py's one resolver, and every component and
+    # proxy is plugged into its realm, as `revl run` and `revl mcp` plug them.
+    from revl.run import host_realm, resolve_key, unserved_key_reason  # noqa: PLC0415
     # item 515: install this host's model schedule BEFORE anything activates,
     # so a component's first model call already reads the scheduled device.
     # Re-derived from the files, never believed off the spec.
@@ -912,7 +939,13 @@ async def run(spec: dict, spec_path=None) -> None:
                                            async_methods=info.get("async_methods"),
                                            correlation=correlation)
             clients[key] = proxy["_client"]
-            fiber = root.plugin(proxy)
+            # the proxy stands in for a remote provider, so it is provided in
+            # that provider's realm: a local consumer isolated into the same
+            # realm (G3 links only same-realm edges) resolves it there.
+            realm = host_realm(running_ir, key)
+            if isinstance(realm, str):
+                proxy = {**proxy, "isolate": {key: realm}}
+            fiber = runtime_mod.plug(root, proxy)
             await fiber
             await _flush()
             fibers.append((f"{key}-proxy", fiber))
@@ -948,7 +981,7 @@ async def run(spec: dict, spec_path=None) -> None:
 
     async def _activate(component: str):
         config = (spec.get("config") or {}).get(component, {})
-        fiber = root.plugin(getattr(module, component), config)
+        fiber = runtime_mod.plug(root, getattr(module, component), config)
         await fiber
         await _flush()
         log("load", component, f"state={FiberState(fiber.state).name}")
@@ -1008,7 +1041,8 @@ async def run(spec: dict, spec_path=None) -> None:
             replay = TransportReplayGuard(
                 per_peer=int(rspec.get("per_peer") or 1024),
                 max_peers=int(rspec.get("max_peers") or 64))
-        server = await bridge.serve(root, serve.get("methods") or serve["keys"], serve_target,
+        server = await bridge.serve(_RealmView(root, runtime_mod, running_ir),
+                                    serve.get("methods") or serve["keys"], serve_target,
                                     module=module, correlation=guard, peers=allow,
                                     replay=replay)
         # The level this seam achieved, named on the seam's own log line so it is
@@ -1027,13 +1061,16 @@ async def run(spec: dict, spec_path=None) -> None:
             f"-> {bridge.Endpoint.from_spec(serve_target).describe()}" + level)
 
     # 4. probes: call provided services (may cross a seam), print results
-    namespace = {key: root.get(key) for key in (spec.get("provides") or [])}
+    namespace = {key: resolve_key(root, runtime_mod, running_ir, key)
+                 for key in (spec.get("provides") or [])}
     for key in spec.get("proxies") or {}:
-        namespace[key] = root.get(key)
+        namespace[key] = resolve_key(root, runtime_mod, running_ir, key)
+    reasons = {key: unserved_key_reason(running_ir, key)
+               for key, value in namespace.items() if value is None}
     for expr in spec.get("probe") or []:
         args: list = []
         try:
-            value = _eval_probe(expr, namespace, args_out=args)
+            value = _eval_probe(expr, namespace, args_out=args, reasons=reasons)
             if hasattr(value, "__await__"):
                 value = await value
             await _flush()
