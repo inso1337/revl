@@ -1,0 +1,141 @@
+// The pure typed-core surface the go self-host port used to refuse or skip
+// (issue #106): the stdlib builtins and `len`, the built-in Opt / Result / Map
+// values, structural equality, the canonical Float rendering, and the two
+// rewrites that change a loop's shape (the item 434 (c) code-point
+// scan and the item 445 destructive self-rebind). Each one pulls a preamble or
+// an import of its own, so the module header is checked as hard as the bodies.
+// The in-file test section lives in `in_file_tests.rvl`, because
+// selfhost/lower.rvl does not produce the IR `tests` section yet and this
+// document compiles byte-exact through the fully native chain without it.
+
+type Point = { x: Int, y: Int }
+
+// `??` (the Opt preamble's `revlOptOr`) and Opt construction from the flow
+// target, the argument, and a bare `None`.
+fn coalesce(o: Opt[Int]) -> Int { return o ?? 0 }
+fn some_of(n: Int) -> Opt[Int] { return Some(n) }
+fn nothing() -> Opt[Str] { return None }
+fn inferred_some() -> Bool { return Some(7) == Some(7) }
+
+// Opt and Result `match` on the two-value structs, with a wildcard standing in
+// for the arm that is absent.
+fn opt_match(o: Opt[Int]) -> Int {
+  return match o { Some(v) => v + 1, None => 0 }
+}
+fn opt_wild(o: Opt[Str]) -> Str {
+  return match o { Some(s) => s, _ => "none" }
+}
+fn result_match(r: Result[Int, Str]) -> Str {
+  return match r { Ok(v) => v.to_str(), Err(e) => e }
+}
+fn result_wild(r: Result[Int, Str]) -> Int {
+  return match r { Err(_) => -1, _ => 1 }
+}
+fn ok_or_err(flag: Bool) -> Result[Int, Str] {
+  if (flag) { return Ok(1) }
+  return Err("no")
+}
+
+// Optional chaining over a field and over a builtin method.
+fn chain_field(p: Opt[Point]) -> Opt[Int] { return p?.x }
+fn chain_call(s: Opt[Str]) -> Opt[Int] { return s?.length() }
+fn chain_render(x: Opt[Float]) -> Opt[Str] { return x?.to_str() }
+
+// The Map value type: the literal, the methods, and the faulting subscript.
+fn map_ops(k: Str) -> Int {
+  var m: Map[Str, Int] = Map.empty()
+  m = m.set(k, 1)
+  let hit = m.has(k)
+  let keys = m.keys()
+  let size = m.size()
+  let removed = m.remove(k)
+  return (m.lookup(k) ?? 0) + size + keys.length() + removed.size()
+}
+fn subscript(m: Map[Str, Int], k: Str) -> Int { return m[k] }
+
+// Str and List builtins, `len`, and the integer division forms.
+fn text_ops(s: Str) -> Str {
+  let head = s.slice(0, 1)
+  let parts = s.split(",")
+  let joined = parts.join("+")
+  let starts = s.startsWith("a") && s.endsWith("z")
+  let at = s.indexOf("b")
+  return head.concat(joined).concat(s.charAt(0)).concat("-".repeat(2))
+}
+fn list_ops(xs: List[Int]) -> Int {
+  let more = xs.push(4).concat([5])
+  let some = more.slice(0, 2)
+  return more.length() + some.indexOf(4)
+}
+fn nested_index(xss: List[List[Int]]) -> Int { return xss.indexOf([1]) }
+fn divisions(a: Int, b: Int) -> Int {
+  return a.div_trunc(b) + a.div_floor(b) + a.div_euclid(b) + a.mod(b)
+}
+fn checked(a: Int, b: Int) -> Result[Int, Str] { return a.checked_div_floor(b) }
+fn parse(s: Str) -> Int { return s.to_int() ?? 0 }
+fn sum_text(a: Int, b: Int) -> Str { return (a + b).to_str() }
+fn narrow(n: Int) -> Int32 { return n.to_int32() }
+
+// Structural `==` and the canonical Float -> Str.
+fn same_points(a: Point, b: Point) -> Bool { return a == b }
+fn same_lists(a: List[Int], b: List[Int]) -> Bool { return a != b }
+fn float_text(x: Float) -> Str { return `x=${x}` }
+
+// The code-point scan: `while (i < s.length())` over `s.charCodeAt(i)` with a
+// trailing `i = i + 1` lowers to `for _, r := range s`.
+fn count_digits(s: Str) -> Int {
+  var i = 0
+  var n = 0
+  while (i < s.length()) {
+    let c = s.charCodeAt(i)
+    if (c >= 48 && c <= 57) { n = n + 1 }
+    i = i + 1
+  }
+  return n
+}
+
+// A uniquely owned rebind lowers to Go's destructive `append`.
+fn collect(n: Int) -> List[Int] {
+  var out: List[Int] = []
+  var i = 0
+  while (i < n) {
+    out = out.push(i)
+    i = i + 1
+  }
+  return out
+}
+
+// Structural `==` pins both sides to whichever operand type is fully concrete
+// (item 302): an argument the emitter cannot type leaves `Opt[any]` /
+// `Result[any, Str]` on one side, and `any` is a whole word, so the record
+// `Company` (which spells the letters) is not mistaken for it.
+type Company = { name: Str }
+fn opt_any(g: (Int) -> Int) -> Bool { return Some(g(1)) == Some(2) }
+fn res_any(r: Result[Int, Str]) -> Bool { return Err("x") != r }
+fn companies(a: List[Company], b: List[Company]) -> Bool { return a == b }
+type Many2 = { n: Int }
+fn manys(a: Result[Many2, Many2], b: Result[Many2, Many2]) -> Bool { return a == b }
+
+// Go's predeclared names and the runtime's own type names are escaped off a
+// user identifier, so a user name never shadows a builtin the emitted code
+// spells, and a user type never redeclares `RevlOpt` and its kin.
+type RevlOpt = { a: Int }
+type RevlFrame = { b: Int }
+type Subscription = { c: Int }
+type RevlSpawnHandle = { d: Int }
+fn predeclared(rune: Int, error: Int, int32: Int, any: Int, comparable: Int, string: Int) -> Int {
+  return rune + error + int32 + any + comparable + string
+}
+
+// The two-value `match` without its present arm, a wildcard as the only arm,
+// and a wildcard standing in for the Ok side.
+fn opt_wild_only(o: Opt[Int]) -> Int { return match o { _ => 3 } }
+fn opt_none_wild(o: Opt[Int]) -> Int { return match o { None => 0, _ => 1 } }
+fn res_err_wild(r: Result[Int, Str]) -> Str { return match r { Err(e) => e, _ => "ok" } }
+fn res_wild_only(r: Result[Int, Str]) -> Int { return match r { _ => 1 } }
+fn res_ok_unbound(r: Result[Int, Str]) -> Int { return match r { Ok(_) => 1, _ => 0 } }
+
+// `v[k]` on a statically `Any` receiver reads through reflection (issue
+// #1356), and the `len` node on a Str counts code points.
+fn any_index(v: Any, k: Str) -> Any { return v[k] }
+fn str_len(s: Str) -> Int { return s.length }
