@@ -763,7 +763,7 @@ class _RevlRouter:
         self._served = {realm: 0 for realm in self._realms}
 
     def _handle(self, realm):
-        scoped = self._root.isolate(self._key, realm_label(realm))
+        scoped = self._root.isolate(self._key, realm_label(realm, self._key))
         return scoped.reflect.get(self._key)
 
     def _live(self):
