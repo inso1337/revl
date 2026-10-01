@@ -146,8 +146,7 @@
     "kind=hole",
     "kind=lease-acquire",
     "kind=lease-revoke",
-    "step=approval",
-    "validated=<true>"
+    "step=approval"
   ],
   "emit_rust": [
     "bind=_",

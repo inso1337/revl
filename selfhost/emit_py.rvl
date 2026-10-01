@@ -58,23 +58,25 @@
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
-//   * the ABI. A `validated` call and a possible item-259 fan-out are each
-//     REFUSED by name (item 391), never emitted as a plausible sync body, and so
-//     is a stream replay request (item 130 §4.5). Ported since item 391: spawn
-//     and instance-get, the item-130 stream surface (`subscribe` with its
-//     stages, buffer, drain and `merge` head, the `every ... in` / `on ... as`
-//     loops), deferred emission (enqueued, with its item-440 register), realm
-//     placements (`isolate`/`intercept`/`routes` and the router), async
-//     colouring (coloured fns, async operations, the await-seed, async arrows,
-//     the async timer window), awaited activation-body effect/emit steps, the
-//     activation-body `await` step, destructuring `let` (`let_pattern`), and the
-//     in-file `test` / `lifecycle test` / `fault test` sections;
+//   * the ABI. A `validated` call with a `retry` budget, a possible item-259
+//     fan-out and a stream replay request (item 130 §4.5) are each REFUSED by
+//     name (item 391), never emitted as a plausible sync body. Ported since
+//     item 391: spawn and instance-get, the item-130 stream surface
+//     (`subscribe` with its stages, buffer, drain and `merge` head, the
+//     `every ... in` / `on ... as` loops), deferred emission (enqueued, with
+//     its item-440 register), the item-257 validate seam with the item-513
+//     grammar registry, realm placements (`isolate`/`intercept`/`routes` and
+//     the router), async colouring (coloured fns, async operations, the
+//     await-seed, async arrows, the async timer window), awaited
+//     activation-body effect/emit steps, the activation-body `await` step,
+//     destructuring `let` (`let_pattern`), and the in-file `test` /
+//     `lifecycle test` / `fault test` sections;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
 //     yet cross-checked: admitted bound acquisitions use spawn or result-declared
 //     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
 //     Bound witnessed acquisition in a provide method is frontend-rejected.
 // Exact residual conditions and reproducing inputs, including stream replay,
-// approval/validated dispatch and full model-flow provenance, live in
+// approval dispatch, validated retry and full model-flow provenance, live in
 // the Python entries of selfhost_{blind_spots,uncovered_lines}.json. These are
 // measured limitations, not a claim of whole-emitter parity.
 //
@@ -124,6 +126,11 @@ use "../stdlib/str.rvl" { trim, lstrip, last_index_of, ident_tokens, dedent }
 // hand-positioned canonical `sorted(uses)` order in the `from runtime import`
 // line — see `emit_py_src`.
 use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
+// item 513 slice 4: the `json-schema` dialect of a validated crossing's stated
+// grammar is digested over its canonical JSON, the same two primitives the
+// reference's `revl.decode_grammar` uses (`json.dumps` + `hashlib.sha256`).
+use "../stdlib/json.rvl" { json_stringify }
+use "../stdlib/crypto.rvl" { sha256 }
 
 // ------------------------------------------- NAVIGATION GAP CLOSED (item 188)
 // The ONE navigation primitive slices 1-2 could not express in pure revl was an
@@ -2041,6 +2048,13 @@ fn cexpr(node: Any) -> Str {
   // is repr'd RAW (unlike the schema declaration, which mangles it) — mirroring
   // the reference `_expr` config branch exactly.
   if (kind == "config") { return `_revl_config[${py_repr(value_field(node, "field"))}]` }
+  // item 257: the validate seam over the settled response. A `retry` budget
+  // (Slice 2) needs the item-121 completion-site analysis this port does not
+  // carry, so a retrying crossing falls through to the named marker below.
+  if (kind == "__validated__" && value_int(value_field(node, "retry")) == 0) {
+    let schema = value_field(node, "schema")
+    return `_revl_validate(${cexpr(value_field(node, "expr"))}, ${py_repr(schema)}, ${py_repr(value_str(value_field(node, "where")))}, ${ctor_map(schema)}, ${py_repr(value_str(value_field(node, "key")))})`
+  }
   if (kind == "call") {
     if (!value_is_null(value_field(node, "target"))) {
       let t = cexpr(value_field(node, "target"))
@@ -2565,28 +2579,165 @@ fn route_reqs(node: Any, keys: List[Str]) -> Any {
   return node
 }
 
-// item 257: a call through a required key to a `validated` service operation.
-// The reference wraps it in the response-validation seam (`_revl_validate`,
-// with the grammar registry and the constructor map); this port does not carry
-// the seam, and emitting the raw call would hand the body an UNVALIDATED model
-// response. It returns the first such `Service.method`, or "" when none, so the
-// component can refuse by name.
-fn validated_call(node: Any, reqs: Any, services: Any) -> Str {
-  if (node_kind(node) == "call") {
-    let tgt = value_field(node, "target")
-    if (node_kind(tgt) == "req") {
-      let svc = value_str(value_field(reqs, value_str(value_field(tgt, "name"))))
-      let m = value_str(value_field(node, "method"))
-      if (value_bool(value_field(value_field(value_field(value_field(services, svc), "methods"), m), "validated"))) {
-        return `${svc}.${m}`
+// item 257: the method spec of a call through a required key to a `validated`
+// service operation, or None. The reference's `_validated_call` fires on
+// exactly this shape, so nothing else is wrapped.
+fn validated_spec(node: Any, reqs: Any, services: Any) -> Any {
+  if (node_kind(node) != "call" || node_kind(value_field(node, "target")) != "req") { return None }
+  let svc = value_str(value_field(reqs, value_str(value_field(value_field(node, "target"), "name"))))
+  let spec = value_field(value_field(value_field(services, svc), "methods"), value_str(value_field(node, "method")))
+  return value_bool(value_field(spec, "validated")) ? spec : None
+}
+
+// The validate-on-response seam, as an up-front rewrite: each validated call is
+// wrapped in a `__validated__` node carrying what `_revl_validate` takes. The
+// wrapper goes OUTSIDE the call's `__await__`, because the reference validates
+// the SETTLED response. `where` is the component name in the activation body
+// and `<component>.<def name>` in a provide method, as the reference's `where`.
+fn mark_validated(node: Any, reqs: Any, services: Any, where: Str, under_await: Bool) -> Any {
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(mark_validated(item, reqs, services, where, false)) }
+    return items
+  }
+  if (!value_is_object(node)) { return node }
+  let k = node_kind(node)
+  var fields: Map[Str, Any] = Map.empty()
+  for (key of value_keys(node)) { fields = fields.set(key, mark_validated(value_field(node, key), reqs, services, where, k == "__await__")) }
+  let call = k == "__await__" ? value_field(node, "expr") : node
+  let spec = validated_spec(call, reqs, services)
+  if (value_is_null(spec) || (k == "call" && under_await)) { return fields }
+  let svc = value_str(value_field(reqs, value_str(value_field(value_field(call, "target"), "name"))))
+  let retry = value_field(spec, "retry")
+  var v: Map[Str, Any] = Map.empty()
+  v = v.set("kind", "__validated__").set("expr", fields).set("schema", value_field(spec, "response_schema"))
+  v = v.set("retry", value_is_null(retry) ? 0 : value_int(retry)).set("where", where)
+  return v.set("key", `${svc}.${value_str(value_field(call, "method"))}`)
+}
+
+// A component's steps through `mark_validated`, each provide method under its
+// own `where`.
+fn mark_component(steps: Any, reqs: Any, services: Any, comp_name: Str) -> Any {
+  var out: List[Any] = []
+  for (st of value_list(steps)) {
+    if (value_str(value_field(st, "step")) == "provide") {
+      var methods: List[Any] = []
+      for (m of value_list(value_field(st, "methods"))) {
+        let mwhere = `${comp_name}.${mangle_kw(value_str(value_field(m, "name")))}`
+        var mf: Map[Str, Any] = Map.empty()
+        for (key of value_keys(m)) { mf = mf.set(key, key == "body" ? mark_validated(value_field(m, key), reqs, services, mwhere, false) : value_field(m, key)) }
+        methods = methods.push(mf)
+      }
+      var pf: Map[Str, Any] = Map.empty()
+      for (key of value_keys(st)) { pf = pf.set(key, key == "methods" ? methods : mark_validated(value_field(st, key), reqs, services, comp_name, false)) }
+      out = out.push(pf)
+    } else {
+      out = out.push(mark_validated(st, reqs, services, comp_name, false))
+    }
+  }
+  return out
+}
+
+// `_ctor_map`: the tag -> ADT case class dict for a tagged-union response
+// schema, or `None` when the validated value is used as-is.
+fn ctor_map(schema: Any) -> Str {
+  var parts = []
+  for (arm of value_list(value_field(schema, "oneOf"))) {
+    let tag = value_field(value_field(value_field(arm, "properties"), "tag"), "const")
+    if (value_kind(tag) == "str") { parts = parts.push(`${py_repr(value_str(tag))}: ${mangle(value_str(tag))}`) }
+  }
+  return parts.length() == 0 ? "None" : `{${parts.join(", ")}}`
+}
+
+// Whether the document renders a validate seam: a call through a required key
+// to a `validated` operation in any component (body or provide method).
+fn uses_validated(node: Any, reqs: Any, services: Any) -> Bool {
+  if (!value_is_null(validated_spec(node, reqs, services))) { return true }
+  for (c of value_children(node)) { if (uses_validated(c, reqs, services)) { return true } }
+  return false
+}
+
+// item 513 slice 2: `{"Service.method": grammar}` for every validated service
+// emission in the document, registered once at module import. Each entry is
+// the IR's GBNF `response_grammar` plus the `json-schema` dialect composed from
+// the crossing's `response_schema` (slice 4).
+fn grammar_registry(services: Any) -> Any {
+  var reg: Map[Str, Any] = Map.empty()
+  for (sname of list_sort(value_keys(services))) {
+    let methods = value_field(value_field(services, sname), "methods")
+    for (mname of list_sort(value_keys(methods))) {
+      let spec = value_field(methods, mname)
+      let grammar = value_field(spec, "response_grammar")
+      if (!value_is_null(grammar)) {
+        var entry: Map[Str, Any] = Map.empty()
+        for (key of value_keys(grammar)) { entry = entry.set(key, value_field(grammar, key)) }
+        let schema = value_field(spec, "response_schema")
+        if (!value_is_null(schema)) { entry = entry.set("wire_schema", json_schema_grammar(schema)) }
+        reg = reg.set(`${sname}.${mname}`, entry)
       }
     }
   }
-  for (c of value_children(node)) {
-    let found = validated_call(c, reqs, services)
-    if (found != "") { return found }
+  return reg
+}
+
+// `json_schema_grammar_for`: the wire schema, and a digest over its canonical
+// bytes (`json.dumps(sort_keys=True, separators=(",", ":"))`). The canonical
+// form is reached by sorting keys before `json_stringify`; the reference's
+// ASCII escaping cannot differ, because a derived schema holds only revl names
+// (ASCII by the lexer) and fixed type keywords.
+fn json_schema_grammar(schema: Any) -> Any {
+  let wire = wire_json_schema(schema)
+  var g: Map[Str, Any] = Map.empty()
+  return g.set("format", "json-schema").set("schema", wire).set("digest", sha256(json_stringify(sorted_keys(wire))))
+}
+
+fn sorted_keys(v: Any) -> Any {
+  if (value_is_list(v)) {
+    var items: List[Any] = []
+    for (item of value_list(v)) { items = items.push(sorted_keys(item)) }
+    return items
   }
-  return ""
+  if (!value_is_object(v)) { return v }
+  var out: Map[Str, Any] = Map.empty()
+  for (key of list_sort(value_keys(v))) { out = out.set(key, sorted_keys(value_field(v, key))) }
+  return out
+}
+
+// `_wire_json_schema`: an OpenAPI `nullable` becomes an `anyOf` with `null`, an
+// object with `properties` is closed with every member required, and
+// `contentEncoding` is dropped. Keys keep their order; `required` and
+// `additionalProperties` are set the way a Python dict sets them (in place when
+// already present, appended otherwise). Every node of a derived schema is an
+// object, so the reference's non-dict guard has nothing to guard here.
+fn wire_json_schema(schema: Any) -> Any {
+  let keys = value_keys(schema)
+  if (list_contains(keys, "nullable")) {
+    var base: Map[Str, Any] = Map.empty()
+    for (key of keys) { if (key != "nullable") { base = base.set(key, value_field(schema, key)) } }
+    var null_type: Map[Str, Any] = Map.empty()
+    var any_of: Map[Str, Any] = Map.empty()
+    return value_bool(value_field(schema, "nullable")) ? any_of.set("anyOf", [wire_json_schema(base), null_type.set("type", "null")]) : wire_json_schema(base)
+  }
+  var out: Map[Str, Any] = Map.empty()
+  for (key of keys) {
+    let v = value_field(schema, key)
+    if ((key == "oneOf" || key == "anyOf" || key == "allOf") && value_is_list(v)) {
+      var arms: List[Any] = []
+      for (arm of value_list(v)) { arms = arms.push(wire_json_schema(arm)) }
+      out = out.set(key, arms)
+    } else if (key == "properties" && value_is_object(v)) {
+      var props: Map[Str, Any] = Map.empty()
+      for (name of value_keys(v)) { props = props.set(name, wire_json_schema(value_field(v, name))) }
+      out = out.set(key, props)
+    } else if ((key == "items" || key == "additionalProperties") && value_is_object(v)) {
+      out = out.set(key, wire_json_schema(v))
+    } else if (key != "contentEncoding") {
+      out = out.set(key, v)
+    }
+  }
+  let props = value_field(out, "properties")
+  if (value_is_object(props)) { out = out.set("required", value_keys(props)).set("additionalProperties", false) }
+  return out
 }
 
 fn ir_uses_routes(ir: Any) -> Bool {
@@ -3159,15 +3310,14 @@ fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List
   // Colour first, on the IR the reference reads (a routed require is still a
   // `req` there, so an async operation through it is awaited), then route.
   let coloured = colour_component(value_field(comp, "body"), doc_colour(ir, value_field(comp, "requires"), [], true), services)
-  let body_steps = routed.length() > 0 ? route_reqs(coloured, routed) : coloured
+  let marked = mark_component(coloured, value_field(comp, "requires"), services, name)
+  let body_steps = routed.length() > 0 ? route_reqs(marked, routed) : marked
   out = out.push(line(1, body_is_async(value_list(body_steps)) ? "async def _body():" : "def _body():"))
   // item 247 second-pass (F1): `begin` yielded FIRST -> disposed LAST (cordis
   // LIFO), the Phase-2 post-unwind hook at the bottom of the unwind stack, so a
   // post-activation abort's activation-body offsets are drained after Phase 1
   // instead of lost. Mirrors backends/python/emit.py (byte-agreement oracle).
   out = out.push(line(2, "yield _revl_frame.begin"))
-  let validated = validated_call(body_steps, value_field(comp, "requires"), services)
-  if (validated != "") { out = out.push(line(2, `<<UNSUPPORTED-COMPONENT:validated ${validated}>>`)) }
   if (body_may_fan_out(value_list(body_steps))) { out = out.push(line(2, "<<UNSUPPORTED-COMPONENT:parallel-emit>>")) }
   let e = emit_body_steps(value_list(body_steps), 2, name, 0, services, externs)
   out = out.concat(e.lines)
@@ -4225,9 +4375,22 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
   if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
   if (need_secret_result) { imports = imports.push("secret_result as _revl_secret_result") }
+  // item 513 slice 2: the grammar registry, only when the document HAS a
+  // validated operation; item 257: the validate seam, only when one is called.
+  let registry = grammar_registry(value_field(ir, "services"))
+  if (value_keys(registry).length() > 0) { imports = imports.push("register_grammars as _revl_register_grammars") }
+  var validates = false
+  for (c of value_list(value_field(ir, "components"))) {
+    validates = validates || uses_validated(value_field(c, "body"), value_field(c, "requires"), value_field(ir, "services"))
+  }
+  if (validates) { imports = imports.push("validate_response as _revl_validate") }
   if (imports.length() > 0) {
     let sorted_imports = list_sort(list_dedup(imports))
     out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
+    out = out.push("")
+  }
+  if (value_keys(registry).length() > 0) {
+    out = out.push(`_revl_register_grammars(${py_repr(registry)})`)
     out = out.push("")
   }
   // item 396 option B: an extern carrying a host `ref` (on ANY tier) makes the

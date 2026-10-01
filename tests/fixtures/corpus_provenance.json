@@ -820,6 +820,7 @@
    "tests/fixtures/emit_py_placement.rvl",
    "tests/fixtures/emit_py_spawn_shapes.rvl",
    "tests/fixtures/emit_py_test_sections.rvl",
+   "tests/fixtures/emit_py_validated_shapes.rvl",
    "tests/fixtures/emit_rust_corpus/arith.rvl",
    "tests/fixtures/emit_rust_corpus/bitwise.rvl",
    "tests/fixtures/emit_rust_corpus/borrow_boundaries.rvl",

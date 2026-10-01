@@ -552,6 +552,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `def ping`).
         "../emit_ts_refusals/deferred_emission_call.rvl",
         "../emit_py_deferred_shapes.rvl",
+        # item 391: the validated slice. Both are emitter-exact from the
+        # reference IR. The native IR producer drops every operation declared
+        # `validated`, as it drops a `commutative` or `idempotent` one (see
+        # emit_py_placement.rvl above), so the service comes out empty: no
+        # grammar registry, no validate seam, and the call renders raw.
+        "../emit_ts_refusals/validated_emission_operation.rvl",
+        "../emit_py_validated_shapes.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at

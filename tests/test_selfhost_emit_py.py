@@ -286,6 +286,16 @@ CORPUS = [
     # fires through the `extern_emit` seam.
     "../emit_ts_refusals/deferred_emission_call.rvl",
     "../emit_py_deferred_shapes.rvl",
+    # item 391: a call to a `validated` operation (item 257) goes through the
+    # validate-on-response seam over the settled response, with the module's
+    # item-513 grammar registry; the port refused it by name before.
+    # validated_emission_operation.rvl is the tree's plain shape (every tier's
+    # refusal fixture holds the same code); emit_py_validated_shapes.rvl adds a
+    # tagged-union response, a record whose wire schema is rewritten, an async
+    # operation awaited inside the seam, the provide-method site and an
+    # uncalled validated operation that is still registered.
+    "../emit_ts_refusals/validated_emission_operation.rvl",
+    "../emit_py_validated_shapes.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -700,27 +710,6 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
         fn()
 
 
-@pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
-    # item 257: a call to a `validated` operation goes through the response
-    # validation seam. The port used to emit the raw call, handing the body an
-    # unvalidated model response.
-    ("tests/fixtures/emit_ts_refusals/validated_emission_operation.rvl",
-     "_revl_validate(", "<<UNSUPPORTED-COMPONENT:validated Model.complete>>"),
-])
-def test_named_runtime_and_harness_boundaries(emitted, reference, path, reference_text, port_marker):
-    """Pin specific deferred paths, not a blanket allowance for different bytes."""
-    ir = compile_files([str(ROOT / path)])
-    expected = reference.emit(ir)
-    actual = emitted["emit_py_src"](ir)
-    assert reference_text in expected
-    assert reference_text not in actual
-    # A port marker the reference emits too witnesses nothing (item 1136).
-    reason = shared_witness_token_reason(expected, port_marker)
-    assert reason is None, reason
-    if port_marker is not None:
-        assert port_marker in actual
-
-
 # The service-wide `commutative` flag is a line of its own in the SERVICES table.
 # It is not a CORPUS document: the self-host gate refuses `commutative service`
 # ("unexpected declaration"), which the gate/reference census would report as a
@@ -904,6 +893,36 @@ def test_a_deferred_emission_carries_its_idempotency_register(emitted, reference
                     "lambda: notify('boot'), register='declared')"):
         assert enqueue in want
     assert got == want
+
+
+# A `validated` operation with a `retry` budget (item 257 Slice 2). The
+# reference re-fires the completion through `_revl_validate_retry` and threads
+# the item-121 completion site through it; the port carries neither, so it
+# names the crossing rather than emitting the plain one-attempt seam, which
+# would drop the budget silently. The plain seam beside it is still emitted.
+VALIDATED_RETRY_SRC = """service Model {
+  emission validated retry 2 fn complete(h: Str) -> Str
+  emission validated fn once(h: Str) -> Str
+}
+component Agent requires model: Model {
+  emit model.complete("p")
+  emit model.once("q")
+}
+"""
+
+
+def test_a_validated_retry_budget_is_named_not_dropped(emitted, reference, tmp_path):
+    path = tmp_path / "validated_retry.rvl"
+    path.write_text(VALIDATED_RETRY_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert "_revl_validate_retry(lambda: _revl_ctx.model.complete('p'), 2," in want
+    assert "model.complete('p')" not in got
+    assert got.count("<<UNSUPPORTED-CEXPR:__validated__>>") == 1
+    once = "_revl_validate(_revl_ctx.model.once('q'), {'type': 'string'}, 'Agent', None, 'Model.once')"
+    assert once in want and once in got
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:__validated__>>")
+    assert reason is None, reason
 
 
 # ---------------------------------------------------------------------------
