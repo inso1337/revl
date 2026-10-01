@@ -145,10 +145,8 @@
     "deferred=<true>",
     "kind=__rendered__",
     "kind=hole",
-    "kind=instance-get",
     "kind=lease-acquire",
     "kind=lease-revoke",
-    "kind=spawn",
     "kind=stream-merge",
     "kind=subscribe",
     "stage=take",
@@ -276,8 +274,6 @@
   ],
   "lower_ir": [
     "kind=hole",
-    "kind=instance-get",
-    "kind=spawn",
     "kind=stream-merge",
     "method=next"
   ]

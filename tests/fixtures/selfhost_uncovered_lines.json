@@ -51,7 +51,7 @@
     "reference": {
       "go": 3354,
       "java": 986,
-      "py": 384,
+      "py": 367,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -709,8 +709,8 @@
           "_ComponentEmitter._stream_head": 4,
           "_ComponentEmitter._stream_iter": 25
         },
-        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain. (The await-seed and async arrows are exercised by services_async.rvl, async_arrow_emission.rvl and emit_py_async_shapes.rvl since item 391.) These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal).": {
-          "_ComponentEmitter._expr": 76
+        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; produced_emit/model completion/validated retry; the unknown-host-root refusal; lease/subscribe with take/capacity/drain. (The await-seed and async arrows are exercised by services_async.rvl, async_arrow_emission.rvl and emit_py_async_shapes.rvl since item 391.) These are the named realm/runtime/flow boundaries reproduced by stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal). `spawn` and `instance-get` are exercised by emit_ts_corpus/spawn.rvl, instance_get.rvl, accessor.rvl, tenant_attenuation.rvl and emit_py_spawn_shapes.rvl since item 391.": {
+          "_ComponentEmitter._expr": 62
         },
         "Declared-`Secret[Map[K, V]]` marking (item 481): `_split_type_name` splits a declared type spelling into its head and its generic arguments, and `_secret_shape_facts` walks a document's declared secret roots transitively to answer whether any shape reachable from one is a `Map` and to render the field table the runtime needs so a map's keys and values are routed through their own declared types. The python corpus reaches both, but only through the non-generic splitter path and the no-Map answers; the branches that fire for a declared `Map` reachable from a secret root are not reached, because no `emit_py_corpus` document declares one. `selfhost/emit_py.rvl` carries the declared-`Secret[T]` marking import line only, not the call-site shape (item-429(d)), so a corpus document that reached them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by tests/test_secret_map_key_redaction.py.": {
           "_secret_shape_facts": 3,
@@ -730,10 +730,10 @@
         "Empty record-class pass in _emit_types: both sources emit pass when a record spec has zero fields. Surface type Empty = {} in branches.rvl canonicalizes to kind=variant,cases=[] (confirmed directly), not an empty record spec; a forced record/fields={} is legacy/direct IR. Populated record classes and the empty surface declaration are both covered.": {
           "_emit_types": 1
         },
-        "Async-colouring residuals: _py_yields_coroutine's spawn-handle (`instance-get`) branch, which only a spawn document reaches and the port refuses `instance-get` by name; _py_async_arrow's refusal of an async arrow with an internal (non-tail) await, which the port names; _is_async_fn_type's false return on a non-string type. The await-seed itself is exercised by async_colour.rvl, async_arrow_arg.rvl, services_async.rvl, async_arrow_emission.rvl and emit_py_async_shapes.rvl since item 391.": {
+        "Async-colouring residuals: _py_yields_coroutine's non-dict guard, which no IR node reaches; _py_async_arrow's refusal of an async arrow with an internal (non-tail) await, which the port names; _is_async_fn_type's false return on a non-string type. The await-seed itself is exercised by async_colour.rvl, async_arrow_arg.rvl, services_async.rvl, async_arrow_emission.rvl and emit_py_async_shapes.rvl since item 391, and its spawn-handle branch by emit_py_spawn_shapes.rvl.": {
           "_is_async_fn_type": 1,
           "_py_async_arrow": 1,
-          "_py_yields_coroutine": 4
+          "_py_yields_coroutine": 1
         },
         "Destructuring residual: _let_pattern_stmt rejects a pattern kind other than record or list, which the frontend never lowers. Record, single, multi-name and rest list patterns are exercised by destructure.rvl, emit_ts_corpus/destructuring.rvl and emit_py_async_shapes.rvl since item 391.": {
           "_let_pattern_stmt": 1
@@ -858,7 +858,7 @@
           "_method_def_name": 2
         }
       },
-      "uncovered_statements": 366
+      "uncovered_statements": 349
     },
     "rust": {
       "statements": 3771,
