@@ -199,11 +199,7 @@
     }
   },
   "py": {
-    "blind": {
-      "Deferred delivery is REFUSED by name, not mirrored: emit.py::_deferred_step enqueues the call on the session (`_revl_frame.enqueue_deferred`) with argument-position idempotency keys, and selfhost/emit_py.rvl reads the `deferred` stamp only to answer `<<UNSUPPORTED-BODYSTEP:deferred-emit>>` / `<<UNSUPPORTED-METHODSTEP:deferred-emit>>` instead of firing the host body directly, which it used to do. No agreeing corpus document can hold a refusal, so the construct stays blind until the session queue is ported. tests/test_selfhost_emit_py.py pins both refusals (the method half on emit_ts_refusals/deferred_emission_call.rvl, the body half inline).": [
-        "deferred=<true>"
-      ]
-    },
+    "blind": {},
     "unported": {
       "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
         "kind=lease-acquire",

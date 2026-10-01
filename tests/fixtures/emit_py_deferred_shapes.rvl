@@ -1,0 +1,41 @@
+// item 391: the deferred-emission shapes (item 245) the tree's one deferred
+// document leaves out, held to byte agreement by tests/test_selfhost_emit_py.py.
+// selfhost/emit_py.rvl refused a deferred emission by name before.
+//
+//   - a deferred emission from the ACTIVATION body, beside the provide-method
+//     site every emit_*_refusals/deferred_emission_call.rvl uses;
+//   - a deferred extern beside one that fires directly, so the document still
+//     imports the `extern_emit` seam for the second and only for it;
+//   - an emission through a required service in a document that declares
+//     deferred externs: a `call`, not a `fn`, so it is never looked up as one.
+//
+// The item-440 idempotency register on the enqueue (`idempotent`,
+// `idempotent(key: p)`) is NOT here: the self-host gate cannot parse that
+// modifier, so the gate/reference census would report a false reject for this
+// file. test_a_deferred_emission_carries_its_idempotency_register holds those
+// shapes to byte agreement from inline source instead.
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+extern emission deferred fn deliver(sink: Str, msg: Str) = @py { return }
+extern emission fn ping(msg: Str) = @py { return }
+
+service Ops {
+  emission fn enqueue(sink: Str, msg: Str)
+  emission fn announce(msg: Str)
+}
+
+component Agent provides ops: Ops {
+  emit deliver("boot", "up")
+  emit ping("boot")
+  provide ops {
+    fn enqueue(sink, msg) { emit deliver(sink, msg) }
+    fn announce(msg) { emit ping(msg) }
+  }
+}
+
+component Relay requires ops: Ops {
+  emit ops.announce("relay")
+}

@@ -277,6 +277,15 @@ CORPUS = [
     "../../../backends/go/testdata/stream_event_130.rvl",
     "../../../backends/rust/scenarios/stream.rvl",
     "../emit_rust_corpus/comp_stream.rvl",
+    # item 391: a `deferred` emission (item 245) is enqueued on the session's
+    # deferral queue, never fired at the call site; the port refused it by
+    # name at both sites before. deferred_emission_call.rvl is the tree's
+    # provide-method shape (every tier's refusal fixture holds the same code).
+    # emit_py_deferred_shapes.rvl adds the activation-body site, the item-440
+    # `keyed` and `declared` registers, and a deferred extern beside one that
+    # fires through the `extern_emit` seam.
+    "../emit_ts_refusals/deferred_emission_call.rvl",
+    "../emit_py_deferred_shapes.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -692,10 +701,6 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
 
 
 @pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
-    # item 245: a deferred emission is enqueued on the session, never fired at
-    # the call site. The port used to fire the host body directly.
-    ("tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl",
-     "_revl_frame.enqueue_deferred(", "<<UNSUPPORTED-METHODSTEP:deferred-emit>>"),
     # item 257: a call to a `validated` operation goes through the response
     # validation seam. The port used to emit the raw call, handing the body an
     # unvalidated model response.
@@ -797,29 +802,6 @@ def test_a_py_ref_extern_is_named_not_emitted_empty(emitted, reference, tmp_path
     assert reason is None, reason
 
 
-# The activation-body half of the deferred-emission refusal (the method-body
-# half is the boundary row above): no document in the tree fires a deferred
-# extern straight from an activation body, so the source is inline.
-DEFERRED_BODY_SRC = """extern emission deferred fn deliver(msg: Str) = @py { return }
-component Mailer {
-  emit deliver("hi")
-}
-"""
-
-
-def test_a_deferred_emission_in_an_activation_body_is_named_not_fired(emitted, reference, tmp_path):
-    path = tmp_path / "deferred.rvl"
-    path.write_text(DEFERRED_BODY_SRC)
-    ir = compile_files([str(path)])
-    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
-    assert "_revl_frame.enqueue_deferred('deliver'" in want
-    assert "enqueue_deferred" not in got
-    assert "deliver('hi')" not in got
-    assert "<<UNSUPPORTED-BODYSTEP:deferred-emit>>" in got
-    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-BODYSTEP:deferred-emit>>")
-    assert reason is None, reason
-
-
 # A `Stream.source()` that DECLARES its replay backlog (item 130 §4.5) is the
 # one `host` shape the port still refuses. The reference renders the
 # declaration as a keyword argument (`_replay_kwarg`); the port answers the
@@ -888,6 +870,40 @@ def test_a_subscribe_replay_request_is_named_not_dropped(emitted, reference, tmp
     assert plain in want and plain in got
     reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:subscribe>>")
     assert reason is None, reason
+
+
+# The item-440 idempotency register on a deferred emission's enqueue: `keyed`
+# with the key's VALUE at the call site, and the bare `declared` claim. Inline
+# because the self-host gate cannot parse the `idempotent` extern modifier, so
+# a fixture file holding it would be a gate/reference census false reject (the
+# rest of the deferred surface is the corpus document emit_py_deferred_shapes.rvl).
+# Unlike the refusals above, this one is a byte-agreement case.
+DEFERRED_REGISTER_SRC = """extern emission deferred idempotent(key: msg) fn post(sink: Str, msg: Str) = @py { return }
+extern emission deferred idempotent fn notify(msg: Str) = @py { return }
+service Ops {
+  emission fn enqueue(sink: Str, msg: Str)
+  emission fn announce(msg: Str)
+}
+component Agent provides ops: Ops {
+  emit notify("boot")
+  provide ops {
+    fn enqueue(sink, msg) { emit post(sink, msg) }
+    fn announce(msg) { emit notify(msg) }
+  }
+}
+"""
+
+
+def test_a_deferred_emission_carries_its_idempotency_register(emitted, reference, tmp_path):
+    path = tmp_path / "deferred_register.rvl"
+    path.write_text(DEFERRED_REGISTER_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    for enqueue in ("lambda: post(sink, msg), register='keyed', idempotency=msg)",
+                    "lambda: notify(msg), register='declared')",
+                    "lambda: notify('boot'), register='declared')"):
+        assert enqueue in want
+    assert got == want
 
 
 # ---------------------------------------------------------------------------

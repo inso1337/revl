@@ -18,8 +18,8 @@
           "documents": []
         },
         "py": {
-          "residual": 22,
-          "corpus": 94,
+          "residual": 24,
+          "corpus": 96,
           "reproduced": 72,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
@@ -37,9 +37,11 @@
             "../../../stdlib/fs.rvl",
             "../emit_py_async_shapes.rvl",
             "../emit_py_builtin_shadow.rvl",
+            "../emit_py_deferred_shapes.rvl",
             "../emit_py_placement.rvl",
             "../emit_py_test_sections.rvl",
             "../emit_rust_corpus/comp_stream.rvl",
+            "../emit_ts_refusals/deferred_emission_call.rvl",
             "branches.rvl",
             "services_control_flow.rvl",
             "services_host_stream.rvl",
@@ -73,8 +75,8 @@
           "documents": []
         }
       },
-      "total_residual": 28,
-      "total_corpus": 298,
+      "total_residual": 30,
+      "total_corpus": 300,
       "clean_tiers": [
         "go",
         "java",
@@ -246,7 +248,7 @@
         "py": {
           "unported_constructs": 6,
           "unported_reasons": 4,
-          "blind_constructs": 1,
+          "blind_constructs": 0,
           "reasons": {
             "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
               "kind=lease-acquire",
@@ -430,14 +432,14 @@
         "compile": 1,
         "emit_go": 69,
         "emit_java": 36,
-        "emit_py": 7,
+        "emit_py": 6,
         "emit_rust": 34,
         "emit_ts": 20,
         "emit_wasm": 50,
         "gate_census": 5,
         "lower_ir": 1
       },
-      "total_unreached": 223
+      "total_unreached": 222
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

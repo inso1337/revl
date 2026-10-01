@@ -51,7 +51,7 @@
     "reference": {
       "go": 3354,
       "java": 986,
-      "py": 319,
+      "py": 304,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 91,
       "java": 175,
-      "py": 103,
+      "py": 108,
       "rust": 286,
       "ts": 97,
       "wasm": 63
@@ -689,8 +689,8 @@
     "py": {
       "statements": 2563,
       "uncovered": {
-        "Activation residuals: non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval paths belong to the named runtime boundaries (the port refuses a deferred emission by name); the `await` step is exercised by emit_ts_corpus/components_await.rvl and the `stream-iter` step by emit_py_corpus/streams.rvl since item 391. The result-guarded `Map.cas` undo and the extern-declared compensation are exercised by emit_ts_corpus/cas_runtime.rvl and erase_receipt.rvl. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms. Item 130 §4.9 adds one statement: the durable-cursor subscription's self-describing disposer (`yield sub.durable_undo()`), which only a `replay(from: …)` program reaches. No corpus document can be one while the self-host gate refuses the `replay(…)` clause with G1, and selfhost/emit_py.rvl refuses the subscribe that asks for it by name (test_a_subscribe_replay_request_is_named_not_dropped).": {
-          "_ComponentEmitter._body_step": 13
+        "Activation residuals: non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). The approval path belongs to the named runtime boundaries. The `await` step is exercised by emit_ts_corpus/components_await.rvl, the `stream-iter` step by emit_py_corpus/streams.rvl and a deferred emission by emit_py_deferred_shapes.rvl since item 391. The result-guarded `Map.cas` undo and the extern-declared compensation are exercised by emit_ts_corpus/cas_runtime.rvl and erase_receipt.rvl. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms. Item 130 §4.9 adds one statement: the durable-cursor subscription's self-describing disposer (`yield sub.durable_undo()`), which only a `replay(from: …)` program reaches. No corpus document can be one while the self-host gate refuses the `replay(…)` clause with G1, and selfhost/emit_py.rvl refuses the subscribe that asks for it by name (test_a_subscribe_replay_request_is_named_not_dropped).": {
+          "_ComponentEmitter._body_step": 10
         },
         "Approval/lease runtime boundary: _approval_step renders frame.approval handles; _emit_fire renders approval_crossing with capability and callback. Neither exists in selfhost/emit_py.rvl. Representative accepted inputs are tests/test_approval_typed.py and tests/test_capability_leases.py::_SOURCE, not ordinary witnessed effects.": {
           "_ComponentEmitter._approval_step": 3,
@@ -714,11 +714,6 @@
         "Declared-`Secret[Map[K, V]]` marking (item 481): `_split_type_name` splits a declared type spelling into its head and its generic arguments, and `_secret_shape_facts` walks a document's declared secret roots transitively to answer whether any shape reachable from one is a `Map` and to render the field table the runtime needs so a map's keys and values are routed through their own declared types. The python corpus reaches both, but only through the non-generic splitter path and the no-Map answers; the branches that fire for a declared `Map` reachable from a secret root are not reached, because no `emit_py_corpus` document declares one. `selfhost/emit_py.rvl` carries the declared-`Secret[T]` marking import line only, not the call-site shape (item-429(d)), so a corpus document that reached them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by tests/test_secret_map_key_redaction.py.": {
           "_secret_shape_facts": 3,
           "_split_type_name": 1
-        },
-        "Deferred delivery boundary: _deferred_extern's non-fn/lookup paths require a nonempty deferred table; _deferred_step builds frame.emit_deferred; _deferred_register_kwargs handles absent register and declared key position/argument count. The port does not implement deferred delivery. tests/test_standing_approval.py::_SOURCE declares the representative deferred deliver extern. Witnessed register kwargs are separately ported.": {
-          "_ComponentEmitter._deferred_extern": 3,
-          "_ComponentEmitter._deferred_step": 5,
-          "_deferred_register_kwargs": 12
         },
         "Destructuring binder scan only: _inline_bound_names iterates step.names strings for let_pattern. Port inline_bound mirrors it; ordinary name/bind/rest/arrow/match binders are exercised. Destructuring remains the existing explicit separate boundary.": {
           "_inline_bound_names": 2
@@ -797,8 +792,8 @@
         "Method declaration rejection only: _method rejects a method absent from its service or wrong arity. Frontend checking supplies matching names/arity; services_methods.rvl covers ordinary rendering. The declared-`Secret[Map[K, V]]` marking adds the same `_declared=` argument at the provide-method site (item 481), so two statements arrive with it and this is re-recorded 2 to 4 under the same reason, on the extern-site entry's grounds.": {
           "_ComponentEmitter._method": 4
         },
-        "Method residuals: assign emits the same name/value form as the covered let path (port combines them); the witnessed bind is frontend-rejected; deferred uses a retained runtime path (the port refuses a deferred emission by name); the `await` step is exercised by emit_py_async_shapes.rvl since item 391. The `Map.cas` undo and the by-value pins on an effect undo and an emission compensate are exercised by emit_ts_corpus/cas_runtime.rvl and emit_py_placement.rvl. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
-          "_ComponentEmitter._method_step": 9
+        "Method residuals: assign emits the same name/value form as the covered let path (port combines them); the witnessed bind is frontend-rejected; the `await` step is exercised by emit_py_async_shapes.rvl and a deferred emission by emit_ts_refusals/deferred_emission_call.rvl since item 391. The `Map.cas` undo and the by-value pins on an effect undo and an emission compensate are exercised by emit_ts_corpus/cas_runtime.rvl and emit_py_placement.rvl. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
+          "_ComponentEmitter._method_step": 8
         },
         "Module emit residuals: non-dict/version/empty-document/duplicate-component errors. (The asyncio import for an async timer and the `_revl_as_async` adapter are exercised by async_timer.rvl and emit_py_async_shapes.rvl since item 391.) (The lifecycle imports, the asyncio import and the test and fault-test sections are exercised by uxprobe2_jobs.rvl, advance.rvl, model_store_sqlite.rvl, uxprobe2_fault.rvl and emit_py_test_sections.rvl since item 391.) (The idempotent map, the per-operation commutative/async/idempotent metadata and the router runtime source are exercised by emit_py_placement.rvl, async_effects.rvl and erase_receipt.rvl since item 391's placement slice. The SERVICE-wide `'commutative': True` line is not: the self-host gate refuses a `commutative service` declaration as \"unexpected declaration\", so no census-directory document can carry one, and tests/test_selfhost_emit_py.py::test_selfhosted_emitter_renders_a_commutative_service holds both halves to agreement from an inline source.) Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. The `import inspect` / `_REVL_REFS` header and the #957 `Map` subscript helper are exercised by stdlib/fs.rvl and maps.rvl since item 391. Item 513 slice 2 (PR #1326) adds the two statements inside `if grammar_registry:`: the module-level `register_grammars(...)` call and the blank line after it. The guard is the point, because a document with no validated service crossing stays byte-identical to one compiled before the slice. No emit_py_corpus document declares a `response_grammar`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no grammar-registry arm at all (item-429(d)); the seam is pinned by tests/test_decode_grammar_seam_513s2.py instead.": {
           "emit": 10
@@ -855,9 +850,12 @@
         "Issue #1474, a provided method named after a Python keyword, soft keyword or `self`: `_method_def_name` is the one rename for the method's `def`, `_ComponentEmitter._provide` registers the contract name back on the provided class with `setattr`, and `_method_access` reaches it by `getattr(target, 'class')` at a static call site. No emit_py corpus document names a provided method after a Python keyword, and selfhost/emit_py.rvl does not port the rename, so a corpus document here would make the byte-agreement oracle diverge; the self-host port plus that document is the work that retires this entry. Not reached besides: the two refusals `_method_def_name` makes (a non-identifier, a `_revl` scaffolding name), which the frontend stops first. The input family is tests/test_keyword_method_names_1474.py.": {
           "_method_access": 1,
           "_method_def_name": 2
+        },
+        "Deferred-emission idempotency register (item 440 §(b)): `_deferred_register_kwargs` puts the extern's register, and the key's value at the call site, on the enqueue. Only a deferred extern declared `idempotent` or `idempotent(key: p)` reaches past its early return, and the self-host gate cannot parse that modifier, so a corpus file holding one would be a gate/reference census false reject. test_a_deferred_emission_carries_its_idempotency_register holds both registers to byte agreement from inline source instead; the rest of the deferred surface is the corpus documents emit_ts_refusals/deferred_emission_call.rvl and emit_py_deferred_shapes.rvl since item 391.": {
+          "_deferred_register_kwargs": 9
         }
       },
-      "uncovered_statements": 301
+      "uncovered_statements": 286
     },
     "rust": {
       "statements": 3771,
@@ -1726,10 +1724,10 @@
       "uncovered_statements": 175
     },
     "py": {
-      "statements": 2780,
+      "statements": 2805,
       "uncovered": {
-        "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds; a fourth is the named refusal of a deferred emission (`<<UNSUPPORTED-BODYSTEP:deferred-emit>>`), which only a document the port refuses reaches. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
-          "body_step": 9
+        "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. The final three statements return an explicit unsupported-step marker for an approval step or an invalid kind. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
+          "body_step": 8
         },
         "Component cexpr residuals: do rejects non-let steps and wraps empty tail; bare None/Some map to None/identity; single-argument Some call returns its argument; ADT argument loop constructs positional payloads; final unknown-kind marker names a construct the port has no arm for, a replay-declaring `Stream.source()` or replay-requesting `subscribe` (item 130 §4.5) among them. No corpus document reaches it, and none can hold a replay clause while the self-host gate refuses it. The #957 `Map` subscript arm mirrors the reference's component `_expr` arm, which no corpus document reaches on either side: a component-body subscript lowers through the list path today. branches.rvl covers nonempty do, optional and ordinary records; declarations/construction are supported, not deferred wholesale.": {
           "cexpr": 7
@@ -1765,8 +1763,8 @@
         "Match source bookkeeping: TWO statements of arm_body_is_bind are unreachable through the byte-agreement oracle. (1) The non-record body guard returns false, but every match arm body is an expression record, so no document reaches that defensive branch (the reference folds the same guard into _arm_body_is_bind). (2) The Some/None-binder short-circuit: #320 now mangles a predeclared binder in the frontend (`Some` -> `Some_`) before either emitter reads the IR, and `None` carries no payload, so `bind` is never literally `Some`/`None` here. match_binder_scan's some_binder still drives the arm but through the mangled `Some_` binder (an unread bind). arm_body_mentions' conservative object-KEY retention and exhausted-list walk stay graded on both sides by match_binder_scan (#306); control/result/services_match exercise ordinary binder use and folding.": {
           "arm_body_is_bind": 2
         },
-        "Method-step residuals: the witnessed provide bind is frontend-refused, pinned in tests; the named refusal of a deferred emission; and the final marker for await and invalid nested/unknown steps. Ordinary and `Map.cas` let-effect acquisitions, pinned inverses, adopt and compensation are covered.": {
-          "method_step": 3
+        "Method-step residuals: the witnessed provide bind is frontend-refused, pinned in tests; and the final marker for await and invalid nested/unknown steps. Ordinary and `Map.cas` let-effect acquisitions, pinned inverses, adopt, compensation and a deferred emission are covered.": {
+          "method_step": 2
         },
         "Module expr_inner residuals: bare Some identity, legacy field.sized_length branch and explicit unsupported-kind marker. Module .length currently lowers kind=len while component .length reaches field.sized_length (both in branches.rvl). Some-call construction is covered separately; no claim that all historical IR shapes are source-reachable.": {
           "expr_inner": 4
@@ -1780,10 +1778,9 @@
         "Async-arrow marker (item 391): async_arrow names an async arrow whose body awaits internally (`<<UNSUPPORTED-ARROW:async-mixed>>`), the shape the reference refuses with an EmitError, so no agreeing document reaches it.": {
           "async_arrow": 1
         },
-        "Named refusals that replaced silent drops (item 391): a component body that calls a `validated` operation (`validated_call` finds it, `component_body` names it), two adjacent awaited emits the reference may fan out from its item-259 plan (`body_may_fan_out`, `component_body`), and a deferred emission extern (`is_deferred_extern`). Each statement runs only on a document the port refuses, and a refused document has no reference bytes to agree with, so no corpus document can reach it; each refusal is pinned in tests/test_selfhost_emit_py.py instead.": {
+        "Named refusals that replaced silent drops (item 391): a component body that calls a `validated` operation (`validated_call` finds it, `component_body` names it), and two adjacent awaited emits the reference may fan out from its item-259 plan (`body_may_fan_out`, `component_body`). Each statement runs only on a document the port refuses, and a refused document has no reference bytes to agree with, so no corpus document can reach it; each refusal is pinned in tests/test_selfhost_emit_py.py instead.": {
           "body_may_fan_out": 1,
           "component_body": 2,
-          "is_deferred_extern": 1,
           "validated_call": 2
         },
         "Module host-root discovery: ir_uses_host_root's tests subtree, which only a test body that names a host root reaches, and no corpus document does. All four roots reach the sorted runtime import: Map/Pool from the module corpus, Job and Stream from the component host calls in services_host.rvl.": {
@@ -1850,9 +1847,12 @@
         },
         "uses_builtin_result's tests-subtree return selects Result helpers used only by an in-file test. The port deliberately omits test emission; such a helper alone cannot establish harness parity. Extern/activation/function Result uses are positively covered by result/result_ctor_secrets/witnessed; the separate harness boundary is reproduced by fuzz_go_6be27824.rvl.": {
           "uses_builtin_result": 1
+        },
+        "The port of the reference's `_deferred_register_kwargs` (item 440 §(b)): the register and key-value kwargs on a deferred emission's enqueue. Past its early return it runs only on a deferred extern declared `idempotent` or `idempotent(key: p)`, a modifier the self-host gate cannot parse, so no corpus file can hold one without a gate/reference census false reject. test_a_deferred_emission_carries_its_idempotency_register asserts the whole emitted module byte-equal to the reference over both registers from inline source. A self-host parser that reads the modifier would let a corpus document replace that test and close these.": {
+          "deferred_register_kwargs": 8
         }
       },
-      "uncovered_statements": 103
+      "uncovered_statements": 108
     },
     "rust": {
       "statements": 4092,

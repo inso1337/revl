@@ -544,6 +544,14 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../backends/go/testdata/stream_event_130.rvl",
         "../../../backends/rust/scenarios/stream.rvl",
         "../emit_rust_corpus/comp_stream.rvl",
+        # item 391: the deferred-emission slice. Both are emitter-exact from
+        # the reference IR. The native IR producer drops an extern's `deferred`
+        # modifier and its `@py` body, so the native chain fires each deferred
+        # call through the `extern_emit` seam instead of enqueueing it, and
+        # loses the module's `def deliver` (and, in emit_py_deferred_shapes.rvl,
+        # `def ping`).
+        "../emit_ts_refusals/deferred_emission_call.rvl",
+        "../emit_py_deferred_shapes.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at

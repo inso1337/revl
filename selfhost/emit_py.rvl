@@ -58,25 +58,23 @@
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
-//   * the ABI. A deferred emission, a `validated` call and a possible item-259
-//     fan-out are each REFUSED by name (item 391), never emitted as a
-//     plausible sync body. Ported since item 391: spawn and instance-get, realm
+//   * the ABI. A `validated` call and a possible item-259 fan-out are each
+//     REFUSED by name (item 391), never emitted as a plausible sync body, and so
+//     is a stream replay request (item 130 §4.5). Ported since item 391: spawn
+//     and instance-get, the item-130 stream surface (`subscribe` with its
+//     stages, buffer, drain and `merge` head, the `every ... in` / `on ... as`
+//     loops), deferred emission (enqueued, with its item-440 register), realm
 //     placements (`isolate`/`intercept`/`routes` and the router), async
 //     colouring (coloured fns, async operations, the await-seed, async arrows,
 //     the async timer window), awaited activation-body effect/emit steps, the
-//     activation-body `await` step, destructuring `let`, and the in-file
-//     `test` / `lifecycle test` / `fault test` sections;
+//     activation-body `await` step, destructuring `let` (`let_pattern`), and the
+//     in-file `test` / `lifecycle test` / `fault test` sections;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
 //     yet cross-checked: admitted bound acquisitions use spawn or result-declared
 //     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
-//     Bound witnessed acquisition in a provide method is frontend-rejected;
-//   * `let_pattern` (record/list destructuring): still unimplemented here, but no
-//     longer a PERMANENT exclusion — item 179 replaced the reference's
-//     `__revl_destructure_{id(node)}` (a nondeterministic Python object id) with a
-//     per-`_Lines` monotonic counter in deterministic emission order, so its bytes
-//     are now reproducible and a future slice CAN port + cross-check it.
-// Exact residual conditions and reproducing inputs, including runtime streams,
-// approval/deferred/validated dispatch and full model-flow provenance, live in
+//     Bound witnessed acquisition in a provide method is frontend-rejected.
+// Exact residual conditions and reproducing inputs, including stream replay,
+// approval/validated dispatch and full model-flow provenance, live in
 // the Python entries of selfhost_{blind_spots,uncovered_lines}.json. These are
 // measured limitations, not a claim of whole-emitter parity.
 //
@@ -2312,8 +2310,9 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     return { lines: out, counter: c }
   }
   if (kind == "emit") {
-    if (is_deferred_extern(value_field(step, "expr"), externs)) {
-      return { lines: [line(indent, "<<UNSUPPORTED-METHODSTEP:deferred-emit>>")], counter: counter }
+    let deferred = deferred_extern(value_field(step, "expr"), externs)
+    if (!value_is_null(deferred)) {
+      return { lines: [line(indent, deferred_enqueue(value_field(step, "expr"), deferred))], counter: counter }
     }
     if (!value_is_null(value_field(step, "compensate"))) {
       // item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): a method-body
@@ -2687,19 +2686,50 @@ fn compensated_extern(expr: Any, externs: List[Any]) -> Any {
   return None
 }
 
-// `_deferred_extern` (item 245): a `deferred` emission extern is ENQUEUED on the
-// session, never fired at the call site. This port does not carry the session
-// queue, so it names the step instead of firing the host body directly, which
-// would run a deferred emission immediately and outside the commit manifest.
-fn is_deferred_extern(expr: Any, externs: List[Any]) -> Bool {
+// `_deferred_extern` (item 245): the `deferred` emission extern an `emit` step
+// calls, or None. A deferred emission is ENQUEUED on the session, never fired at
+// the call site.
+fn deferred_extern(expr: Any, externs: List[Any]) -> Any {
   let call = unwrap_await(expr)
-  if (node_kind(call) != "fn") { return false }
+  if (node_kind(call) != "fn") { return None }
   let name = value_str(value_field(call, "name"))
   for (ext of externs) {
     if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "emission"
-        && value_bool(value_field(ext, "deferred"))) { return true }
+        && value_bool(value_field(ext, "deferred"))) { return ext }
   }
-  return false
+  return None
+}
+
+// `_deferred_step` (item 245): the host body does NOT run here. The call goes
+// onto the session's deferral queue as a named descriptor (receiver, method,
+// captured args) plus a thunk that fires the real body at the commit's flush,
+// or never on abort. The same line serves the activation body and a provide
+// method.
+fn deferred_enqueue(expr: Any, ext: Any) -> Str {
+  let call = unwrap_await(expr)
+  let method = py_repr(value_str(value_field(call, "name")))
+  var args = []
+  for (a of value_list(value_field(call, "args"))) { args = args.push(cexpr(a)) }
+  return `_revl_frame.enqueue_deferred(${method}, ${method}, [${args.join(", ")}], lambda: ${cexpr(expr)}${deferred_register_kwargs(ext, args)})`
+}
+
+// `_deferred_register_kwargs` (item 440 §(b)): the idempotency register, and the
+// key's VALUE at this call site, ride the WAL descriptor so a fresh-process
+// re-issue repeats the key the remote first saw. Emitted only when the extern
+// declares one, so a deferred emission without it keeps its enqueue unchanged.
+fn deferred_register_kwargs(ext: Any, args: List[Str]) -> Str {
+  let register = value_field(ext, "register")
+  if (value_is_null(register)) { return "" }
+  var parts = [`register=${py_repr(value_str(register))}`]
+  // The frontend checks the key names a parameter, and every call passes one
+  // argument per parameter, so the key's position always holds an argument.
+  let key = value_str(value_field(ext, "idempotency_key"))
+  var i = 0
+  for (p of value_list(value_field(ext, "params"))) {
+    if (key != "" && value_str(value_field(p, "name")) == key) { parts = parts.push(`idempotency=${args[i]}`) }
+    i = i + 1
+  }
+  return `, ${parts.join(", ")}`
 }
 
 // `_is_map_cas` (item 397): a result-guarded acquisition. A `false` CAS did not
@@ -2888,8 +2918,9 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     return { lines: out, counter: counter }
   }
   if (kind == "emit") {
-    if (is_deferred_extern(value_field(step, "expr"), externs)) {
-      return { lines: [line(indent, "<<UNSUPPORTED-BODYSTEP:deferred-emit>>"), ""], counter: counter }
+    let deferred = deferred_extern(value_field(step, "expr"), externs)
+    if (!value_is_null(deferred)) {
+      return { lines: [line(indent, deferred_enqueue(value_field(step, "expr"), deferred)), ""], counter: counter }
     }
     var out = [line(indent, `${await_prefix(step)}${emission_fire(value_field(step, "expr"))}`)]
     if (!value_is_null(value_field(step, "compensate"))) {
@@ -3608,14 +3639,22 @@ fn ir_uses_fmt(ir: Any) -> Bool {
 // statement containers (as `uses_fmt` does) is what makes the gate independent
 // of WHICH firing site reaches the step: an emission inside a timer body, a
 // provide method or an `if` branch is found as well, so the import can never go
-// missing for a site that renders the seam.
-fn uses_extern_emit(n: Any) -> Bool {
-  if (value_str(value_field(n, "step")) == "emit" && node_kind(value_field(n, "expr")) == "fn") { return true }
-  for (c of value_children(n)) { if (uses_extern_emit(c)) { return true } }
+// missing for a site that renders the seam. A call to a `deferred` extern is
+// not one: it is enqueued, never fired through the seam (item 245).
+fn uses_extern_emit(n: Any, deferred: List[Str]) -> Bool {
+  if (value_str(value_field(n, "step")) == "emit" && node_kind(value_field(n, "expr")) == "fn"
+      && !list_contains(deferred, value_str(value_field(value_field(n, "expr"), "name")))) { return true }
+  for (c of value_children(n)) { if (uses_extern_emit(c, deferred)) { return true } }
   return false
 }
 fn ir_uses_extern_emit(ir: Any) -> Bool {
-  return uses_extern_emit(value_field(ir, "components"))
+  var deferred = []
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "emission" && value_bool(value_field(ext, "deferred"))) {
+      deferred = deferred.push(value_str(value_field(ext, "name")))
+    }
+  }
+  return uses_extern_emit(value_field(ir, "components"), deferred)
 }
 
 // Safe pure-function templates mirror the reference's evaluation-preserving
