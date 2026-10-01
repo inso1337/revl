@@ -16,6 +16,9 @@ bodies and providers instead:
   provider. Recover boots only the components that PROVIDE those keys, and what
   they in turn require, as a composition of their own. The verdict names every
   component it booted: booting a provider runs that provider's activation.
+  So a provider whose activation crosses the boundary is NOT booted: it would
+  make those crossings a second time. Calls through its key are declined,
+  naming the provider and its crossings (`reactivation_refusals`).
 * The replay itself is `runtime.replay_descriptors`, the frame's own abort path,
   so the fences, the Phase-2 budget, the `aborted` record that settles what ran,
   and the E-Stop check are the runtime's. This module adds no executor.
@@ -182,7 +185,8 @@ class CompositionWorld(World):
                  wal_path: str, services: dict, booted: list,
                  provider_session: Any, cleanup: list,
                  foreign: Optional[dict] = None,
-                 foreign_handles: Optional[dict] = None) -> None:
+                 foreign_handles: Optional[dict] = None,
+                 refused: Optional[dict] = None) -> None:
         self.files = list(files)
         self.digest = digest
         self.module = module
@@ -197,23 +201,51 @@ class CompositionWorld(World):
         self.foreign = dict(foreign or {})
         #: the same, for `shared` grants (keyed by handle: a grant has no seq)
         self.foreign_handles = dict(foreign_handles or {})
+        #: key -> {component, crossings}: a required-service key whose
+        #: provider recover will not boot, because its activation (or that of
+        #: a component it requires) crosses the boundary and booting it would
+        #: cross again. Calls through such a key are declined, by name.
+        self.refused = dict(refused or {})
 
     def describe(self) -> dict:
         """What the verdict says about the binding it ran through."""
         return {"composition": self.files, "digest": self.digest,
                 "booted": self.booted,
+                "refused": [{"key": key, **why}
+                            for key, why in sorted(self.refused.items())],
                 "otherGenerations": sorted(
                     {_label(seg) for seg in self.foreign.values()}
                     | {_label(seg) for seg in self.foreign_handles.values()})}
 
+    def declined(self, seq: Any, receiver: Any) -> Optional[str]:
+        """The outcome for a call this binding will not make, or ``None``.
+        ``other-generation``: another composition wrote it.
+        ``would-reactivate``: its receiver's provider was not booted, because
+        booting it runs an activation that crosses the boundary again."""
+        if seq in self.foreign or seq in self.foreign_handles:
+            return "other-generation"
+        if receiver in self.refused:
+            return "would-reactivate"
+        return None
+
+    def _split(self, items: list, ident, receiver) -> tuple:
+        mine, outcome = [], {}
+        for item in items:
+            state = self.declined(ident(item), receiver(item))
+            if state is None:
+                mine.append(item)
+            else:
+                outcome[ident(item)] = state
+        return mine, outcome
+
+    def _calls(self, descriptors: list) -> tuple:
+        return self._split(descriptors, lambda d: d.get("seq"),
+                           lambda d: (d.get("call") or {}).get("receiver"))
+
     def replay_descriptors(self, descriptors: list) -> dict:
-        """The runtime's outcomes for the calls this composition wrote, and
-        ``other-generation`` for a call another composition wrote: that one is
-        not handed over, because this composition's host bodies are not the
-        ones it was registered against."""
-        mine = [d for d in descriptors if d.get("seq") not in self.foreign]
-        outcome = {d.get("seq"): "other-generation" for d in descriptors
-                   if d.get("seq") in self.foreign}
+        """The runtime's outcomes for the calls this binding makes, and the
+        :meth:`declined` outcome for each call it does not hand over."""
+        mine, outcome = self._calls(descriptors)
         if mine:
             outcome.update(self.runtime.replay_descriptors(
                 self.module, self.wal_path, mine, services=self.services))
@@ -222,10 +254,8 @@ class CompositionWorld(World):
     def reissue_deferred(self, descriptors: list) -> dict:
         """Owed deferred emissions through the runtime's own flush
         (`runtime.reissue_deferred`): `flushed` or `flush-residue` per seq. A
-        call another composition wrote is ``other-generation``, not fired."""
-        mine = [d for d in descriptors if d.get("seq") not in self.foreign]
-        outcome = {d.get("seq"): "other-generation" for d in descriptors
-                   if d.get("seq") in self.foreign}
+        declined call is not fired."""
+        mine, outcome = self._calls(descriptors)
         if mine:
             outcome.update(self.runtime.reissue_deferred(
                 self.module, self.wal_path, mine, services=self.services))
@@ -234,10 +264,10 @@ class CompositionWorld(World):
     def reclaim_shared(self, grants: list) -> dict:
         """`shared` grants' inverses through `runtime.reclaim_shared`, which
         writes the handle's `shared-reclaim-fence` before and `shared-complete`
-        after. A grant another composition wrote is ``other-generation``."""
-        mine = [g for g in grants if g.get("handle") not in self.foreign_handles]
-        outcome = {g.get("handle"): "other-generation" for g in grants
-                   if g.get("handle") in self.foreign_handles}
+        after. A declined grant is not reclaimed."""
+        mine, outcome = self._split(
+            grants, lambda g: g.get("handle"),
+            lambda g: (g.get("inverse") or {}).get("receiver"))
         if mine:
             outcome.update(self.runtime.reclaim_shared(
                 self.module, self.wal_path, mine, services=self.services))
@@ -250,6 +280,15 @@ class CompositionWorld(World):
         return (f"written by {_label(segment)}, composition "
                 f"{segment['composition'] or '(no digest)'}; recover it with "
                 f"that composition")
+
+    def reactivation_note(self, receiver: Any) -> str:
+        why = self.refused.get(receiver)
+        if why is None:
+            return ""
+        return (f"reaching `{receiver}` needs {why['component']}, and booting "
+                f"it runs its activation again, which crosses "
+                f"{', '.join(why['crossings'])}; recover will not make those "
+                f"crossings a second time")
 
     # The referent bookkeeping `DictWorld` keeps is a model's; the real world
     # has nothing to seed and cannot enumerate what is still out there.
@@ -373,6 +412,53 @@ def open_keys(wal: dict, foreign: dict, grants: dict, foreign_handles: dict) -> 
     return keys
 
 
+def _without_provided_bodies(node: Any) -> Any:
+    """``node`` with every `provide` step's method bodies removed, and every
+    `compensate` expression: neither runs when a component activates."""
+    if isinstance(node, list):
+        return [_without_provided_bodies(n) for n in node]
+    if not isinstance(node, dict):
+        return node
+    out = {k: _without_provided_bodies(v) for k, v in node.items()
+           if k != "compensate"}
+    if node.get("step") == "provide":
+        out["methods"] = []
+    return out
+
+
+def activation_crossings(ir: dict, name: str) -> list:
+    """What component ``name`` crosses when it boots: every non-pure extern its
+    activation body reaches (directly or through functions), and every
+    emission method of a required service it calls. Read with `revl audit`'s
+    own boundary walk (`boundary._boundary`) over the component's body with its
+    provided methods and compensations removed, since booting runs neither.
+    Teardown-position crossings stay in: recover unloads what it boots."""
+    from .boundary import _boundary  # noqa: PLC0415
+
+    comp = next(c for c in ir.get("components") or [] if c["name"] == name)
+    stripped = {**comp, "body": _without_provided_bodies(comp.get("body") or [])}
+    report = _boundary({**ir, "components": [stripped]}).get(name) or {}
+    crossed = {e["name"] for e in report.get("externs") or []
+               if e.get("class") != "pure"}
+    crossed |= set(report.get("emissions") or [])
+    return sorted(crossed)
+
+
+def reactivation_refusals(ir: dict, keys: set) -> dict:
+    """``{key: {component, crossings}}`` for each key whose provider recover
+    must not boot: booting a provider runs its activation, and the activation
+    of each component it requires, so any crossing among them would be made a
+    second time. The WAL already holds the first."""
+    refused: dict = {}
+    for key in sorted(keys):
+        for name in _provider_closure(ir, {key}):
+            crossings = activation_crossings(ir, name)
+            if crossings:
+                refused[key] = {"component": name, "crossings": crossings}
+                break
+    return refused
+
+
 def boot_providers(ir: dict, keys: set, config: dict) -> tuple:
     """``(session, booted, services)``: the components that provide ``keys``,
     and what they require, booted as a composition of their own. Booting a
@@ -425,9 +511,11 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
     config = dict(config or {})
     cleanup: list = []
     module, runtime = emit_unactivated(ir, config, cleanup)
+    keys = open_keys(wal, foreign, grants, foreign_handles)
+    refused = reactivation_refusals(ir, keys)
     try:
         session, booted, services = boot_providers(
-            ir, open_keys(wal, foreign, grants, foreign_handles), config)
+            ir, keys - set(refused), config)
     except Exception:
         while cleanup:
             cleanup.pop()()
@@ -436,4 +524,5 @@ def bind(files: list, wal_path: str, *, config: Optional[dict] = None) -> Compos
                             runtime=runtime, wal_path=wal_path,
                             services=services, booted=booted,
                             provider_session=session, cleanup=cleanup,
-                            foreign=foreign, foreign_handles=foreign_handles)
+                            foreign=foreign, foreign_handles=foreign_handles,
+                            refused=refused)

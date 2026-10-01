@@ -421,6 +421,38 @@ def _estop_outstanding(wal_path: str | None) -> dict:
                 "note": "no WAL was named, so the outstanding entries cannot be "
                         "read off disk — pass --wal FILE, or run `revl recover "
                         "--wal FILE` against the session's log"}
+    from ..placement_wal import PlacementIndexError, read_index  # noqa: PLC0415
+    try:
+        index = read_index(wal_path)
+    except PlacementIndexError as error:
+        return {"known": False, "note": str(error)}
+    if index is not None:
+        return _estop_outstanding_placement(wal_path, index)
+    return _estop_outstanding_wal(wal_path)
+
+
+def _estop_outstanding_placement(index_path: str, index: dict) -> dict:
+    """The outstanding entries of a `revl run --placement --wal` run: each
+    process WAL the index names, read as one session's WAL is (issue #1477).
+    Known only when every process WAL could be read."""
+    from ..placement_wal import process_wal_path  # noqa: PLC0415
+    processes, entries = [], []
+    for entry in index["processes"]:
+        one = _estop_outstanding_wal(process_wal_path(index_path, entry))
+        processes.append({"process": entry["name"], **one})
+        entries.extend({"process": entry["name"], **e}
+                       for e in one.get("entries") or [])
+    unknown = [p for p in processes if not p["known"]]
+    report = {"known": not unknown, "wal": index_path, "processes": processes,
+              "entries": entries, "count": len(entries)}
+    if unknown:
+        report["note"] = "; ".join(f"process {p['process']}: {p['note']}"
+                                   for p in unknown)
+    return report
+
+
+def _estop_outstanding_wal(wal_path: str) -> dict:
+    """The outstanding entries of one WAL."""
     from ..wal import WALIntegrityError, read_wal  # noqa: PLC0415
     try:
         wal = read_wal(wal_path)
@@ -461,17 +493,18 @@ def _render_estop(report: dict) -> str:
     lines.append("  is still held. That is the trade the button makes.")
     outstanding = report.get("outstanding") or {}
     lines.append("")
-    if outstanding.get("known"):
+    if outstanding.get("entries") is not None:
         lines.append(f"  outstanding ({outstanding['count']}):")
         for entry in outstanding["entries"] or []:
             key = entry.get("idempotency")
+            where = f"[{entry['process']}] " if entry.get("process") else ""
             lines.append(
-                f"    seq {entry.get('seq')}  {entry.get('entry')}  "
+                f"    {where}seq {entry.get('seq')}  {entry.get('entry')}  "
                 f"{entry.get('receiver')}.{entry.get('method')}"
                 + (f"  [idempotency {key}]" if key else ""))
-        if not outstanding["entries"]:
+        if not outstanding["entries"] and outstanding.get("known"):
             lines.append("    (none on the WAL — nothing durable was registered)")
-    else:
+    if not outstanding.get("known"):
         lines.append(f"  outstanding: {outstanding.get('note', 'unknown')}")
     lines.append("")
     lines.append("  The instance is DEAD; there is no resume (item 443).")

@@ -974,7 +974,10 @@ LIFO), ending in a checked verdict + residue proof
   that wrote the WAL. Each open call is replayed only through the composition
   of the log opening that wrote it (the header, or a later `generation`
   record); another opening's calls are residue naming that opening, and a
-  composition that wrote none of them is refused by name. The WAL's open discharge descriptors are re-issued through its own
+  composition that wrote none of them is refused by name. A provider whose
+  activation crosses the boundary is never booted to reach it (booting would
+  cross again); calls through it are residue naming the provider and its
+  crossings (`binding.refused`). The WAL's open discharge descriptors are re-issued through its own
   host bodies and the providers they call through, by the runtime's abort
   path, and the runtime's `aborted` record settles each one that ran.
 - `--config FILE` - with `--composition`, the config the composition ran with,
@@ -1011,7 +1014,8 @@ resume, and the way back is `revl recover --wal FILE`.
   `--wal` is given.
 - `--wal FILE` - the running session's write-ahead log. Derives the latch as
   `FILE.estop` when `--latch` is omitted, and names the log the outstanding
-  inventory is read from.
+  inventory is read from. For a `--placement` run's index, the inventory is
+  read from every process WAL it names, each entry tagged with its process.
 - `--reason TEXT` - why the button was hit; carried into the halt record and
   every residue record it produces.
 - `--operator TOKEN` - the operator accountable for the halt. An E-Stop is an

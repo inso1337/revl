@@ -1387,6 +1387,8 @@ def recover_shared_grants(wal: dict, *, wal_path: Optional[str],
                                      "its outcome is unknown, not re-fired",
                            "stranded": "an E-Stop is in force, nothing ran",
                            "other-generation": f"{note}; not attempted",
+                           "would-reactivate": _reactivation_note(
+                               world, inverse) + "; not attempted",
                        }.get(state, "the inverse names no host body in this "
                                     "composition binding; not attempted")},
                 fenced_unknown=state == "fenced"))
@@ -1720,7 +1722,12 @@ def _reissue_through_binding(wal_path: Optional[str], world: World,
     and appends `flushed` (or `flush-residue`) for the seq, so a later recover
     reads the emission as flushed and fires nothing."""
     call = descriptor.get("call") or {}
-    if wal_path is not None and seq is not None and _spends_fences(world):
+    declined = getattr(world, "declined", lambda _s, _r: None)(
+        seq, call.get("receiver"))
+    # a call the binding declines is never attempted, so it spends no fence:
+    # a fence here would stop the recover that can make it from making it
+    if wal_path is not None and seq is not None and _spends_fences(world) \
+            and declined is None:
         _append_reissue_fence(wal_path, seq, register)
     state = world.reissue_deferred([descriptor]).get(seq, "unresolved")
     if state in ("ran", "settled"):
@@ -1737,6 +1744,8 @@ def _reissue_through_binding(wal_path: Optional[str], world: World,
         "other-generation": (f"{named}: "
                              + getattr(world, "generation_note", lambda _s: "")(seq)
                              + "; not fired", "generation-residue"),
+        "would-reactivate": (f"{named}: {_reactivation_note(world, call)}; "
+                             "not fired", "reactivation-residue"),
     }.get(state, (f"{named}: names no host body in this composition binding; "
                   "not fired", "unresolved-residue"))
     return {"outcome": "failed", "seq": seq, "referent": referent,
@@ -1822,6 +1831,19 @@ def _named_call(call: dict) -> str:
     return f"{receiver + '.' if receiver else ''}{call.get('method')}({shown})"
 
 
+#: Binding outcomes for a call the binding did not hand to the runtime at all.
+_DECLINED = ("other-generation", "would-reactivate")
+
+_REACTIVATION_HINT = (
+    "finish this call by hand, or give the provider an activation that "
+    "crosses nothing, so recover can boot it without crossing again")
+
+
+def _reactivation_note(world: World, call: dict) -> str:
+    return getattr(world, "reactivation_note", lambda _r: "")(
+        (call or {}).get("receiver"))
+
+
 def _replay_through_binding(world: World, descriptors: list, *,
                             outstanding: list, ran: list, rolled_back: list,
                             restore_residue: list, fenced_deferred: list,
@@ -1834,8 +1856,10 @@ def _replay_through_binding(world: World, descriptors: list, *,
     earlier run spent; ``settled`` is a seq a discharge or `aborted` record
     already names; ``unresolved`` is a call naming no host body here, or one
     whose arguments were not captured at registration; ``stranded`` is an
-    E-Stop in force. The binding adds ``other-generation``: a call a different
-    composition wrote, which it never hands over. Only ``ran`` and ``settled``
+    E-Stop in force. The binding adds two it never hands over:
+    ``other-generation``, a call a different composition wrote, and
+    ``would-reactivate``, a call whose provider would have to be booted, which
+    runs an activation that crosses the boundary again. Only ``ran`` and ``settled``
     are clean. Everything else is residue, named by its call, never reported as
     done. A legacy boundary inverse (``_entry`` set) lands in ``ran`` and its
     residue names its `effect` record; the rest are descriptors."""
@@ -1891,9 +1915,10 @@ def _replay_through_binding(world: World, descriptors: list, *,
             continue
         if state == "fenced":
             fenced_deferred.append({"seq": seq, "referent": named})
-        elif transactional and state != "other-generation":
+        elif transactional and state not in _DECLINED:
             restore_residue.append({"seq": seq, "referent": named})
         note = getattr(world, "generation_note", lambda _seq: "")(seq)
+        refusal = _reactivation_note(world, call)
         message, kind, hint = {
             "failed": (f"{named} raised when the runtime replayed it",
                        "restore-residue" if transactional else "compensation-residue",
@@ -1912,6 +1937,8 @@ def _replay_through_binding(world: World, descriptors: list, *,
                                  "generation-residue",
                                  "run `revl recover --composition` again with "
                                  "the composition that generation ran"),
+            "would-reactivate": (f"{named}: {refusal}; not attempted",
+                                 "reactivation-residue", _REACTIVATION_HINT),
         }.get(state, (f"{named}: names no host body in this composition "
                       "binding; not attempted", "unresolved-residue",
                       "the call's receiver or method is not bound here; "
@@ -2576,10 +2603,14 @@ def render(report: dict) -> str:
     elif report.get("world") == WORLD_REAL and report.get("binding"):
         binding = report["binding"]
         booted = ", ".join(binding.get("booted") or []) or "none"
+        refused = "".join(
+            f"; not booted: {r['component']} (for `{r['key']}`; its activation "
+            f"crosses {', '.join(r['crossings'])})"
+            for r in binding.get("refused") or [])
         lines.append(f"world: REAL. Recovery replayed the WAL's discharge "
                      f"descriptors through {', '.join(binding.get('composition') or [])} "
                      f"({binding.get('digest', '')[:19]}...); providers booted: "
-                     f"{booted}.")
+                     f"{booted}{refused}.")
     lines += [report["decision"], ""]
     if report["verdict"] == "rolled-forward" and "owedFlushes" in report:
         # item 245's approved-to-discharged window verdict shares the
@@ -2673,7 +2704,8 @@ def render(report: dict) -> str:
         for rec in (report.get("residue") or {}).get("outstanding") or []:
             # issue #1477: the binding's own refusals, named by their call.
             if rec.get("kind") in ("unresolved-residue", "stranded-residue",
-                                   "unbound-residue", "generation-residue"):
+                                   "unbound-residue", "generation-residue",
+                                   "reactivation-residue"):
                 lines.append(f"  RESIDUE  {rec.get('referent')} - "
                              f"{(rec.get('error') or {}).get('message')}")
         for entry in report.get("fencedDeferred") or []:
