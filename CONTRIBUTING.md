@@ -104,9 +104,15 @@ other. The pattern, visible throughout the commit history:
    git worktree add /tmp/wave-<name> -b wave-<name> origin/main
    ```
 
-   A worktree is a separate checkout sharing the one `.git`, so the pre-commit
-   hook resolves the primary checkout's `.venv` automatically (see the hook's
-   comments). Work there; never on `main` directly.
+   A worktree is a separate checkout sharing the one `.git`, but not its
+   `.venv`: give it its own (`uv venv && uv pip install -e ".[test]"` inside
+   it), or commit with a virtualenv active that has revl installed from this
+   worktree. The pre-commit hook runs every check on one interpreter: the
+   `REVL_HOOK_PYTHON` you set, else the active virtualenv, else the worktree's
+   `.venv`, else `python3` on PATH. It never borrows the primary checkout's
+   `.venv`, and it refuses an interpreter without pytest or one whose `revl` is
+   installed from another checkout (`tools/hooks/resolve-python`). Work there;
+   never on `main` directly.
 
 2. **Do the work, commit on the wave branch.** Small, well-described commits.
    Commit messages are prose, present-tense, scoped
