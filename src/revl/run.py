@@ -2546,8 +2546,35 @@ def run_command(args, hold_once: bool = False) -> int:
         return _fail(problem, lifecycle.CONFIG)
     config = _merge_env(ir, env, config)
 
+    # issue #1461: `--providers FILE` binds the composition's model crossings to
+    # runtime adapters. Checked here, before the plan and before any runtime is
+    # imported, so a configuration the program's placement forbids refuses the
+    # boot with the diagnostic available on an interpreter with no cordis. The
+    # import is lazy: a run without the flag never loads the package.
+    model_hosts = None
+    if getattr(args, "providers", None):
+        if backend != "py":
+            return _fail(f"--providers binds model hosts on the py tier only; "
+                         f"--backend {backend} has no model host seam",
+                         lifecycle.CONFIG)
+        from . import providers as _providers  # noqa: PLC0415 - lazy
+        try:
+            model_hosts = _providers.bind_for_run(ir, args.files,
+                                                  args.providers)
+        except (_providers.ProviderConfigError, _providers.PlacementRefused,
+                _providers.ProviderError, RevlError) as exc:
+            return _fail(str(exc), lifecycle.CONFIG)
+        except OSError as exc:
+            return _fail(f"cannot read provider configuration: {exc}",
+                         lifecycle.CONFIG)
+
     if getattr(args, "plan", False):
         _print_plan(ir, config, backend)
+        if model_hosts is not None:
+            from .providers import describe_hosts  # noqa: PLC0415 - lazy
+            print("model hosts:")
+            for line in describe_hosts(model_hosts) or ["  (none)"]:
+                print(line)
         return 0
 
     if not _components(ir):
@@ -2627,6 +2654,11 @@ def run_command(args, hold_once: bool = False) -> int:
     # root is the root compile file's directory"). The driver appends them only
     # when the IR carries refs.
     root_dirs = [os.path.dirname(os.path.abspath(f)) for f in args.files]
+    ambient = getattr(args, "ambient", None)
+    if model_hosts:
+        # the model hosts are ambient provisions: provided before any component
+        # loads and withdrawn by the driver at teardown, like `revl dev`'s host
+        ambient = {**(ambient or {}), **model_hosts}
     driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
                      record=bool(getattr(args, "record", False)),
                      trace_path=getattr(args, "trace", None),
@@ -2634,7 +2666,7 @@ def run_command(args, hold_once: bool = False) -> int:
                      wal_path=getattr(args, "wal", None),
                      estop_latch=getattr(args, "estop_latch", None),
                      root_dirs=root_dirs,
-                     ambient=getattr(args, "ambient", None))
+                     ambient=ambient)
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())

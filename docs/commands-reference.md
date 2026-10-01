@@ -854,6 +854,14 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   value outside a declared `under "<prefix>"` / `in [...]` bound each refuse the
   boot before any runtime is imported. See
   [environment-binding.md](environment-binding.md).
+- `--providers FILE` - JSON/TOML provider configuration binding each
+  `model role` to a runtime adapter (OpenAI-compatible, Anthropic Messages,
+  Gemini). The composition's model `requires` keys are then served by those
+  adapters. Checked before any runtime is imported: an `on_device` role bound
+  to an endpoint off the device, a crossing on an unbound or undeclared role, a
+  binding that reaches past its role, a credential written into the file, or
+  an unset credential variable each refuse the boot. py tier only. `--plan`
+  prints the bindings. See [model-providers.md](model-providers.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
   refused and the run keeps going.
 - `--record` - record the effect accumulator so the REPL can step backwards
