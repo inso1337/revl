@@ -167,7 +167,10 @@ Participation levels differ, and the docs are honest about it:
 Every bridge marshals values to the same JSON so any pair of backends interop:
 - scalars: `Int`/`Float` to number, `Bool` to bool, `Str` to string, `Unit` to null;
 - `List[T]` to array; records and `Map[K, V]` to a JSON object `{field/key: value}`;
-- `Opt[T]`: the bare value for `Some(x)`, `null` for `None` (never tagged);
+- `Opt[T]`: the bare value for `Some(x)`, `null` for `None` (never tagged). A
+  tier whose own `None` is not `null` maps it at decode by the declared type:
+  ts reads a declared `Opt[T]`'s `null` as `undefined`, the tier's `None`, in
+  a reply, an argument, a record field and a list element (issue #1619);
 - a user ADT or `Result[T, E]` value: a tagged object
   `{"$kind": "<Case>", "$value": <payload>}`, where `<Case>` is the variant name
   (`Hit`, `Missing`, `Ok`, `Err`, ...) and `<payload>` is the case's single
