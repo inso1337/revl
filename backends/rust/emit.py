@@ -1810,23 +1810,67 @@ def _body_has_witnessed(steps: list | None, witnessed: dict) -> bool:
     return False
 
 
-def _body_has_compensation(steps: list | None) -> bool:
+def _compensated_table(externs: list) -> dict:
+    """item 254 (issue #1592): emission externs that DECLARE their own
+    `compensate`, by name. Every `emit` of one registers that compensation, at
+    whatever site the emit sits. Mirrors backends/python/emit.py's
+    `_ComponentEmitter.compensated`; empty for a document with no such extern,
+    so its emission stays byte-identical."""
+    return {ext["name"]: ext for ext in externs
+            if ext.get("class") == "emission" and ext.get("compensate") is not None}
+
+
+def _as_fn_call(node):
+    """An extern's declared slot is lowered in the pure-expression dialect
+    (`{"kind": "call", "callee": {"kind": "var", ...}}`). Re-spell a bare named
+    call as the component-site `fn` node the component renderer reads.
+    Anything else is returned as is."""
+    if isinstance(node, dict) and node.get("kind") == "call" and "method" not in node:
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            return {"kind": "fn", "name": callee.get("name"),
+                    "args": list(node.get("args") or [])}
+    return node
+
+
+def _emit_compensations(step: dict, compensated: dict | None) -> list:
+    """The compensations an `emit` step registers, in order: the site-spelled
+    `compensate` clause, then the emitted extern's own declared one (item 254,
+    issue #1592), the order the py reference registers them in. An extern is
+    matched as a `fn`-kind call naming it."""
+    out = []
+    if step.get("compensate") is not None:
+        out.append(step["compensate"])
+    expr = step.get("expr")
+    if compensated and isinstance(expr, dict) and expr.get("kind") == "fn":
+        ext = compensated.get(expr.get("name"))
+        if ext is not None:
+            out.append(_as_fn_call(ext["compensate"]))
+    return out
+
+
+def _body_has_compensation(steps: list | None, compensated: dict | None = None) -> bool:
     for step in steps or []:
-        if step.get("step") == "emit" and step.get("compensate") is not None:
+        if step.get("step") == "emit" and _emit_compensations(step, compensated):
+            return True
+        # a timer firing that emits an extern declaring its own `compensate`
+        # registers it onto the activation's accumulator (issue #1592)
+        if step.get("step") == "timer" and any(
+                _emit_compensations(em, compensated) for em in step.get("body") or []):
             return True
         if step.get("step") == "if":
-            if (_body_has_compensation(step.get("then"))
-                    or _body_has_compensation(step.get("else"))):
+            if (_body_has_compensation(step.get("then"), compensated)
+                    or _body_has_compensation(step.get("else"), compensated)):
                 return True
     return False
 
 
-def _method_bodies_have_compensation(component: dict) -> bool:
+def _method_bodies_have_compensation(component: dict, compensated: dict | None = None) -> bool:
     for step in component.get("body") or []:
         if step.get("step") != "provide":
             continue
         for method in step.get("methods") or []:
-            if _body_has_compensation(method.get("body")):
+            if _body_has_compensation(method.get("body"), compensated):
                 return True
     return False
 
@@ -1849,11 +1893,12 @@ def _method_bodies_have_witnessed(component: dict, witnessed: dict) -> bool:
     return False
 
 
-def _component_needs_teardown(component: dict, witnessed: dict) -> bool:
+def _component_needs_teardown(component: dict, witnessed: dict,
+                              compensated: dict | None = None) -> bool:
     body = component.get("body") or []
     return (_body_has_witnessed(body, witnessed)
-            or _body_has_compensation(body)
-            or _method_bodies_have_compensation(component)
+            or _body_has_compensation(body, compensated)
+            or _method_bodies_have_compensation(component, compensated)
             or _method_bodies_have_witnessed(component, witnessed))
 
 
@@ -2255,7 +2300,11 @@ class _Env:
         # `compensation` (`emit ... compensate`, activation- or method-body)
         # entry. Gated so a program using neither emits byte-identically to
         # before this slice.
-        self.needs_teardown: bool = _component_needs_teardown(component, self.witnessed)
+        # item 254 (issue #1592): emission externs that declare their own
+        # `compensate`; every emit of one registers it (see `_emit_compensations`).
+        self.compensated: dict[str, dict] = _compensated_table(self.externs)
+        self.needs_teardown: bool = _component_needs_teardown(
+            component, self.witnessed, self.compensated)
 
     def v3_ctx(self) -> _V3Ctx:
         if self._v3_ctx is None:
@@ -4621,7 +4670,8 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             acquire_node = step.get("expr")
             acquire = _expr(acquire_node, env, acquire_rename)
             out.append(f"{pad}let _ = {acquire};")
-            if step.get("compensate") is None:
+            compensations = _emit_compensations(step, env.compensated)
+            if not compensations:
                 continue
             # `compensation` (item 247 / the teardown-contract two-phase
             # abort): recover this activation's `RevlTeardown` through the
@@ -4629,16 +4679,17 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             # `revl_teardown_begin` stored there at activation), then register
             # a disposer that discharges on commit or queues onto phase 2 on
             # abort — never runs immediately, unlike the old placeholder.
-            undo_rename = _method_undo_rename(env, method)
-            _method_undo_clones(env, method, out, indent)
-            for local in sorted(_undo_reclone_locals(
-                    acquire_node, step.get("compensate"), body_locals, env.v3_ctx())):
-                out.append(f"{pad}let {local}_undo = {local}.clone();")
-                undo_rename[local] = f"{local}_undo"
-            out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
-            _emit_compensation_registration(
-                env, step["compensate"], f"{env.name}.{method.get('name')}.compensate.{index}",
-                out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
+            for compensate_node in compensations:
+                undo_rename = _method_undo_rename(env, method)
+                _method_undo_clones(env, method, out, indent)
+                for local in sorted(_undo_reclone_locals(
+                        acquire_node, compensate_node, body_locals, env.v3_ctx())):
+                    out.append(f"{pad}let {local}_undo = {local}.clone();")
+                    undo_rename[local] = f"{local}_undo"
+                out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
+                _emit_compensation_registration(
+                    env, compensate_node, f"{env.name}.{method.get('name')}.compensate.{index}",
+                    out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
         elif kind in ("let", "assign"):
             name = _ident(step.get("name"), "binding")
             # Seed the local's inferred type into the shared type table so a
@@ -5436,7 +5487,8 @@ def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_te
     out.append(f"{pad}}}){tail}")
 
 
-def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], indent: int) -> None:
+def _emit_activation_compensation(env: "_Env", compensate_node: dict, out: list[str],
+                                  indent: int) -> None:
     """`emit ... compensate` at activation level. Requires `env.needs_teardown`
     (the caller guarantees `_revl_teardown`/`ctx` are the extended locals from
     `_emit_teardown_begin`). Pre-clones every `req` and every prior
@@ -5445,7 +5497,7 @@ def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], inden
     from under it (mirrors the existing bracket-undo req cloning above)."""
     pad = "    " * indent
     referenced: set[str] = set()
-    _expr_var_names(step.get("compensate"), referenced)
+    _expr_var_names(compensate_node, referenced)
     rename: dict[str, str] = {}
     for req in env.reqs:
         req_c = f"{req}_comp"
@@ -5456,7 +5508,7 @@ def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], inden
         out.append(f"{pad}let {local_c} = {local}.clone();")
         rename[local] = local_c
     _emit_compensation_registration(
-        env, step["compensate"], env.name + ".compensate", out, indent, rename)
+        env, compensate_node, env.name + ".compensate", out, indent, rename)
 
 
 def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
@@ -5534,8 +5586,10 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
-        if step.get("compensate") is not None:
-            _emit_activation_compensation(env, step, out, indent)
+        # the site-spelled clause, then the extern's own declared one (item
+        # 254, issue #1592), each registered after the fire.
+        for compensate_node in _emit_compensations(step, env.compensated):
+            _emit_activation_compensation(env, compensate_node, out, indent)
     elif kind == "timer":
         # A `timer` step (item 57, docs/time-coeffect.md): a revertible
         # schedule. Arming the timer is the acquire, cancellation its derived
@@ -5562,12 +5616,26 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             cloned = f"{req}_t{n}"
             out.append(f"{pad}let {cloned} = {req}.clone();")
             rename[req] = cloned
+        # a firing that emits an extern declaring its own `compensate` registers
+        # it on the activation's accumulator, once per firing, after the fire
+        # (item 254, issue #1592). The firing runs after activation, so it
+        # registers the way a provide method does: through its own clone of the
+        # activation `ctx`, recovering the accumulator with `revl_teardown_of`.
+        compensates = any(_emit_compensations(em, env.compensated)
+                          for em in step.get("body") or [])
+        if compensates:
+            out.append(f"{pad}let _revl_ctx_t{n} = ctx.clone();")
         out.append(f"{pad}let _revl_timer_{n} = {schedule}({interval}, move || {{")
         for em in step.get("body") or []:
             if em.get("step") != "emit":  # lowerer invariant (scope: emissions)
                 raise EmitError(
                     f"timer body carries emissions only, found {em.get('step')!r}")
             out.append(f"{pad}    let _ = {_expr(em.get('expr'), env, rename=rename)};")
+            for compensate_node in _emit_compensations(em, env.compensated):
+                out.append(f"{pad}    let _revl_teardown = revl_teardown_of(&_revl_ctx_t{n});")
+                _emit_compensation_registration(
+                    env, compensate_node, env.name + ".timer.compensate", out, indent + 1,
+                    rename, ctx_expr=f"_revl_ctx_t{n}", propagate=False)
         out.append(f"{pad}}});")
         # the derived inverse: cancellation, yielded into the disposer stack.
         label = _string(env.name + ".timer.undo")
@@ -9697,7 +9765,8 @@ def _uses_teardown(components: list, externs: list) -> bool:
     method-body)? Gates `_revl_teardown_preamble` so a program using
     neither emits byte-identically to before this slice."""
     witnessed = {ext["name"]: ext for ext in externs if ext.get("class") == "witnessed"}
-    return any(_component_needs_teardown(c, witnessed) for c in components)
+    compensated = _compensated_table(externs)
+    return any(_component_needs_teardown(c, witnessed, compensated) for c in components)
 
 
 def _emit_components(ir: dict, components: list) -> list[str]:
