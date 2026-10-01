@@ -230,6 +230,14 @@ follow-on. A timer is an acquisition, so like every acquisition it must precede
 any `provide` in the body (linker rule A2) and is not allowed inside a
 provide-method body.
 
+The parser refuses a `compensate` clause written on a timer-body `emit`. An
+emission extern that **declares** its own `compensate` (item 254) may still be
+emitted from a firing. On the Python tier each firing registers that
+compensation the way a provide-method call does (`Frame.compensation_method`):
+it is discharged on a clean commit, runs in Phase 2 of an abort, and writes its
+WAL discharge descriptor when it registers (issue #1589). The TypeScript, go and
+rust tiers do not wire an extern-declared `compensate` at any site yet.
+
 ## Other tiers
 
 Timers lower and run on **Python, TypeScript, go, and rust**. The go and rust
