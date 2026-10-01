@@ -840,6 +840,17 @@ def _fixture(name: str) -> str:
 
 
 REJECTED_PROGRAMS = [
+    # A scoped extern that declares the floor is required under its SCOPE token
+    # (issue #1437): the reference's required set and `crossed_caps` both key
+    # by `capabilities or [name]`, so this crossing needs a `pay.card` edge.
+    ("a scoped extern crosses its scope, not its name", """
+extern emission[pay.card] fn charge(sink: Str, msg: Str) requires approval = @py { return }
+service Ops { fn ping() -> Int }
+component Biller provides ops: Ops {
+  emit charge("s", "m")
+  provide ops { fn ping() = 1 }
+}
+""", "crossing capability `pay.card` requires approval, but this `emit` carries no covering `with` edge"),
     # ---- the top-level heads, negative controls (item 391) -----------------
     # The same head in front of a component the checker must still REFUSE.
     # Every one of these drew a parse `(bad)` before, which a verdict-direction
@@ -1481,14 +1492,6 @@ component R provides till: Till {
   }
 }
 """, _AP_REFUSAL),
-    ("a scoped extern crosses its scope, and the scope is required", """
-extern emission[pay.card] fn charge(sink: Str, msg: Str) requires approval = @py { return }
-service Ops { fn ping() -> Int }
-component Biller provides ops: Ops {
-  emit charge("s", "m")
-  provide ops { fn ping() = 1 }
-}
-""", _AP_REFUSAL_OF("pay.card")),
 ]
 
 

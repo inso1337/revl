@@ -1,0 +1,25 @@
+// The two extern shapes the go self-host port used to answer with a marker
+// (issue #106): an item 378 `config` schema, which puts the package-level
+// config seam ahead of the externs and binds `_revl_config` as the body's first
+// line, and a `//revl:import` directive, which leaves the body for the module
+// import block. A plain extern is declared first as the negative control.
+
+extern pure fn plain(body: Str) -> Str = @go { return body }
+
+extern pure fn author(body: Str) -> Str
+  config { model: Str = "opus", retries: Int = 3 }
+  = @go { return _revl_config["model"].(string) + body }
+
+extern pure fn required_only(body: Str) -> Str
+  config { endpoint: Str, ratio: Float = 0.5, on: Bool = true }
+  = @go { return _revl_config["endpoint"].(string) + body }
+
+extern pure fn shout(s: Str) -> Str = @go {
+  //revl:import strings
+  //revl:import "unicode"
+  //revl:imported names stay in the body: this line is a plain comment
+  _ = unicode.IsUpper
+  return strings.ToUpper(s)
+}
+
+fn greet(name: Str) -> Str { return shout(author(plain(name))) }

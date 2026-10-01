@@ -3248,21 +3248,23 @@ fn floor_tokens(toks: List[Str], i: Int, scope: Str, ck: Ck) -> Ck {
 }
 
 // The required set is the capability TOKENS of the externs that declared the
-// floor: the declared scope when there is one, else the name (issue #1437,
-// `_approval_index`). That is the token `crossed_caps` returns for the same
-// crossing; keyed by name, a scoped extern's crossing never met the floor.
+// floor, as the reference's `_approval_index` builds it (issue #1437): an
+// extern's declared scope, else its name. That is the token `crossed_caps`
+// resolves the crossing to, so a scoped `emission[pay.card] ... requires
+// approval` extern is required under `pay.card`; keyed by name, the two never
+// met and such a crossing needed no edge.
 fn approval_required(token: Str, ck: Ck) -> Bool {
-  let names = ck.ctx.fns.keys()
-  var i = 0
-  while (i < names.length()) {
-    let hit = match ck.ctx.fns.lookup(names[i]) {
-      Some(f) => f.appr && list_contains(f.extCaps, token),
-      None    => false,
-    }
-    if (hit) { return true }
-    i += 1
+  return appr_token_in(ck.ctx.fns.keys(), 0, token, ck)
+}
+
+fn appr_token_in(names: List[Str], i: Int, token: Str, ck: Ck) -> Bool {
+  if (i >= names.length()) { return false }
+  let hit = match ck.ctx.fns.lookup(names[i]) {
+    Some(f) => f.appr && f.extEm && f.extCaps.indexOf(token) != 0 - 1,
+    None    => false,
   }
-  return false
+  if (hit) { return true }
+  return appr_token_in(names, i + 1, token, ck)
 }
 
 // `_approval_crossed_caps`: the head's tokens, or, for a marked call to a fn
