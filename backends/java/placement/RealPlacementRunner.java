@@ -518,7 +518,9 @@ public final class RealPlacementRunner {
                 }
             }
             List<Object> callArgs = new ArrayList<>();
-            if (args != null) for (Object a : args) callArgs.add(a);
+            // issue #1627: encoded as a reply is, so an Optional crosses as
+            // its value or `null`, never as its `toString()`
+            if (args != null) for (Object a : args) callArgs.add(BridgeCodec.encode(a));
             return BridgeCodec.decode(client.call(key, method.getName(), callArgs), method.getGenericReturnType());
         }
 
