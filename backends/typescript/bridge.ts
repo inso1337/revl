@@ -309,11 +309,14 @@ export function decodeAs(v: unknown, type: string | null | undefined,
   types: Record<string, any> = {}): unknown {
   if (type == null) return decodeValue(v)
   const { head, args } = typeHead(type)
+  // issue #1619: this tier's `None` is `undefined` (the emitter's Opt checks
+  // test `=== undefined`), and the wire's is JSON `null`. A declared Opt reads
+  // a `null` as `None`, or a `match` takes the `Some` arm and binds `null`.
+  if (head === 'Opt') return v === null || v === undefined ? undefined : decodeAs(v, args[0], types)
   if (head === 'Int') return toBigInt(v)
   if (head === 'Float') return typeof v === 'bigint' ? Number(v) : v
   if (v === null || v === undefined) return v
   if (head === 'List' && Array.isArray(v)) return v.map((x) => decodeAs(x, args[0], types))
-  if (head === 'Opt') return decodeAs(v, args[0], types)
   const tagged = typeof v === 'object' && !Array.isArray(v)
     && typeof (v as Record<string, unknown>).$kind === 'string'
     ? (v as Record<string, unknown>) : null

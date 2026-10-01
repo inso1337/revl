@@ -1,0 +1,11 @@
+// The reference decides which runtime preambles a pure module carries by
+// probing the JSON text of the IR (`json.dumps` of types, functions, externs
+// and tests), and a key is part of that text. So a record that merely NAMES a
+// field `maplit` pulls in the Map preamble (and with it the Opt one and the
+// `slices` import), and a field named `checked_mod` pulls in the Result one,
+// in a document that uses neither (issue #106). The port mirrors the probe
+// rather than the intent, because byte agreement is the contract; the extra
+// preambles are dead code, not wrong code.
+type Quirks = { maplit: Int, checked_mod: Int }
+
+fn total(q: Quirks) -> Int { return q.maplit + q.checked_mod }
