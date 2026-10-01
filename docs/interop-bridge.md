@@ -147,8 +147,15 @@ Participation levels differ, and the docs are honest about it:
   are present: `RealPlacementRunner` consumes via a generic
   `java.lang.reflect.Proxy` (any interface, no codegen) and a monitor connection
   turns provider death into reactive withdrawal (verified: the consumer unloads,
-  no exception). Without JDK 21 + cordis4j it falls back to the non-reactive
-  in-repo stub (`PlacementRunner`, JDK 17), which still crosses and tears down.
+  no exception). It also serves (issue #1581): it binds the serve socket, and
+  each connection hands its call to the main thread, because cordis4j is
+  single-threaded. The main thread refuses a key the process does not serve and
+  a method the service does not declare, resolves the key (the shared realm
+  first, then the one component context that isolated it, since cordis4j cannot
+  read an isolated realm by label), and runs the method with the crossing
+  recorded for the E-Stop inventory. A key two realms provide is refused by
+  name. Without JDK 21 + cordis4j it falls back to the non-reactive in-repo stub
+  (`PlacementRunner`, JDK 17), which still crosses and tears down.
 - `rust` is emitter-generated (`backends/rust/emit.py`): per service a
   `<Svc>Proxy` and a stub dispatcher plus a `plugin_by_name` table, so the
   runner carries no composition-specific code, consumes and serves any seam,
