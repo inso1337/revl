@@ -24,8 +24,9 @@ most wrong answers unrepresentable.
 The shape added to every obligation in `revl_check` is::
 
     "fillSpec": {
-      "version": 2,
+      "version": 3,
       "expected": "Str",
+      "grammarCategory": "expression",
       "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                      "reason": "..."},
       "crossing": {"permitted": false, "required": false, "form": null,
@@ -48,15 +49,24 @@ declared (G4). Version 2 states the permission under a name that cannot be
 read as an obligation (`permitsCrossing`), says outright that a crossing is
 never `required`, and gives the call-site FORM a crossing is written in, with
 the exact crossings available at this position.
+
+VERSION 3 adds `grammarCategory` (issue #1664): the syntactic category a fill
+is a document of, a key of `revl.source_grammar.CATEGORIES`, so a client can
+pass it to `revl grammar --format F --category C` (or the MCP `revl_grammar`
+tool) and constrain its decoder to the hole's slot. It is read off the grammar
+derived from the parser (`source_grammar.hole_category`), not a table: the
+narrowest category every parse of the `hole` keyword passes through. Every
+version-2 field is unchanged.
 """
 
 from __future__ import annotations
 
+from .. import source_grammar
 from ..diagnostics import GUARANTEES
 from ..holes import EMITTABLE_SECTIONS
 
 #: The fillSpec shape this module writes. Version 1 had no `version` key.
-FILL_SPEC_VERSION = 2
+FILL_SPEC_VERSION = 3
 
 #: How a crossing is written at a hole, in any position that permits one.
 CROSSING_FORM = ("emit <key>.<operation>(<args>) for an injected service, or "
@@ -332,6 +342,7 @@ def _collect_exprs(node, services, functions, bindings, capability,
             collected.append((node, {
                 "version": FILL_SPEC_VERSION,
                 "expected": node.get("type"),
+                "grammarCategory": source_grammar.hole_category(),
                 "capability": capability,
                 "crossing": _crossing(capability, calls),
                 "bindings": visible,

@@ -232,8 +232,9 @@ The `revl_check` MCP result enriches every open hole with one:
   "file": "draft.rvl", "line": 8, "expected": "Str",
   "message": "look it up", "guarantee": "…",
   "fillSpec": {
-    "version": 2,
+    "version": 3,
     "expected": "Str",
+    "grammarCategory": "expression",
     "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                    "reason": "a non-emission provide-method — pure"},
     "crossing": {"permitted": false, "required": false, "form": null,
@@ -256,6 +257,17 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
 
 * **`expected`** — the hole's type (§2). A fill that does not have it is a
   type error before it is a wrong answer.
+* **`grammarCategory`** (version 3): the syntactic category a fill is a
+  document of, one of `program`, `component-body`, `statements`, `expression`,
+  `type`. Pass it to `revl grammar --format lark|gbnf|ebnf --category <it>` or
+  to the MCP `revl_grammar` tool to constrain a decoder to this slot: a fill
+  outside the category cannot parse here. It is read off the grammar derived
+  from the parser (`revl.source_grammar.hole_category`), not a table: the
+  narrowest category every parse of the `hole` keyword passes through. The
+  parser reads `hole` only as a primary expression, so today it is
+  `expression` for every hole, and a fill such as `emit db.put(k, v)` or
+  `` k == "" ? "empty" : `key ${k}` `` is in it. A fill written inside a larger
+  expression replaces the hole as one operand, so parenthesise it there.
 * **`capability`** — the emission upper bound at this position, the G4 question
   (docs/capabilities.md). A hole is a pure expression and can never be `emit
   hole` (§2); the question is what the *fill that replaces it* may do. An
@@ -293,8 +305,9 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   whether this position may call the method at all: a plain method always, an
   emission method only where it is one of the `crossing.calls`.
 
-`version` is `2`. A version-1 spec had no `version` key; every version-1 field
-is unchanged, so a reader of version 1 keeps working.
+`version` is `3`. Version 3 added `grammarCategory`; every version-2 field is
+unchanged. A version-1 spec had no `version` key; every version-1 field is
+unchanged, so a reader of version 1 or 2 keeps working.
 
 None of this is new inference. Each field is read off the compiled IR — the
 services table, the component's `requires`/`config`, the enclosing method's

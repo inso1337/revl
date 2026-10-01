@@ -51,7 +51,10 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    obligation: `crossing.required` is always false, so do not spend effort
    deciding whether a hole "is an emission position". If the fill needs a
    crossing, `crossing.calls` lists the ones allowed there, already written
-   as `emit db.put(<k: Str>, <v: Str>)`. Fill one hole against its spec, re-check,
+   as `emit db.put(<k: Str>, <v: Str>)`. `grammarCategory` names the
+   syntactic slot the fill must be (today `expression` for every hole); pass
+   it as `category` to `revl_grammar` with a `format` to hold a constrained
+   decoder to that slot. Fill one hole against its spec, re-check,
    repeat. This is the step that turns generate-whole/refuse/regenerate into
    scaffold/fill/fill: most wrong answers become unrepresentable before they
    are written.
