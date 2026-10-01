@@ -1129,7 +1129,8 @@ class _Driver:
                  record: bool = False, trace_path: str | None = None,
                  withdraw: str | None = None, wal_path: str | None = None,
                  root_dirs: list | None = None, secrets: dict | None = None,
-                 estop_latch: str | None = None, ambient: dict | None = None):
+                 estop_latch: str | None = None, ambient: dict | None = None,
+                 ambient_check=None):
         self.ir = ir
         self.config = config
         # item 256 Slice 1: an optional caller-supplied secret store (name ->
@@ -1153,6 +1154,10 @@ class _Driver:
         # rather than an untracked global bridge.
         self._ambient_services = dict(ambient or {})
         self._ambient_disposers = []
+        # issue #1569: `ambient_check(ir)` returns why the ambient provisions,
+        # kept across a `--watch` reload, cannot serve an edited composition,
+        # or None. A reload it refuses leaves the running generation untouched.
+        self._ambient_check = ambient_check
         self.fibers: dict[str, object] = {}
         # item 628: an optional per-attempt settlement ledger. When a caller
         # (the Session's awaitable teardown) sets this to a list before driving
@@ -1851,7 +1856,36 @@ class _Driver:
                       f"provides {key} — routing across realms("
                       f"{', '.join(realms)}) strategy({strategy or 'round_robin'})")
 
-    async def _dispose_all(self, ir: dict) -> None:
+    async def _withdraw_ambient(self) -> None:
+        """Withdraw the ambient host provisions, then release the model
+        provisions behind them.
+
+        They are withdrawn only after every component has released the
+        service, preserving the same consumers-before-providers teardown
+        discipline as revl-owned provisions.  A `FiberEffect` joins an
+        in-flight or completed cleanup, so both paths stay no-ops when
+        nothing is outstanding.
+        """
+        for dispose in reversed(self._ambient_disposers):
+            async def _settle(effect=dispose):
+                joined = effect._join() if hasattr(effect, "_join") else effect()
+                if hasattr(joined, "__await__") or asyncio.iscoroutine(joined):
+                    await joined
+            try:
+                await _settle()
+            except BaseException as exc:
+                self._log("swap", "ambient", f"withdraw failed: {exc}")
+        self._ambient_disposers.clear()
+        # item 515 S2: with every consumer component gone and the hosts
+        # withdrawn, release the model provisions. The last release of a
+        # role unloads its member; `_teardown` then proves it is gone.
+        # (`getattr`: a test may build a driver without `__init__`)
+        if getattr(self, "_model_hosts", None):
+            from .providers import close_hosts  # noqa: PLC0415 - lazy
+            for failure in close_hosts(self._model_hosts):
+                self._log("swap", "model", f"release failed: {failure}")
+
+    async def _dispose_all(self, ir: dict, keep_ambient: bool = False) -> None:
         # stop the production silence observer FIRST (#622): a generation being
         # torn down or swapped must leave no independent watcher behind, and the
         # observer must not race the disposals below with an expiry of its own.
@@ -1954,29 +1988,11 @@ class _Driver:
             # on every component releasing cleanly.  The original exception is
             # untouched and propagates once this block is done.
             #
-            # They are withdrawn only after every component has released the
-            # service, preserving the same consumers-before-providers teardown
-            # discipline as revl-owned provisions.  A `FiberEffect` joins an
-            # in-flight or completed cleanup, so both paths stay no-ops when
-            # nothing is outstanding.
-            for dispose in reversed(self._ambient_disposers):
-                async def _settle(effect=dispose):
-                    joined = effect._join() if hasattr(effect, "_join") else effect()
-                    if hasattr(joined, "__await__") or asyncio.iscoroutine(joined):
-                        await joined
-                try:
-                    await _settle()
-                except BaseException as exc:
-                    self._log("swap", "ambient", f"withdraw failed: {exc}")
-            self._ambient_disposers.clear()
-            # item 515 S2: with every consumer component gone and the hosts
-            # withdrawn, release the model provisions. The last release of a
-            # role unloads its member; `_teardown` then proves it is gone.
-            # (`getattr`: a test may build a driver without `__init__`)
-            if getattr(self, "_model_hosts", None):
-                from .providers import close_hosts  # noqa: PLC0415 - lazy
-                for failure in close_hosts(self._model_hosts):
-                    self._log("swap", "model", f"release failed: {failure}")
+            # A `--watch` reload keeps them (issue #1569): they belong to the
+            # run, not to one generation, and nothing re-provides them for the
+            # next one.
+            if not keep_ambient:
+                await self._withdraw_ambient()
             await self._flush()
             # item 541: components just disposed here may have been the last live
             # users of one or more generation modules (a swap/reload predecessor, a
@@ -2443,12 +2459,22 @@ class _Driver:
                 # rejecting it.
                 raise RevlError(files[0] if files else "<composition>", 0,
                                 problem)
+            # issue #1569: the ambient provisions are kept across the reload,
+            # so an edit they can no longer serve is refused here, before the
+            # running generation is touched
+            check = getattr(self, "_ambient_check", None)
+            problem = check(ir) if check is not None else None
+            if problem is not None:
+                raise RevlError(files[0] if files else "<composition>", 0,
+                                problem)
         except RevlError as exc:
             for i, text in enumerate(str(exc).splitlines()):
                 self._log("reject", "REJECTED" if i == 0 else "", text)
             self._log("note", "", "running composition untouched — a bad edit cannot deploy (that is the point)")
             return
-        await self._dispose_all(self.ir)  # tear down the old generation first
+        # tear down the old generation first; the ambient provisions are the
+        # run's, not the generation's, so they stay provided (issue #1569)
+        await self._dispose_all(self.ir, keep_ambient=True)
         self.ir = ir
         await self._load(ir, self._emit_module(ir))
 
@@ -2525,6 +2551,18 @@ def _fail(exc_text: str, stage: str, code: int = 1) -> int:
     on the record."""
     print(f"error: {lifecycle.render(exc_text, stage)}", file=sys.stderr)
     return code
+
+
+def _model_host_check(args, model_hosts):
+    """The reload check for `--providers` model hosts (issue #1569), or None
+    when the run binds none."""
+    if not model_hosts:
+        return None
+    from .providers import rebind_problem  # noqa: PLC0415 - lazy
+
+    def check(ir):
+        return rebind_problem(ir, args.files, args.providers, model_hosts)
+    return check
 
 
 def _is_model_refusal(exc: BaseException) -> bool:
@@ -2711,7 +2749,8 @@ def run_command(args, hold_once: bool = False) -> int:
                          wal_path=getattr(args, "wal", None),
                          estop_latch=getattr(args, "estop_latch", None),
                          root_dirs=root_dirs,
-                         ambient=ambient)
+                         ambient=ambient,
+                         ambient_check=_model_host_check(args, model_hosts))
     except Exception as exc:
         # item 515 S2: a model provision that cannot load its member where the
         # schedule placed it refuses the boot, named, before anything loads
