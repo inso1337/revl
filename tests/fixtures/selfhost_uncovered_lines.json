@@ -49,7 +49,7 @@
   ],
   "_budget": {
     "reference": {
-      "go": 2834,
+      "go": 2822,
       "java": 986,
       "py": 660,
       "rust": 1200,
@@ -57,7 +57,7 @@
       "wasm": 1558
     },
     "selfhost": {
-      "go": 103,
+      "go": 104,
       "java": 175,
       "py": 103,
       "rust": 286,
@@ -249,8 +249,8 @@
           "_spawn_targets": 5,
           "_uses_spawn": 1
         },
-        "The `_go_v3_expr` arms the frontend never feeds: a malformed node, an unknown binary or unary operator, an unknown expression kind, a nullary case read as a bare name and a user constructor in call shape (both compatibility IR: the frontend lowers a declared variant application as `adt`), and an unpinned `Map.empty()` (the checker requires the annotation the frontend threads onto the node, so neither the fallback read of that pin nor the refusal runs). Functional record update is the one refusal here a document reaches, tests/fixtures/emit_go_refusals/record_update.rvl. Issue #1631 adds three statements to the structural-equality arm: when neither operand is fully concrete, each side's erased Opt/Result type arguments are filled from the other. selfhost/emit_go.rvl mirrors it in the follow-up that also puts backends/go/testdata/result_erased_1631.rvl in the go corpus; until then backends/go/test_result_erased_1631.py executes it under `go test`.": {
-          "_go_v3_expr": 11
+        "The `_go_v3_expr` arms the frontend never feeds: a malformed node, an unknown binary or unary operator, an unknown expression kind, a nullary case read as a bare name and a user constructor in call shape (both compatibility IR: the frontend lowers a declared variant application as `adt`), and an unpinned `Map.empty()` (the checker requires the annotation the frontend threads onto the node, so neither the fallback read of that pin nor the refusal runs). Functional record update is the one refusal here a document reaches, tests/fixtures/emit_go_refusals/record_update.rvl.": {
+          "_go_v3_expr": 8
         },
         "The item 445 `unique` stamp lands only on a self-rebind through `push`/`set`/`remove` of the binding itself, so the two guards that reject a stamped write through another method or from another receiver never fail. The destructive `append`, map store and `delete` are in the corpus (emit_go_corpus/stdlib_surface.rvl, loop_shapes.rvl).": {
           "_go_v3_self_rebind": 2
@@ -298,9 +298,8 @@
           "_method_returns_value": 1,
           "_needs_sync": 1
         },
-        "Issue #1631: `_v3_fill_erased` fills the erased `any` type arguments of a built-in Opt/Result surface from a declared one of the same family, and `_v3_fn_value_ret` reads the declared return of a function-typed binding so a call through it types a constructor's payload. The go corpus reaches only their no-op paths until selfhost/emit_go.rvl mirrors them, in the follow-up that also puts backends/go/testdata/result_erased_1631.rvl in the corpus; backends/go/test_result_erased_1631.py executes both under `go test`.": {
-          "_v3_fill_erased": 9,
-          "_v3_fn_value_ret": 1
+        "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
+          "_v3_fill_erased": 1
         }
       },
       "uncovered_statements": 3190
@@ -1531,6 +1530,9 @@
         },
         "`has_any_word` tests the neighbours of an `any` only when the left one is not a word character; an erased `any` is always inside brackets and a user type name that contains the letters starts with a capital, so the empty neighbour and a digit right after a non-word left neighbour do not occur.": {
           "is_word_char": 2
+        },
+        "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
+          "fill_erased": 1
         }
       },
       "uncovered_statements": 86
