@@ -718,7 +718,6 @@ def check_claims(claims: list[Claim], observed: list[dict],
 
     by_key = {(e["site"], e["mirrors"]): e for e in observed}
     recorded = {(e["site"], e["mirrors"]): e for e in entries}
-    claiming = {c.site for c in claims}
 
     for key, entry in sorted(recorded.items()):
         site, mirrors = key
