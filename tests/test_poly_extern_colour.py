@@ -140,9 +140,18 @@ def test_poly_extern_emits_byte_identical_to_two_hand_written_externs(backend):
 @pytest.mark.parametrize("backend", ["python", "typescript"])
 def test_async_call_site_awaited_sync_call_site_not(backend):
     out = _emit(backend, compile_source(_poly_program(), "poly.rvl"))
-    # the async clone is awaited; the sync clone is a plain call
-    assert "await engine_run(x)" in out
+    # the async clone is awaited; the sync clone is a plain call. On py both
+    # are a provide method's value-position emission, so each fires through
+    # the recording seam (issue #1603), and the `await` stays outside it.
+    if backend == "python":
+        assert ("(await _revl_extern_emit(_revl_ctx, 'engine_run', "
+                "engine_run, (x,)))") in out
+        assert ("return _revl_extern_emit(_revl_ctx, 'engine_run_revl_sync', "
+                "engine_run_revl_sync, (x,))") in out
+    else:
+        assert "await engine_run(x)" in out
     assert "await engine_run_revl_sync" not in out
+    assert "await _revl_extern_emit(_revl_ctx, 'engine_run_revl_sync'" not in out
 
 
 # -- A1 is untouched ---------------------------------------------------------
