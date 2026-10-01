@@ -413,6 +413,22 @@ public final class PlacementRunner {
         throw new RuntimeException("no method " + name + "/" + arity + " on " + iface.getName());
     }
 
+    private static final Map<Method, java.lang.reflect.Type[]> GENERIC_PARAM_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    // issue #1627: a SERVED call's arguments decoded by the method's declared
+    // (generic) parameter types, as a reply is by its return type. A wire
+    // `null` for an `Opt[T]` parameter becomes `Optional.empty()`, a record
+    // argument becomes the record, and an `Opt` inside either is rebuilt too.
+    // `coerceArgs` (by raw class) handed the provider a `null` Optional, a Map
+    // for a record and a `null` list element.
+    static Object[] decodeArgs(Method m, List<Object> args) {
+        java.lang.reflect.Type[] types = GENERIC_PARAM_CACHE.computeIfAbsent(m, Method::getGenericParameterTypes);
+        Object[] out = new Object[args.size()];
+        for (int i = 0; i < args.size(); i++) out[i] = BridgeCodec.decode(args.get(i), types[i]);
+        return out;
+    }
+
     static Object[] coerceArgs(Method m, List<Object> args) {
         Class<?>[] types = PARAM_TYPE_CACHE.computeIfAbsent(m, Method::getParameterTypes);
         Object[] out = new Object[args.size()];
@@ -455,7 +471,9 @@ public final class PlacementRunner {
                 }
             }
             List<Object> callArgs = new ArrayList<>();
-            if (args != null) for (Object a : args) callArgs.add(a);
+            // issue #1627: encoded as a reply is, so an Optional crosses as
+            // its value or `null`, never as its `toString()`
+            if (args != null) for (Object a : args) callArgs.add(BridgeCodec.encode(a));
             Object value = client.call(key, method.getName(), callArgs);
             return BridgeCodec.decode(value, method.getGenericReturnType());
         }
@@ -690,7 +708,7 @@ public final class PlacementRunner {
                         long seq = Estop.beginCrossing(key, method, "accept");
                         Object result;
                         try {
-                            result = m.invoke(service, coerceArgs(m, args));
+                            result = m.invoke(service, decodeArgs(m, args));
                         } finally {
                             Estop.endCrossing(seq);
                         }
