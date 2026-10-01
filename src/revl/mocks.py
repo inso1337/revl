@@ -309,8 +309,12 @@ async def _drive_mock_lifecycle(ir: dict, test: dict, module: Any, emit_mod: Any
     events: list = []
     runtime_mod.set_trace(events.append)
     fibers: dict = {}          # component name -> fiber (real, loaded consumers)
-    mock_fibers: dict = {}     # provision key -> the mock provider's fiber
-    mock_refs: dict = {}       # provision key -> live consumers relying on the mock
+    # issue #1513: every lookup goes through run.py's one resolver. A mock is
+    # keyed by (key, realm): a consumer placed with `isolate k in realm("r")`
+    # resolves `k` in `r`, so its mock must be provided there, not in root.
+    from .run import resolve_key, resolve_provision, unserved_key_reason  # noqa: PLC0415
+    mock_fibers: dict = {}     # (key, realm) -> the mock provider's fiber
+    mock_refs: dict = {}       # (key, realm) -> live consumers relying on the mock
     bindings: dict = {}        # `let x = call ...` bindings, by name
     try:
         baseline = fault._snapshot(root)
@@ -322,15 +326,20 @@ async def _drive_mock_lifecycle(ir: dict, test: dict, module: Any, emit_mod: Any
                 comp = _component(ir, comp_name)
                 # auto-mock every `requires` key the composition has not already
                 # satisfied (a real provider loaded earlier keeps its place).
+                isolate = comp.get("isolate") or {}
                 for local, service in (comp.get("requires") or {}).items():
-                    if root.get(local) is None and local not in mock_fibers:
+                    slot = (local, isolate.get(local))
+                    if slot not in mock_fibers and resolve_provision(
+                            root, runtime_mod, local, slot[1]) is None:
                         spec = (ir.get("services") or {}).get(service) or {}
                         mock = make_mock_component(local, service, spec, types,
                                                    module, recorder, Frame)
-                        mock_fibers[local] = runtime_mod.plug(root, mock, {})
+                        if slot[1] is not None:
+                            mock["isolate"] = {local: slot[1]}
+                        mock_fibers[slot] = runtime_mod.plug(root, mock, {})
                         await fault._flush()
-                    if local in mock_fibers:
-                        mock_refs[local] = mock_refs.get(local, 0) + 1
+                    if slot in mock_fibers:
+                        mock_refs[slot] = mock_refs.get(slot, 0) + 1
                 config = {name: eval(emit_mod._expr(value), module.__dict__, bindings)  # noqa: S307
                           for name, value in (step.get("config") or {}).items()}
                 fibers[comp_name] = runtime_mod.plug(root, getattr(module, comp_name), config)
@@ -345,20 +354,25 @@ async def _drive_mock_lifecycle(ir: dict, test: dict, module: Any, emit_mod: Any
                     await fault._flush()
                 # release the mocks this consumer was relying on; drop a mock
                 # when its last consumer is gone, so residue returns to baseline.
+                isolate = comp.get("isolate") or {}
                 for local in (comp.get("requires") or {}):
-                    if local in mock_refs:
-                        mock_refs[local] -= 1
-                        if mock_refs[local] <= 0:
-                            del mock_refs[local]
-                            mock_fiber = mock_fibers.pop(local, None)
+                    slot = (local, isolate.get(local))
+                    if slot in mock_refs:
+                        mock_refs[slot] -= 1
+                        if mock_refs[slot] <= 0:
+                            del mock_refs[slot]
+                            mock_fiber = mock_fibers.pop(slot, None)
                             if mock_fiber is not None:
                                 await mock_fiber.dispose()
                                 await fault._flush()
 
             elif kind == "call":
                 key = step["key"]
-                impl = root.get(key)
+                impl = resolve_key(root, runtime_mod, ir, key)
                 if impl is None:
+                    reason = unserved_key_reason(ir, key)
+                    if reason is not None:
+                        raise AssertionError(f"{where}: {reason}")
                     raise AssertionError(
                         f"{where}: no provider for key {key!r} — its component is "
                         f"loaded but not ACTIVE (a component with an unmet `requires` "
