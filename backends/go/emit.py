@@ -405,6 +405,13 @@ def _expr(node, env: _Env, expected=None) -> str:
     if kind == "name":
         return env.name_ref(node["id"])
     if kind == "var":  # pure-tier name shape, seen inside v3 documents
+        if node.get("name") == "None":
+            # issue #1627: a `None` in a value position (an argument, a record
+            # field, a list element) is the same construction `Some(x)` is
+            # refused for above; `return None` never reaches here (the return
+            # path spreads it into the tuple convention). It used to render
+            # as `None`, which `go build` refused as an undefined name.
+            raise EmitError(_OPT_VALUE_REFUSAL)
         return env.name_ref(node.get("name") or node.get("id"))
     if kind == "config":
         return env.config_ref(node["field"])
@@ -511,6 +518,12 @@ def _expr(node, env: _Env, expected=None) -> str:
             gt = (_go_type(expected) if expected
                   else _go_type(_comp_infer(node.get("right"), env)) or "any")
             left_node = node["left"]
+            if left_node.get("kind") == "field" and left_node.get("opt"):
+                # issue #1627: an Opt FIELD of a declared record is the
+                # record's `RevlOpt[T]` struct, neither the `*T` the read
+                # form below dereferences nor the `(T, bool)` a call returns;
+                # `go build` refused the `_v != nil` this rendered.
+                raise EmitError(_OPT_VALUE_REFUSAL)
             left = _expr(left_node, env)
             right = _expr(node["right"], env, _comp_infer(node.get("right"), env))
             if left_node.get("kind") not in ("call", "host", "builtin", "fn"):
@@ -658,11 +671,7 @@ def _expr(node, env: _Env, expected=None) -> str:
         case = node.get("case")
         if _V3_MODE and _V3_TYPED_COMPONENTS and case in _v3_case_layout():
             return _v3_comp_construct(node, env)
-        raise EmitError(
-            "Opt/Result construction is only supported in return position on "
-            "the cordis-go tier (got a bare value) - the component world "
-            "spells an Opt VALUE as `*T` and nothing in it consumes one; "
-            "lift it into a helper fn instead")
+        raise EmitError(_OPT_VALUE_REFUSAL)
     if kind == "match":
         if _V3_MODE:
             # v3 method bodies: user ADTs lower to a type switch (needs the
@@ -1882,6 +1891,15 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             out.append("%scontinue" % pad)
         else:
             raise EmitError("unsupported method step: %r" % (s,))
+
+
+#: The one sentence every Opt value position this component world cannot hold
+#: is refused with: a construction, a `None` argument, an Opt record field.
+_OPT_VALUE_REFUSAL = (
+    "Opt/Result construction is only supported in return position on "
+    "the cordis-go tier (got a bare value) - the component world "
+    "spells an Opt VALUE as `*T` and nothing in it consumes one; "
+    "lift it into a helper fn instead")
 
 
 def _construction_case(node):
