@@ -53,7 +53,7 @@
       "java": 986,
       "py": 660,
       "rust": 1200,
-      "ts": 542,
+      "ts": 552,
       "wasm": 1558
     },
     "selfhost": {
@@ -1096,7 +1096,7 @@
       "statements": 2208,
       "uncovered": {
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), emits sync/async timer scheduling and in-flight tracking, dispatches the item-130 `stream-iter` step (roadmap #81), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards and fail are covered; witnessed transactions, timers and the ts reactive-tier stream steps are declared port boundaries": {
-          "_component_step": 44
+          "_component_step": 49
         },
         "Canonical type parser fallbacks: `_split_fn_type` rejects missing arrows/unclosed parameter lists; `_split_ts_types` tracks nested generic bracket depth; `_ts_type` and `_ts_v3_type` erase unknown nominal/generic arguments; `_v3_surface_type` retains legacy unstamped literal/name/list inference. Frontend canonical type strings and stamped expressions exercise the supported paths Issue #957's `Map` subscript arm adds two statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_ts.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py.": {
           "_split_fn_type": 2,
@@ -1144,7 +1144,7 @@
           "_guard_frame_neutral_loop": 1,
           "_has_bracket.walk": 3,
           "_method_body_needs_frame": 1,
-          "_needs_frame.walk": 2
+          "_needs_frame.walk": 3
         },
         "In-file test harness boundary: `_emit_ts_tests` emits vitest cases and test-mode statements; `_emit_ts_lifecycle_tests` builds Context/fibers and lowers load, unload, call, assert, advance and no-residue steps. The self-host emitter produces application/library modules only; lifecycle constructs and steps are recorded unported Issue #1112 adds the per-test async-context isolation here (the module-entry `AsyncLocalStorage.snapshot()` re-entered around every driver) and the region got SMALLER, 60 to 59: the driver's line emission was folded into one `extend` per region, so a construct no corpus document can reach costs the ledger one statement instead of one per emitted line. It cannot be reached: a corpus document carrying a `lifecycle test` would flip the byte-agreement oracle RED rather than close the gap, and that was MEASURED on such a document rather than assumed -- selfhost/emit_ts.rvl emits no driver section at all for it (reference 3934 bytes, port 2298, 57 diff lines), because in-file `test` / `fault_test` / `lifecycle test` emission is deferred out of every self-host slice by that file's own header. Porting it is the corpus work that retires this entry; the reference half is pinned by backends/typescript/test_lifecycle_async_isolation.py, which executes both drivers on real node under both of node's async-context implementations.": {
           "_emit_ts_lifecycle_tests": 59,
@@ -1172,7 +1172,7 @@
           "_ts_inplace_write": 3
         },
         "Provide-method residuals: `_method_body` retains witnessed acquisition, generic non-call compensation snapshots, empty-list `any[]` fallback, nested-provide rejection and unknown-step rejection. Mutable/immutable locals, returns, await, Map CAS and call compensation are covered; witnessed transactions remain the named boundary": {
-          "_method_body": 17
+          "_method_body": 12
         },
         "Standalone transport only: `<module>` calls `_main`; `_main` parses `--runtime`, stdin/file JSON, usage and missing-argument errors, then writes `emit`. The oracle imports and calls `emit` directly, so these statements do not represent an emitter branch": {
           "<module>": 1,
@@ -1225,6 +1225,11 @@
         },
         "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 7
+        },
+        "Extern-declared compensate (item 254, issue #1592): `_compensated_extern` finds an emitted extern that declares its own `compensate`, `_emit_compensations` adds that compensation to the ones an `emit` registers, and `_as_fn_call` re-spells the slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_ts.rvl ports no extern-declared compensation. The behaviour is pinned and executed against real cordis by backends/typescript/tests/extern_compensate.test.ts.": {
+          "_as_fn_call": 5,
+          "_compensated_extern": 3,
+          "_emit_compensations": 1
         }
       },
       "uncovered_statements": 518
