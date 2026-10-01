@@ -11,6 +11,7 @@ Run: pytest backends/go/test_emit_go.py -q
 import importlib.util
 import json
 import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -1671,3 +1672,33 @@ def test_a_pool_collision_still_renames_the_host_side():
         "  provide s { fn size() = 1 }\n"
         "}"), package="emitted")
     _has(src, "type RevlPool struct {")
+
+
+# --- a lifecycle test with no `unload` (issue #1559) -------------------------
+# The unload waits are the lifecycle's only use of `time`, so a test without an
+# `unload` step imported it unused and the package did not build.
+
+_NO_UNLOAD = """
+service S { fn bump(x: Int) -> Int }
+component P provides s: S { provide s { fn bump(x) { return x + 1 } } }
+lifecycle test "a call without an unload" {
+  load P
+  let n = call s.bump(41)
+  assert n == 42
+}
+"""
+
+
+def test_a_lifecycle_test_without_unload_does_not_import_time():
+    from revl import compile_source  # noqa: PLC0415
+    code = emit.emit(compile_source(_NO_UNLOAD, "no_unload.rvl"))
+    assert '\t"time"' not in code
+    assert "time." not in code.replace("runtime.", "")
+
+
+@pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")
+def test_a_lifecycle_test_without_unload_builds_and_passes():
+    from revl import compile_source  # noqa: PLC0415
+    from revl.test import RUNNERS  # noqa: PLC0415
+    status, message = RUNNERS["go"](compile_source(_NO_UNLOAD, "no_unload.rvl"))
+    assert status == "pass", message

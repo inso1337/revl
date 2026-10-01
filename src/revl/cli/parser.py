@@ -246,7 +246,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="a TOML/JSON placement map: also print the item-411 sandbox "
              "envelope per sandboxed process: the fs/net grant, the effective "
              "reach of each seam-served key, and the externs the [sandbox.needs] "
-             "table vouches (claimed, unverified). Human output only.")
+             "table vouches (claimed, unverified); and each model role's "
+             "binding per host with the model bindings digest (item 515). "
+             "Human output only.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
@@ -1321,6 +1323,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--env", default=None,
                      help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
+    run.add_argument("--providers", default=None, metavar="FILE",
+                     help="JSON/TOML provider configuration binding each "
+                          "`model role` to a runtime adapter (OpenAI-compatible, "
+                          "Anthropic, Gemini). Checked before boot against the "
+                          "program's placement: an on_device role bound off the "
+                          "device, a crossing on an unbound or undeclared role, "
+                          "or a credential in the file refuses the run. "
+                          "Credentials come from the environment variables the "
+                          "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
                      help="boundary policy file (item 33). With --backend wasm it "
                           "enforces the item-289 least-authority chain (host "

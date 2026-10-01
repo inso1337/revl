@@ -249,16 +249,114 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
-def _parse_probe(expr: str) -> dict:
-    """`key.method('a', 'b')` -> {"key","method","args"} for the rust runner,
-    whose probes are structured rather than eval'd strings."""
+def _parse_probe(expr: str, ir: dict | None = None) -> dict:
+    """`key.method('a', 41)` -> {"key","method","args"} for the rust and go
+    runners, whose probes are structured rather than eval'd strings.
+
+    Issue #1559: every argument used to be sent as a STRING, so a go
+    consumer's `ops.run(41)` decoded `"41"` into an `int64`, failed silently
+    and ran with 0. Each argument is now a typed JSON value: the literal's own
+    type (a quoted string, `true`/`false`, an integer, a float), converted to
+    the parameter type the operation declares in `ir` when that type is a
+    scalar. A literal that cannot be that type is refused by name, never
+    passed on to be misread."""
     match = _PROBE_RE.match(expr)
     if not match:
-        raise RuntimeError(f"cannot parse probe {expr!r} for the rust backend (use key.method('a', 'b'))")
+        raise RuntimeError(f"cannot parse probe {expr!r} (use key.method('a', 41))")
     key, method, arg_str = match.groups()
-    arg_str = arg_str.strip()
-    args = [a.strip().strip("'\"") for a in arg_str.split(",")] if arg_str else []
+    tokens = _probe_tokens(expr, arg_str)
+    types = _probe_param_types(ir, key, method) if ir is not None else None
+    args = []
+    for i, token in enumerate(tokens):
+        declared = types[i] if types is not None and i < len(types) else None
+        args.append(_probe_arg(expr, token, declared))
     return {"key": key, "method": method, "args": args}
+
+
+def _probe_tokens(expr: str, arg_str: str) -> list[tuple[str, bool]]:
+    """Split a probe's argument list on top-level commas. Each token is
+    `(text, quoted)`; a quoted string may hold commas."""
+    tokens: list[tuple[str, bool]] = []
+    i, n = 0, len(arg_str)
+    while i < n:
+        while i < n and arg_str[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        if arg_str[i] in "'\"":
+            quote, j = arg_str[i], i + 1
+            while j < n and arg_str[j] != quote:
+                j += 1
+            if j >= n:
+                raise RuntimeError(f"probe {expr!r}: unterminated string argument")
+            tokens.append((arg_str[i + 1:j], True))
+            i = j + 1
+        else:
+            j = i
+            while j < n and arg_str[j] != ",":
+                j += 1
+            tokens.append((arg_str[i:j].strip(), False))
+            i = j
+        while i < n and arg_str[i] in " \t":
+            i += 1
+        if i < n:
+            if arg_str[i] != ",":
+                raise RuntimeError(f"probe {expr!r}: expected `,` between arguments")
+            i += 1
+    return tokens
+
+
+def _probe_param_types(ir: dict, key: str, method: str) -> list | None:
+    """The declared parameter types of `key.method`, read off the service the
+    composition binds `key` to (provided or required), or None."""
+    services = ir.get("services") or {}
+    for comp in ir.get("components") or []:
+        for table in ("provides", "requires"):
+            service = (comp.get(table) or {}).get(key)
+            if service is None:
+                continue
+            decl = ((services.get(service) or {}).get("methods") or {}).get(method)
+            if decl is not None:
+                return [p.get("type") for p in decl.get("params") or []]
+    return None
+
+
+def _probe_arg(expr: str, token: tuple[str, bool], declared) -> object:
+    text, quoted = token
+    if quoted:
+        value: object = text
+    elif text in ("true", "false"):
+        value = text == "true"
+    elif re.fullmatch(r"-?\d+", text):
+        value = int(text)
+    elif re.fullmatch(r"-?(\d+\.\d*|\.\d+)([eE][-+]?\d+)?|-?\d+[eE][-+]?\d+", text):
+        value = float(text)
+    else:
+        value = text
+    kind = str(declared).strip() if declared is not None else None
+    try:
+        if kind in ("Int", "Int32"):
+            if isinstance(value, bool) or not re.fullmatch(r"-?\d+", str(value).strip()):
+                raise ValueError
+            return int(str(value).strip())
+        if kind == "Float":
+            if isinstance(value, bool):
+                raise ValueError
+            return float(value)
+        if kind == "Bool":
+            if isinstance(value, bool):
+                return value
+            if str(value) in ("true", "false"):
+                return str(value) == "true"
+            raise ValueError
+        if kind == "Str":
+            return value if isinstance(value, str) else (
+                ("true" if value else "false") if isinstance(value, bool) else str(value))
+    except ValueError:
+        raise RuntimeError(
+            f"probe {expr!r}: argument {text!r} is not a {kind}, the type the "
+            f"operation declares for it") from None
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -2132,7 +2230,47 @@ def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
     for host in schedules:
         for line in host.lines():
             print(f"  {line}", flush=True)
+    for line in model_schedule.binding_lines(
+            model_schedule.binding_manifest(schedules)):
+        print(f"  {line}", flush=True)
     return None, {host.host: model_schedule.handoff(host) for host in schedules}
+
+
+def model_binding_view(files, placement: dict) -> tuple[list[str], str | None]:
+    """`revl audit --placement`: each model role's binding per host and the
+    bindings digest (item 515 S5), computed by the same scheduler the
+    conductor runs. `(lines, None)`, or `([], diagnostic)` when the placement
+    cannot be scheduled. Empty lines for a composition with no routed model
+    action, so its audit output is unchanged."""
+    from . import model_schedule  # noqa: PLC0415
+    try:
+        names = _component_names(files)
+    except RevlError as exc:
+        # A composition DOCUMENT argument (item 439) is not a module and is
+        # not read here; say so rather than failing an audit that worked.
+        return [f"model bindings (item 515): not computed, the arguments do "
+                f"not parse as modules ({exc})"], None
+    expanded, err = expand_tiers(placement, names)
+    if err:
+        return [], err
+    try:
+        schedules = model_schedule.placement_schedules(
+            files, expanded.get("processes") or {})
+    except model_schedule.ScheduleRefusal as exc:
+        return [], str(exc)
+    manifest = model_schedule.binding_manifest(schedules)
+    if manifest is None:
+        return [], None
+    return (["model bindings (item 515): each role's device per host, as "
+             "declared and scheduled; not evidence of what a provider loaded"]
+            + ["  " + line for line in model_schedule.binding_lines(manifest)],
+            None)
+
+
+def _component_names(files) -> list[str]:
+    from . import model_schedule  # noqa: PLC0415
+    program = model_schedule.composition_program(files)
+    return [c.name for c in program.components]
 
 
 def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
@@ -4390,11 +4528,11 @@ def run_placement(files, placement_path: str, once: bool = False,
             spec["module"] = built["node"]
         elif backend == "rust":
             spec["components"] = [_snake(c) for c in spec["components"]]
-            spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
+            spec["probe"] = [_parse_probe(p, ir) for p in spec["probe"]]
         elif backend == "go":
             # go keeps PascalCase component names (RevlLoad switches on them);
             # only probes are structured rather than eval'd strings.
-            spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
+            spec["probe"] = [_parse_probe(p, ir) for p in spec["probe"]]
         elif backend == "java":
             spec["module"] = "revl.Components"
             iface_keys = (set(spec["proxies"]) | set(spec.get("serve", {}).get("keys", []))
