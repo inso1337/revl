@@ -298,3 +298,58 @@ def test_the_rejection_documents_state_their_verdict(name, message):
     header = " ".join(line.lstrip("/ ").strip() for line in text.splitlines()
                       if line.startswith("//"))
     assert message in header
+
+
+# ------------------------------------------------ issue #1613's reproducers
+#
+# The four programs issue #1613 measured on main, verbatim: a value-position
+# `emit` in a provide method (`let r = emit` and `return emit`), the `emit`
+# statement control, and a capability-scoped extern. Each is refused by the
+# reference and by the self-host gate with the same tag and text.
+
+_ISSUE_1613_CHARGE = ('extern emission fn charge(cents: Int) -> Int requires approval '
+                      '= @py { print("CHARGE-FIRED", cents); return cents }\n')
+
+
+def _issue_1613_method(body: str) -> str:
+    return (_ISSUE_1613_CHARGE
+            + "service P { emission fn go() -> Int }\n"
+            + "component B provides p: P {\n  provide p {\n    fn go() {\n"
+            + body + "    }\n  }\n}\n")
+
+
+ISSUE_1613 = {
+    "A_let_emit": (_issue_1613_method("      let r = emit charge(5)\n      return r\n"),
+                   "charge"),
+    "B_return_emit": (_issue_1613_method("      return emit charge(5)\n"), "charge"),
+    "C_emit_stmt": (_issue_1613_method("      emit charge(5)\n      return 1\n"), "charge"),
+    "D_scoped": ('extern emission[pay.card] fn charge(cents: Int) -> Int requires approval '
+                 '= @py { print("CHARGE-FIRED", cents); return cents }\n'
+                 "service Ops { fn ping() -> Int }\n"
+                 "component Biller provides ops: Ops {\n"
+                 "  emit charge(5)\n"
+                 "  provide ops { fn ping() = 1 }\n}\n", "pay.card"),
+}
+
+
+@pytest.mark.parametrize("case", sorted(ISSUE_1613))
+def test_issue_1613_reproducers_are_refused_by_the_reference(case):
+    src, token = ISSUE_1613[case]
+    err = _refusal(src)
+    assert err.code == "G4"
+    assert err.message == _approval(token)
+
+
+@pytest.fixture(scope="module")
+def gate_admit():
+    """`admit_src` off `selfhost/lower.rvl`, the shape every
+    `tests/test_selfhost_*.py` builds it in. pytest's default import mode
+    already puts `tests/` on the path for this file."""
+    import test_selfhost_lower as lower_oracle
+    return lower_oracle._exec_emitted()["admit_src"]
+
+
+@pytest.mark.parametrize("case", sorted(ISSUE_1613))
+def test_issue_1613_reproducers_are_refused_by_the_gate(gate_admit, case):
+    src, token = ISSUE_1613[case]
+    assert gate_admit(src) == "G4|" + _approval(token)
