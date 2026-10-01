@@ -1669,7 +1669,7 @@ class _ComponentEmitter:
             return f"Stream.subscribe({stream}, {policy!r}, _revl_ctx{extra})"
         if kind == "fn":
             if self._is_value_emission(expr):
-                return self._extern_emit_fire(expr, where)
+                return self._value_emission_fire(expr, where)
             name = _ident(expr.get("name"), f"{where}: function")
             args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
             # item 92: a call to a colored (async def) module fn returns a
@@ -2307,6 +2307,20 @@ class _ComponentEmitter:
             return f"(await {call})"
         return call
 
+    def _value_emission_fire(self, expr: dict, where: str) -> str:
+        """A provide-method value emission, fired through the recording seam
+        (#1603). When its extern DECLARES a `compensate` (item 254, #1592), the
+        compensation registers on the frame right after the fire and before the
+        rest of the expression, as an `emit` statement registers it:
+        `(<fire>, _revl_frame.compensation_method(lambda: <comp>))[0]` keeps
+        the emission's value. A fire that raises registers nothing."""
+        fire = self._extern_emit_fire(expr, where)
+        ext_comp = self._compensated_extern(expr)
+        if ext_comp is None:
+            return fire
+        comp = self._inverse_expr(ext_comp["compensate"], where)
+        return f"({fire}, _revl_frame.compensation_method(lambda: {comp}))[0]"
+
     def _inverse_expr(self, expr: Any, where: str) -> str:
         """`_expr` for an undo or a compensation inside a provide-method body:
         it runs at abort, so a value-position emission in it is not routed."""
@@ -2935,6 +2949,14 @@ class _ComponentEmitter:
                         f"{self._inverse_expr(step.get('compensate'), where)})")
             else:
                 out.add(indent, self._emit_fire(step, where))
+            ext_comp = self._compensated_extern(step.get("expr"))
+            if deferred is None and ext_comp is not None:
+                # item 254 / #1592: the extern DECLARES its own `compensate`.
+                # Registered after the fire and after a site-spelled one, the
+                # order the activation body (and the timer site, #1590) uses.
+                out.add(indent,
+                        "_revl_frame.compensation_method(lambda: "
+                        f"{self._inverse_expr(ext_comp['compensate'], where)})")
         elif kind == "return":
             if step.get("expr") is None:
                 out.add(indent, "return")

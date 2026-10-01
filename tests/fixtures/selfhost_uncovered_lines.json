@@ -51,7 +51,7 @@
     "reference": {
       "go": 3354,
       "java": 986,
-      "py": 660,
+      "py": 663,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -719,8 +719,9 @@
           "_match_expr.bind_payload": 3,
           "_walrus_temp": 1
         },
-        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run.": {
-          "_ComponentEmitter._compensated_extern": 3
+        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run. The provide-method sites (#1592) are the same boundary: `_method_step` registers an emit statement's declared compensation (recorded with the method residuals), and `_value_emission_fire` registers a value emission's (`return emit put_row(m)`). selfhost/emit_py.rvl ports the extern-declared compensate at no site, so a corpus document carrying one would turn the byte oracle red rather than close the gap.": {
+          "_ComponentEmitter._compensated_extern": 3,
+          "_ComponentEmitter._value_emission_fire": 2
         },
         "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal).": {
           "_ComponentEmitter._expr": 81
@@ -823,8 +824,8 @@
         "Method declaration rejection only: _method rejects a method absent from its service or wrong arity. Frontend checking supplies matching names/arity; services_methods.rvl covers ordinary rendering. The declared-`Secret[Map[K, V]]` marking adds the same `_declared=` argument at the provide-method site (item 481), so two statements arrive with it and this is re-recorded 2 to 4 under the same reason, on the extern-site entry's grounds.": {
           "_ComponentEmitter._method": 4
         },
-        "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
-          "_ComponentEmitter._method_step": 22
+        "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration. One statement registers an extern-declared compensate at a method emit (#1592, the item-254 boundary below).": {
+          "_ComponentEmitter._method_step": 23
         },
         "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. Issue #957's `Map` subscript arm adds seven statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 513 slice 2 (PR #1326) adds the two statements inside `if grammar_registry:`: the module-level `register_grammars(...)` call and the blank line after it. The guard is the point, because a document with no validated service crossing stays byte-identical to one compiled before the slice. No emit_py_corpus document declares a `response_grammar`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no grammar-registry arm at all (item-429(d)); the seam is pinned by tests/test_decode_grammar_seam_513s2.py instead.": {
           "emit": 45
@@ -889,7 +890,7 @@
           "_method_def_name": 2
         }
       },
-      "uncovered_statements": 642
+      "uncovered_statements": 645
     },
     "rust": {
       "statements": 3771,
