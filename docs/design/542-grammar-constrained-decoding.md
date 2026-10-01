@@ -431,6 +431,31 @@ other five refuse a validated crossing by name. At that point re-measure: the
 golden count is zero today only because nothing in the corpus uses the feature,
 and a corpus case added by the refusal work will change that number.
 
+**The second condition was met on 2026-09-24, and the question is open again
+(updated 2026-09-29, issue #1572).** PR 1391 made python refuse a `validated`
+extern, and PR 1413 (issue #1373) made the other five cordis tiers refuse a
+`validated` service operation and a `validated` extern by name, through
+`src/revl/validated_boundary.py` and each backend's `_refuse_validated_emissions`
+wrapper, pinned by `tests/test_validated_tier_refusal_1373.py`. So the
+differential table above is history: typescript, rust, wasm, go and java no
+longer emit the same bytes for a validated crossing, they refuse it. One scope
+boundary is deliberate and pinned there: typescript's `--target temporal`
+returns before the gate and reads `validated` on an extern to pin the crossing
+to at-most-once, so it is neither refused nor lowered as a checked boundary.
+
+The re-measurement this paragraph asks for, on `67fc027b7`: checked-in
+`.ir.json` documents carrying either key, 0 of 54; backend golden files
+mentioning either key, 0 of 29; and the only `.rvl` sources declaring a
+`validated` emission are the five refusal fixtures
+`tests/fixtures/emit_{go,java,rust,ts,wasm}_refusals/validated_emission_operation.rvl`,
+which the refusal work added and which lower to no golden. Python is still the
+only tier that reads `response_grammar` (`backends/python/emit.py`), so the
+first condition is not met. What changed is the argument: a slice 3
+differential now has six answers to check, one lowering and five refusals by
+name, instead of one answer and five silences. Whether that makes slice 3 worth
+its IR migration and seam-API change is a decision for the item's owner, and it
+has not been taken.
+
 ## 7. Recursion, and what would have to change together
 
 The most valuable thing a grammar can express that an inline schema cannot is a

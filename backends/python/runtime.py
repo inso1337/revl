@@ -1408,28 +1408,36 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
 # ---------------------------------------------------------------------------
 
 class _RealmLabel:
-    """A realm identity. cordis compares isolate labels by object identity,
-    so same-string sharing must go through one object — never rely on
-    string interning."""
+    """The isolation label of one key in one realm. cordis compares isolate
+    labels by object identity, so same-string sharing must go through one
+    object — never rely on string interning."""
 
-    __slots__ = ("name",)
+    __slots__ = ("name", "key")
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, key: str) -> None:
         self.name = name
+        self.key = key
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
-        return f"<realm {self.name}>"
+        return f"<realm {self.name}/{self.key}>"
 
 
 _REALM_LABELS: dict = {}
 
 
-def realm_label(name: str) -> "_RealmLabel":
-    """Process-wide string -> label-object registry: equal strings share a
-    realm (the paper §5.2.1 global-realm convention)."""
-    label = _REALM_LABELS.get(name)
+def realm_label(name: str, key: str) -> "_RealmLabel":
+    """Process-wide `(realm, key)` -> label-object registry: equal realm
+    strings share a realm (the paper §5.2.1 global-realm convention).
+
+    Keyed by the key too, not by the realm string alone (issue #1543). cordis
+    stores a provision under its isolation label (`ctx.isolate(name, label)`
+    then `reflect.store[label]`), which is why its own loader mints one label
+    per key inside a realm (`loader.Realm.access`). One label for the whole
+    realm put `isolate db in realm("wa")` and `isolate api in realm("wa")` in
+    the same slot."""
+    label = _REALM_LABELS.get((name, key))
     if label is None:
-        label = _REALM_LABELS[name] = _RealmLabel(name)
+        label = _REALM_LABELS[(name, key)] = _RealmLabel(name, key)
     return label
 
 
@@ -1445,7 +1453,7 @@ def plug(ctx, component: dict, config=None):
     _estop_check(f"plug {component.get('name') or '<component>'}")
     scoped = ctx
     for key, realm in (component.get("isolate") or {}).items():
-        scoped = scoped.isolate(key, realm_label(realm))
+        scoped = scoped.isolate(key, realm_label(realm, key))
     return scoped.plugin(component, config)
 
 

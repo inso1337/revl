@@ -106,11 +106,19 @@ composition has not already provided is auto-mocked:
   disposed when its last consumer unloads;
 - `load` → `unload` → `load` again re-derives the same mock (same seeds, same
   responses), so reload is reproducible.
+- a requirement placed with `isolate <key> in realm("<label>")` is checked and
+  mocked in that realm, so the consumer resolves the mock where it looks for
+  the key. Two consumers share a mock only when they require the key in the
+  same realm.
 
 The test itself still drives the composition *through provided keys* — `call
 key.op(…)` is checked against the document's loaded providers (syntax-2.0
 §7.1) — so mock world tests the consumer through its own interface, with the
 mock answering the calls the consumer makes on its requires.
+
+A `call` resolves its key the way `revl_call` does: the shared realm first,
+otherwise the key's single isolated realm. A key isolated into two or more
+realms is refused, naming each provider and its realm.
 
 ## 4. Scope
 

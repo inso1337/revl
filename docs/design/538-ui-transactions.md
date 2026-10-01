@@ -489,14 +489,22 @@ Written down so a reader does not infer more than was measured.
   `unknown` or `irreversible` UI crossing is still admitted with no
   confirmation, because absence of a rule is silence. Section 6 says that is
   the cost of the option, and the unconditional raise is still not built.
-- **The check-to-use race is open** (issue #1371). Section 4 names it. Item
-  521's slice 4 landed a `UiTarget` carried BY VALUE, which is not a resolved
-  handle: `docs/design/565-ui-target-binding.md` §7 says revl checks the
-  signature and not the dataflow between two crossings, so every phase
-  boundary still re-resolves by name and the window between the check and the
-  use is unbounded. Slice 5's binding is that same re-resolution by name,
-  compared across two crossings. It is a stronger statement than position and
-  it is not the race, and slice 3 does not close it either.
+- **The check-to-use race is open.** Section 4 names it. Item 521's slice 4
+  landed a `UiTarget` carried BY VALUE, which is not a resolved handle, so
+  every phase boundary still re-resolves by name and the window between the
+  check and the use is unbounded. Issue #1371 was closed on 2026-09-25 by PR
+  1416 on a narrower property, and this bullet used to call that issue the
+  open race (corrected 2026-09-29, issue #1572): in an admitted program every
+  `UiTarget` now originates in a target-producing crossing, because
+  `lower._check_ui_target_provenance` refuses a target that is constructed as
+  a record literal, minted by an extern that does not declare the resolution,
+  or rebound by a functional update (`docs/design/565-ui-target-binding.md`
+  §13). That closes the forged target. It does not claim that the target is
+  the one resolved for THIS step, nor that the resolution is still fresh
+  (565 §13.4); both need a resolved handle from the substrate (item 539).
+  Slice 5's binding is re-resolution by name compared across two crossings.
+  It is a stronger statement than position and it is not the race, and slice
+  3 does not close it either.
 - **No phase executes.** Slice 3 COMPUTES the LIFO run and slice 5 computes
   which read carries which postcondition; neither performs a crossing, drives
   a desktop, or evaluates a postcondition against a real screen. Section 3's
