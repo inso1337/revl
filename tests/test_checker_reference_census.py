@@ -197,12 +197,16 @@ UNMASKED_UNDECIDED = {
     "examples/rejections/g4_arrow_param_emission.rvl",
     "examples/rejections/g4_unmarked_alias_emission.rvl",
     "examples/rejections/g4_unmarked_handle_emission.rvl",
-    # -- one `emit` marker per crossing (issue #1175): an emission evaluated
-    # to build an emit head's argument, unmarked or marked in place. The
-    # checker's marker rule reads a statement's head call and never its
-    # argument list --
-    "examples/rejections/g4_nested_unmarked_emission.rvl",
-    "examples/rejections/g4_nested_emit_expression.rvl",
+    # -- one `emit` marker per crossing (issue #1175). Two documents stood
+    # here, `g4_nested_unmarked_emission.rvl` and
+    # `g4_nested_emit_expression.rvl`: the checker's marker flag reached an
+    # emit head's ARGUMENTS too, so a second crossing under one marker read as
+    # marked. The walk now carries the head/argument split the reference
+    # lowers with, and both are decided with the reference's text, pinned in
+    # tests/test_selfhost_checker.py's REJECTED_PROGRAMS together with the
+    # eight host-extern documents of issue #1427 that the same change decided.
+    # Measured over the census corpus: agree-refuse 32 to 42, no-objection
+    # 191 to 181, no other document moved --
     # -- the type layer past the expression slice: a config-field default.
     # `t7_provide_param_annotation_mismatch.rvl` stood here too — the PARAMETER
     # twin of the return annotation #1063 taught the parser to read — until
