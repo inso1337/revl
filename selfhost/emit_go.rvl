@@ -1901,9 +1901,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
     let closed = close_builders(ctx, bodyR.ctx, indent)
-    let cctx = closed.ctx
-    let cursors = cctx.sc
-    let done = with_scan(cctx, cursors.remove(key), cctx.scan_seq)
+    let done = with_scan(closed.ctx, closed.ctx.sc.remove(key), closed.ctx.scan_seq)
     return { lines: out.concat(closed.lines), ctx: done }
   }
   if (step == "for") {
