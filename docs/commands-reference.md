@@ -155,7 +155,8 @@ of revl source for a grammar-constrained decoder. No sources.
   component body (`component C { requires k: S }`) instead of on the header.
 - `--category program|component-body|statements|expression|type` - scope the
   grammar to one syntactic slot, so a generator filling a hole is held to that
-  slot. Defaults to `program`.
+  slot. Defaults to `program`. The MCP `revl_grammar` tool takes the same
+  `format` and `category` ([mcp-reference.md](mcp-reference.md#revl_grammar)).
 - `--notes` - where the derivation is looser than the parser: each read it
   models as any token, and each backtracking construct.
 - `--write` / `--check` - regenerate, or check, the committed `grammar/revl.lark`,

@@ -209,7 +209,18 @@ author.
 ### `revl_grammar`
 
 The revl surface syntax and the rules that reject code - small enough to keep in
-context while generating. No inputs.
+context while generating. With no inputs it returns that prose summary
+(`grammar`) with the guarantees and their fixes.
+
+- Inputs (all optional): `format` (`lark`, `gbnf` or `ebnf`) returns instead
+  the grammar of revl source derived from the parser, the text
+  `revl grammar --format` prints ([commands-reference.md](commands-reference.md#revl-grammar)),
+  as `{ok, format, category, grammar}`. `lark` is llguidance's dialect, `gbnf`
+  the character-level GBNF the llama.cpp server and XGrammar read.
+  `category` (`program`, `component-body`, `statements`, `expression` or
+  `type`, default `program`) scopes it to one syntactic slot, so a client
+  filling a hole can constrain its decoder to that slot. `category` without
+  `format`, or a value outside these lists, is refused.
 
 ---
 
