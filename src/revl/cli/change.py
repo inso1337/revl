@@ -550,6 +550,15 @@ def _run_recover(args) -> int:
         if getattr(args, "approval_policy", None):
             session.approval_policy = args.approval_policy
 
+    from ..placement_wal import PlacementIndexError, read_index  # noqa: PLC0415
+    try:
+        index = read_index(args.wal)
+    except PlacementIndexError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if index is not None:
+        return _recover_placement(args, index, reissue, session)
+
     world = None
     try:
         # issue #1477: `--composition` binds the REAL world, the composition's
@@ -579,17 +588,46 @@ def _run_recover(args) -> int:
     return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
 
 
-def _bind_composition(args):
-    """The real world for `revl recover --composition FILE` (issue #1477)."""
+def _recover_placement(args, index: dict, reissue, session) -> int:
+    """`revl recover --wal INDEX` for a `revl run --placement --wal INDEX` run
+    (issue #1477): every process WAL the index names, one verdict."""
+    from ..recover_placement import recover_index, render_placement  # noqa: PLC0415
+    from ..recovery import RecoveryError  # noqa: PLC0415
+    from ..wal import WALIntegrityError  # noqa: PLC0415
+    if session is not None:
+        print("error: --restore resumes one process's persisted generation; a "
+              "placement run has one per process. Recover the placement without "
+              "--restore.", file=sys.stderr)
+        return 1
+    try:
+        report = recover_index(
+            args.wal, index, composition=getattr(args, "composition", None),
+            config=_recover_config(args), reissue=reissue,
+            forward_admissions=getattr(args, "forward", False))
+    except (RecoveryError, WALIntegrityError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_placement(report))
+    return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
+
+
+def _recover_config(args) -> dict:
     from ..errors import RevlError  # noqa: PLC0415
-    from ..recover_binding import bind  # noqa: PLC0415
     from ..recovery import RecoveryError  # noqa: PLC0415
     from ..run import _load_config  # noqa: PLC0415
     try:
-        config = _load_config(getattr(args, "config", None))
+        return _load_config(getattr(args, "config", None))
     except (RevlError, OSError) as error:
         raise RecoveryError(f"cannot read config {args.config}: {error}") from None
-    return bind(list(args.composition), args.wal, config=config)
+
+
+def _bind_composition(args):
+    """The real world for `revl recover --composition FILE` (issue #1477)."""
+    from ..recover_binding import bind  # noqa: PLC0415
+    return bind(list(args.composition), args.wal, config=_recover_config(args))
 
 
 #: `revl recover`'s exit status when the modelled residue is clean, the model

@@ -83,6 +83,7 @@ from .tee_attestation import TeeError, TeeRequirement
 from .typecheck import FN_HEAD, parse_type
 from .estop import (HALTED_LINE, LATCH_ENV, TIERS_WITH_ESTOP, latch_path,
                     read_latch)
+from . import placement_wal
 from . import sandbox_runtime as _sb
 from .sandbox_runtime import resolve_driver as resolve_sandbox_driver
 from .sandbox_runtime import _OCI_ARCH_UNAME, accepted_uname
@@ -3594,7 +3595,7 @@ def _estop_halt_report(record: dict, latch: str, roster: dict,
 
 
 def run_placement(files, placement_path: str, once: bool = False,
-                  estop_latch: str | None = None) -> int:
+                  estop_latch: str | None = None, wal: str | None = None) -> int:
     # item 443: the operator E-Stop. `--estop-latch FILE` (or the ambient
     # REVL_ESTOP_LATCH) arms it; UNARMED is the default, and a placement that
     # never arms one runs byte-identically to the pre-443 conductor — no
@@ -4480,6 +4481,19 @@ def run_placement(files, placement_path: str, once: bool = False,
             # see is not an emergency stop.
             spec["estopLatch"] = estop_latch
 
+    # issue #1477: `--wal FILE` writes one WAL per process and an index at FILE
+    # naming them, for `revl recover --wal FILE`. Armed before anything spawns,
+    # so a crash at any later point leaves an index recover can read.
+    wal_run = None
+    if wal:
+        problem = placement_wal.wal_problem(processes, backends, sandboxes)
+        if problem:
+            return abort(problem)
+        try:
+            wal_run = placement_wal.arm(wal, processes, backends, specs)
+        except (placement_wal.PlacementIndexError, OSError) as exc:
+            return abort(str(exc))
+
     # --- sandbox seam identities (item 411 T2): the conductor mints a per-boot
     # mTLS leaf + key for every process on a CROSS-BOUNDARY sandbox seam, so a
     # seam that must cross the isolation boundary (once T3 carries it) is
@@ -4696,6 +4710,8 @@ def run_placement(files, placement_path: str, once: bool = False,
     up: set[str] = set()
     repointed: set[tuple[str, str]] = set()
     down: set[str] = set()
+    # issue #1477: processes that stamped their WAL's `activation-complete`
+    wal_committed: set[str] = set()
     # issue 239 / 265: children that exited before they said DOWN -- by
     # SIGKILL, by the SIGTERM that asked them to stop, or by any other death.
     # Their unwind was cut mid-flight, so their residue is UNKNOWN; the
@@ -4721,6 +4737,8 @@ def run_placement(files, placement_path: str, once: bool = False,
                 up.add(pname)
             elif text == f"[{pname}] DOWN":
                 down.add(pname)
+            elif text == f"[{pname}] WAL COMMITTED":
+                wal_committed.add(pname)
             elif text.startswith(f"[{pname}] {HALTED_LINE} "):
                 # item 443: the child's own in-flight inventory, printed when
                 # the latch tripped its seams. It is NOT a `DOWN` line and must
@@ -4831,6 +4849,22 @@ def run_placement(files, placement_path: str, once: bool = False,
             if name not in stranded:
                 stranded.append(name)
 
+    def commit_wals() -> None:
+        """issue #1477: every process is UP, so the placement's activation is
+        complete. The index records the decision first, then each process
+        stamps its own WAL's `activation-complete`."""
+        if wal_run is None or len(up) != len(children):
+            return
+        placement_wal.mark_committed(wal, wal_run)
+        for proc, _mode in children.values():
+            proc.stdin.write(json.dumps({"op": "commit-wal"}) + "\n")
+            proc.stdin.flush()
+        if not _wait_for(lambda: wal_committed >= set(children), 30):
+            missing = ", ".join(p for p in children if p not in wal_committed)
+            print(f"warning: {missing} did not stamp its WAL's activation-complete; "
+                  f"the index records the commit, and `revl recover --wal {wal}` "
+                  f"completes it", file=sys.stderr, flush=True)
+
     swap_seq = [0]
 
     def do_swap(component: str, to_backend: str) -> None:
@@ -4845,6 +4879,15 @@ def run_placement(files, placement_path: str, once: bool = False,
         if component not in placed:
             print(f"swap refused: no component {component!r} in this placement "
                   f"(have: {', '.join(sorted(placed))})", flush=True)
+            return
+        if wal_run is not None:
+            # issue #1477: the index names the processes the run started with;
+            # a successor would write a WAL no index entry names, which no
+            # recover would read.
+            print(f"swap refused: this placement writes a WAL per process "
+                  f"(--wal {wal}), and a successor process would write one the "
+                  f"index does not name. Running composition untouched.",
+                  flush=True)
             return
         to_backend = _canonical_backend(to_backend)
         if to_backend not in KNOWN_BACKENDS:
@@ -5202,6 +5245,7 @@ def run_placement(files, placement_path: str, once: bool = False,
     try:
         if once:
             _wait_for(lambda: len(up) == len(children), 60)
+            commit_wals()
             if len(up) != len(children):
                 missing = ", ".join(p for p in children if p not in up)
                 print(f"error: processes did not come up: {missing}", file=sys.stderr)
@@ -5210,8 +5254,11 @@ def run_placement(files, placement_path: str, once: bool = False,
                 report_network_latency()
             stop_all(children)
         elif _interactive():
-            if net_seams and _wait_for(lambda: len(up) == len(children), 60):
-                report_network_latency()
+            if (net_seams or wal_run is not None) \
+                    and _wait_for(lambda: len(up) == len(children), 60):
+                commit_wals()
+                if net_seams:
+                    report_network_latency()
             swap_repl()
         else:
             # stdin is not a tty: it may be carrying a swap SCRIPT (one
@@ -5224,6 +5271,7 @@ def run_placement(files, placement_path: str, once: bool = False,
             # tears the placement down, the same stdin-closed contract as
             # single-process `revl run`.
             _wait_for(lambda: len(up) == len(children), 60)
+            commit_wals()
             if net_seams:
                 report_network_latency()
             swap_repl()

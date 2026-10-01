@@ -1299,7 +1299,8 @@ def build_parser() -> argparse.ArgumentParser:
                      help="persist the effect accumulator as a durable write-ahead "
                           "log (implies --record). On restart, `revl recover --wal "
                           "FILE` rolls forward or back and states a checked verdict "
-                          "(docs/crash-recovery.md)")
+                          "(docs/crash-recovery.md). With --placement, each process "
+                          "writes FILE.<process> and FILE is the run's index")
     run.add_argument("--trace", default=None, metavar="FILE",
                      help="write a causal lifecycle trace (JSONL) — every "
                           "transition carries the cause chain behind it, "
@@ -1392,7 +1393,9 @@ def build_parser() -> argparse.ArgumentParser:
              "boundary inverses LIFO), ending in a checked verdict + residue "
              "proof (docs/crash-recovery.md)")
     recover.add_argument("--wal", required=True, metavar="FILE",
-                         help="a write-ahead log written by `revl run --wal`")
+                         help="a write-ahead log written by `revl run --wal`, or "
+                              "the index of a `revl run --placement --wal` run, "
+                              "whose process WALs are recovered together")
     recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                          help="on roll-forward, the item-15 snapshot to re-admit "
                               "so recovery resumes the persisted generation")
