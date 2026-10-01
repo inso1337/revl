@@ -91,14 +91,25 @@ target, where the target is a provision key (`ledger`), a `key.method`
 Every reading that matches something is used, and `resolved` says which — key,
 service and extern names live in different namespaces and can collide.
 
-Reach is followed two ways:
+Reach is followed three ways:
 
 - **through the pure stratum** — `say` calls `shout` calls `host_write`. The
-  fn call graph is *not* re-walked here: `lower._emitting_fns` is the
-  checker's own least fixed point (the one G4 uses to force `emission` into a
-  service declaration) and `__main__._extern_reachability` names which externs
-  a fn reaches. Consuming both means this query cannot disagree with the gate
+  fn call graph is *not* re-walked here:
+  `emission_analysis._emitting_extern_names` is the checker's own least fixed
+  point (the one G4 uses to force `emission` into a service declaration) and
+  `boundary._extern_reachability` names which externs a fn calls. Consuming both means this query cannot disagree with the gate
   that rejects code. The fn that got there is reported as `reaches.through`.
+- **as a function value**: `let g = charge  g(n)`, `apply(charge, n)`,
+  `{ f: charge }`, `[charge]`, a helper `fn pick() = charge` whose result is
+  called, or a called `fn run(n) = apply(charge, n)`. No call site names the
+  extern, so a walk by called name finds nothing. The reach is read off the
+  checker's own call and value channels, closed by the G4 fixed point: the
+  analysis that prints "`charge` (passed as a function value)" when it refuses
+  the same body on a plain method. A fact reached this way carries
+  `asValue: true` when this scope hands the value on itself, and `through`
+  names a called fn that does it for the scope. A `deferred` extern reached any
+  way but an `emit` naming it is not held (`deferred: false`): the value is
+  dispatched as an ordinary call and fires.
 - **across the service seam** — a call on an injected key lands in the
   provider's provide-method, whose own reach is folded in. `path` is the hop
   chain (`["rep.publish", "kv.set", "ledger.append"]`) and `distance` its

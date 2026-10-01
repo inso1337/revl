@@ -141,8 +141,8 @@ if (_SRC / "revl").is_dir() and str(_SRC) not in sys.path:
 
 # The same for every python a test starts. Without it, a child resolves revl
 # through the interpreter's own install, which for the main checkout's `.venv`
-# (the one tools/hooks/pre-commit falls back to in a worktree) is an editable
-# `.pth` entry naming the MAIN checkout's src/: in-process imports read this
+# (run from a worktree by hand; tools/hooks/pre-commit refuses it since #1608)
+# is an editable `.pth` entry naming the MAIN checkout's src/: in-process imports read this
 # tree and `python -m revl` in a subprocess read another. PYTHONPATH outranks
 # site-packages and `.pth` entries. Where revl is installed from this same tree
 # (CI) this changes nothing. tests/test_child_python_resolves_this_tree.py.

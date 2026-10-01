@@ -62,6 +62,8 @@ USAGE
     python3 tools/census_artifact.py --write             # write both files
     python3 tools/census_artifact.py --check             # fail if they drifted
     python3 tools/census_artifact.py --verify [REPORT]   # judge a published copy
+    python3 tools/census_artifact.py --verify --strict   # CI: is the committed copy current
+    git diff --name-only BASE | python3 tools/census_artifact.py --moved-inputs
     python3 tools/census_artifact.py --crate-json C.json --record-reproduction
 
 THE REPRODUCTION, AND WHY IT IS RECORDED RATHER THAN RE-RUN
@@ -95,6 +97,21 @@ checkout (every file a census run opens is pinned, measured by an audit hook),
 then re-runs the census and compares `census.cases` row by row. Exit 0
 reproduced, 1 refuted, 2 unusable, 3 not a full check (inputs differ, or
 published programs were edited or removed).
+
+THE REPOSITORY KEEPS ITS OWN COPY CURRENT
+-----------------------------------------
+CI's `census-artifact` job runs `--verify --strict` on the committed copy
+whenever a pull request's diff moves one of its inputs, as `--moved-inputs`
+decides from the diff: a pinned file, a program, or a new `.rvl` under a census
+directory. `--strict` fails unless every published program reproduced from
+byte-identical inputs, no program in the corpus is missing from the file, and
+no report input moved. A pull request that moves an input regenerates the
+artifact in the same diff:
+
+    python3 tools/census_artifact.py --write
+
+`--check` is then green too, because the artifact's bytes are a function of
+exactly those inputs (issue #1572).
 """
 
 from __future__ import annotations
@@ -138,9 +155,14 @@ CHECKER_SOURCES = (
     "selfhost/lower.rvl",
 )
 
-# The reference implementation, digested whole. Named `compiler_commit` in the
-# report because `EVAL-REPORT-1` requires that key; it holds a tree digest, and
-# the report says so in as many words.
+# The reference implementation. Its pins and its digest (named
+# `compiler_commit` in the report, because `EVAL-REPORT-1` requires that key)
+# cover the modules under this prefix that the census run OPENED, measured by
+# the same audit hook as `decides_verdicts`. They used to cover the whole glob,
+# which made the artifact stale on every change to a module the census never
+# imports: of the 19 `src/revl` files that changed between PR 1469 and
+# `67fc027b7`, one was a module the run opens (issue #1572). A module the run
+# does not open cannot decide a verdict it computes, so it is not an input.
 REFERENCE_GLOB = "src/revl/**/*.py"
 
 # The synthetic case id the NEVER_BASELINED probes use. It is not a real path
@@ -211,10 +233,10 @@ def checker_version() -> tuple[str, dict[str, str]]:
     return f"{CENSUS_SCHEMA}+{whole[:12]}", per_file
 
 
-def reference_digest() -> str:
-    """sha256 over the reference compiler's sources."""
-    files = sorted(ROOT.glob(REFERENCE_GLOB))
-    return _digest(files)
+def reference_digest(reference) -> str:
+    """sha256 over the reference modules the census run opened, repo-relative
+    names in sorted order (`build_pins`'s `reference` group)."""
+    return _digest([ROOT / rel for rel in sorted(reference)])
 
 
 def corpus_digest(cases) -> str:
@@ -340,8 +362,8 @@ def build_pins(measured: dict, reads: set[str]) -> dict:
     Four groups, because a change to each means something different:
 
       * `corpus`: carried per case in `census.cases`; the aggregate is `run`.
-      * `reference`: `src/revl/**/*.py`, whole, as `compiler_tree_digest`
-        already digests it, now listed per file so a reader sees what moved.
+      * `reference`: the `src/revl/**/*.py` modules the run OPENED, measured
+        like `decides_verdicts`, and the set `compiler_tree_digest` digests.
       * `decides_verdicts`: every other file the census run OPENED, measured.
       * `report_inputs`: `REPORT_INPUTS` and the shipped crate, which shape the
         report but are not read by the run that produces a verdict.
@@ -350,8 +372,15 @@ def build_pins(measured: dict, reads: set[str]) -> dict:
     opened = {rel for rel in map(tree_file, reads) if rel is not None}
     deciding = sorted(rel for rel in opened
                       if rel not in corpus_files and not _is_reference(rel))
-    reference = sorted(p.relative_to(ROOT).as_posix()
-                       for p in ROOT.glob(REFERENCE_GLOB))
+    reference = sorted(rel for rel in opened if _is_reference(rel))
+    if not reference:
+        # The reference was imported from outside this checkout (a wheel, or
+        # another clone on sys.path), so nothing under `src/revl` was opened
+        # and the pins would claim a run over no reference at all.
+        raise SystemExit(
+            "census_artifact: the census run opened no file under src/revl in "
+            f"{ROOT}; revl was imported from somewhere else. Install this "
+            "checkout editable (`pip install -e .`) and run again.")
     crate = sorted({p.relative_to(ROOT).as_posix()
                     for pattern in GATE_CRATE_GLOBS for p in ROOT.glob(pattern)
                     if p.is_file()})
@@ -579,7 +608,8 @@ def build_report(census, provenance, measured: dict,
     cases = measured["cases"]
     version, per_file = checker_version()
     run_id = f"census-{measured['engine']}-{corpus_digest(cases)[:12]}"
-    compiler = f"src/revl@sha256:{reference_digest()[:12]}"
+    compiler = (f"src/revl@sha256:"
+                f"{reference_digest(measured['pins']['reference'])[:12]}")
 
     probe = probe_never_baselined(census)
     admissions = census.false_admissions(buckets)
@@ -762,9 +792,10 @@ def build_report(census, provenance, measured: dict,
             "compiler_tree_digest": compiler,
             "compiler_tree_digest_note": (
                 "EVAL-REPORT-1 names this field `compiler_commit`. It is not a "
-                "commit. It is a sha256 over " + REFERENCE_GLOB + ", which is "
-                "narrower than a commit (a commit that touched no compiler "
-                "source does not move it) and recomputable by anyone with a "
+                "commit. It is a sha256 over the " + REFERENCE_GLOB + " modules "
+                "the census run opened, listed in `pins.reference`, which is "
+                "narrower than a commit (a commit that touched no module the "
+                "run reads does not move it) and recomputable by anyone with a "
                 "checkout."),
             "run": run_id,
             "engine": measured["engine"],
@@ -1119,8 +1150,8 @@ def render_markdown(report: dict) -> str:
     w(f"| checker version `{c['checker_version']}` | sha256 over the "
       f"{len(c['checker_sources'])} files in `census.checker_sources`, each "
       "listed there with its own sha256 |")
-    w(f"| `{c['compiler_tree_digest']}` | sha256 over `" + REFERENCE_GLOB
-      + "` |")
+    w(f"| `{c['compiler_tree_digest']}` | sha256 over the `" + REFERENCE_GLOB
+      + "` modules the run opened, listed in `census.pins.reference` |")
     w("| every bucket count | `tools/gate_reference_census.py --json out.json` "
       "|")
     w(f"| the false-admit allowance | `{alw['baseline_file']}`, which is in "
@@ -1301,6 +1332,98 @@ def judge(published: dict, local: dict) -> dict:
     }
 
 
+# ------------------------------------------------- the repository's own gate
+#
+# `--verify` is the reader's question, and a reader's clone is expected to have
+# moved. The repository asks a stricter one of its OWN committed copy, in CI, on
+# every pull request whose diff moves an input of the artifact (issue #1572):
+# is the committed file what this tree produces? That is a full reproduction
+# with nothing left over: every published program recomputed from byte-identical
+# inputs, no program in the corpus that the file does not carry, and no report
+# input moved under it. A pull request that fails it regenerates the artifact
+# with `--write` in the same diff, the way a golden is regenerated.
+
+# The files that are inputs of the artifact whatever its pins say: the tool, the
+# artifact itself (a hand edit is a change the gate must see), and the declared
+# lists above.
+OWN_FILES = ("tools/census_artifact.py", "docs/census-artifact.json",
+             "docs/census-artifact.md")
+
+
+def current_problems(result: dict) -> list[str]:
+    """Why a `judge` result on the COMMITTED artifact is not a current one.
+
+    Empty means the committed file is what this tree produces, program by
+    program. Pure, so each arm is testable without a census run."""
+    problems = []
+    if result["verdict"] != "reproduced":
+        problems.append(f"the verdict is {result['verdict']}, not reproduced")
+    if result["new"]:
+        problems.append(
+            f"{_plural(len(result['new']), 'program', 'programs')} in the "
+            f"corpus {'is' if len(result['new']) == 1 else 'are'} not in the "
+            f"committed artifact")
+    moved = result["report_inputs"]
+    for kind in ("moved", "missing", "added"):
+        for rel in moved[kind]:
+            problems.append(f"report input {kind}: {rel}")
+    return problems
+
+
+def _glob_regex(pattern: str) -> str:
+    """A `Path.glob` pattern as an anchored regular expression over a
+    repo-relative name: `**/` is any number of directories, `*` stays within
+    one."""
+    import re  # noqa: PLC0415
+    out = []
+    i = 0
+    while i < len(pattern):
+        if pattern.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif pattern[i] == "*":
+            out.append("[^/]*")
+            i += 1
+        else:
+            out.append(re.escape(pattern[i]))
+            i += 1
+    return "^" + "".join(out) + "$"
+
+
+def moved_inputs(paths, committed: dict | None) -> list[str]:
+    """The changed repo-relative `paths` that are inputs of the artifact.
+
+    An input is a file the committed artifact pins (a deciding file, a
+    reference module, a report input), a program it carries, a file in the
+    declared lists, a gate crate source, or a `.rvl` under a census directory,
+    which is how a NEW program enters the corpus. `committed` is the parsed
+    `docs/census-artifact.json`; None (absent or unreadable) makes every path
+    an input, so a broken artifact cannot switch its own gate off."""
+    import re  # noqa: PLC0415
+    paths = [p.strip() for p in paths if p.strip()]
+    if committed is None:
+        return paths
+    c = committed.get("census") or {}
+    pins = c.get("pins") or {}
+    named = set(OWN_FILES) | set(CHECKER_SOURCES) | set(REPORT_INPUTS)
+    for group in ("decides_verdicts", "reference", "report_inputs"):
+        named |= set(pins.get(group) or {})
+    named |= {row[0] for row in c.get("cases") or []}
+    crate = [re.compile(_glob_regex(g)) for g in GATE_CRATE_GLOBS]
+    census = _load("tools/gate_reference_census.py", "artifact_moved_census")
+    # A census directory can be nested (`tests/fixtures`), so it is a prefix.
+    corpus_dirs = tuple(d + "/" for d in census.CORPUS_DIRS)
+    skip = set(census._SKIP_DIRS)
+    moved = []
+    for rel in paths:
+        parts = rel.split("/")
+        if (rel in named or any(r.match(rel) for r in crate)
+                or (rel.endswith(".rvl") and rel.startswith(corpus_dirs)
+                    and not skip & set(parts))):
+            moved.append(rel)
+    return moved
+
+
 def render_verdict(result: dict) -> str:
     """The judgement as text a reader can act on, every difference named."""
     out: list[str] = []
@@ -1356,8 +1479,12 @@ def render_verdict(result: dict) -> str:
     return "\n".join(out)
 
 
-def verify(path: Path, engine: str = "selfhost") -> tuple[int, str]:
-    """Re-measure this checkout and judge the published file at `path`."""
+def verify(path: Path, engine: str = "selfhost",
+           strict: bool = False) -> tuple[int, str]:
+    """Re-measure this checkout and judge the published file at `path`.
+
+    `strict` is the repository's gate on its own committed copy: on top of the
+    reader's verdict it fails on anything `current_problems` names."""
     try:
         bundle = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
@@ -1374,7 +1501,18 @@ def verify(path: Path, engine: str = "selfhost") -> tuple[int, str]:
     local = {"pins": measured["pins"], "cases": measured["case_rows"],
              "mechanism_holds": probe_never_baselined(census)["holds"]}
     result = judge(published, local)
-    return result["exit"], render_verdict(result)
+    text = render_verdict(result)
+    if not strict:
+        return result["exit"], text
+    problems = current_problems(result)
+    if not problems:
+        return 0, text + "\ncensus verify --strict: the committed artifact is current."
+    lines = [text, "census verify --strict: the committed artifact is NOT "
+             "current:"]
+    lines += [f"  {p}" for p in problems]
+    lines.append("  regenerate it in this pull request: "
+                 "python3 tools/census_artifact.py --write")
+    return result["exit"] or 3, "\n".join(lines)
 
 
 def render_verify_section(c: dict, w) -> None:
@@ -1411,7 +1549,7 @@ def render_verify_section(c: dict, w) -> None:
     w("The files that decide a verdict are MEASURED rather than listed. The")
     w("generator records, through a Python audit hook, every file under the")
     w("checkout the census run opens, and pins each one. For this run that is")
-    w(f"the corpus (per row), `{REFERENCE_GLOB}` ("
+    w(f"the corpus (per row), the `{REFERENCE_GLOB}` modules it opened ("
       f"{_plural(len(pins.get('reference', {})), 'file', 'files')}), and:")
     w("")
     for rel in deciding:
@@ -1537,10 +1675,33 @@ def main(argv: list[str]) -> int:
                          "reproduced, 1 refuted, 2 unusable input, 3 not a "
                          "full check (inputs differ, or programs were edited "
                          "or removed)")
+    ap.add_argument("--strict", action="store_true",
+                    help="with --verify: also fail unless the file is CURRENT, "
+                         "a full reproduction with no program missing from it "
+                         "and no report input moved. The CI gate on the "
+                         "committed copy (issue #1572)")
+    ap.add_argument("--moved-inputs", action="store_true",
+                    help="read changed repo-relative paths on stdin, print the "
+                         "ones that are inputs of the committed artifact. Exit "
+                         "0 when at least one is, 1 when none is. CI uses it to "
+                         "decide whether a pull request runs --verify --strict")
     args = ap.parse_args(argv)
 
+    if args.moved_inputs:
+        try:
+            committed = json.loads(REPORT_JSON.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            committed = None
+        moved = moved_inputs(sys.stdin.read().splitlines(), committed)
+        for rel in moved:
+            print(rel)
+        return 0 if moved else 1
+
+    if args.strict and args.verify is None:
+        ap.error("--strict is a mode of --verify")
+
     if args.verify is not None:
-        code, text = verify(Path(args.verify), args.engine)
+        code, text = verify(Path(args.verify), args.engine, strict=args.strict)
         print(text)
         return code
 

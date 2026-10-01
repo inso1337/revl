@@ -444,6 +444,14 @@ wait on a provision that never arrives). So the compiled-tier sweep prunes the
 target's transitive dependents before the boot — the same hold-out the py
 reference applies (section 9.2), so the two sweep the same fault points.
 
+**What the program prints.** The py leg runs in process with nothing captured,
+so an extern body's prints reach the terminal as they happen. Each compiled-tier
+`--once` run is captured, because the verdict is read from it. The program's own
+lines in that capture (everything after `== load composition` that is not a
+`[run]` line or the runner's closing `error: the <tier> composition …`) are kept
+on the fault point as `hostOutput` and replayed under the tier's line, labelled
+`[<tier>] host output at <point>:`. They never feed the verdict (issue #1614).
+
 ### 10.2 Agreement, and what a skip means
 
 ```
