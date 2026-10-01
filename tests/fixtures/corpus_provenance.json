@@ -885,6 +885,7 @@
    "tests/fixtures/emit_ts_corpus/config_reserved.rvl",
    "tests/fixtures/emit_ts_corpus/control.rvl",
    "tests/fixtures/emit_ts_corpus/destructuring.rvl",
+   "tests/fixtures/emit_ts_corpus/extern_compensate.rvl",
    "tests/fixtures/emit_ts_corpus/instance_get.rvl",
    "tests/fixtures/emit_ts_corpus/mixed.rvl",
    "tests/fixtures/emit_ts_corpus/optionals.rvl",

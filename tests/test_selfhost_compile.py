@@ -576,6 +576,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # and the two documents written for this slice, which combine the above.
         "routed_timers.rvl",
         "ref_externs.rvl",
+        # Issue #1592: an extern that declares its own `compensate`. The
+        # emitter half agrees byte for byte on the reference IR; lower.rvl
+        # does not yet lower an extern's declared `compensate` slot.
+        "extern_compensate.rvl",
     ),
     "go": (
         # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the

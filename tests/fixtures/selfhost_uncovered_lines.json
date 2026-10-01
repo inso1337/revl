@@ -53,7 +53,7 @@
       "java": 986,
       "py": 660,
       "rust": 1200,
-      "ts": 276,
+      "ts": 265,
       "wasm": 1558
     },
     "selfhost": {
@@ -1054,7 +1054,7 @@
       "statements": 2208,
       "uncovered": {
         "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards, fail, sync and async timers and the item-130 `stream-iter` step are covered (issue #106); witnessed transactions are the declared port boundary": {
-          "_component_step": 14
+          "_component_step": 12
         },
         "Canonical type parser fallbacks: `_split_fn_type` rejects missing arrows/unclosed parameter lists; `_split_ts_types` tracks nested generic bracket depth; `_ts_type` and `_ts_v3_type` erase unknown nominal/generic arguments; `_v3_surface_type` retains legacy unstamped literal/name inference. Frontend canonical type strings and stamped expressions exercise the supported paths, including the #957 `Map` subscript's declared value type": {
           "_split_fn_type": 2,
@@ -1094,7 +1094,7 @@
           "_guard_frame_neutral_loop": 1,
           "_has_bracket.walk": 2,
           "_method_body_needs_frame": 1,
-          "_needs_frame.walk": 3
+          "_needs_frame.walk": 2
         },
         "In-file test pass-over: `_emit_ts_tests` skips a lifecycle test and `_emit_ts_lifecycle_tests` skips a plain one, but `_emit_v3` splits the list before calling either, so neither `continue` has an input. Both drivers are otherwise covered (issue #106)": {
           "_emit_ts_lifecycle_tests": 1,
@@ -1170,10 +1170,8 @@
         "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch": {
           "_emit_v1": 5
         },
-        "Extern-declared compensate (item 254, issue #1592): `_compensated_extern` finds an emitted extern that declares its own `compensate`, `_emit_compensations` adds that compensation to the ones an `emit` registers, and `_as_fn_call` re-spells the slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_ts.rvl ports no extern-declared compensation. The behaviour is pinned and executed against real cordis by backends/typescript/tests/extern_compensate.test.ts.": {
-          "_as_fn_call": 5,
-          "_compensated_extern": 3,
-          "_emit_compensations": 1
+        "Extern-declared compensate (item 254, issue #1592): `_as_fn_call` re-spells an extern's declared `compensate` slot, lowered in the pure-expression call dialect, as a component `fn` node. Its fall-through returns any other shape unchanged. The frontend lowers every declared slot to a bare named call, so no corpus document can reach that return. selfhost/emit_ts.rvl mirrors the rest of the path (emit_ts_corpus/extern_compensate.rvl).": {
+          "_as_fn_call": 1
         }
       },
       "uncovered_statements": 518

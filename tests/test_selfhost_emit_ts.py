@@ -267,6 +267,12 @@ CORPUS = [
     # the user root, empty-list inference through a `Map` subscript, and the
     # three in-file assert shapes (empty body, `!=`, a plain condition).
     "ref_externs.rvl",
+    # Issue #1592: an emission extern that declares its own `compensate`
+    # registers it at an activation-body emit (alone and beside a site-spelled
+    # clause), a provide-method emit and a timer firing (sync, and the plain
+    # emission of an async body). Added FAILING FIRST: the port rendered the
+    # forward call alone at every site.
+    "extern_compensate.rvl",
 ]
 
 def _load_reference_emit():

@@ -1811,16 +1811,16 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
 | py   |     59 |                   59 (100%) |             53 (89.8%) |
-| ts   |     75 |                   75 (100%) |             60 (80.0%) |
+| ts   |     76 |                   76 (100%) |             60 (78.9%) |
 | go   |     37 |                   37 (100%) |             35 (94.6%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **291** | **291 (100%)** | **266 (91.4%)** |
+| **total** | **292** | **292 (100%)** | **266 (91.1%)** |
 
-Every one of the 291 documents is reproduced byte-for-byte by its
+Every one of the 292 documents is reproduced byte-for-byte by its
 self-host emitter when the emitter is fed the **reference** IR. 266 of
-them survive the **fully-native** chain, so all 25 residual documents
+them survive the **fully-native** chain, so all 26 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1859,7 +1859,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `../../../src/revl/truc/components/cli.rvl`
 
-`ts`, 15 residual of 75:
+`ts`, 16 residual of 76:
 
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `../../../examples/java_match.rvl`
@@ -1876,6 +1876,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../emit_py_corpus/branches.rvl`
 - `routed_timers.rvl`
 - `ref_externs.rvl`
+- `extern_compensate.rvl`
 
 `go`, 2 residual of 37:
 

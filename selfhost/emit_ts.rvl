@@ -258,10 +258,10 @@ type StmtOut = { lines: List[Str], counter: Int }
 // `empty_lists` (issue #273) is the body-local `[]`-binding annotation table
 // `empty_list_types` computes; it rides on ACx because a `let` can sit at any
 // depth of the statement tree `v3_stmt` walks.
-type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str], routes: List[Str], test_mode: Bool }
+type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str], routes: List[Str], test_mode: Bool, comps: List[Any] }
 
 // The sync, non-component context: the pure fn/test pass and every sync body.
-fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false } }
+fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] } }
 
 // The `"<reqKey>#<method>"` await-seed key.
 fn async_op_key(req_key: Str, method: Str) -> Str {
@@ -960,7 +960,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   // stays out of the arrow (its Promise flattens). `async_names`/`async_locals`
   // are inherited (the reference's `with_scope` leaves them untouched), so an
   // async callable invoked inside an async arrow is still awaited.
-  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists, routes: acx.routes, test_mode: acx.test_mode }
+  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists, routes: acx.routes, test_mode: acx.test_mode, comps: acx.comps }
   let br = expr(value_field(node, "body"), counter, body_acx)
   // Item 435(b): the `async` followed the DECLARED type, so `(msgs) =>
   // model.complete(msgs)` rendered `async (msgs: any) =>
@@ -1896,7 +1896,7 @@ fn emit_functions(functions: List[Any], async_names: List[Str]) -> List[Str] {
     let sync_base = sync_acx()
     var body_acx = { sync_base | empty_lists = elt }
     if (value_bool(value_field(fnode, "async"))) {
-      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt, routes: [], test_mode: false }
+      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt, routes: [], test_mode: false, comps: [] }
       out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
     } else {
       out = out.push(`export function ${name}(${params}): ${returns} {`)
@@ -2499,7 +2499,7 @@ fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str,
 // bind the body; the param TYPES come from the service declaration (arity must
 // agree). An operation the service declares `async` lowers to an `async` method
 // whose body renders in an async context (the await-seed's `ops`, item 219).
-fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], frame_var: Str, level: Int, counter: Int) -> StmtOut {
+fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let svc_name = value_str(value_field(step, "service"))
   let declared = value_field(value_field(services, svc_name), "methods")
@@ -2536,10 +2536,10 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], kno
     let is_async = value_bool(value_field(spec, "async"))
     var prefix = ""
     let sync_base = sync_acx()
-    var body_acx = { sync_base | routes = routes }
+    var body_acx = { sync_base | routes = routes, comps = comps }
     if (is_async) {
       prefix = "async "
-      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false }
+      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false, comps: comps }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
     // A param the service declared `Secret[T]` is a declared DISCLOSURE
@@ -2579,16 +2579,16 @@ fn crossing_key_name(target: Any) -> Str {
 // this component's RAW name (for a compensation entry's `site`); `frame_var` is
 // the emitted `Frame` local (`$revl_frame`, "" when the component needs none) —
 // a compensation entry registers through it (item 243 Slice 2b).
-fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
+fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let sync_base = sync_acx()
-  let a = { sync_base | routes = routes }
+  let a = { sync_base | routes = routes, comps = comps }
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect" || kind == "effect") {
     let awaited = value_bool(value_field(step, "async"))
     var acquire_acx = a
     if (awaited && kind == "let-effect") {
-      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false }
+      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false, comps: comps }
     }
     let ar = expr(value_field(step, "acquire"), counter, acquire_acx)
     var out = []
@@ -2637,7 +2637,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
   if (kind == "provide") {
     let name = value_str(value_field(step, "name"))
     var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
-    let pr = provide_impl(step, services, ops, routes, known_types, async_names, frame_var, level + 1, counter)
+    let pr = provide_impl(step, services, ops, routes, known_types, async_names, comps, frame_var, level + 1, counter)
     out = out.concat(pr.lines)
     out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
     return { lines: out, counter: pr.counter }
@@ -2647,7 +2647,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(step, "then"))) {
-      let r = component_step(s, services, ops, routes, known_types, async_names, comp_name, frame_var, level + 1, c)
+      let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -2655,7 +2655,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     if (els.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (s of els) {
-        let r = component_step(s, services, ops, routes, known_types, async_names, comp_name, frame_var, level + 1, c)
+        let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -2695,7 +2695,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], k
     out = out.push(`${pad}  if (host.Stream.isClosed(${item})) break`)
     if (gate != "") { out = out.push(`${pad}  if (!${gate}.admit(${item}, ${json_dumps(where)})) continue`) }
     for (inner of value_list(value_field(step, "body"))) {
-      let r = component_step(inner, services, ops, routes, known_types, async_names, comp_name, frame_var, level + 1, c)
+      let r = component_step(inner, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -2746,6 +2746,9 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
       let r = expr(value_field(em, "expr"), c, a)
       out = out.push(`${pad}  ${r.text}`)
       c = r.counter
+      let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
+      out = out.concat(tr.lines)
+      c = tr.counter
     }
     out = out.push(`${pad}}`)
     out = out.push(`${pad}const ${handle} = host.${verb}(${interval}, ${fname})`)
@@ -2764,12 +2767,24 @@ fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str,
       out = out.push(`${pad}  ${inflight}.add(_revl_task)`)
     } else {
       out = out.push(`${pad}  ${r.text}`)
+      let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
+      out = out.concat(tr.lines)
+      c = tr.counter
     }
   }
   out = out.push(`${pad}}`)
   out = out.push(`${pad}const ${handle} = host.${verb}(${interval}, ${fname})`)
   out = out.push(`${pad}yield ${frame_var}.bracket(${crossing}, "cancel", () => { ${handle}.cancel(); ${inflight}.clear() })`)
   return { lines: out, counter: c }
+}
+
+// A timer firing registers the compensation an emitted extern declares, once
+// per firing, after the fire (item 254, issue #1592). A firing has no generator
+// to yield into, so it uses the provide-method form.
+fn timer_compensation(em: Any, n: Int, comp_name: Str, frame_var: Str, level: Int, counter: Int, a: ACx) -> StmtOut {
+  let idx = compensated_extern_index(value_field(em, "expr"), a.comps)
+  if (idx < 0) { return { lines: [], counter: counter } }
+  return register_compensation(value_field(a.comps[idx], "compensate"), true, level, counter, a, `${comp_name}.timer${n}`, comp_name, `${frame_var}.compensationMethod`)
 }
 
 // Both activation and method compensation snapshot arguments at registration.
@@ -2781,15 +2796,39 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
       emitted = `await ${emitted}`
     }
     var out = [`${pad}${emitted}`]
+    var c = er.counter
+    // the site-spelled clause, then the emitted extern's own declared one
+    // (item 254, issue #1592), each registered after the fire
     let comp = value_field(step, "compensate")
-    if (value_is_null(comp)) { return { lines: out, counter: er.counter } }
+    if (!value_is_null(comp)) {
+      let r = register_compensation(comp, false, level, c, a, site_prefix, scope_name, register)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    let idx = compensated_extern_index(value_field(step, "expr"), a.comps)
+    if (idx >= 0) {
+      let r = register_compensation(value_field(a.comps[idx], "compensate"), true, level, c, a, site_prefix, scope_name, register)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    return { lines: out, counter: c }
+}
+
+// `_register_compensation`: one compensation registration, after its emission
+// fired. `declared` marks an extern's own slot, lowered in the pure-expression
+// call dialect: a bare named call there is read as the component `fn` node
+// (`_as_fn_call`), so its arguments are bound at registration and the Phase-2
+// closure replays the call.
+fn register_compensation(comp: Any, declared: Bool, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str) -> StmtOut {
+    let pad = ind(level)
+    var out = []
     // item 247/243 Slice 2b: a compensation entry — audit-facing, best-effort,
     // ABORT-ONLY, Phase 2. Args are bound to temps HERE, at registration (the
     // contract's "no data hazard"): a deferred Phase-2 closure never re-reads a
     // variable a later step might reassign. The crossing's `args` is captured
     // once, from those same `const` temps, and the replayed call is rebuilt from
     // them (no double evaluation).
-    var c = er.counter + 1
+    var c = counter + 1
     let n = c
     let site = `${site_prefix}#${n}`
     let target = value_field(comp, "target")
@@ -2818,11 +2857,18 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
       return { lines: out, counter: c }
     }
     let comp_kind = node_kind(comp)
-    if (comp_kind == "fn" || comp_kind == "host") {
+    var as_fn = false
+    if (declared && comp_kind == "call" && !value_has(comp, "target")) {
+      as_fn = node_kind(value_field(comp, "callee")) == "var"
+    }
+    if (comp_kind == "fn" || comp_kind == "host" || as_fn) {
       // a bare `fn` or `host` builtin call: no separate target.
       var name = ""
       if (comp_kind == "fn") { name = value_str(value_field(comp, "name")) }
-      else { name = value_str(value_field(comp, "fn")) }
+      else {
+        if (as_fn) { name = value_str(value_field(value_field(comp, "callee"), "name")) }
+        else { name = value_str(value_field(comp, "fn")) }
+      }
       var temps = []
       var i = 0
       for (arg of value_list(value_field(comp, "args"))) {
@@ -2893,7 +2939,7 @@ fn config_interface(comp: Any) -> List[Str] {
 }
 
 // `_component`: one component's config interface + plugin object.
-fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], counter: Int) -> StmtOut {
+fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], comps: List[Any], counter: Int) -> StmtOut {
   let name = ident(value_str(value_field(comp, "name")))
   var out = config_interface(comp)
   out = out.push(`export const ${name} = {`)
@@ -2984,7 +3030,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   // byte-identical to before this slice. `frame_var` is threaded to
   // `component_step`, where a compensation registers through it; "" otherwise.
   let raw_name = value_str(value_field(comp, "name"))
-  let needs_frame = component_needs_frame(comp)
+  let needs_frame = component_needs_frame(comp, comps)
   var frame_var = ""
   if (needs_frame || component_has_bracket(comp)) {
     frame_var = "$revl_frame"
@@ -3024,7 +3070,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   let ops = async_ops_of(value_field(comp, "requires"), services)
   var c = counter
   for (step of body) {
-    let r = component_step(step, services, ops, route_keys, known_types, async_names, raw_name, frame_var, 3, c)
+    let r = component_step(step, services, ops, route_keys, known_types, async_names, comps, raw_name, frame_var, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
@@ -3126,7 +3172,7 @@ fn emit_component_tail(ir: Any, async_names: List[Str]) -> List[Str] {
   out = out.concat(context_augmentation(components))
   var c = 0
   for (comp of components) {
-    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, c)
+    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, compensated_externs(ir), c)
     out = out.concat(r.lines)
     out = out.push("")
     c = r.counter
@@ -3482,32 +3528,73 @@ fn uses_spawn(n: Any) -> Bool {
 
 // `_needs_frame` (item 243 Slice 2b, docs/design/teardown-contract.md): true iff
 // this component's activation body registers a compensation entry (`emit …
-// compensate …`), the entry kind that needs the `Frame` two-phase teardown
-// apparatus. Walks `if` branches (the only nesting an activation-body step
-// reaches here); a `timer` body is emission-only, so it never contributes. A
+// compensate …`, or an emitted extern that declares its own `compensate`), the
+// entry kind that needs the `Frame` two-phase teardown apparatus. Walks `if`
+// branches and a `timer` step's emissions: a firing that emits such an extern
+// registers on the frame (issue #1592). A
 // component using only plain brackets emits with NO `Frame`, byte-identical to
 // before this slice. (The witnessed/transactional entry kind is Slice-2b too but
 // no covered document declares a witnessed extern, so it is out of this port —
 // see item 324; a re-enabled witnessed fixture would extend this walk.)
-fn body_needs_frame(steps: List[Any]) -> Bool {
+fn body_needs_frame(steps: List[Any], comps: List[Any]) -> Bool {
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
-    if (kind == "emit" && !value_is_null(value_field(step, "compensate"))) { return true }
+    if (kind == "emit" && emit_registers(step, comps)) { return true }
+    // a timer firing that emits an extern declaring its own `compensate`
+    // registers it on the activation frame (issue #1592)
+    if (kind == "timer") {
+      for (em of value_list(value_field(step, "body"))) {
+        if (emit_registers(em, comps)) { return true }
+      }
+    }
     if (kind == "provide") {
       for (method of value_list(value_field(step, "methods"))) {
-        if (body_needs_frame(value_list(value_field(method, "body")))) { return true }
+        if (body_needs_frame(value_list(value_field(method, "body")), comps)) { return true }
       }
     }
     if (kind == "if") {
-      if (body_needs_frame(value_list(value_field(step, "then")))) { return true }
-      if (body_needs_frame(value_list(value_field(step, "else")))) { return true }
+      if (body_needs_frame(value_list(value_field(step, "then")), comps)) { return true }
+      if (body_needs_frame(value_list(value_field(step, "else")), comps)) { return true }
     }
   }
   return false
 }
 
-fn component_needs_frame(comp: Any) -> Bool {
-  return body_needs_frame(value_list(value_field(comp, "body")))
+fn component_needs_frame(comp: Any, comps: List[Any]) -> Bool {
+  return body_needs_frame(value_list(value_field(comp, "body")), comps)
+}
+
+// `_ComponentEmitter.compensated` / `_Ctx.compensated` (item 254, issue #1592):
+// the emission externs that DECLARE their own `compensate`. Every `emit` of one
+// registers that compensation, at whatever site the emit sits.
+fn compensated_externs(ir: Any) -> List[Any] {
+  var out = []
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "emission" && !value_is_null(value_field(ext, "compensate"))) {
+      out = out.push(ext)
+    }
+  }
+  return out
+}
+
+// `_compensated_extern`: the index in `comps` of the extern an emission calls
+// (a `fn`-kind call naming it), or -1.
+fn compensated_extern_index(e: Any, comps: List[Any]) -> Int {
+  if (node_kind(e) != "fn") { return -1 }
+  let nm = value_str(value_field(e, "name"))
+  var i = 0
+  for (ext of comps) {
+    if (value_str(value_field(ext, "name")) == nm) { return i }
+    i += 1
+  }
+  return -1
+}
+
+// `_emit_compensations` is non-empty: the step spells a `compensate`, or the
+// extern it emits declares one.
+fn emit_registers(step: Any, comps: List[Any]) -> Bool {
+  if (!value_is_null(value_field(step, "compensate"))) { return true }
+  return compensated_extern_index(value_field(step, "expr"), comps) >= 0
 }
 
 // `_has_bracket`: true iff this component's activation body yields at least one
@@ -3591,7 +3678,7 @@ fn acquire_method_name(node: Any) -> Str {
 // registers a compensation entry.
 fn uses_frame(ir: Any) -> Bool {
   for (comp of value_list(value_field(ir, "components"))) {
-    if (component_needs_frame(comp)) { return true }
+    if (component_needs_frame(comp, compensated_externs(ir))) { return true }
   }
   return false
 }
@@ -4092,12 +4179,12 @@ test "the await-seed awaits a req-keyed async op only in an async, non-arrow bod
   let call = { kind: "call", target: { kind: "req", name: "store" }, method: "get",
                args: [{ kind: "name", id: "k" }] }
   let ops = [async_op_key("store", "get")]
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "(await ctx.store.get(k))"
   assert expr(call, 0, sync_acx()).text == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false }).text
+  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "ctx.store.get(k)"
 }
 
