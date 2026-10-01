@@ -1016,6 +1016,9 @@ resume, and the way back is `revl recover --wal FILE`.
   `FILE.estop` when `--latch` is omitted, and names the log the outstanding
   inventory is read from. For a `--placement` run's index, the inventory is
   read from every process WAL it names, each entry tagged with its process.
+  An entry is outstanding until a `discharge` record (a commit) or an
+  `aborted` record (a recover replayed it) settles it; `settled` counts the
+  ones that were.
 - `--reason TEXT` - why the button was hit; carried into the halt record and
   every residue record it produces.
 - `--operator TOKEN` - the operator accountable for the halt. An E-Stop is an

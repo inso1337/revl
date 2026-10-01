@@ -53,14 +53,10 @@ def _open_calls(records: list) -> dict:
     make: a discharge descriptor, or a legacy boundary effect with a
     reconstructible inverse op. A seq named in a `discharge` or `aborted`
     record is settled and needs nothing."""
-    settled: set = set()
-    for record in records:
-        if record.get("record") == "discharge":
-            settled.update(record.get("discharged") or [])
-        elif record.get("record") == "aborted":
-            settled.update(record.get("replayed") or [])
-        elif record.get("record") in ("flushed", "flush-residue"):
-            settled.add(record.get("seq"))
+    from .wal import settled_descriptor_seqs  # noqa: PLC0415
+    settled = settled_descriptor_seqs(records)
+    settled |= {r.get("seq") for r in records
+                if r.get("record") in ("flushed", "flush-residue")}
     calls: dict = {}
     for r in records:
         seq = r.get("seq")

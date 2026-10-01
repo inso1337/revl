@@ -413,7 +413,9 @@ def _estop_outstanding(wal_path: str | None) -> dict:
     contract.md, "WAL descriptor"), and a clean commit writes a `discharge`
     record naming the seqs it settled. An E-Stop writes neither — it strands —
     so the descriptors with no discharge behind them are exactly the entries
-    still owed, and exactly what `revl recover` would replay. Counting them
+    still owed, and exactly what `revl recover` would replay. A recover that
+    replayed one writes the runtime's `aborted` record naming it, which settles
+    it too (issue #1477, `wal.settled_descriptor_seqs`). Counting them
     here re-derives the inventory from the durable log rather than trusting the
     dead process's memory."""
     if not wal_path:
@@ -444,7 +446,8 @@ def _estop_outstanding_placement(index_path: str, index: dict) -> dict:
                        for e in one.get("entries") or [])
     unknown = [p for p in processes if not p["known"]]
     report = {"known": not unknown, "wal": index_path, "processes": processes,
-              "entries": entries, "count": len(entries)}
+              "entries": entries, "count": len(entries),
+              "settled": sum(p.get("settled") or 0 for p in processes)}
     if unknown:
         report["note"] = "; ".join(f"process {p['process']}: {p['note']}"
                                    for p in unknown)
@@ -453,23 +456,21 @@ def _estop_outstanding_placement(index_path: str, index: dict) -> dict:
 
 def _estop_outstanding_wal(wal_path: str) -> dict:
     """The outstanding entries of one WAL."""
-    from ..wal import WALIntegrityError, read_wal  # noqa: PLC0415
+    from ..wal import WALIntegrityError, read_wal, settled_descriptor_seqs  # noqa: PLC0415
     try:
         wal = read_wal(wal_path)
     except (OSError, WALIntegrityError) as error:
         return {"known": False, "note": f"cannot read WAL {wal_path}: {error}"}
-    discharged: set = set()
-    descriptors: list[dict] = []
-    for record in wal.get("records") or []:
-        kind = record.get("record")
-        if kind == "discharge":
-            discharged.update(record.get("discharged") or [])
-        elif kind == "discharge-descriptor":
-            descriptors.append(record)
-    owed = [d for d in descriptors if d.get("seq") not in discharged]
+    records = wal.get("records") or []
+    # issue #1477: settled by a commit's `discharge` OR by the runtime's
+    # `aborted` record (a recover replayed it), not by `discharge` alone
+    settled = settled_descriptor_seqs(records)
+    descriptors = [r for r in records if r.get("record") == "discharge-descriptor"]
+    owed = [d for d in descriptors if d.get("seq") not in settled]
     return {
         "known": True,
         "wal": wal_path,
+        "settled": len(descriptors) - len(owed),
         "entries": [{"seq": d.get("seq"), "entry": d.get("entry"),
                      "receiver": (d.get("call") or {}).get("receiver"),
                      "method": (d.get("call") or {}).get("method"),
@@ -477,6 +478,15 @@ def _estop_outstanding_wal(wal_path: str) -> dict:
                     for d in owed],
         "count": len(owed),
     }
+
+
+def _nothing_outstanding(outstanding: dict) -> str:
+    settled = outstanding.get("settled") or 0
+    if settled:
+        return (f"    (none: {settled} registered entr"
+                f"{'y was' if settled == 1 else 'ies were'} settled on the WAL, "
+                f"by a commit's discharge or a recover's replay)")
+    return "    (none on the WAL — nothing durable was registered)"
 
 
 def _render_estop(report: dict) -> str:
@@ -503,7 +513,7 @@ def _render_estop(report: dict) -> str:
                 f"{entry.get('receiver')}.{entry.get('method')}"
                 + (f"  [idempotency {key}]" if key else ""))
         if not outstanding["entries"] and outstanding.get("known"):
-            lines.append("    (none on the WAL — nothing durable was registered)")
+            lines.append(_nothing_outstanding(outstanding))
     if not outstanding.get("known"):
         lines.append(f"  outstanding: {outstanding.get('note', 'unknown')}")
     lines.append("")

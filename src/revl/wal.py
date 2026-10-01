@@ -200,6 +200,22 @@ def __getattr__(name: str):
 RECORD_MODEL_DECISION = "model-decision"
 
 
+def settled_descriptor_seqs(records: list) -> set:
+    """The `discharge-descriptor` seqs the log itself settles: a `discharge`
+    record's ``discharged`` (the commit path) and an `aborted` record's
+    ``replayed`` (the runtime's abort path, which `revl recover` replays
+    through). The same two records `runtime._settled_seqs` reads, so a reader
+    of what is still owed agrees with the replay that settled it."""
+    settled: set = set()
+    for record in records:
+        kind = record.get("record")
+        if kind == "discharge":
+            settled.update(record.get("discharged") or [])
+        elif kind == "aborted":
+            settled.update(record.get("replayed") or [])
+    return settled
+
+
 def model_decisions(records: list) -> dict:
     """Index a WAL's ``model-decision`` records by the crossing they describe,
     ``(component, stepIndex) -> record``, in recorded order.
