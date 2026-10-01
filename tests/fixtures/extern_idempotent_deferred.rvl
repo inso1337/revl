@@ -1,0 +1,22 @@
+// ADMITTED: item 309's `idempotent` modifier on a `deferred` emission extern,
+// in both forms. `notify` makes the bare claim (the remote treats a
+// re-delivery as the delivery, register `declared`). `deliver` makes the
+// keyed claim `idempotent(key: id)`: the parameter `id` carries the value the
+// remote deduplicates on, a `Str` the WAL descriptor can hold, register
+// `keyed`.
+//
+// The self-host gate read neither form. Its extern reader had no case for
+// the `idempotent` keyword in the modifier slot, so it answered
+// `BAD|expected fn after extern` for a declaration the reference admits.
+
+extern emission deferred idempotent fn notify(msg: Str) = @py { return }
+
+extern emission deferred idempotent(key: id) fn deliver(id: Str, body: Str) = @py { return }
+
+service Outbox { fn pending() -> Int }
+
+component Mailer provides outbox: Outbox {
+  emit notify("queued")
+  emit deliver("k-1", "hello")
+  provide outbox { fn pending() = 0 }
+}
