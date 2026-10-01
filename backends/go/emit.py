@@ -9800,6 +9800,16 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
             # 141aa7e3d and `emit` never learned about (issue #1321).
             return _emit_v3_combined(ir, package, placement=False)
         return _emit_v3_go(ir, package)
+    if (ver == 3 and not holds_stream and has_lifecycle
+            and ir.get("components") and ir.get("functions")):
+        # A `lifecycle test` keeps the document on a live renderer, but the
+        # live stc-go path below renders types, externs and components and
+        # never the module `fn`s, so a provide method or activation step that
+        # calls one did not build ("undefined: double", issue #1669). The
+        # combined renderer carries the pure tier's functions, their runtime
+        # preambles and the lifecycle tests in one package, so a document that
+        # declares a module fn takes it instead.
+        return _emit_v3_combined(ir, package, placement=False)
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
