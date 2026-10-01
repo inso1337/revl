@@ -4,7 +4,9 @@
 // emission fires, DISCHARGED on a clean commit, RUN in Phase 2 on an abort.
 //
 // One component per site: the activation body (`ExternOk`, `ExternAbort`,
-// which fails after the emission), a provide-method body (`Agent`) and an
+// which fails after the emission), a provide-method body (`Agent`, with an
+// `emit` statement and the value positions `let`, `return`, argument and
+// nested operand) and an
 // `every` timer firing (`Beat`). `SiteAbort` and `Agent.site` are the
 // controls, a site-spelled `compensate` on a plain emission, which go
 // registered before the fix.
@@ -29,9 +31,17 @@ extern emission fn note(body: Str) -> Int = @go {
 	return 1
 }
 
+extern pure fn keep(n: Int) -> Int = @go {
+	return n
+}
+
 service Ops {
   emission fn run(x: Str)
   emission fn site(x: Str)
+  emission fn bound(x: Str) -> Int
+  emission fn returned(x: Str) -> Int
+  emission fn argument(x: Str) -> Int
+  emission fn nested(x: Str) -> Int
 }
 
 component SiteAbort {
@@ -52,6 +62,21 @@ component Agent provides ops: Ops {
   provide ops {
     fn run(x) { emit put_row(x) }
     fn site(x) { emit note(x) compensate restore_row() }
+    // value positions (issue #1592, the positions of #1511): the call is not
+    // an `emit` statement, and still registers the extern's compensation
+    fn bound(x) {
+      let a = emit put_row(x)
+      return a
+    }
+    fn returned(x) { return emit put_row(x) }
+    fn argument(x) {
+      let s = keep(emit put_row(x))
+      return s
+    }
+    fn nested(x) {
+      let b = emit put_row(x) + 1
+      return b
+    }
   }
 }
 

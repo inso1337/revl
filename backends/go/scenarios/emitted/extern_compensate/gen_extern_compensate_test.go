@@ -482,6 +482,16 @@ func (f *RevlFrame) runOneCompensation(entry revlCompEntry, bound time.Duration)
 	}
 }
 
+// revlDeclared registers the compensation an extern DECLARES (item 254) for a
+// call in a value position of a provide method (a let, a return, an argument,
+// a nested operand; issue #1592). Go evaluates the argument v, the
+// call itself, before revlDeclared runs, so the offset is parked only once the
+// call has returned, exactly as a method-body emit statement parks it.
+func revlDeclared[T any](f *RevlFrame, v T, key, method string, run func() error) T {
+	f.registerMethodCompensation(key, method, run)
+	return v
+}
+
 // ---- clock coeffect + timer scheduler (item 57, docs/time-coeffect.md) --
 // The go mirror of backends/python/runtime.py's Clock/TimerHandle: time moves
 // only on RevlClockAdvance, firing due timers earliest-first (ties by arm
@@ -650,10 +660,18 @@ func note(body string) int64 {
 	return 1
 }
 
+func keep(n int64) int64 {
+	return n
+}
+
 // service Ops
 type Ops interface {
 	Run(x string)
 	Site(x string)
+	Bound(x string) int64
+	Returned(x string) int64
+	Argument(x string) int64
+	Nested(x string) int64
 }
 
 var _keyOps = stc.NewKey[Ops]("ops")
@@ -774,6 +792,28 @@ func (revlSelf *Agent_ops) Run(x string) {
 func (revlSelf *Agent_ops) Site(x string) {
 	note(x)
 	revlSelf.revlFrame.registerMethodCompensation("restore_row", "restore_row", func() error { restore_row(); return nil })
+}
+
+func (revlSelf *Agent_ops) Bound(x string) int64 {
+	var a int64 = revlDeclared(revlSelf.revlFrame, put_row(x), "restore_row", "restore_row", func() error { restore_row(); return nil })
+	_ = a
+	return a
+}
+
+func (revlSelf *Agent_ops) Returned(x string) int64 {
+	return revlDeclared(revlSelf.revlFrame, put_row(x), "restore_row", "restore_row", func() error { restore_row(); return nil })
+}
+
+func (revlSelf *Agent_ops) Argument(x string) int64 {
+	var s int64 = keep(revlDeclared(revlSelf.revlFrame, put_row(x), "restore_row", "restore_row", func() error { restore_row(); return nil }))
+	_ = s
+	return s
+}
+
+func (revlSelf *Agent_ops) Nested(x string) int64 {
+	var b int64 = (revlDeclared(revlSelf.revlFrame, put_row(x), "restore_row", "restore_row", func() error { restore_row(); return nil }) + 1)
+	_ = b
+	return b
 }
 
 func Beat() stc.Component {

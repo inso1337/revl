@@ -22,6 +22,46 @@
           ],
           "returns": null,
           "emission": true
+        },
+        "bound": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        },
+        "returned": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        },
+        "argument": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
+        },
+        "nested": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Str"
+            }
+          ],
+          "returns": "Int",
+          "emission": true
         }
       }
     }
@@ -172,6 +212,131 @@
                   }
                 }
               ]
+            },
+            {
+              "name": "bound",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "a",
+                  "value": {
+                    "kind": "fn",
+                    "name": "put_row",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "a"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "returned",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_row",
+                    "args": [
+                      {
+                        "kind": "name",
+                        "id": "x"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "argument",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "s",
+                  "value": {
+                    "kind": "fn",
+                    "name": "keep",
+                    "args": [
+                      {
+                        "kind": "fn",
+                        "name": "put_row",
+                        "args": [
+                          {
+                            "kind": "name",
+                            "id": "x"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "s"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "nested",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "b",
+                  "value": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "fn",
+                      "name": "put_row",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "b"
+                  }
+                }
+              ]
             }
           ]
         }
@@ -294,6 +459,20 @@
       "returns": "Int",
       "bodies": {
         "go": "\n\thostRecord(\"note \" + body)\n\treturn 1\n"
+      }
+    },
+    {
+      "name": "keep",
+      "class": "pure",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "go": "\n\treturn n\n"
       }
     }
   ],

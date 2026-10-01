@@ -158,3 +158,50 @@ func TestTimerExternCompensationRunsOncePerFiringOnAbort(t *testing.T) {
 	waitSettled(f)
 	want(t, calls(), "put x", "put x", "restore", "restore")
 }
+
+// value positions inside a provide method (issue #1592, the positions of
+// #1511): a `let`, a `return`, an argument and a nested operand each register
+// the extern's compensation once the call returns.
+func valuePositions() map[string]func(Ops) {
+	return map[string]func(Ops){
+		"let":      func(o Ops) { o.Bound("let") },
+		"return":   func(o Ops) { o.Returned("return") },
+		"argument": func(o Ops) { o.Argument("argument") },
+		"nested":   func(o Ops) { o.Nested("nested") },
+	}
+}
+
+func TestValuePositionCompensationRunsOnAbort(t *testing.T) {
+	for tag, call := range valuePositions() {
+		t.Run(tag, func(t *testing.T) {
+			root := reset()
+			f := load(t, root, LoadAgent)
+			ops, err := stc.Service[Ops](root, _keyOps)
+			if err != nil {
+				t.Fatalf("resolve ops: %v", err)
+			}
+			call(ops)
+			soleFrame(t).Abort()
+			f.Dispose()
+			waitSettled(f)
+			want(t, calls(), "put "+tag, "restore")
+		})
+	}
+}
+
+func TestValuePositionCompensationDischargesOnCleanUnload(t *testing.T) {
+	for tag, call := range valuePositions() {
+		t.Run(tag, func(t *testing.T) {
+			root := reset()
+			f := load(t, root, LoadAgent)
+			ops, err := stc.Service[Ops](root, _keyOps)
+			if err != nil {
+				t.Fatalf("resolve ops: %v", err)
+			}
+			call(ops)
+			f.Dispose()
+			waitSettled(f)
+			want(t, calls(), "put "+tag)
+		})
+	}
+}
