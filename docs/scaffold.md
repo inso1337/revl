@@ -140,3 +140,12 @@ of the toolchain already trusts; the generator is the only new code.
 `admissible` is the standing verdict: a scaffold with open holes never is. An
 agent reads the skeleton, fills one hole against its spec, re-checks, and
 repeats until `holeCount` reaches zero.
+
+`unfillable` (present only when there is one) lists the holes the requesting
+author can never fill, `{line, expected, reason}` each, read off each fill
+spec's `fillable` ([holes.md](holes.md) §8). Through `revl_scaffold` under the
+default authoring trust, the effect scaffolding's resource hole is one: its
+type is a handle only host code builds, and an untrusted author may neither
+declare nor reach an extern (G8). It is flagged here so the agent asks the
+operator for a granted service or for host-code trust instead of spending its
+budget on a hole it cannot fill; `--no-effect` scaffolds without it.
