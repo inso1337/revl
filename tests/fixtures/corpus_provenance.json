@@ -746,6 +746,7 @@
    "tests/fixtures/emit_java_corpus/v1_components.rvl",
    "tests/fixtures/emit_java_refusals/deferred_emission_call.rvl",
    "tests/fixtures/emit_java_refusals/validated_emission_operation.rvl",
+   "tests/fixtures/emit_py_async_shapes.rvl",
    "tests/fixtures/emit_py_builtin_shadow.rvl",
    "tests/fixtures/emit_py_corpus/adt.rvl",
    "tests/fixtures/emit_py_corpus/adt_inference.rvl",

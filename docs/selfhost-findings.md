@@ -1739,17 +1739,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     75 |                   75 (100%) |             60 (80.0%) |
+| py   |     84 |                   84 (100%) |             67 (79.8%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
 | go   |     23 |                   23 (100%) |            23 (100.0%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **279** | **279 (100%)** | **258 (92.5%)** |
+| **total** | **288** | **288 (100%)** | **265 (92.0%)** |
 
-Every one of the 279 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 258 of
-them survive the **fully-native** chain, so all 21 residual documents
+Every one of the 288 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 265 of
+them survive the **fully-native** chain, so all 23 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,7 +1779,7 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 15 residual of 75:
+`py`, 17 residual of 84:
 
 - `services_control_flow.rvl`
 - `services_host_stream.rvl`
@@ -1792,6 +1792,8 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../examples/model_store_sqlite.rvl`
 - `../../../examples/uxprobe2_fault.rvl`
 - `../emit_py_test_sections.rvl`
+- `../../../examples/async_timer.rvl`
+- `../emit_py_async_shapes.rvl`
 - `branches.rvl`
 - `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`

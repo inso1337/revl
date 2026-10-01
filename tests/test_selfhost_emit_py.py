@@ -63,10 +63,11 @@ Slice 4 (item 206) adds three more byte-identical forms:
     ``_effect_N`` / ``_emit_N`` closure names and the ``{comp}.{provide}.{method}
     #{n}`` ``_label``).
 
-Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+): async
-coloring (async methods and async externs' await-seed), spawn/instances, and the
-canonical ABI. The activation-body ``await`` step and the in-file ``test`` /
-``lifecycle test`` / ``fault test`` sections are ported since item 391. Realm placements (``isolate``/``intercept``/``routes``)
+Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
+spawn/instances and the canonical ABI. Async colouring (coloured fns, async
+operations, the await-seed), destructuring ``let``, the activation-body
+``await`` step and the in-file ``test`` / ``lifecycle test`` / ``fault test``
+sections are ported since item 391. Realm placements (``isolate``/``intercept``/``routes``)
 are ported since item 391's placement slice. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
 ``spawn`` or result-declared host acquisitions there, whose ``cexpr`` lands in
@@ -223,6 +224,35 @@ CORPUS = [
     #     `idempotent` provider (the `_REVL_IDEMPOTENT` map), a fault test's
     #     config.
     "../emit_py_test_sections.rvl",
+    # item 391: the await-seed (item 92), the async-coloured timer (item 170)
+    # and destructuring `let` (item 179), each refused by name before:
+    #   async_colour.rvl - coloured `async def` fns awaiting each other, an
+    #     async extern, an async-typed parameter, and an awaited match arm;
+    #   async_arrow_arg.rvl - async arrows: a coroutine tail call stays the
+    #     plain lambda, a sync body goes through `_revl_as_async`;
+    #   async_module_local.rvl - an async local in a coloured fn;
+    #   services_async.rvl - `async def` provide operations awaiting async
+    #     service operations through their required keys;
+    #   async_arrow_emission.rvl - an async provide operation passing an async
+    #     arrow over a required key's emission;
+    #   async_timer.rvl - a timer body reaching an async operation: the
+    #     in-flight window, the task spawn and the cancelling inverse;
+    #   destructure.rvl, destructuring.rvl - record and list `let` patterns,
+    #     the rest binding, and the section's destructure counter.
+    "async_colour.rvl",
+    "async_arrow_arg.rvl",
+    "../emit_ts_corpus/async_module_local.rvl",
+    "../emit_ts_corpus/services_async.rvl",
+    "../emit_ts_corpus/async_arrow_emission.rvl",
+    "../../../examples/async_timer.rvl",
+    "destructure.rvl",
+    "../emit_ts_corpus/destructuring.rvl",
+    #   emit_py_async_shapes.rvl - the async shapes those leave out: the
+    #     `_revl_as_async` lift, awaited match binders (and the walrus-temp
+    #     exception), an `await` statement, an awaited host-extern emission and
+    #     an awaited match in an async operation, and an async timer that
+    #     mixes an inline sync emission with a spawned async one.
+    "../emit_py_async_shapes.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -638,15 +668,6 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
 
 
 @pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
-    # Async colouring is not ported. A coloured fn and an `async` operation
-    # used to come out as sync bodies with un-awaited calls (a silent drop);
-    # each is now refused by name. The service table's `'async': True` flag and
-    # an activation body's async effect/emit steps ARE ported (async_effects.rvl
-    # in the CORPUS above).
-    ("tests/fixtures/emit_ts_corpus/async_module_local.rvl", "async def run(",
-     "<<UNSUPPORTED-FN:async run>>"),
-    ("tests/fixtures/emit_ts_corpus/services_async.rvl", "async def fetch(self, k):",
-     "<<UNSUPPORTED-METHOD:async fetch>>"),
     # item 245: a deferred emission is enqueued on the session, never fired at
     # the call site. The port used to fire the host body directly.
     ("tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl",

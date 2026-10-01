@@ -523,6 +523,15 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../examples/model_store_sqlite.rvl",
         "../../../examples/uxprobe2_fault.rvl",
         "../emit_py_test_sections.rvl",
+        # item 391: the await-seed slice. Both are emitter-exact from the
+        # reference IR. async_timer.rvl carries lifecycle tests (the native IR
+        # has no `tests` section). emit_py_async_shapes.rvl reaches the
+        # frontend's sync instance of a fn with an async-typed parameter
+        # (`drive_revl_sync`) and the async-coloured timer flag, neither of
+        # which the native IR producer emits, so the native chain also loses
+        # the `extern_emit` and `asyncio` imports.
+        "../../../examples/async_timer.rvl",
+        "../emit_py_async_shapes.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at
