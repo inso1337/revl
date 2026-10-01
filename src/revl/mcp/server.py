@@ -1769,9 +1769,16 @@ def _tool_check(arguments: dict) -> dict:
     # `fillSpec` — the expected type, the emission upper bound, the in-scope
     # bindings and the reachable service signatures the checker already knew at
     # that position — so the hole can be filled directly (docs/holes.md §8).
-    holes = fillspec.enrich(ir) if ir.get("holes") else []
+    holes = (fillspec.enrich(ir, untrusted=_untrusted_author())
+             if ir.get("holes") else [])
     return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
             "holes": holes}
+
+
+def _untrusted_author() -> bool:
+    """Whether the agent on this transport authors under the untrusted-author
+    profile, so a fillSpec offers it no extern (`fillspec.enrich`)."""
+    return AUTHORING.profile() is not None
 
 
 def _tool_admit(arguments: dict) -> dict:
@@ -2117,7 +2124,7 @@ def _tool_scaffold(arguments: dict) -> dict:
     except ScaffoldError as error:
         return _session_error(str(error))
     filename = arguments.get("filename") or f"{spec.component}.rvl"
-    return scaffold_document(spec, filename)
+    return scaffold_document(spec, filename, untrusted=_untrusted_author())
 
 
 def _tool_fmt(arguments: dict) -> dict:
