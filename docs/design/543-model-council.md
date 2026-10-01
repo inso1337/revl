@@ -2,8 +2,9 @@
 
 Roadmap: item 516 (issue #1190), from the 2026-09-19 external review. Slice 1
 was LANDED with this note and slices 2 to 5 were designed here and not written.
-Since then slices 2, 3 and 5 have landed and slice 4 is issue #1368; section 14
-carries the per-slice evidence and is the current answer.
+Since then all four have landed, slice 4 last (issue #1368, 2026-09-24); section
+14 carries the per-slice evidence and is the current answer. (Corrected
+2026-09-29, issue #1572: this said slice 4 was still open.)
 
 Builds on: item 512 and `docs/design/531-model-placement.md` (the `model role`
 declaration each member names, and section 9 of that note, which decided for
