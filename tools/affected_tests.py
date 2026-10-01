@@ -96,6 +96,9 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_inprocess_gate_rust.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
+    # Issue #1461: loads `bench/run.py` by path and checks that the bench
+    # endpoint clients send through the runtime adapters.
+    "tests/test_model_providers_1461.py",
     "tests/test_rescore_no_self_score.py",
     # Does not READ bench. Its synthetic tree mirrors the real suffix
     # collision between `backends/typescript/runtime.ts` and
@@ -104,6 +107,12 @@ BENCH_DEPENDENT_TESTS = (
     # resolving. Declared because the guard below is mention-based, and
     # over-selecting is the safe direction for this gate.
     "tests/test_roadmap_claims_gate.py",
+    # Does not READ bench. Its diff-filter test (issue #1572) names a
+    # `bench/results/...` path as one the census does NOT read, since `bench`
+    # is outside the census's corpus directories. Declared for the same reason
+    # as the entry above: the guard below is mention-based, and over-selecting
+    # is the safe direction.
+    "tests/test_census_artifact.py",
     # The self-host capstone oracle pins four `bench/results/…` candidate
     # documents as members of the emit_java corpus (roadmap item 146 gap 2's
     # located-gap ratchet), so a bench change must re-run it.
