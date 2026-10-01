@@ -1,0 +1,66 @@
+// Issue #1592 on the go tier: an emission extern that DECLARES its own
+// `compensate` (item 254) registers that compensation at every site it is
+// emitted from, with the py reference's semantics: registered after the
+// emission fires, DISCHARGED on a clean commit, RUN in Phase 2 on an abort.
+//
+// One component per site: the activation body (`ExternOk`, `ExternAbort`,
+// which fails after the emission), a provide-method body (`Agent`) and an
+// `every` timer firing (`Beat`). `SiteAbort` and `Agent.site` are the
+// controls, a site-spelled `compensate` on a plain emission, which go
+// registered before the fix.
+// Every call records through the host trace (`hostRecord`) so exec_test.go
+// asserts which calls ran and in what order.
+//
+// The `lifecycle test` below is the smoke path that keeps this document on
+// emit()'s live stc-go component path.
+
+extern emission fn put_row(body: Str) -> Int compensate restore_row() = @go {
+	hostRecord("put " + body)
+	return 1
+}
+
+extern emission fn restore_row() -> Int = @go {
+	hostRecord("restore")
+	return 0
+}
+
+extern emission fn note(body: Str) -> Int = @go {
+	hostRecord("note " + body)
+	return 1
+}
+
+service Ops {
+  emission fn run(x: Str)
+  emission fn site(x: Str)
+}
+
+component SiteAbort {
+  emit note("s") compensate restore_row()
+  fail "boom"
+}
+
+component ExternOk {
+  emit put_row("y")
+}
+
+component ExternAbort {
+  emit put_row("y")
+  fail "boom"
+}
+
+component Agent provides ops: Ops {
+  provide ops {
+    fn run(x) { emit put_row(x) }
+    fn site(x) { emit note(x) compensate restore_row() }
+  }
+}
+
+component Beat {
+  every 10s { emit put_row("x") }
+}
+
+lifecycle test "clean unload of an un-called agent leaves no residue" {
+  load Agent
+  unload Agent
+  assert no_residue
+}
