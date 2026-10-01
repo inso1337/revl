@@ -249,6 +249,7 @@
    "examples/rejections/lifecycle_unknown_assertion.rvl",
    "examples/rejections/lifecycle_unknown_component.rvl",
    "examples/rejections/lifecycle_unknown_operation.rvl",
+   "examples/rejections/requires_in_component_body.rvl",
    "examples/rejections/service_compat_duplicate.rvl",
    "examples/rejections/shadowed_module_fn_call.rvl",
    "examples/rejections/t10_call_arity.rvl",
