@@ -18,11 +18,14 @@
           "documents": []
         },
         "py": {
-          "residual": 17,
-          "corpus": 89,
+          "residual": 22,
+          "corpus": 94,
           "reproduced": 72,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
+            "../../../backends/go/testdata/stream_130.rvl",
+            "../../../backends/go/testdata/stream_event_130.rvl",
+            "../../../backends/rust/scenarios/stream.rvl",
             "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
             "../../../examples/async_timer.rvl",
@@ -36,9 +39,11 @@
             "../emit_py_builtin_shadow.rvl",
             "../emit_py_placement.rvl",
             "../emit_py_test_sections.rvl",
+            "../emit_rust_corpus/comp_stream.rvl",
             "branches.rvl",
             "services_control_flow.rvl",
-            "services_host_stream.rvl"
+            "services_host_stream.rvl",
+            "streams.rvl"
           ]
         },
         "rust": {
@@ -68,8 +73,8 @@
           "documents": []
         }
       },
-      "total_residual": 23,
-      "total_corpus": 293,
+      "total_residual": 28,
+      "total_corpus": 298,
       "clean_tiers": [
         "go",
         "java",
@@ -239,17 +244,10 @@
           }
         },
         "py": {
-          "unported_constructs": 11,
-          "unported_reasons": 5,
+          "unported_constructs": 6,
+          "unported_reasons": 4,
           "blind_constructs": 1,
           "reasons": {
-            "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
-              "kind=stream-merge",
-              "kind=subscribe",
-              "stage=take",
-              "step=stream-iter",
-              "subscribe=<true>"
-            ],
             "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
               "kind=lease-acquire",
               "kind=lease-revoke",
@@ -422,7 +420,7 @@
           }
         }
       },
-      "total_unported": 188
+      "total_unported": 183
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -432,14 +430,14 @@
         "compile": 1,
         "emit_go": 69,
         "emit_java": 36,
-        "emit_py": 12,
+        "emit_py": 7,
         "emit_rust": 34,
         "emit_ts": 20,
         "emit_wasm": 50,
         "gate_census": 5,
-        "lower_ir": 3
+        "lower_ir": 1
       },
-      "total_unreached": 230
+      "total_unreached": 223
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

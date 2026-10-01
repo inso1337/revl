@@ -817,8 +817,10 @@ fn ir_needs_as_async(ir: Any) -> Bool {
   return found
 }
 
+// Whether any node under `n` is an expression of `kind` or a body step tagged
+// `kind` (a `stream-iter` loop is a step, not an expression).
 fn uses_kind(n: Any, kind: Str) -> Bool {
-  if (node_kind(n) == kind) { return true }
+  if (node_kind(n) == kind || value_str(value_field(n, "step")) == kind) { return true }
   for (c of value_children(n)) { if (uses_kind(c, kind)) { return true } }
   return false
 }
@@ -2135,6 +2137,8 @@ fn cexpr(node: Any) -> Str {
     for (a of value_list(value_field(node, "args"))) { args = args.concat(", ").concat(cexpr(a)) }
     return `${runtime_ref("fmt")}(${py_repr(value_field(node, "template"))}${args})`
   }
+  // item 130: a `subscribe` without a replay request (see render_subscribe).
+  if (kind == "subscribe" && value_is_null(value_field(node, "replay"))) { return render_subscribe(node) }
   // instance-parametric components (docs/design-v2-instances.md): `spawn`
   // plugs a fresh child instance, each provided key isolated into its own local
   // realm, and returns a handle; `instance-get` reads a provision off that
@@ -2149,6 +2153,42 @@ fn cexpr(node: Any) -> Str {
     return `${cexpr(value_field(node, "target"))}.get(${py_repr(value_field(node, "key"))})`
   }
   return `<<UNSUPPORTED-CEXPR:${kind}>>`
+}
+
+// item 130: `subscribe <stream>` opens a single-consumer subscription and
+// registers its bracket. The derived-stream stages, the declared buffer
+// capacity and the `block` drain window are appended only when declared, so a
+// plain subscription keeps the three-argument call. A subscribe that asks for a
+// replay backlog (item 130 §4.5) is not taken here: like a replay-declaring
+// `Stream.source()`, it falls through to the named `subscribe` marker, because
+// no corpus document can hold it to agreement while the self-host gate refuses
+// the `replay(...)` clause.
+fn render_subscribe(node: Any) -> Str {
+  let policy = value_is_null(value_field(node, "policy")) ? "error" : value_str(value_field(node, "policy"))
+  var extra = ""
+  let stages = value_list(value_field(node, "stages"))
+  if (stages.length() > 0) {
+    var rendered = []
+    for (st of stages) {
+      let name = value_str(value_field(st, "stage"))
+      rendered = rendered.push(name == "take" ? `('take', ${value_int(value_field(st, "count"))})` : `(${py_repr(name)}, ${cexpr(value_field(st, "fn"))})`)
+    }
+    extra = extra.concat(`, stages=[${rendered.join(", ")}]`)
+  }
+  if (!value_is_null(value_field(node, "buffer"))) { extra = extra.concat(`, capacity=${value_int(value_field(node, "buffer"))}`) }
+  if (!value_is_null(value_field(node, "drain"))) { extra = extra.concat(`, drain_ms=${value_int(value_field(node, "drain"))}`) }
+  return `Stream.subscribe(${stream_head(value_field(node, "stream"))}, ${py_repr(policy)}, _revl_ctx${extra})`
+}
+
+// The stream a `subscribe` acquires: a plain source, or a `merge(a, b)` fan-in,
+// itself a stream, so the head is recursive.
+fn stream_head(node: Any) -> Str {
+  if (node_kind(node) == "stream-merge") {
+    var parts = []
+    for (src of value_list(value_field(node, "sources"))) { parts = parts.push(stream_head(src)) }
+    return `Stream.merge(${parts.join(", ")})`
+  }
+  return cexpr(node)
 }
 
 // A list of strings as the repr of the Python tuple it becomes: `()`, `('a',)`,
@@ -2692,7 +2732,7 @@ fn inverse_lambda(step: Any, slot: Str, params: Str) -> Str {
 fn body_is_async(steps: List[Any]) -> Bool {
   for (s of steps) {
     let k = value_str(value_field(s, "step"))
-    if (k == "await") { return true }
+    if (k == "await" || k == "stream-iter") { return true }
     if ((k == "effect" || k == "let-effect" || k == "emit") && value_bool(value_field(s, "async"))) { return true }
   }
   return false
@@ -2760,6 +2800,42 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
     out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${tmp}`))
   }
   return { lines: out, counter: c }
+}
+
+// item 130 Slice 4/5: `every <x> in <sub> { ... }` and the typed-event handler
+// `on <Event> as <x> in <sub>`. The await lands, the A1 yield closes the
+// iteration, a `Closed` terminal ends the loop, and (for an event) the
+// contract built once above the loop gates each item before the body runs.
+// The item is mangled TWICE, as the reference's `_mangle(_ident(bind))` does
+// (`_ident` already mangles). Body reads are mangled once, so a builtin-named
+// item (`every len in sub`) binds `len___` and reads `len__` on both sides.
+// That is a reference defect, mirrored here for byte parity rather than fixed.
+fn stream_iter(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
+  let item = mangle(mangle(value_str(value_field(step, "bind"))))
+  let subject = cexpr(value_field(step, "subject"))
+  let contract = value_field(step, "event")
+  var out = []
+  var c = counter
+  var gate = ""
+  var ename = ""
+  if (!value_is_null(contract)) {
+    c = c + 1
+    gate = `_revl_event${c}`
+    ename = mangle(value_str(value_field(contract, "name")))
+    out = out.push(line(indent, `${gate} = Stream.contract(${py_repr(ename)}, ${py_repr(value_field(contract, "schema"))}, ${py_repr(mangle(value_str(value_field(contract, "key"))))}, ${value_int(value_field(contract, "window"))})`))
+  }
+  out = out.push(line(indent, "while True:"))
+  out = out.push(line(indent + 1, `${item} = await ${subject}.next()`))
+  out = out.push(line(indent + 1, "yield None  # iteration boundary (A1)"))
+  out = out.push(line(indent + 1, `if Stream.is_closed(${item}):`))
+  out = out.push(line(indent + 2, "break"))
+  if (gate != "") {
+    out = out.push(line(indent + 1, `if not ${gate}.admit(${item}, ${py_repr(`${comp_name}: on ${ename}`)}):`))
+    out = out.push(line(indent + 2, "continue"))
+  }
+  let e = emit_body_steps(value_list(value_field(step, "body")), indent + 1, comp_name, c, services, externs)
+  out = out.concat(e.lines)
+  return { lines: out.push(""), counter: e.counter }
 }
 
 fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
@@ -2852,6 +2928,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     out = out.push("")
     return { lines: out, counter: c }
   }
+  if (kind == "stream-iter") { return stream_iter(step, indent, comp_name, counter, services, externs) }
   if (kind == "timer") {
     let e = timer_emit(step, indent, counter)
     var out = e.lines
@@ -4086,7 +4163,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
   if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }
-  if (ir_uses_host_root(ir, "Stream")) { imports = imports.push("Stream") }
+  // item 130: a `subscribe` and an `every ... in` / `on ... as` loop both run
+  // through the runtime `Stream`.
+  if (ir_uses_host_root(ir, "Stream") || uses_kind(value_field(ir, "components"), "subscribe")
+      || uses_kind(value_field(ir, "components"), "stream-iter")) { imports = imports.push("Stream") }
   if (need_mark_secret) { imports = imports.push("mark_secret as _revl_mark_secret") }
   // §7.1: the lifecycle driver loads components through the realm-aware `plug`,
   // reads the host-builtin trace, may auto-retry an idempotent emission (item

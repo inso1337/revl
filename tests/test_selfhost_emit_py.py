@@ -266,6 +266,17 @@ CORPUS = [
     # emit_py_spawn_shapes.rvl: a two-key spawn (a realm tuple of more than one
     # entry) and an async operation emitted off a spawn handle, awaited.
     "../emit_py_spawn_shapes.rvl",
+    # item 391: the item-130 stream surface, refused by name before at both of
+    # its boundaries (the `subscribe` acquisition and the `every ... in` loop).
+    # streams.rvl holds the policy, `buffer`/`drain`, `merge` fan-in, the
+    # derived-stage chain and a typed-event handler; stream_130.rvl and
+    # stream_event_130.rvl are the go tier's scenarios, stream.rvl the rust
+    # one, comp_stream.rvl a subscription on a required stream.
+    "streams.rvl",
+    "../../../backends/go/testdata/stream_130.rvl",
+    "../../../backends/go/testdata/stream_event_130.rvl",
+    "../../../backends/rust/scenarios/stream.rvl",
+    "../emit_rust_corpus/comp_stream.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -690,21 +701,6 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     # unvalidated model response.
     ("tests/fixtures/emit_ts_refusals/validated_emission_operation.rvl",
      "_revl_validate(", "<<UNSUPPORTED-COMPONENT:validated Model.complete>>"),
-    # item 130 (issue #81): a stream document reaches this port at TWO
-    # boundaries, and the row below covered only the first. The `subscribe`
-    # acquisition is one; the `every … in` loop the reference lowers as a
-    # `while True` around `Stream.is_closed(…)` is the other, and it answers
-    # with a body-step marker of its own. Both are pinned because a ledger
-    # entry is satisfied by a port that emits the acquisition's marker and
-    # then drops the loop with nothing in its place — the section-level
-    # silence issue #1123 found, and the worst answer item 130 admits for a
-    # stream. The acquisition row reads the reference's subscribe CALL: the
-    # `Pool, Stream` import it used to read is emitted by the port too now that
-    # a component-body `Stream.source()` is ported (`services_host_stream.rvl`).
-    ("backends/go/testdata/stream_130.rvl", "Stream.subscribe(",
-     "<<UNSUPPORTED-CEXPR:subscribe>>"),
-    ("backends/go/testdata/stream_130.rvl", "Stream.is_closed(",
-     "<<UNSUPPORTED-BODYSTEP:stream-iter>>"),
 ])
 def test_named_runtime_and_harness_boundaries(emitted, reference, path, reference_text, port_marker):
     """Pin specific deferred paths, not a blanket allowance for different bytes."""
@@ -853,6 +849,44 @@ def test_a_declared_stream_replay_is_named_not_dropped(emitted, reference, tmp_p
     assert "src = Stream.source()" not in got
     assert got.count("<<UNSUPPORTED-CEXPR:host>>") == 2
     reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:host>>")
+    assert reason is None, reason
+
+
+# The consumer half of item 130 §4.5: a `subscribe` that ASKS for a backlog.
+# The reference appends a `replay=` keyword to the subscribe call; the port
+# answers a named marker rather than the bare call, which would subscribe live
+# and drop the requested backlog silently. A plain subscription of a source
+# that declares a backlog is still emitted: the refusal is the request, not the
+# source. Inline for the reason the source declaration above is: the self-host
+# gate refuses the `replay(...)` clause.
+SUBSCRIBE_REPLAY_SRC = """component Backlog {
+  let src = effect Stream.source() replay(8) undo src.close()
+  let sub = subscribe src replay(2) undo sub.close()
+}
+component Durable {
+  let src = effect Stream.source() replay(from: "orders") undo src.close()
+  let sub = subscribe src replay(from: "orders") undo sub.close()
+}
+component Live {
+  let live = effect Stream.source() replay(8) undo live.close()
+  let sub = subscribe live undo sub.close()
+}
+"""
+
+
+def test_a_subscribe_replay_request_is_named_not_dropped(emitted, reference, tmp_path):
+    path = tmp_path / "subscribe_replay.rvl"
+    path.write_text(SUBSCRIBE_REPLAY_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    for asked in ("replay={'count': 2}", "replay={'cursor': 'orders'}"):
+        assert f"Stream.subscribe(src, 'error', _revl_ctx, {asked})" in want
+        assert asked not in got
+    assert "Stream.subscribe(src, 'error', _revl_ctx)" not in got
+    assert got.count("<<UNSUPPORTED-CEXPR:subscribe>>") == 2
+    plain = "sub = Stream.subscribe(live, 'error', _revl_ctx)"
+    assert plain in want and plain in got
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:subscribe>>")
     assert reason is None, reason
 
 

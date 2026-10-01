@@ -147,12 +147,7 @@
     "kind=hole",
     "kind=lease-acquire",
     "kind=lease-revoke",
-    "kind=stream-merge",
-    "kind=subscribe",
-    "stage=take",
     "step=approval",
-    "step=stream-iter",
-    "subscribe=<true>",
     "validated=<true>"
   ],
   "emit_rust": [
@@ -273,8 +268,6 @@
     "SPAWN"
   ],
   "lower_ir": [
-    "kind=hole",
-    "kind=stream-merge",
-    "method=next"
+    "kind=hole"
   ]
 }

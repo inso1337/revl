@@ -532,6 +532,18 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # the `extern_emit` and `asyncio` imports.
         "../../../examples/async_timer.rvl",
         "../emit_py_async_shapes.rvl",
+        # item 391: the stream slice. All five are emitter-exact from the
+        # reference IR. The native IR producer drops the body's stream steps
+        # (the `Stream.source()` acquisition, as in services_host_stream.rvl,
+        # the `Pool.open` one beside it, and the `subscribe` that reads the
+        # source), so the native chain emits a sync body with no `Stream`
+        # import. stream_event_130.rvl also comes out as `ir_version 1` where
+        # the reference IR of a typed-event handler carries 3.
+        "streams.rvl",
+        "../../../backends/go/testdata/stream_130.rvl",
+        "../../../backends/go/testdata/stream_event_130.rvl",
+        "../../../backends/rust/scenarios/stream.rvl",
+        "../emit_rust_corpus/comp_stream.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at
