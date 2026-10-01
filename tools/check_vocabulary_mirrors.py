@@ -689,13 +689,19 @@ def check(sites: list[Site], entries: list[dict] | None,
 
 def check_claims(claims: list[Claim], observed: list[dict],
                  entries: list[dict] | None,
-                 ledger_error: str | None) -> list[str]:
+                 ledger_error: str | None,
+                 sites: list[Site] | None = None) -> list[str]:
     """Every reason this tree fails the CLAIM rule. An empty list is green.
 
     Three ways to fail, the same three shapes the class rule has: an UNRECORDED
     near miss, a RECORDED one whose difference moved, and a RECORDED one that
     is no longer observed (which is the shrink-only clause -- resolving a near
-    miss DELETES its entry)."""
+    miss DELETES its entry).
+
+    `sites` lets a NO LONGER OBSERVED finding say WHICH way the near miss went
+    (issue #1580): into exact agreement, or further apart than the slack. The
+    second is not a resolution, and the fix is not the same. Without `sites`
+    the finding names both possibilities."""
     problems: list[str] = []
 
     if entries is None:
@@ -722,16 +728,9 @@ def check_claims(claims: list[Claim], observed: list[dict],
                 "    A difference that is allowed to stand needs the sentence "
                 "saying why. Write it.")
         if key not in by_key:
-            why = ("the claim no longer names that module, or the site is gone"
-                   if site not in claiming
-                   else "the two vocabularies now agree exactly")
             problems.append(
                 f"NAMED NEAR MISS NO LONGER OBSERVED: {site} -> {mirrors}\n"
-                f"    {why}.\n"
-                "    If the near miss was resolved -- by importing, by "
-                "extending rather than restating, or by putting the "
-                "vocabularies back in step -- DELETE this entry. The ledger is "
-                "shrink-only and a stale entry is a lie about the tree.")
+                + _why_no_longer_observed(site, mirrors, claims, sites))
             continue
         got = by_key[key]
         if (sorted(got["only_here"]) != sorted(entry["only_here"])
@@ -763,6 +762,65 @@ def check_claims(claims: list[Claim], observed: list[dict],
             f"    {LEDGER.relative_to(REPO_ROOT).as_posix()} with "
             "`python3 tools/check_vocabulary_mirrors.py --write`.")
     return problems
+
+
+_RESOLVED_ADVICE = (
+    "    If the near miss was resolved -- by importing, by extending rather "
+    "than restating, or by putting the vocabularies back in step -- DELETE "
+    "this entry. The ledger is shrink-only and a stale entry is a lie about "
+    "the tree.")
+
+_DRIFT_ADVICE = (
+    "    This is NOT a resolution: the near miss grew into a divergence the "
+    "ledger has no reason for, which is worse than the one on file.\n"
+    "    Reconcile the vocabularies (import one, or extend it in one declared "
+    "place), or, if the difference is deliberate, record it as a divergence: "
+    "say in the claiming prose what differs and why (or drop the claim), then "
+    "DELETE this entry. Deleting it with nothing else changed leaves the old "
+    "reason's claim standing over a bigger difference.")
+
+
+def _difference(here: frozenset, there: frozenset) -> str:
+    """The symmetric difference, one side per line."""
+    return (f"    only here:  {sorted(here - there) or '-'}\n"
+            f"    only there: {sorted(there - here) or '-'}\n")
+
+
+def _why_no_longer_observed(site: str, mirrors: str, claims: list[Claim],
+                            sites: list[Site] | None) -> str:
+    """The body of a NAMED NEAR MISS NO LONGER OBSERVED finding: which way the
+    near miss went, the difference now, and the fix for that case (issue
+    #1580). Equal and further-apart both stop a near miss being observed, and
+    only the first is the mirror resolving."""
+    claim = next((c for c in claims if c.site == site), None)
+    if claim is None:
+        return ("    the claim no longer names that module, or the site is "
+                "gone.\n" + _RESOLVED_ADVICE)
+    if sites is None:
+        return ("    the vocabularies either now agree exactly or drifted "
+                f"further apart than the {CLAIM_SLACK}-token slack.\n"
+                "    Run `python3 tools/check_vocabulary_mirrors.py --check` "
+                "to see which.\n" + _RESOLVED_ADVICE)
+    target = next((t for t in sites if t.sid == mirrors), None)
+    if target is None:
+        return (f"    the mirrored site {mirrors} is gone from the tree.\n"
+                + _RESOLVED_ADVICE)
+    apart = len(claim.tokens ^ target.tokens)
+    diff = _difference(claim.tokens, target.tokens)
+    if apart == 0:
+        return ("    the two vocabularies now agree exactly.\n"
+                + _RESOLVED_ADVICE)
+    if apart > CLAIM_SLACK:
+        return (f"    the two vocabularies drifted FURTHER APART: they now "
+                f"differ by {apart} tokens, past the {CLAIM_SLACK}-token "
+                "slack, so the claim no longer anchors.\n"
+                + diff + _DRIFT_ADVICE)
+    return ("    another site in the cited modules now spells this vocabulary "
+            f"exactly or more closely than {mirrors}, which still differs by "
+            f"{apart}:\n"
+            + diff
+            + "    Re-record the near miss with `--write` and rewrite the "
+            "reason against the site it now names, or close the difference.")
 
 
 # --------------------------------------------------------------- the report
@@ -865,6 +923,12 @@ ANSWER = {"component": 1, "evidence": 2, "reason": 3, "verdict": 4}
 _CLAIM_OFF_BY_ONE = '''
 # The same field names as `src/revl/d.py`, kept in step by hand.
 ANSWER = {"component": 1, "evidence": 2, "reason": 3, "verdict": 4, "code": 5}
+'''
+
+_CLAIM_FURTHER_APART = '''
+# The same field names as `src/revl/d.py`, kept in step by hand.
+ANSWER = {"component": 1, "evidence": 2, "reason": 3, "verdict": 4, "code": 5,
+          "blocker": 6}
 '''
 
 _CLAIM_NO_CITATION = '''
@@ -998,6 +1062,14 @@ def self_test() -> int:
                         "(shrink-only)",
                         claim_sites, held, off_ledger, None, False, True))
 
+    # The near miss stopped being observed because the vocabularies drifted
+    # FURTHER apart, past the slack (issue #1580). Not a resolution.
+    apart = {"d.py": _CLAIM_DEF, "e.py": _CLAIM_FURTHER_APART}
+    apart_sites = _sites_from(apart)
+    claim_cases.append(("a recorded near miss that DRIFTED FURTHER APART reds",
+                        apart_sites, _claims_from(apart, apart_sites),
+                        off_ledger, None, False, False))
+
     # The difference moved inside the slack. The reason on file was written
     # about the old difference, so it is no longer a reason.
     moved = {"d.py": _CLAIM_DEF,
@@ -1042,7 +1114,8 @@ def self_test() -> int:
                 print("        " + line.replace("\n", "\n        "))
 
     for name, sites, claims, entries, err, want_green, want_class in claim_cases:
-        problems = check_claims(claims, near_misses(sites, claims), entries, err)
+        problems = check_claims(claims, near_misses(sites, claims), entries,
+                                err, sites)
         seen_by_equality = bool(classes(sites))
         green = not problems
         ok = green == want_green and seen_by_equality == want_class
@@ -1110,7 +1183,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.check:
         problems = check(sites, entries, err)
         problems += check_claims(claims, near_misses(sites, claims),
-                                 claim_entries, claim_err)
+                                 claim_entries, claim_err, sites)
         if problems:
             print(f"{len(problems)} problem(s) -- issue #1285, closed "
                   "vocabularies declared in more than one place, and issue "
