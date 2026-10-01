@@ -237,6 +237,10 @@ CORPUS = [
     # `@ts ref` externs (item 396 option B): the three `node:` imports, the ref
     # runtime, and one lazy sync thunk per extern against the stdlib root.
     "../../../stdlib/fs.rvl",
+    # A provided method named after a JS/TS reserved word (issue #1512): the
+    # contract name verbatim at every site, quoted in the interface. Added
+    # FAILING FIRST: the port renamed `delete` and wrote it bare.
+    "../../../stdlib/server.rvl",
     # In-file tests: vitest `it(...)` cases, the test-mode `assert` through
     # `revlEq`/`revlShow`, and lifecycle drivers (load with config, call with
     # and without a binding, unload, assert no residue).

@@ -168,8 +168,11 @@ def test_the_condition_is_not_cancelled_rather_than_always():
     The workflow sets `cancel-in-progress: true`, so that is real runner time,
     on the resource that is this repository's throughput limit."""
     workflow = _workflow()
-    assert workflow["concurrency"]["cancel-in-progress"] is True, (
-        "this assertion exists because runs are cancelled in progress; if that "
+    cancel = workflow["concurrency"]["cancel-in-progress"]
+    # Pull-request runs are cancelled in progress (main pushes are not, so a
+    # landed commit always reports). Either form keeps cancelled PR runs real.
+    assert cancel is True or cancel == "${{ github.event_name == 'pull_request' }}", (
+        "this assertion exists because PR runs are cancelled in progress; if that "
         "changed, re-weigh `always()` against `!cancelled()` rather than "
         "deleting this"
     )

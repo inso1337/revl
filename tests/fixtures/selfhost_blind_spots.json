@@ -222,9 +222,6 @@
         "kind=lease-revoke",
         "step=approval"
       ],
-      "Component host-runtime boundary from the port banner: emit.py::_ComponentEmitter._expr lowers host roots via runtime imports; emit_py.rvl::cexpr returns a named marker for kind=host. backends/go/scenarios/advance.rvl reproduces host, pinned by test_named_runtime_and_harness_boundaries. Module builtins and interpolation are supported and not included; component-body kind=format (the `${\u2026}` template) is now ported and covered by emit_py_corpus/services_interp.rvl.": [
-        "kind=host"
-      ],
       "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
         "deferred=<true>"
       ],

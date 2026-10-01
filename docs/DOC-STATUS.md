@@ -148,7 +148,9 @@ was corrected by hand and had drifted back within a day.
 | interop-bridge.md | needs-work | 51 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
 | mcp-bridge.md | needs-work | 76 |  |
+| mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 6 |  |
+| model-providers.md | current | 0 | written with issue #1461 |
 | model-scheduling.md | needs-work | 0 |  |
 | namespacing.md | needs-work | 8 |  |
 | network-path.md | needs-work | 24 |  |
@@ -161,6 +163,9 @@ was corrected by hand and had drifted back within a day.
 | process.md | needs-work | 5 |  |
 | prompt-injection-resistance.md | needs-work | 37 |  |
 | prop-test.md | needs-work | 23 |  |
+| providers-anthropic.md | current | 0 | written with issue #1461 |
+| providers-gemini.md | current | 0 | written with issue #1461 |
+| providers-openai-compatible.md | current | 0 | written with issue #1461 |
 | quarantine-tier.md | needs-work | 25 |  |
 | queries.md | needs-work | 43 |  |
 | records.md | needs-work | 15 |  |

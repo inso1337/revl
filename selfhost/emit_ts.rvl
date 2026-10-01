@@ -1091,7 +1091,10 @@ fn render_call(node: Any, counter: Int, acx: ACx) -> Rendered {
     let tr = expr(target, counter, acx)
     var t = tr.text
     if (!is_component_atomic(target)) { t = `(${t})` }
-    let method = ident(value_str(value_field(node, "method")))
+    // issue #1512 (reference `_method_ident`): a service method keeps its
+    // contract name verbatim at every site; a JS/TS reserved word is a legal
+    // property name, so no rename.
+    let method = value_str(value_field(node, "method"))
     let ar = commajoin(value_list(value_field(node, "args")), tr.counter, acx)
     let rendered = `${t}.${method}(${ar.text})`
     // item 141 await-seed: an async service op reached through a req key returns
@@ -2503,7 +2506,7 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], kno
   var out = []
   var c = counter
   for (method of value_list(value_field(step, "methods"))) {
-    let name = ident(value_str(value_field(method, "name")))
+    let name = value_str(value_field(method, "name"))
     let spec = value_field(declared, value_str(value_field(method, "name")))
     let spec_params = value_list(value_field(spec, "params"))
     let param_names = value_list(value_field(method, "params"))
@@ -2809,7 +2812,7 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
         i += 1
       }
       let args_joined = temps.join(", ")
-      let run_ts = `${target_tmp}.${ident(method)}(${args_joined})`
+      let run_ts = `${target_tmp}.${method}(${args_joined})`
       let crossing = `{ key: ${json_dumps(crossing_key_name(target))}, method: ${json_dumps(method)}, args: [${args_joined}], site: ${json_dumps(site)} }`
       out = out.push(`${pad}${register}(${crossing}, ${json_dumps(method)}, [${args_joined}], () => ${run_ts})`)
       return { lines: out, counter: c }
@@ -3063,7 +3066,9 @@ fn service_interfaces(services: Any, known_types: List[Str]) -> List[Str] {
       if (value_bool(value_field(method, "idempotent"))) {
         out = out.push("  /** idempotent — safe to re-deliver; the runtime may auto-retry a transient failure (item 44) */")
       }
-      out = out.push(`  ${mname}(${sig_parts.join(", ")}): ${returns}`)
+      // quoted for a reserved word: in an interface, a bare `new(..)` is a
+      // construct signature, not a method named `new` (issue #1512)
+      out = out.push(`  ${prop_key(mname)}(${sig_parts.join(", ")}): ${returns}`)
     }
     out = out.push("}")
     out = out.push("")
@@ -3341,7 +3346,7 @@ fn revl_router_src() -> Str {
   o = o.push('// `requires <k> in realms("w1"…"wN") strategy(...)` provides <k> once')
   o = o.push("// downstream (G2) while fanning each call out across the worker realms. The")
   o = o.push("// proxy holds no worker handle — it re-resolves the live per-realm handle on")
-  o = o.push("// every call (`ctx.root.isolate(k, realmLabel(w)).reflect.get(k)`, nullish for")
+  o = o.push("// every call (`ctx.root.isolate(k, realmLabel(w, k)).reflect.get(k)`, nullish for")
   o = o.push("// a non-ACTIVE provider), so a withdrawn worker drops out and its calls go to")
   o = o.push("// the survivors (reactive failover).")
   o = o.push("function revlRouter(")
@@ -3356,7 +3361,7 @@ fn revl_router_src() -> Str {
   o = o.push("  const served: Record<string, number> = {}")
   o = o.push("  for (const r of realms) served[r] = 0")
   o = o.push("  const handle = (realm: string): any =>")
-  o = o.push("    (root as any).isolate(key, realmLabel(realm)).reflect.get(key)")
+  o = o.push("    (root as any).isolate(key, realmLabel(realm, key)).reflect.get(key)")
   o = o.push("  const live = (): Array<[string, any]> =>")
   o = o.push("    realms.map((r) => [r, handle(r)] as [string, any]).filter(([, h]) => h != null)")
   o = o.push("  const select = (): any => {")
@@ -3881,7 +3886,7 @@ fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: AC
     }
     var await_kw = ""
     if (value_bool(value_field(method, "async"))) { await_kw = "await " }
-    let call = `root.${ident(key)}.${ident(mname)}(${args.join(", ")})`
+    let call = `root.${ident(key)}.${mname}(${args.join(", ")})`
     let bind = value_field(step, "bind")
     var line = `  ${await_kw}${call}`
     if (!value_is_null(bind)) { line = `  const ${ident(value_str(bind))} = ${await_kw}${call}` }

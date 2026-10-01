@@ -1739,17 +1739,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     57 |                   57 (100%) |             52 (91.2%) |
-| ts   |     74 |                   74 (100%) |             59 (79.7%) |
+| py   |     59 |                   59 (100%) |             53 (89.8%) |
+| ts   |     75 |                   75 (100%) |             60 (80.0%) |
 | go   |     23 |                   23 (100%) |            23 (100.0%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **274** | **274 (100%)** | **252 (92.0%)** |
+| **total** | **277** | **277 (100%)** | **254 (91.7%)** |
 
-Every one of the 274 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 252 of
-them survive the **fully-native** chain, so all 22 residual documents
+Every one of the 277 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 254 of
+them survive the **fully-native** chain, so all 23 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,15 +1779,16 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 5 residual of 57:
+`py`, 6 residual of 59:
 
 - `services_control_flow.rvl`
+- `services_host_stream.rvl`
 - `branches.rvl`
 - `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `../../../src/revl/truc/components/cli.rvl`
 
-`ts`, 15 residual of 74:
+`ts`, 15 residual of 75:
 
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
 - `../../../examples/java_match.rvl`
