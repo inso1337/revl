@@ -2,9 +2,10 @@
 
 Roadmap: item 515 (issue #1189), from the 2026-09-19 external review. Slice 1
 is LANDED with this note. Slice S4, the scheduler against a host's DECLARED
-devices, is LANDED and described in section 10. Slice S2, the provision keyed
-by role, is LANDED and described in section 11. Slices 3 and 5 are designed
-here and not written.
+devices, is LANDED and described in section 10. Slice S5, each role's binding
+recorded on the placement side, is LANDED in section 10.6. Slice S2, the
+provision keyed by role, is LANDED and described in section 11. Slice 3 is
+designed here and not written.
 
 Number 539 was taken because 531 to 538 are claimed: 531 merged (PR #1220,
 extended by #1243), 532 by PR #1228 and #1242, 533 by #1232, 534 by #1231,
@@ -509,10 +510,13 @@ section 10.4. The refusals of S1 are what make it safe: the set is closed, the
 residence is uniform, and every candidate is comparable, so the scheduler
 chooses within a placement rather than about one.
 
-**S5. The role in the manifest.** 531's own S5, which this item needs: a role
-declared in the composition manifest and bound to a member by configuration,
-which is what item 538 means by "a role is declared once and bound to a member
-by configuration". S2's provision key is the natural place that binding lands.
+**S5. The role in the manifest. LANDED on the placement side (section 10.6).**
+531's own S5, which this item needs: a role bound to a member by
+configuration, which is what item 538 means by "a role is declared once and
+bound to a member by configuration". It lands in the placement-side record,
+not in the compiler IR's composition manifest, for the reason 10.6 gives. S2's
+provision (section 11) loads on the same decision, read through
+`revl.model_placement` in the child rather than from this record.
 
 ---
 
@@ -661,8 +665,78 @@ differs between runs, which is concurrency and not this change.
 What 10.5 does not close: host code that never asks is not refused, and an
 edit that rewrites the devices and the decision in a spec together is a
 self-consistent declaration the child cannot tell from the conductor's. The
-first is S2's to close by making the provider adapters ask on every load; the
-second is the trust the runner already places in its spec's `files`.
+first is closed by S2 for a managed role: its provision asks on every load
+and every call (section 11).
+
+**The second is a stated limit, accepted.** The spec is not signed. Its
+`modelSchedule` entry gets exactly the trust the runner already gives
+`spec["files"]`: both are written by the conductor into the `0700` placement
+directory, and a party able to rewrite them consistently can already hand the
+child different source. Signing one key while the file list beside it stays
+unsigned would buy nothing.
+
+**The per-child re-parse was measured, and left in.** Every child, including
+the child of a composition with no `route model` block, re-reads the
+composition to decide whether it needed a schedule. On a one-process plain
+composition, `verify_handoff` costs a median of 2.80 ms against 6.05 ms for
+the `compile_files` the child already runs (median of 10 each), and the whole
+`revl run --placement --once` boot is a median of 1.393 s with it against
+1.392 s without (10 interleaved A/B runs each, on a machine with a load
+average near 25, so the end-to-end number is noise-bound; the in-process
+number puts the cost near 0.2% of a boot). That is under the 5% threshold set
+for skipping it, so the child keeps re-deriving rather than trusting the
+parent's word that nothing was routed, which would be the unsigned-spec trust
+applied to a second question.
+
+### 10.6 S5: each role's binding, recorded on the placement side
+
+A role is bound to a member by configuration, so the binding belongs with the
+configuration. It is recorded where the placement is: in the record the
+conductor prints at boot and `revl audit --placement` prints on request, both
+computed by the same scheduler. `model_schedule.binding_manifest` builds it:
+
+    {"version": "revl-model-bindings-v1",
+     "hosts": [{"host": "edge",
+                "devices": [...the host's declared devices...],
+                "bindings": [{"role": "fast", "residence": "on_device",
+                              "demand": {"device": "gpu", "memory_mib": 6144,
+                                         "quant": "q4_k_m"},
+                              "device": "gpu0", "device_class": "gpu",
+                              "consumers": ["First.classify confidential",
+                                            "Second.classify confidential"]}]}],
+     "digest": "<64 hex>"}
+
+One row per role per host, however many actions share it, which is the
+issue's "two consumers that inject `small` share one provision" written down
+where an operator reads it. The digest is sha256 over the version line, a LF,
+and the canonical JSON of `hosts` (sorted keys, no whitespace, ASCII), so a
+change to one role's device, quantisation or memory, to which actions share
+it, or to a host's declared devices changes it. A composition with no routed
+model action has no record at all, and both outputs print nothing new.
+
+**Why not the compiler IR's composition manifest.** "Model roles write no IR"
+is a pinned property (`tests/test_1311_model_routes_not_in_ir.py`,
+`test_a_profiled_placement_writes_no_ir`), and it is deliberate: the compiler
+decides what a program may do, and deployment decides where it runs. Putting
+the binding in the IR would make a placement decision part of the admitted
+artifact and move every emitter's golden with it. `src/revl/lower.py` is
+untouched.
+
+**Not the same digest as item 517's `placement_digest`.** That one is the
+PROVIDER's digest over what it actually loaded (section 5). This one is over
+what the placement DECLARED and the scheduler DECIDED. A verifier holding both
+can compare them; revl computes only this one.
+
+**Where an operator reads it.** `revl audit FILES --placement MAP` prints the
+rows and the digest (human output; the `--json` audit body is unchanged,
+because it must stay byte-identical to `audit_report`). `revl run --placement`
+prints the same lines before anything spawns. `revl deploy` does not print it
+yet: `src/revl/deploy.py` was owned by another change when this landed.
+
+What 10.6 does not do: the record is printed, not persisted or signed, and a
+composition DOCUMENT argument to `revl audit` gets a one-line note instead of
+the rows, because the view reads modules and a composition's rows are
+resolved rather than parsed.
 
 ## 11. S2: the provision, keyed by role
 

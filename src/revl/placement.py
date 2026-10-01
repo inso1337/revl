@@ -2230,6 +2230,9 @@ def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
     for host in schedules:
         for line in host.lines():
             print(f"  {line}", flush=True)
+    for line in model_schedule.binding_lines(
+            model_schedule.binding_manifest(schedules)):
+        print(f"  {line}", flush=True)
     return None, {host.host: model_schedule.handoff(host) for host in schedules}
 
 
@@ -2288,6 +2291,43 @@ def _model_host_plan(ir, files, providers_path: str, processes: dict,
                         f"loaded only where the schedule placed it; add "
                         f"`devices.{device}` to the binding"), {}
     return None, served
+
+
+def model_binding_view(files, placement: dict) -> tuple[list[str], str | None]:
+    """`revl audit --placement`: each model role's binding per host and the
+    bindings digest (item 515 S5), computed by the same scheduler the
+    conductor runs. `(lines, None)`, or `([], diagnostic)` when the placement
+    cannot be scheduled. Empty lines for a composition with no routed model
+    action, so its audit output is unchanged."""
+    from . import model_schedule  # noqa: PLC0415
+    try:
+        names = _component_names(files)
+    except RevlError as exc:
+        # A composition DOCUMENT argument (item 439) is not a module and is
+        # not read here; say so rather than failing an audit that worked.
+        return [f"model bindings (item 515): not computed, the arguments do "
+                f"not parse as modules ({exc})"], None
+    expanded, err = expand_tiers(placement, names)
+    if err:
+        return [], err
+    try:
+        schedules = model_schedule.placement_schedules(
+            files, expanded.get("processes") or {})
+    except model_schedule.ScheduleRefusal as exc:
+        return [], str(exc)
+    manifest = model_schedule.binding_manifest(schedules)
+    if manifest is None:
+        return [], None
+    return (["model bindings (item 515): each role's device per host, as "
+             "declared and scheduled; not evidence of what a provider loaded"]
+            + ["  " + line for line in model_schedule.binding_lines(manifest)],
+            None)
+
+
+def _component_names(files) -> list[str]:
+    from . import model_schedule  # noqa: PLC0415
+    program = model_schedule.composition_program(files)
+    return [c.name for c in program.components]
 
 
 def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
