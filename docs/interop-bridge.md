@@ -303,8 +303,11 @@ declared list (`backends/python/bridge.py`, `backends/typescript/bridge.ts`);
 go checks both lists before the generated `RevlInvoke` runs
 (`backends/go/placement_runner/main.go`; before issue #1599 it answered any key
 the document provides, exported or not); java resolves the method on the emitted service *interface* by reflection, so
-an undeclared name has nowhere to land; rust dispatches through an emitted
-`match` over the declared methods, so an unknown name is not expressible.
+an undeclared name has nowhere to land; rust checks both lists before the
+emitted `match` over the declared methods runs
+(`backends/rust/placement_runner/src/main.rs`; before issue #1599 it answered
+any key the document provides, and answered an unknown key or method with
+`"ok": true` and a `null` value).
 (The legacy `serve(ctx, ["db"], sock)` form, used by the hand-written demos,
 has no declared list and derives the allowlist from the provided object's own
 public methods — weaker, because it trusts the object rather than the
