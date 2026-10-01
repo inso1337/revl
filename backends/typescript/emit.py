@@ -3735,7 +3735,7 @@ _TS_ROUTER_SRC = """// item 167: the emitted realization of a routed require (it
 // `requires <k> in realms("w1"…"wN") strategy(...)` provides <k> once
 // downstream (G2) while fanning each call out across the worker realms. The
 // proxy holds no worker handle — it re-resolves the live per-realm handle on
-// every call (`ctx.root.isolate(k, realmLabel(w)).reflect.get(k)`, nullish for
+// every call (`ctx.root.isolate(k, realmLabel(w, k)).reflect.get(k)`, nullish for
 // a non-ACTIVE provider), so a withdrawn worker drops out and its calls go to
 // the survivors (reactive failover).
 function revlRouter(
@@ -3750,7 +3750,7 @@ function revlRouter(
   const served: Record<string, number> = {}
   for (const r of realms) served[r] = 0
   const handle = (realm: string): any =>
-    (root as any).isolate(key, realmLabel(realm)).reflect.get(key)
+    (root as any).isolate(key, realmLabel(realm, key)).reflect.get(key)
   const live = (): Array<[string, any]> =>
     realms.map((r) => [r, handle(r)] as [string, any]).filter(([, h]) => h != null)
   const select = (): any => {

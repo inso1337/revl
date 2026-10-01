@@ -485,6 +485,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # carries `method_control`, so this is a `selfhost/lower.rvl` gap: the
         # native IR producer does not lower a method-body control-flow step.
         "services_control_flow.rvl",
+        # item 391: a component-body `Stream.source()` acquisition (a `host`
+        # node). The EMITTER half is byte-exact on the reference IR; the native
+        # IR producer drops the whole `let src = effect Stream.source() undo
+        # src.close()` step, so the component emits an empty body and the
+        # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
+        # in services_host.rvl go through the native chain byte-exact.
+        "services_host_stream.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at
