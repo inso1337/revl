@@ -372,18 +372,16 @@ def test_the_unmasked_documents_are_refused_and_undecided(verdicts, rel):
 #
 # Held per document, by the file-name prefix:
 #   * `g4_`: both refuse with the same text. The marker and the upper bound are
-#     in this slice.
+#     in this slice. That includes the 24 `g4_host_marker_` and `g4_approval_`
+#     documents of issue #1437, which were held undecided by name until this
+#     checker held the host-extern carrier to the marker in every setup
+#     position and met the approval floor on the `emit` value form (issue
+#     #1613). All 24 now agree with the reference's text.
 #   * `ok_`: both admit, so a fix that works by refusing more shows up.
 #   * `g1_`: the reference refuses G1 and the checker raises no objection. An
 #     undeclared requirement is outside this slice (`req_call` passes a root
 #     that is not a requirement through unjudged), with or without a block.
-#   * `g4_host_marker_` and `g4_approval_` (issue #1437): the reference and the
-#     gate refuse, and the checker raises no objection. This checker holds the
-#     `req` carrier to the marker but not the host extern carrier, and it
-#     carries no approval floor. Held undecided by name, so the day it grows
-#     either rule this reds and the documents move to the `g4_` rule above.
 BLOCK_NESTING = ROOT / "tests" / "fixtures" / "gate_block_nesting"
-CHECKER_UNDECIDED_PREFIXES = ("g4_host_marker_", "g4_approval_")
 G1_MESSAGE = "`db` is not a declared requirement of C"
 
 
@@ -398,9 +396,7 @@ def test_every_block_nesting_document_is_held_by_name(verdicts):
             continue
         want, got = verdicts[rel]
         prefix = doc.stem.split("_", 1)[0]
-        if doc.stem.startswith(CHECKER_UNDECIDED_PREFIXES):
-            ok = want != "" and got == ""
-        elif prefix == "ok":
+        if prefix == "ok":
             ok = want == "" and got == ""
         elif prefix == "g4":
             ok = want != "" and got == want

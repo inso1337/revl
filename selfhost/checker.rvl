@@ -1354,8 +1354,12 @@ type Stmt    = { kind: Str, bind: Str, e: Expr }
 // the union of what it calls and never its own name.
 // `appr` is the declaration-owned `requires approval` floor (item 246): a
 // crossing of this extern needs a covering `with` edge.
+// `wit` marks a `witnessed` extern: in the emission reach for G4's evidence,
+// but reversible and legal only in effect position, so no `emit` marker is
+// demanded of it (docs/design/243-witnessed-externs.md).
 type FnD     = { name: Str, params: List[ParamN], extEm: Bool,
-                 extCaps: List[Str], body: List[Stmt], appr: Bool }
+                 extCaps: List[Str], body: List[Stmt], appr: Bool,
+                 wit: Bool }
 // `isAsync` / `ret` are what the PROVIDER spelled, not what the service
 // declared: A6 judges the two against each other, so both sides have to be
 // carried separately. `ret` is "" when the method restated no return type.
@@ -1767,7 +1771,7 @@ fn mk_meths(xs: List[MethSig], i: Int, ok: Bool) -> MethsR {
 
 fn mk_fn_d(nm: Str, ps: List[ParamN], em: Bool, cs: List[Str]) -> FnD {
   return { name: nm, params: ps, extEm: em, extCaps: cs, body: [],
-           appr: false }
+           appr: false, wit: false }
 }
 
 fn mk_meth(nm: Str, ps: List[ParamN], rt: Str, em: Bool,
@@ -1938,7 +1942,7 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   let d = mk_fn_d(nm, ps.ps, em || wit, seed)
   return mk_step(push_fn(pg, { name: d.name, params: d.params, extEm: d.extEm,
                                extCaps: d.extCaps, body: d.body,
-                               appr: appr }), k)
+                               appr: appr, wit: wit }), k)
 }
 
 // The capability tokens inside a `[...]` scope bracket, spelled as the
@@ -2020,7 +2024,8 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   let body = p_stmts(ts, bi + 1, bend - 1, [])
   return { pg: push_fn(pg, { name: nm, params: ps.ps, extEm: false,
-                             extCaps: [], body: body, appr: false }),
+                             extCaps: [], body: body, appr: false,
+                             wit: false }),
            i: bend }
 }
 
@@ -3099,6 +3104,12 @@ fn check_stmts_in(ss: List[Stmt], i: Int, marks: List[Int], ck: Ck) -> Ck {
     // calls in the value count even though the statement also binds
     next = walk_expr(s.e, stmt_mode(s), ck)
     if (next.msg != "") { return next }
+    // `let r = emit …` is the value form: no `with` clause, so the floor is
+    // met with no edge (issue #1437)
+    if (s.kind == "emit") {
+      next = floor_tokens(approval_crossed(s.e, next), 0, "", next)
+      if (next.msg != "") { return next }
+    }
     next = ck_ordered(ck.ev, next, s.kind == "emit")
     let inf = infer_t(s.e, next.env, next.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(next, inf.msg) }
@@ -3124,25 +3135,41 @@ fn check_stmts_in(ss: List[Stmt], i: Int, marks: List[Int], ck: Ck) -> Ck {
 //   * head:  the call an `emit` marks, and the receiver chain leading to it;
 //   * args:  anywhere inside the argument list of a marked head.
 //
+//   * teardown: an `undo` slot, which runs in teardown and keeps the
+//     documented bare-emission exception (the reference's `undo` mode).
+//
 // An emission in `args` is unmarked exactly as in `plain`, and two refusals of
 // the reference become reachable with its text: a call to an emitting name
 // (`_refuse_unmarked_emission_call`, the host-extern carrier) and an `emit`
 // nested in another's arguments (`_refuse_nested_emit`). Before this, the
 // marked flag reached the arguments too, so `emit log_line(charge(1))` read
 // as two marked crossings and was admitted.
+//
+// Issue #1437 (docs/design/1437-emit-marks-every-crossing.md) holds the
+// host-extern carrier to the marker in EVERY setup position, not only in an
+// emit head's arguments: `plain` and `args` both demand it, `teardown` does
+// not.
 fn mode_plain() -> Int { return 0 }
 fn mode_head() -> Int { return 1 }
 fn mode_args() -> Int { return 2 }
+fn mode_teardown() -> Int { return 3 }
 
 fn stmt_mode(s: Stmt) -> Int {
   if (s.kind == "emit") { return mode_head() }
+  if (s.kind == "undo") { return mode_teardown() }
   return mode_plain()
 }
 
+// Whether a crossing here must carry its own `emit` marker.
+fn demands_marker(mode: Int) -> Bool {
+  return mode == mode_plain() || mode == mode_args()
+}
+
 // The mode an argument list is walked in: a marked head's arguments, and
-// everything nested in them, are `args`; elsewhere the mode stays `plain`.
+// everything nested in them, are `args`; a teardown slot stays teardown, and
+// elsewhere the mode stays `plain`.
 fn arg_mode(mode: Int) -> Int {
-  if (mode == mode_plain()) { return mode_plain() }
+  if (mode == mode_plain() || mode == mode_teardown()) { return mode }
   return mode_args()
 }
 
@@ -3206,7 +3233,7 @@ fn approval_floor(s: Stmt, edge: EdgeR, ck: Ck) -> Ck {
         .concat("but the expression has type ").concat(shown))
     }
   }
-  return floor_tokens(crossed_caps(s.e, ck), 0, scope, ck)
+  return floor_tokens(approval_crossed(s.e, ck), 0, scope, ck)
 }
 
 fn floor_tokens(toks: List[Str], i: Int, scope: Str, ck: Ck) -> Ck {
@@ -3220,12 +3247,36 @@ fn floor_tokens(toks: List[Str], i: Int, scope: Str, ck: Ck) -> Ck {
   return floor_tokens(toks, i + 1, scope, ck)
 }
 
-// The required set is the NAMES of the externs that declared the floor, as
-// the reference's `_approval_index` builds it.
+// The required set is the capability TOKENS of the externs that declared the
+// floor: the declared scope when there is one, else the name (issue #1437,
+// `_approval_index`). That is the token `crossed_caps` returns for the same
+// crossing; keyed by name, a scoped extern's crossing never met the floor.
 fn approval_required(token: Str, ck: Ck) -> Bool {
-  return match ck.ctx.fns.lookup(token) {
-    Some(f) => f.appr,
-    None    => false,
+  let names = ck.ctx.fns.keys()
+  var i = 0
+  while (i < names.length()) {
+    let hit = match ck.ctx.fns.lookup(names[i]) {
+      Some(f) => f.appr && list_contains(f.extCaps, token),
+      None    => false,
+    }
+    if (hit) { return true }
+    i += 1
+  }
+  return false
+}
+
+// `_approval_crossed_caps`: the head's tokens, or, for a marked call to a fn
+// that REACHES an emission extern, what that fn reaches (the emission fixed
+// point, sorted as the reference sorts it).
+fn approval_crossed(e: Expr, ck: Ck) -> List[Str] {
+  let head = crossed_caps(e, ck)
+  if (head.length() > 0) { return head }
+  return match e {
+    Call(c) => match c.target {
+      Var(n) => sort_strs(caps_of(ck.ctx.caps, n)),
+      _      => [],
+    },
+    _ => [],
   }
 }
 
@@ -3248,7 +3299,7 @@ fn crossed_caps(e: Expr, ck: Ck) -> List[Str] {
 
 fn extern_crossed(name: Str, ck: Ck) -> List[Str] {
   return match ck.ctx.fns.lookup(name) {
-    Some(f) => f.extEm ? f.extCaps : [],
+    Some(f) => f.extEm && !f.wit ? f.extCaps : [],
     None    => [],
   }
 }
@@ -3346,9 +3397,23 @@ fn walk_parts(xs: List[PartN], i: Int,
 
 // An `emit` expression: refused inside another `emit`'s arguments, otherwise
 // its operand is the marked head.
+//
+// The `emit` VALUE form (`return emit charge(1)`, an `emit` inside a larger
+// expression) has no `with` clause, so it meets the approval floor with no
+// edge (issue #1437, `_require_declared_approval(..., value_form=True)`),
+// after its call is judged.
+fn is_witnessed(name: Str, ck: Ck) -> Bool {
+  return match ck.ctx.fns.lookup(name) {
+    Some(f) => f.wit,
+    None    => false,
+  }
+}
+
 fn walk_emit(e: Expr, mode: Int, ck: Ck) -> Ck {
   if (mode == mode_args()) { return refuse_ck(ck, nested_emit_refusal()) }
-  return walk_expr(e, mode_head(), ck)
+  let wck = walk_expr(e, mode_head(), ck)
+  if (wck.msg != "") { return wck }
+  return floor_tokens(approval_crossed(e, wck), 0, "", wck)
 }
 
 fn call_check(tg: Expr, args: List[Expr], mode: Int, ck: Ck) -> Ck {
@@ -3388,7 +3453,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], mode: Int,
       .concat(" argument(s), ").concat(int_str(args.length()))
       .concat(" given"))
   }
-  if (decl.isEm && mode != mode_head()) {
+  if (decl.isEm && demands_marker(mode)) {
     return refuse_ck(ck, "call to emission `".concat(root).concat(".")
       .concat(meth).concat("` must be marked `emit` (G4)"))
   }
@@ -3447,12 +3512,14 @@ fn fn_call(name: Str, args: List[Expr], mode: Int, ck: Ck) -> Ck {
   return unmarked_emitting_call(name, mode, sck)
 }
 
-// The host-extern carrier of the marker rule (issue #1427), in the
-// reference's order: after the arguments and the declared signature. Only the
-// argument list of a marked head is judged here; an unmarked emitting call
-// anywhere else is the provider upper bound's to judge, as in the reference.
+// The host-extern carrier of the marker rule (issues #1427, #1437), in the
+// reference's order: after the arguments and the declared signature. A call
+// to an emitting name (an emission extern, or a fn that reaches one) is
+// refused unmarked in every setup position. A witnessed extern is exempt:
+// `effect` is its marker.
 fn unmarked_emitting_call(name: Str, mode: Int, ck: Ck) -> Ck {
-  if (mode != mode_args() || !ck.ctx.caps.has(name)) { return ck }
+  if (!demands_marker(mode) || !ck.ctx.caps.has(name)) { return ck }
+  if (is_witnessed(name, ck)) { return ck }
   return refuse_ck(ck, "call to emission `".concat(name)
     .concat("` must be marked `emit` (G4)"))
 }
