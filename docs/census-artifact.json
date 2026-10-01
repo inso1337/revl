@@ -5060,7 +5060,7 @@
   ],
   "pins": {
    "decides_verdicts": {
-    "backends/python/emit.py": "7825160009d8634104d594954f6d564d4d5de7dd60d7f4809d471fb2d4c1fe55",
+    "backends/python/emit.py": "c8da1ae2a4f472de5b59845c1123e4c5d2f8f93b158aa0d4a646e8e64d8c86c4",
     "tests/test_selfhost_lower.py": "02b8dd6276f1c6d740ab3998d34793b46af45784774872732d608ded455769f0",
     "tools/build_gate_crate.py": "88eb0b3d84a48290cb777319cce4afc7352705d8025df540746ad9dcaa9f5c63",
     "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
