@@ -75,9 +75,22 @@ who may not declare or reach an extern (G8), it is not fillable at all
 (`byThisAuthor: false`). Everything else is reported, never guessed: a `Str`
 that "must be a hash" is fillable by a literal as far as types can say, so
 the spec lists its producers and stays honest about what it cannot decide.
+
+`split` (additive, issue #1660) decomposes a hole whose obligation is more
+than one sentence. When a hole is a provide-method's WHOLE body and its
+`crossing.calls` span two or more capability tokens, the hole carries
+`split`: one `let <token>_step = hole[T] "..."` statement per token, each
+naming only that token's crossings, then a result hole. `revl scaffold`
+writes that decomposition directly. Inside such a body, a hole bound by
+`let <token>_step = ...` lists only `<token>`'s calls, so every part states
+its obligation in one sentence. A hole is never split by operation (two
+operations through one boundary are one sentence) and never in a pure
+position (it has nothing to cross).
 """
 
 from __future__ import annotations
+
+import re
 
 from ..diagnostics import GUARANTEES
 from ..holes import EMITTABLE_SECTIONS
@@ -408,6 +421,48 @@ def _fillable(expected: str | None, visible: list[dict],
                       f"the top level of the file (see `externs`)"}
 
 
+def step_name(token: str) -> str:
+    """The binding a split statement hole for capability `token` is written
+    under: `db_step`, `net_edge_step` for a dotted `net.edge`."""
+    if token == "*":
+        return "unbounded_step"
+    return re.sub(r"[^A-Za-z0-9_]", "_", token) + "_step"
+
+
+def _tokens_of(calls: list[dict]) -> list[str]:
+    return sorted({t for c in calls for t in c.get("capabilities") or ()})
+
+
+def _split(expected: str | None, method: str | None,
+           calls: list[dict]) -> list[dict] | None:
+    """The decomposition of a whole-body hole whose crossings span two or
+    more capability tokens, or None when there is nothing to split. One
+    statement hole per token, then the result."""
+    tokens = _tokens_of(calls)
+    if len(tokens) < 2:
+        return None
+    parts = []
+    for token in tokens:
+        own = [c for c in calls if token in (c.get("capabilities") or ())]
+        typ = (own[0].get("returns") if len(own) == 1 and own[0].get("returns")
+               else expected) or expected
+        forms = ", ".join(c["write"] for c in own)
+        parts.append({
+            "token": token,
+            "calls": own,
+            "write": (f'let {step_name(token)} = hole[{typ}] "the crossing '
+                      f'through {token}, if any ({forms}); a pure value '
+                      f'otherwise"'),
+        })
+    parts.append({
+        "token": None,
+        "calls": [],
+        "write": (f'return hole[{expected}] "the result of '
+                  f'{method or "the method"}, from the steps above"'),
+    })
+    return parts
+
+
 def _crossing(capability: dict, calls: list[dict]) -> dict:
     """The `crossing` block: may a fill here cross, must it (never), how a
     crossing is written, and which crossings exist at this position."""
@@ -512,8 +567,12 @@ def _walk_body(body, services, functions, bindings, capability,
     for stmt in body or []:
         step = stmt.get("step")
         if step == "let":
+            value_scope = dict(bindings)
+            token = (bindings.get("@step_tokens") or {}).get(stmt.get("name"))
+            if token is not None:
+                value_scope["@only_token"] = token
             _collect_exprs(stmt.get("value"), services, functions,
-                           dict(bindings), capability, collected)
+                           value_scope, capability, collected)
             bindings[stmt["name"]] = _expr_type(
                 stmt.get("value"), services, functions, bindings)
         elif step == "return":
@@ -543,6 +602,11 @@ def _collect_exprs(node, services, functions, bindings, capability,
             calls = _crossing_calls(
                 bindings.get("@requires") or {}, services, externs,
                 capability, bindings.get("@carry") or {}, untrusted)
+            only = bindings.get("@only_token")
+            if only is not None:
+                # a split statement hole: its own token's crossings only
+                calls = [c for c in calls
+                         if only in (c.get("capabilities") or ())]
             reachable = _callable_here(bindings.get("@reachable", []), calls)
             extern_block = _externs(externs, calls,
                                     bindings.get("@position") or "pure",
@@ -560,6 +624,11 @@ def _collect_exprs(node, services, functions, bindings, capability,
                     extern_block, functions, bindings.get("@types") or {},
                     untrusted),
             }))
+            if bindings.get("@whole_body"):
+                parts = _split(node.get("type"), bindings.get("@method"),
+                               calls)
+                if parts is not None:
+                    collected[-1][1]["split"] = parts
             return
         # `step` bodies nested in an expression are rare, but a statement dict
         # threaded here (see `_walk_body` else-branch) should still recurse.
@@ -626,6 +695,25 @@ def unfillable(obligations: list[dict]) -> list[dict]:
     return out
 
 
+def _mark_split_body(scope: dict, method: dict, capability: dict,
+                     services: dict, externs: list, untrusted: bool) -> None:
+    """Mark a provide-method's scope for the split rule (issue #1660): its
+    whole-body hole, if its body is one, and the `<token>_step` names whose
+    holes carry only that token's crossings. Both apply only when the
+    method's crossings span two or more capability tokens."""
+    calls = _crossing_calls(scope.get("@requires") or {}, services, externs,
+                            capability, scope.get("@carry") or {}, untrusted)
+    tokens = _tokens_of(calls)
+    if len(tokens) < 2:
+        return
+    scope["@method"] = method.get("name")
+    body = method.get("body") or []
+    if (len(body) == 1 and body[0].get("step") == "return"
+            and (body[0].get("expr") or {}).get("kind") == "hole"):
+        scope["@whole_body"] = True
+    scope["@step_tokens"] = {step_name(t): t for t in tokens}
+
+
 def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     """Every open hole in `ir`, as an obligation carrying its fill spec.
 
@@ -668,6 +756,8 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                     scope = _method_scope(
                         component, method, decl, services, functions, externs,
                         untrusted, types)
+                    _mark_split_body(scope, method, capability, services,
+                                     externs, untrusted)
                     _walk_body(method.get("body"), services, functions,
                                scope, capability, collected)
             elif stmt.get("step") == "let":
@@ -712,4 +802,4 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
 
 __all__ = ["enrich", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
            "CROSSING_FORM", "CROSSING_RULE", "EXTERN_PLACEMENT",
-           "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS", "unfillable"]
+           "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS", "unfillable", "step_name"]

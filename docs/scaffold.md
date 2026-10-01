@@ -141,6 +141,14 @@ of the toolchain already trusts; the generator is the only new code.
 agent reads the skeleton, fills one hole against its spec, re-checks, and
 repeats until `holeCount` reaches zero.
 
+An emission method bound to two or more capabilities is not one hole: the
+scaffold writes one `let <token>_step = hole[T] "the crossing through
+<token>, if any; a pure value otherwise"` per capability, then `return
+hole[T] "the result of <method>, from the steps above"`, so each obligation
+is one sentence (issue #1660, [holes.md](holes.md) §8 `split`). The stub
+services carry no operations yet, so the scaffold splits by the bound it
+declares, and each step takes the method's return type.
+
 `unfillable` (present only when there is one) lists the holes the requesting
 author can never fill, `{line, expected, reason}` each, read off each fill
 spec's `fillable` ([holes.md](holes.md) §8). Through `revl_scaffold` under the
