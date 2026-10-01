@@ -75,7 +75,7 @@ def _semantic(entry: dict) -> dict:
 
 def _called_names(nodes) -> set:
     """Callable names a lowered tree references, both call encodings (the same
-    walk `query._called_names` uses). Used to close the candidate hash over the
+    call channel `query._channels` reads). Used to close the candidate hash over the
     host bodies a component actually reaches (item 427 F4)."""
     from ..lower import _calls_in  # noqa: PLC0415
 
@@ -699,6 +699,15 @@ class ClassMap:
                     f"`{token}` was not resource-scoped: `{ext.get('name')}` is "
                     f"reached through {helpers}, so revl cannot trace "
                     f"{dimensions} to this call's arguments. "
+                    + self._NO_DATAFLOW_HINT), False
+            # nor is one handed on as a FUNCTION VALUE: whoever receives it
+            # calls it with arguments no site here shows, even when this scope
+            # also calls it directly (issue #1458).
+            if fact["name"] == ext.get("name") and fact.get("asValue"):
+                return None, (
+                    f"`{token}` was not resource-scoped: `{ext.get('name')}` is "
+                    f"also passed as a function value, so revl cannot trace "
+                    f"{dimensions} to the arguments it is called with. "
                     + self._NO_DATAFLOW_HINT), False
         sites = _call_arg_lists(scope["nodes"], ext.get("name"))
         if not sites:
