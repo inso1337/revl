@@ -554,14 +554,16 @@ This goes in the compiler spec, not the runtimes.
     name at the point it is derived, or give user type names a reserved suffix)
     and is left open rather than half-fixed. Pinned by the strict-`xfail`
     `test_derived_component_config_type_name_is_reserved`.
-  - **Not mirrored into the self-host ports, which is pre-existing.**
-    `selfhost/emit_go.rvl::is_go_reserved` carries the Go keywords only and
-    `selfhost/emit_java.rvl::emitter_reserved` the three scaffolding names only,
-    so neither carries the predeclared set either — both are partial ports whose
-    covered subset is enumerated in `tests/test_selfhost_emit_java.py` /
-    `test_selfhost_emit_go.py`, and the reservation lives in the reference
-    emitters. The byte oracle compares the corpus, which declares none of these
-    names, so the divergence is invisible to it in both directions.
+  - **Not mirrored into the self-host java port, which is pre-existing.**
+    `selfhost/emit_java.rvl::emitter_reserved` carries the three scaffolding
+    names only, so it does not carry the predeclared set: it is a partial port
+    whose covered subset is enumerated in `tests/test_selfhost_emit_java.py`,
+    and the reservation lives in the reference emitter. The byte oracle compares
+    the java corpus, which declares none of these names, so the divergence is
+    invisible to it in both directions. The go port is closed: since issue #106
+    `selfhost/emit_go.rvl::is_go_reserved` carries the reference's whole
+    `_GO_RESERVED` set, predeclared and runtime type names included, and
+    `tests/fixtures/emit_go_corpus/stdlib_surface.rvl` declares several of them.
 
 ## Arithmetic divergences (open, pinned, one root cause)
 
