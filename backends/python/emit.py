@@ -1132,6 +1132,16 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         # one frame and builds the dict directly, where the generator form
         # entered four (the `dict` call, the genexpr frame, and its resumes)
         # for the same elements (roadmap item 436 F2).
+        if ":=" in target:
+            # Python refuses an assignment expression anywhere in a
+            # comprehension's iterable, and a receiver that is not a bare name
+            # carries one (`a.b.remove(k)` reads `a.b` through the `_fv :=`
+            # temp; bounded arithmetic binds `_bi :=`). Evaluate the receiver
+            # and the key as arguments, outside the comprehension. A plain
+            # receiver keeps the one-frame form above.
+            return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
+                    "_revl_m.items() if kk != _revl_k})"
+                    f"({target}, {args[0]})")
         return ("{" + f"kk: vv for kk, vv in {target}.items() "
                 f"if kk != {args[0]}" + "}")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
@@ -2571,7 +2581,11 @@ class _ComponentEmitter:
         the activation fails and the prefix reverts LIFO with the subscription
         bracket on it (§6, A8). Nothing here catches anything."""
         self.uses.add("Stream")
-        item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
+        # `_ident` already applies the keyword/builtin rename, exactly as it
+        # does for every name the body reads; wrapping it in `_mangle` again
+        # escaped a colliding bind twice (`len_` bound as `len___` while the
+        # body read `len__`, a NameError on the first item).
+        item = _ident(step.get("bind"), f"{where}: stream item")
         subject = self._expr(step.get("subject"), where)
         contract = step.get("event")
         gate = None
