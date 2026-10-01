@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+    "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -771,14 +771,25 @@
                 ]
               },
               "ts": {
-                "residual": 4,
-                "corpus": 61,
-                "reproduced": 57,
+                "residual": 15,
+                "corpus": 75,
+                "reproduced": 60,
                 "documents": [
+                  "../../../backends/go/scenarios/advance.rvl",
+                  "../../../backends/go/testdata/opt_gaps_280.rvl",
+                  "../../../backends/go/testdata/stream_130.rvl",
                   "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+                  "../../../examples/async_timer.rvl",
                   "../../../examples/java_match.rvl",
+                  "../../../examples/lifecycle_cache.rvl",
+                  "../../../stdlib/fs.rvl",
+                  "../../../stdlib/router.rvl",
+                  "../emit_py_corpus/branches.rvl",
                   "../emit_py_corpus/services_control_flow.rvl",
-                  "component_edges.rvl"
+                  "../emit_rust_corpus/comp_stream.rvl",
+                  "component_edges.rvl",
+                  "ref_externs.rvl",
+                  "routed_timers.rvl"
                 ]
               },
               "wasm": {
@@ -788,8 +799,8 @@
                 "documents": []
               }
             },
-            "total_residual": 14,
-            "total_corpus": 277,
+            "total_residual": 25,
+            "total_corpus": 291,
             "clean_tiers": [
               "java",
               "wasm"
@@ -1036,39 +1047,10 @@
                 }
               },
               "ts": {
-                "unported_constructs": 16,
-                "unported_reasons": 8,
+                "unported_constructs": 1,
+                "unported_reasons": 1,
                 "blind_constructs": 4,
                 "reasons": {
-                  "component `call`, `load`, and `unload` steps require routed instance/reference lifecycle machinery rather than the mirrored provide/guard/effect subset; their source branches terminate in the reference component runtime, not v3 statement emission": [
-                    "step=call",
-                    "step=load",
-                    "step=unload"
-                  ],
-                  "in-file lifecycle tests are emitted by reference-only `_emit_ts_lifecycle_tests`; corpus oracle documents compile library/application output and the port intentionally has no test-runner generation path": [
-                    "lifecycle=<true>"
-                  ],
-                  "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81: the java tier, which still refuses the whole stream surface)": [
-                    "kind=stream-merge",
-                    "kind=subscribe",
-                    "stage=take",
-                    "step=stream-iter"
-                  ],
-                  "reference roots named `stdlib` enter `_emit_ts_ref_runtime`/`_emit_ts_ref_thunk`; the self-host corpus contract requires ordinary host roots and refuses missing host roots instead of synthesizing reference-runtime thunks": [
-                    "root=stdlib"
-                  ],
-                  "temporal `every` and component timer/advance/assert-no-residue steps are handled by reference-only `_emit_temporal` and runtime scheduler hooks, outside the self-host emitter's synchronous component subset": [
-                    "mode=every",
-                    "step=advance",
-                    "step=assert_no_residue",
-                    "step=timer"
-                  ],
-                  "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
-                    "kind=do"
-                  ],
-                  "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
-                    "class=witnessed"
-                  ],
                   "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
                     "kind=hole"
                   ]
@@ -1150,7 +1132,7 @@
                 }
               }
             },
-            "total_unported": 187
+            "total_unported": 172
           },
           "unreached-constructs": {
             "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -1162,12 +1144,12 @@
               "emit_java": 36,
               "emit_py": 28,
               "emit_rust": 34,
-              "emit_ts": 20,
+              "emit_ts": 5,
               "emit_wasm": 50,
               "gate_census": 5,
               "lower_ir": 5
             },
-            "total_unreached": 228
+            "total_unreached": 213
           },
           "gate-reference-divergence": {
             "source": "tools/gate_reference_census_baseline.json",
@@ -1182,15 +1164,15 @@
         "unavailable": {}
       },
       "headline": {
-        "documents_refused": 14,
-        "corpus": 277,
-        "n": 277,
+        "documents_refused": 25,
+        "corpus": 291,
+        "n": 291,
         "per_tier": {
           "go": 2,
           "java": 0,
           "py": 6,
           "rust": 2,
-          "ts": 4,
+          "ts": 15,
           "wasm": 0
         },
         "clean_tiers": [
@@ -1200,7 +1182,7 @@
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
-      "unported_constructs": 187,
+      "unported_constructs": 172,
       "fail_open_programs": 0
     },
     "unload-paths": {
@@ -2562,11 +2544,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 14 of 277 corpus documents that the reference compiler accepts (n=277)",
+      "text": "the fully-native revl chain does not reproduce 25 of 291 corpus documents that the reference compiler accepts (n=291)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2576,7 +2558,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2586,7 +2568,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2596,7 +2578,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2606,7 +2588,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2616,7 +2598,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2626,7 +2608,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2636,7 +2618,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "d93a04c828a7bcf39ea69d71606b29e172198f31",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
