@@ -1,0 +1,86 @@
+#!/bin/sh
+# Print the python that tools/hooks/pre-commit runs every check with, for the
+# checkout at $1. If there is none it can trust, explain why on stderr and
+# exit 1 (issue #1608).
+#
+# The interpreter belongs to whoever is committing, never to another checkout.
+# The first of these that is set or present is THE choice, and it is checked,
+# not passed over for the next one:
+#
+#   1. REVL_HOOK_PYTHON        an explicit path to a python
+#   2. VIRTUAL_ENV             the active virtualenv's bin/python
+#   3. <checkout>/.venv        this checkout's own venv
+#   4. python3 on PATH
+#
+# There used to be a fifth: the PRIMARY checkout's `.venv`, for a linked
+# worktree with no venv of its own. It ran a different python version from the
+# committer's, without the committer's cordis-py runtime, and with an editable
+# revl naming another tree's src/. It is gone on purpose.
+#
+# The checks: the python must import pytest, and with PYTHONPATH unset its
+# `revl` must be this checkout's src/revl or not installed at all. The hook
+# exports this checkout's src/ on PYTHONPATH, but a child process started with a
+# constructed environment does not inherit it, and then imports whatever revl
+# the interpreter itself has installed.
+
+root=${1:?usage: resolve-python <checkout root>}
+
+if [ -n "$REVL_HOOK_PYTHON" ]; then
+    python=$REVL_HOOK_PYTHON
+    how="REVL_HOOK_PYTHON"
+elif [ -n "$VIRTUAL_ENV" ]; then
+    python="$VIRTUAL_ENV/bin/python"
+    how="the active virtualenv (VIRTUAL_ENV=$VIRTUAL_ENV)"
+elif [ -x "$root/.venv/bin/python" ]; then
+    python="$root/.venv/bin/python"
+    how="this checkout's .venv"
+elif command -v python3 >/dev/null 2>&1; then
+    python=$(command -v python3)
+    how="python3 on PATH"
+else
+    python=""
+    how=""
+fi
+
+refuse() {
+    {
+        echo "pre-commit: refusing to run the checks: $1"
+        [ -n "$python" ] && echo "  interpreter: $python (from $how)"
+        echo "  Commit with the python this checkout is tested with: activate its"
+        echo "  virtualenv, or set REVL_HOOK_PYTHON=/path/to/python. A python that"
+        echo "  has revl installed must have it installed from this checkout:"
+        echo "    pip install -e '$root[test]'"
+        echo "  To commit without the checks: git commit --no-verify"
+    } >&2
+    exit 1
+}
+
+[ -n "$python" ] || refuse "no python found (none of REVL_HOOK_PYTHON, VIRTUAL_ENV, $root/.venv or python3 on PATH)"
+[ -x "$python" ] || refuse "$python is not an executable file"
+
+# Run from / with PYTHONPATH unset, so neither the working directory nor the
+# hook's own export can supply `revl`: this is what a child started with a
+# constructed environment sees.
+verdict=$(cd / && env -u PYTHONPATH "$python" -c '
+import importlib.util, os, sys
+if importlib.util.find_spec("pytest") is None:
+    print("NOPYTEST")
+    sys.exit()
+spec = importlib.util.find_spec("revl")
+if spec is None or not spec.submodule_search_locations:
+    print("OK")
+    sys.exit()
+got = os.path.realpath(list(spec.submodule_search_locations)[0])
+print("OK" if got == os.path.realpath(sys.argv[1]) else "ELSEWHERE " + got)
+' "$root/src/revl" 2>&1) || refuse "$python did not run: $verdict"
+
+case "$verdict" in
+    OK)
+        echo "$python" ;;
+    NOPYTEST)
+        refuse "$python cannot import pytest" ;;
+    "ELSEWHERE "*)
+        refuse "$python imports revl from ${verdict#ELSEWHERE }, not from this checkout ($root/src/revl)" ;;
+    *)
+        refuse "$python gave an unexpected answer: $verdict" ;;
+esac
