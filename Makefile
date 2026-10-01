@@ -2,7 +2,7 @@
 # authored: `make matrix` regenerates it, and CI fails if the committed block
 # drifts from a fresh generation (see .github/workflows/ci.yml).
 
-.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo pre-merge pre-merge-affected formal roadmap-check workflow-permissions runtime-seams vision-check
+.PHONY: matrix matrix-check matrix-execute docs-gen docs-check demo demo-flagship pre-merge pre-merge-affected formal roadmap-check workflow-permissions runtime-seams vision-check
 
 # roadmap item 327: the required gate before a change reaches main. Mirrors the
 # FAST half of every per-backend CI job locally (emit/golden suites, the
@@ -31,8 +31,9 @@ pre-merge-affected:
 # --require-issue is on (roadmap item 452): the issue migration is finished, so
 # every open or partial item cites its issue, or its private security advisory
 # for a security item that must not be a public issue on this public repo.
+# --check-tier-parity is on too (issue #1572), so this target is the lint job.
 roadmap-check:
-	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue
+	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue --check-tier-parity
 
 # The same tool with all five prose checks on: self-contradiction, dangling
 # delegation, orphaned findings, single-tier fixes for language-wide
@@ -46,12 +47,14 @@ roadmap-check-all:
 
 # The roadmap's CITATIONS, resolved against the working tree. The gate above
 # asks git whether a marker contradicts a branch; this one asks the tree
-# whether a cited test, symbol, file:line or scoped absence claim still holds.
-# It is ADVISORY and deliberately NOT in `lint`: on 2026-09-15 the roadmap
-# carries six findings it reports, and a red gate on a 1.4 MB document only the
-# owner edits would block every open PR. `--check` is the CI mode, to be wired
-# into the lint line once those six are paid down. See the tool's docstring for
-# the rule that was measured and thrown away, and why.
+# whether a cited test, symbol, path or scoped absence claim still holds. The
+# six findings it reported on 2026-09-15 were paid down in #1110 and CI's
+# `lint` job runs the `--check` line below; this target is the advisory read.
+# Issue #1233 widened the path rule from 75 of the roadmap's 508 backticked
+# path citations to 489 of them, which is where most of its citations live.
+# This target also prints the claim ratchet, the citations that are stale and
+# recorded as debt rather than fixed. See the tool's docstring for the two
+# rules that were measured and thrown away, and why.
 roadmap-claims:
 	python3 tools/check_roadmap_claims.py
 
@@ -124,6 +127,13 @@ docs-check:
 demo:
 	@[ -x backends/python/.venv/bin/python ] || sh backends/python/setup.sh
 	REVL_DEMO_REQUIRE=1 backends/python/.venv/bin/python demo/live_systems/run_demo.py
+
+# Roadmap item 525: the flagship integrated demo. One legacy-enterprise agent
+# across the typed API, a peer service and the computer-use family, with the
+# guarantee each leg discharges named beside the artifact that shows it. Needs
+# the compiler and nothing else, so there is no runtime to set up first.
+demo-flagship:
+	python3 demo/legacy_enterprise/run_demo.py
 
 # formal/ — the machine-checked backbone (formal/STATUS.md). run_gate.sh:
 # the import-layering and non-vacuity gates (both toolchain-free, so they

@@ -1,0 +1,41 @@
+// REJECTED - G4/561: a spawn widens a capability that parent and child wire
+// under the SAME local key, with NEITHER service declaring a token.
+//
+// The fourth corner of the family. `g4_spawn_widens_capability.rvl` is the
+// widening spelled with two different keys, `g4_spawn_widens_parameter.rvl` is
+// one key with two valuations, and `g4_spawn_widens_capability_same_key.rvl`
+// is one key over two different DECLARED tokens. This is one key over two
+// services that declare nothing at all.
+//
+// `Boss` holds whatever `Net` reaches; `Worker` reaches whatever `Kv` does.
+// Both spell the wiring key `net`. A fold that names an undeclared crossing by
+// the key it was reached through sees `net` on both sides and derives no
+// widening, which is what it did before item 561. The boundary a method
+// declining to name one has is the SERVICE it is declared on, so the two sides
+// name nothing in common and the spawn is refused - the same verdict the
+// declared corner gets, which is the point: the declaration spelling does not
+// decide it.
+//
+// Resolving both sides to the unnameable `*` does NOT refuse this, because
+// `covers` reads `*` as covered by `*`.
+//
+// expected error:
+//   `Boss` spawns `Worker`, granting it `Kv`, but `Boss` holds only `Net` - a
+//   spawn may narrow a child's capabilities, never widen them
+
+service Net { emission fn call(u: Str) -> Int }
+service Kv { emission fn put(k: Str, v: Str) -> Int }
+service Task { emission fn go() -> Int }
+
+component Worker requires net: Kv provides task: Task {
+  provide task {
+    fn go() {
+      emit net.put("row", "1")
+      return 0
+    }
+  }
+}
+
+component Boss requires net: Net {
+  let w = effect spawn Worker with { } undo w.dispose()
+}

@@ -19,12 +19,11 @@ and runs on every machine. The half that needs a wasm toolchain lives in
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 import pytest
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 CRATE = ROOT / "crates" / "revl-gate-wasm"
@@ -35,10 +34,7 @@ def _generator():
     """Load `tools/build_gate_wasm.py` by path, the way the backends' own tests
     load their emitters, so the test exercises the file under comparison."""
     path = ROOT / "tools" / "build_gate_wasm.py"
-    spec = importlib.util.spec_from_file_location("revl_build_gate_wasm", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["revl_build_gate_wasm"] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("revl_build_gate_wasm", path)
     return module
 
 

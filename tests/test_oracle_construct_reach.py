@@ -1,24 +1,21 @@
 """Non-vacuity, shape and ratchet checks for the construct-reach report."""
 
 import copy
-import importlib.util
 import inspect
 import json
-import sys
 from pathlib import Path
 
 import pytest
+from _load_by_path import load_by_path
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    spec = importlib.util.spec_from_file_location(
-        "oracle_construct_reach", ROOT / "tools" / "oracle_construct_reach.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "oracle_construct_reach",
+        ROOT / "tools" / "oracle_construct_reach.py")
     return module
 
 
@@ -152,24 +149,52 @@ def census():
 
 
 def test_the_gate_census_row_does_not_read_the_census_baseline(data):
-    """The two halves have no shared input. The baseline's bucket names are
-    what the row used to call its reference constructs, so their absence is the
-    defect's own signature."""
+    """The two halves have no shared input, held without a live divergence.
+
+    Until 2026-09-24 this compared the row's reference set against the bucket
+    names in `tools/gate_reference_census_baseline.json` and asserted that file
+    had buckets to compare against. PR #1396 recorded `{}` there (item 391) and
+    the check went vacuous in both directions at once: there is nothing left to
+    intersect, and the defect's own output would be empty too, so no comparison
+    against that file can see the defect any more. A guard that only works
+    while something is broken is a second copy of the bug.
+
+    The two vocabularies are held against each other instead. The reference set
+    is the census's guarantee vocabulary, and a census bucket name is whatever
+    `census.bucket()` returns; both are derived here, so neither half depends
+    on what the baseline happens to record today.
+    """
+    tool = _tool()
     report = data["gate_census"]
-    baseline = json.loads(
-        (ROOT / "tools" / "gate_reference_census_baseline.json").read_text())
-    assert baseline["buckets"], "the baseline has no buckets to be confused with"
-    assert not set(report["reference"]) & set(baseline["buckets"]), \
+
+    # The positive half, and the one that fires on the defect: the old spelling
+    # took the reference set from the baseline's `buckets` KEYS, which on this
+    # tree would leave it empty.
+    guarantees = tool._census_guarantees()
+    assert guarantees, "the census can name no guarantee at all"
+    assert set(report["reference"]) == guarantees
+
+    # The defect's signature, stated on the vocabularies rather than on the
+    # day's entries. `census.bucket()` is asked for the name of every kind of
+    # divergence a guarantee tag can produce, which is the shape `--record`
+    # writes and the shape the emptied baseline used to carry.
+    naming = tool._load_census()
+    staged = {naming.bucket((tag, "m"), ("no_objection", ""))
+              for tag in guarantees}
+    staged |= {naming.bucket((tag, "m"), ("refused", ("OTHER", "m")))
+               for tag in guarantees}
+    staged |= {naming.bucket((tag, "m"), ("refused", (tag, "other")))
+               for tag in guarantees}
+    assert len(staged) >= len(guarantees), staged
+    assert not set(report["reference"]) & staged, \
         "the gate_census reference set is the baseline's bucket names again"
 
     # ... and the reference set is the census's guarantee vocabulary, read from
     # the classifier the census imports. Held against the module itself, so the
     # static reading cannot drift from the function it claims to be reading.
-    spec = importlib.util.spec_from_file_location(
-        "selfhost_lower_oracle", ROOT / "tests" / "test_selfhost_lower.py")
-    oracle = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = oracle
-    spec.loader.exec_module(oracle)
+    oracle = load_by_path(
+        "selfhost_lower_oracle",
+        ROOT / "tests" / "test_selfhost_lower.py")
     source = inspect.getsource(oracle._classify)
     for tag in report["reference"]:
         assert f'"{tag}"' in source, f"{tag} is not a tag _classify can name"
@@ -250,11 +275,9 @@ def test_the_compile_row_measures_the_corpus_its_oracle_runs_on(data):
     report = data["compile"]
     assert set(report["reached"]) >= {"functions", "components", "externs", "types"}
 
-    spec = importlib.util.spec_from_file_location(
-        "compile_oracle_corpus", ROOT / "tests" / "test_selfhost_compile.py")
-    oracle = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = oracle
-    spec.loader.exec_module(oracle)
+    oracle = load_by_path(
+        "compile_oracle_corpus",
+        ROOT / "tests" / "test_selfhost_compile.py")
     expected = {str((ROOT / "tests" / "fixtures" / subdir / name).relative_to(ROOT))
                 for _tier, subdir, name in
                 [*oracle.NATIVE_CORPUS, *oracle.COMPONENT_CORPUS]}

@@ -301,11 +301,13 @@ below; the exhaustive per-command flag reference is
 | `revl metrics --trace FILE` | capability-aware runtime metrics over a `run --trace` JSONL: emissions by capability, failures by G-rule, average lifecycle duration | [revl-metrics.md](revl-metrics.md) |
 | `revl profile --trace FILE` | diff a component's declared emission surface against what a run actually emitted, flagging over-declaration | [revl-profile.md](revl-profile.md) |
 | `revl attest FILES` | sign a portable record that this exact composition was admitted (IR hash + verdict + guarantees + timestamp); `--verify` checks one, and `--certificate` signs a component certificate stating the per-guarantee coverage and caveats as well | [revl-attest.md](revl-attest.md) |
+| `revl pool init|request|join|status|withdraw` | stand up a private peer pool and admit peers to it: a signed charter, an append-only roster, an entry tier that is sent pure work only, and a withdrawal that says what it revokes, retains and orphans | [design/550-private-peer-pool.md](design/550-private-peer-pool.md) |
 | `revl dash` | the supervisor's cockpit: a read-only live view over a session or recorded run, the dependency graph, causal trace, and pending-decisions queue | [dash.md](dash.md) |
 | `revl serve --mcp FILES` | serve a booted composition's own provided operations as MCP tools (`--config`, `--composition`) | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp serve` | the compiler itself as an MCP server (`--files` default composition, `--restore SNAPSHOT.json`) | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp schema FILES` | project provided services to MCP tool definitions | [mcp-bridge.md](mcp-bridge.md) |
 | `revl mcp import MANIFEST` | turn an MCP `tools/list` manifest into revl source | [mcp-bridge.md](mcp-bridge.md) |
+| `revl mcp proxy -- COMMAND` | gate an existing MCP server with no `.rvl` written: its tools classified as `revl mcp import` classifies them, approval, WAL and declared undos applied at call time | [mcp-proxy.md](mcp-proxy.md) |
 | `revl import wit\|openapi\|cordis\|a2a FILE` | import an external interface definition as typed revl source | [import-wit.md](import-wit.md) · [import-openapi.md](import-openapi.md) · [import-cordis.md](import-cordis.md) · [import-a2a.md](import-a2a.md) |
 | `revl export wit FILES --service N\|--composition` | generate the standard WIT interface for a revl service/composition | [wit-bridge.md](wit-bridge.md) |
 | `revl export client FILES --lang ts --service N\|--composition` | generate a typed remote client (TypeScript) over the canonical wire encoding; carries the gate frontier, claims nothing about the callee | [interop-bridge.md](interop-bridge.md) |
@@ -365,6 +367,7 @@ revl run app.rvl --placement map.toml    # split across processes/languages
 revl mcp serve                           # the compiler as an MCP server
 revl mcp schema app.rvl                  # provided services -> MCP tools
 revl mcp import tools.json               # an MCP server -> revl source
+revl mcp proxy -- node server.js        # gate an MCP server, no .rvl written
 python3 tools/conformance.py             # every construct x every backend
 ```
 

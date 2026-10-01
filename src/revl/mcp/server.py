@@ -605,12 +605,18 @@ def _compile(source: str | None, files: list[str] | None,
     keyword-with-default it used to be is how three verbs dropped it."""
     ir = compile_under_authoring(source, files, manifest=manifest,
                                  modules=modules, replacing=replacing)
-    over_the_transport = source is not None or bool(modules)
     global _AUTHORED_HOST_BODIES
-    _AUTHORED_HOST_BODIES = (_host_bodies(ir)
-                             if over_the_transport and AUTHORING.host_code
-                             else [])
+    _AUTHORED_HOST_BODIES = _authored_host_bodies(ir, source, modules)
     return ir
+
+
+def _authored_host_bodies(ir: dict, source: str | None,
+                          modules: dict | None) -> list:
+    """The agent-authored host bodies `ir` carries: empty unless the candidate
+    came over the transport under an open authoring trust."""
+    over_the_transport = source is not None or bool(modules)
+    return (_host_bodies(ir) if over_the_transport and AUTHORING.host_code
+            else [])
 
 
 def _summary(ir: dict) -> dict:
@@ -699,18 +705,17 @@ def _stamp_authority(payload: dict, decision) -> None:
 # -- component leases (roadmap item 61, docs/component-leases.md) -------------
 
 def _refused_by_lease(refusal) -> dict:
-    """A swap refused because it would replace a component another operator
-    leases, under an enforcing policy (item 33). Same untouched-system,
-    why-trace shape `_refused_by_operator` gives for the management plane —
-    pointed at the workspace instead."""
+    """A swap, load or unload refused because it would replace, boot or take
+    down a component another operator leases, under an enforcing policy (item
+    33). Same untouched-system, why-trace shape `_refused_by_operator` gives
+    for the management plane — pointed at the workspace instead."""
     from ..why import render as _render_why  # noqa: PLC0415
     return {
         "ok": False,
         "admitted": False,
         "swapped": False,
         "authorized": False,
-        "note": "the running composition is untouched — a lease held by another "
-                "operator, enforced by policy, refused this replacement",
+        "note": refusal.note,
         "lease": {"component": refusal.component, "heldBy": refusal.heldBy,
                   "expiry": refusal.expiry, "operator": refusal.holder},
         "why": refusal.why.to_json(),
@@ -799,17 +804,36 @@ def _remember_live_host_bodies() -> None:
 
 
 def _tool_load(arguments: dict) -> dict:
-    """Boot a composition in memory (nothing is written to disk)."""
+    """Boot a composition in memory (nothing is written to disk).
+
+    Issue #1444: a load that does not succeed changes nothing, here or in the
+    session. So this compiles without `_compile`'s side effect and records the
+    candidate's host bodies only once the load has booted. A ticket the load
+    itself raises still names them, because nothing is live yet to name.
+
+    Under a policy that enforces leases, a load that would boot a component
+    under a name another operator leases is refused, as a swap replacing it is
+    (`leases.FENCED` says why a cold load is fenced too)."""
+    if not SESSION.loaded:   # a load over a running composition is refused below
+        refusal = _leases.check(SESSION, "load", arguments)
+        if refusal is not None:
+            return _refused_by_lease(refusal)
+    source, files, modules = _candidate_of(arguments)
     try:
-        ir = _compile(*_candidate_of(arguments))
+        ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         return report(error)
+    authored = _authored_host_bodies(ir, source, modules)
     try:
         state = SESSION.load(ir, arguments.get("config"),
                              record=bool(arguments.get("record")),
                              origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
+    except ApprovalRequired as exc:
+        return _approval_required(exc, host_bodies=authored)
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = authored
     return {"ok": True, **_summary(ir), **state}
 
 
@@ -871,9 +895,13 @@ def _tool_swap(arguments: dict) -> dict:
     if not inline:
         return _swap_server_side(replacing)
 
+    # issue #1446: like `revl_load` (#1444), a swap that does not succeed
+    # changes nothing, so the candidate's host bodies are recorded only once it
+    # is running. Compiled without `_compile`'s side effect for that reason.
+    source, files, modules = _candidate_of(arguments)
     try:
-        _compile(*_candidate_of(arguments),
-                 manifest=SESSION.ir, replacing=replacing)
+        compile_under_authoring(source, files, modules=modules,
+                                manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = False
@@ -884,7 +912,7 @@ def _tool_swap(arguments: dict) -> dict:
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
     try:
-        full = _compile(*_candidate_of(arguments))
+        full = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         rejected = report(error)
         rejected["admitted"] = True
@@ -893,10 +921,17 @@ def _tool_swap(arguments: dict) -> dict:
                             "composition, but is not a complete composition on "
                             "its own — pass the full source set to swap")
         return rejected
+    authored = _authored_host_bodies(full, source, modules)
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
+    except ApprovalRequired as exc:
+        # the candidate's own host bodies: a yes admits the candidate, so its
+        # ticket names the candidate's host code, never the running one's
+        return _approval_required(exc, host_bodies=authored)
+    global _AUTHORED_HOST_BODIES
+    _AUTHORED_HOST_BODIES = authored
     return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
 
 
@@ -977,7 +1012,15 @@ def _tool_undo(arguments: dict) -> dict:
     return {"ok": True, **result}
 
 
-def _tool_unload(_arguments: dict) -> dict:
+def _tool_unload(arguments: dict) -> dict:
+    """Tear the running composition down. Under a policy that enforces leases,
+    refused while another operator leases any component it would take down:
+    otherwise an operator refused a swap could unload the component and boot
+    its own. The holder may unload what it holds."""
+    if SESSION.loaded:
+        refusal = _leases.check(SESSION, "unload", arguments)
+        if refusal is not None:
+            return _refused_by_lease(refusal)
     try:
         return {"ok": True, **SESSION.unload()}
     except SessionError as error:
@@ -1002,6 +1045,12 @@ def _tool_commit_confirm(arguments: dict) -> dict:
     if not manifest_hash:
         return _session_error("provide `hash` — the manifest hash revl_commit "
                               "returned, binding exactly what will fire")
+    # a confirmed commit tears the composition down, so under a policy that
+    # enforces leases it answers to the rule `revl_unload` does
+    if SESSION.loaded:
+        refusal = _leases.check(SESSION, "commit", arguments)
+        if refusal is not None:
+            return _refused_by_lease(refusal)
     try:
         result = SESSION.commit_confirm(manifest_hash)
     except SessionError as error:
@@ -1054,7 +1103,8 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     return {"ok": True, **result}
 
 
-def _approval_required(exc: ApprovalRequired) -> dict:
+def _approval_required(exc: ApprovalRequired,
+                       host_bodies: list | None = None) -> dict:
     """Shape a class-(c) refusal into the ticket two-step response (item 246).
     The call/load/swap did NOT fire: the ticket names what a yes would mean, and
     `revl_approve(hash)` mints the standing approval that lets the identical
@@ -1064,18 +1114,90 @@ def _approval_required(exc: ApprovalRequired) -> dict:
     `capabilities` / `classCCapabilities` are derived from DECLARED extern facts
     (`approval.ClassMap._classify_direct`) and say nothing about what the host
     BODY does — an `emission[notify]` body that also reads a `.env` yields a
-    ticket naming `notify` and nothing else. So when the running (or
-    just-compiled) composition carries agent-authored host bodies, the ticket
-    carries `unreviewedHostCode` naming them and a warning saying the declared
-    capabilities are not a bound on what a yes lets run. The ticket `hash` is
-    untouched (the fields land on a COPY, after the hash the outstanding-ticket
-    table is keyed by), so approve/consume is byte-identical."""
+    ticket naming `notify` and nothing else. So when the composition a yes lets
+    run carries agent-authored host bodies, the ticket carries
+    `unreviewedHostCode` naming them and a warning saying the declared
+    capabilities are not a bound on what a yes lets run
+    (`_ticket_host_code`). The ticket `hash` is untouched (the fields land on a
+    COPY, after the hash the outstanding-ticket table is keyed by), so
+    approve/consume is byte-identical.
+
+    `host_bodies` is the candidate's own, from a verb that has not recorded
+    them: `revl_load` and `revl_swap`, which record them only once the load or
+    swap succeeds (issues #1444, #1446)."""
     ticket = exc.ticket
-    bodies = _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES
-    if bodies:
-        ticket = dict(ticket)
-        ticket["unreviewedHostCode"] = bodies
-        ticket["unreviewedHostCodeWarning"] = (
+    fields = _ticket_host_code(exc, host_bodies)
+    if fields:
+        ticket = {**ticket, **fields}
+    return two_step_payload(
+        ticket,
+        how_to_approve="Relay the ticket, then call revl_approve with its "
+                       "`hash`; the identical re-issue then fires once and "
+                       "consumes the approval.")
+
+
+def _ticket_host_code(exc: ApprovalRequired, host_bodies: list | None) -> dict:
+    """The ticket fields naming the agent-authored host code a yes lets run,
+    or `{}` when there is none.
+
+    A ticket raised while a composition was booting (`exc.candidate`, set by
+    `Session.load` / `Session.swap`) is about that candidate: a yes admits the
+    candidate's host code, so `unreviewedHostCode` is the candidate's. It used
+    to be the RUNNING composition's whenever one was running, so a swap that
+    added a new emission showed the operator only the host code already
+    running. A swap's ticket also lists, separately, what is running now
+    (`runningHostCode`) and which of the candidate's bodies are not already
+    running byte for byte (`newHostCode`), so the operator can tell the two
+    apart. A ticket from a call on the running composition names the live
+    host code, as before."""
+    candidate = exc.candidate
+    if candidate is None:
+        bodies = (host_bodies if host_bodies is not None
+                  else _LIVE_HOST_BODIES or _AUTHORED_HOST_BODIES)
+        return _host_code_fields(bodies) if bodies else {}
+    bodies = (host_bodies if host_bodies is not None
+              else _host_bodies(candidate) if AUTHORING.host_code else [])
+    if not bodies:
+        return {}
+    fields = _host_code_fields(bodies)
+    running = SESSION.ir if SESSION.loaded else None
+    if running is not None:
+        _add_replacement_host_code(fields, candidate, running)
+    return fields
+
+
+def _add_replacement_host_code(fields: dict, candidate: dict,
+                               running: dict) -> None:
+    """For a ticket that replaces `running` with `candidate`, add what runs
+    now and which of the candidate's bodies are new: absent from `running`, or
+    present with a different classification or body text."""
+    bodies = fields["unreviewedHostCode"]
+    was = _host_body_texts(running)
+    now = _host_body_texts(candidate)
+    new = [entry for entry in bodies
+           if now.get(entry["extern"]) != was.get(entry["extern"])]
+    fields["newHostCode"] = new
+    fields["runningHostCode"] = (_host_bodies(running)
+                                 if AUTHORING.host_code else [])
+    fields["unreviewedHostCodeWarning"] += (
+        f" This yes replaces the running composition: `unreviewedHostCode` is "
+        f"the candidate's host code, `newHostCode` names the {len(new)} of "
+        f"those {len(bodies)} that the running composition does not already "
+        f"run byte for byte, and `runningHostCode` is what runs now, for "
+        f"comparison.")
+
+
+def _host_body_texts(ir: dict) -> dict:
+    """Each host-bodied extern in `ir` by name, as its classification and its
+    verbatim bodies, so two compositions' host code compares by content."""
+    return {extern.get("name"): (extern.get("class"), extern.get("bodies"))
+            for extern in ir.get("externs") or [] if extern.get("bodies")}
+
+
+def _host_code_fields(bodies: list) -> dict:
+    return {
+        "unreviewedHostCode": bodies,
+        "unreviewedHostCodeWarning": (
             f"this composition carries {len(bodies)} agent-authored host "
             f"{'body' if len(bodies) == 1 else 'bodies'} that the gate did not "
             f"review (G8, item 24: the gate does not sandbox host code). The "
@@ -1083,13 +1205,8 @@ def _approval_required(exc: ApprovalRequired) -> dict:
             f"bodies do — approving this crossing also lets that code run "
             f"whatever it contains. This server is running "
             f"`--author-trust trusted`; the default refuses agent-authored "
-            f"host code outright.")
-    return two_step_payload(
-        ticket,
-        how_to_approve="Relay the ticket, then call revl_approve with its "
-                       "`hash`; the identical re-issue then fires once and "
-                       "consumes the approval.")
-
+            f"host code outright."),
+    }
 
 def _tool_approve(arguments: dict) -> dict:
     """Say YES to a class-(c) crossing (item 246 / roadmap item 344). Two shapes,
@@ -1286,9 +1403,15 @@ def _tool_revoke_distillation(arguments: dict) -> dict:
         return _session_error(str(error))
 
 
-def _tool_abort(_arguments: dict) -> dict:
+def _tool_abort(arguments: dict) -> dict:
     """Abort the session (item 245): drop the deferral queue (never fired),
-    replay the witnessed inverses, prove a clean world."""
+    replay the witnessed inverses, prove a clean world. An abort tears the
+    composition down, so under a policy that enforces leases it answers to the
+    rule `revl_unload` does."""
+    if SESSION.loaded:
+        refusal = _leases.check(SESSION, "abort", arguments)
+        if refusal is not None:
+            return _refused_by_lease(refusal)
     try:
         return {"ok": True, **SESSION.abort()}
     except SessionError as error:
@@ -1449,6 +1572,12 @@ def _tool_restore(arguments: dict) -> dict:
     snap = arguments.get("snapshot")
     if snap is None:
         return _session_error("`snapshot` (a document from revl_snapshot) is required")
+    # a restore is a cold load from a document, so it answers to the same
+    # enforced lease rule `revl_load` does (`leases.FENCED`)
+    if not SESSION.loaded:
+        leased = _leases.check(SESSION, "restore", arguments)
+        if leased is not None:
+            return _refused_by_lease(leased)
     refusal = _restore_authoring_refusal(snap)
     if refusal is not None:
         return refusal
@@ -3120,7 +3249,10 @@ TOOLS = [
                        "component is WARNED at revl_plan/revl_swap but proceeds; "
                        "under a boundary policy that declares `leases enforced` "
                        "(item 33) that swap is REFUSED at admission, the running "
-                       "system untouched. The holder is the session's operator "
+                       "system untouched, and so is an unload, commit confirm or "
+                       "abort that would take the component down, or a load or "
+                       "restore that would boot one "
+                       "under the leased name. The holder is the session's operator "
                        "identity (item 55); active leases show in revl_state; every "
                        "claim/renew/release/expiry rides the causal trace (item 27). "
                        "Leases expire on their TTL, so a walked-away agent never "

@@ -127,12 +127,62 @@ Verification is fail-closed throughout: :func:`verify` returns a
 member is a refusal rather than a skipped check, and every vocabulary is closed
 (an unknown residence, origin, mode or outcome is refused, never defaulted).
 
+From a constructed record to a recorded run (issue #1191, Slices 2 and 3)
+-----------------------------------------------------------------------
+Slice 1 shipped the object and the gate as a pure function, and said plainly
+that "a recorded run replays a model decision from the artifact alone" was not
+yet claimed: nothing wrote an evidence object during a run. Slices 2 and 3 are
+the two halves of that clause, and they meet on the WAL.
+
+* **Slice 2, the writer.** :class:`CrossingSealer` is installed into a run and
+  handed to ``backends/python/runtime.py``, which calls it at every model
+  crossing and rides it onto the ``model-decision`` WAL record item 250 Slice
+  3a already writes (:data:`WAL_EVIDENCE_MEMBER`). The runtime holds a
+  callable and no key, because that backend is stdlib-only and a second copy
+  of the MAC living beside a signing key is the item 272 mistake at its worst.
+  The crossing owns ``component``, ``step_index`` and ``outcome``
+  (:data:`CROSSING_OWNED`); the provider declares the rest, because revl
+  cannot see through the host body and will not invent what it cannot see.
+
+  **Which way it fails.** Evidence is OPT-IN: a run that never engages a
+  sealer writes exactly the record it wrote before, and `revl replay` says
+  "not sealed" rather than guessing. A run that HAS engaged one and cannot
+  seal a crossing does not continue as though it had. The refusal is written
+  to the WAL first (:data:`WAL_REFUSAL_MEMBER`, carrying the link and the
+  reason, so a post-mortem reader can tell a refused crossing from a run that
+  never engaged), and then it is RAISED out of the crossing. An unaccountable
+  model decision is not a degraded record; under engagement it is a stop.
+
+* **Slice 3, the reader.** :func:`reconstruct` takes a sealed record and the
+  key and returns what the decision was, consulting nothing else. It is
+  fail-closed in the way that makes the exit clause bite: a record whose MAC
+  does not check out yields NO reading at all, not a reading with a warning.
+  `revl replay` runs it over every decision on a WAL (``revl.replay_modes``).
+
+* **The placement, cross-checked at last.** Slice 1 bound ``role`` and
+  ``residence`` by value and nothing compared them to anything, because item
+  512 had not landed. It has (``src/revl/model_route.py``), so
+  :func:`check_placement` compares them to its route table — at seal time, so
+  a contradicting record is never minted, and offline, so one that arrives
+  from elsewhere is still refused.
+
+What is still NOT claimed, in Slices 2 and 3 as in Slice 1: key management,
+rotation and distribution are all outside this module, and the 16-hex
+:func:`key_id` is a fingerprint for CHOOSING a key, never a proof of one. The
+MAC is a shared-secret construction, so a holder of the key can mint any record
+it likes; nothing here is a signature in the public-key sense and nothing here
+detects a compromised signer.
+
 Public surface
 --------------
 ``seal(key, **members)``      — build and sign a record
 ``verify(record, key)``       — ``Verdict(ok, link, reason)``
 ``crossing_key(record)``      — ``(component, step_index)``, the WAL index key
 ``reproducible(record)``      — ``(bool, [missing...])``
+``check_placement(body, roles)`` — item 512's route table, cross-checked
+``CrossingSealer(key, route_table)`` — Slice 2: seal at the crossing
+``reconstruct(record, key)``  — Slice 3: the decision, from the artifact alone
+``from_wal_record(decision)`` — the evidence riding on a WAL record
 ``digest(text)`` / ``key_id(key)``
 """
 
@@ -285,10 +335,25 @@ EVIDENCE_CANDIDATES = "candidate-set"
 #: it must not. The evidence-layer restatement of the runtime's digest gate.
 EVIDENCE_DISCLOSURE = "disclosure"
 
+#: The sealed record does not name the crossing it was FOUND at. Its MAC can be
+#: perfectly valid and it can still be a genuine record of another crossing,
+#: lifted onto this one — the `cert.affirm_key_id` reading, applied to the join
+#: instead of to the signer. Only a reader that holds both sides (the WAL's
+#: index key and the sealed body) can see this, which is why it is a link here
+#: and not a check inside :func:`verify`.
+EVIDENCE_CROSSING = "crossing"
+
+#: The record's declared placement contradicts item 512's own route table, or
+#: names a role that table does not declare. Distinct from
+#: :data:`EVIDENCE_VOCABULARY`, which is about the closed word list: a record
+#: reading `role="local", residence="off_device"` is two legal words making a
+#: claim the PROGRAM refutes, and a reader must be able to tell those apart.
+EVIDENCE_PLACEMENT = "placement"
+
 #: Every link this module can return, for a caller that wants to enumerate.
-EVIDENCE_LINKS = (EVIDENCE_CANDIDATES, EVIDENCE_DISCLOSURE,
-                  EVIDENCE_ENVELOPE, EVIDENCE_INCOMPLETE, EVIDENCE_SIGNATURE,
-                  EVIDENCE_SIGNER, EVIDENCE_VOCABULARY)
+EVIDENCE_LINKS = (EVIDENCE_CANDIDATES, EVIDENCE_CROSSING, EVIDENCE_DISCLOSURE,
+                  EVIDENCE_ENVELOPE, EVIDENCE_INCOMPLETE, EVIDENCE_PLACEMENT,
+                  EVIDENCE_SIGNATURE, EVIDENCE_SIGNER, EVIDENCE_VOCABULARY)
 
 
 class EvidenceRefused(ValueError):
@@ -864,3 +929,353 @@ def reproducible(record: Mapping[str, Any]) -> tuple:
     if binding.get("mode") != "content-addressed":
         missing.append("prompt_binding")
     return (not missing, missing)
+
+
+# ---------------------------------------------------------------------------
+# the placement cross-check (item 512's route table)
+# ---------------------------------------------------------------------------
+
+def placement_table(roles: Any) -> dict:
+    """``{role: residence}`` from item 512's own table.
+
+    Accepts :func:`revl.model_route.roles`' return value (``{name: Role}``)
+    and a plain ``{name: residence}`` mapping, and nothing else. The second
+    shape is not a convenience: a :class:`~revl.model_route.Role` is a compiler
+    object and does not survive the artifact a post-mortem reader is handed, so
+    an offline reader carrying the table as JSON needs a shape that does. Both
+    reduce to the one relation this module checks — a declared role name and
+    the one residence item 512 declared for it.
+    """
+    if not isinstance(roles, Mapping):
+        raise EvidenceRefused(
+            EVIDENCE_PLACEMENT,
+            f"a placement table is a mapping of role name to residence, not "
+            f"{type(roles).__name__}")
+    table = {}
+    for name, value in roles.items():
+        residence = value if isinstance(value, str) \
+            else getattr(value, "residence", None)
+        if residence not in RESIDENCES:
+            raise EvidenceRefused(
+                EVIDENCE_PLACEMENT,
+                f"the placement table gives role {name!r} the residence "
+                f"{residence!r}, which is outside {list(RESIDENCES)}")
+        table[str(name)] = residence
+    return table
+
+
+def check_placement(body: Mapping[str, Any], roles: Any) -> Optional[Verdict]:
+    """Cross-check a record's declared ``role``/``residence`` against item
+    512's route table, or ``None`` when they agree.
+
+    Slice 1 bound the placement BY VALUE and asked no host, which is right —
+    the record must say where the call ran without a reader having to hold the
+    program. But binding a value is not checking it, and item 512 had not
+    landed when that was written, so nothing compared the two. It has landed
+    (``src/revl/model_route.py``), so this is that comparison.
+
+    Two refusals, and they are different claims:
+
+    * the record names a role the program never declared. The placement is not
+      a fact about the record, it is a fact about the program, and a record
+      naming ``role="gpu-box"`` for a program whose only roles are ``local``
+      and ``cloud`` is describing a run of some other program.
+    * the record names a declared role with the OTHER residence. This is the
+      one that matters: a record claiming ``on_device`` for a role the program
+      declared ``off_device`` asserts the prompt did not leave a device it did
+      leave. Both words are inside :data:`RESIDENCES`, so the vocabulary check
+      passes it and only the table refutes it.
+
+    This is a check on a BODY, so :class:`CrossingSealer` runs it before
+    sealing and an offline reader runs it after verifying. A record that
+    contradicts the table is never minted in the first place, and one that
+    arrives from elsewhere is still refused.
+    """
+    table = placement_table(roles)
+    role = body.get("role")
+    residence = body.get("residence")
+    if role not in table:
+        return Verdict(
+            False, EVIDENCE_PLACEMENT,
+            f"the record names model role {role!r}, which item 512's route "
+            f"table does not declare (it declares {sorted(table)}); the "
+            "placement is a fact about the program, so a role the program "
+            "never declared describes a run of another program")
+    declared = table[role]
+    if residence != declared:
+        return Verdict(
+            False, EVIDENCE_PLACEMENT,
+            f"the record places role {role!r} {residence!r}, and item 512's "
+            f"route table declares it {declared!r}; both words are legal, so "
+            "only the table refutes this, and the direction that matters is a "
+            "record claiming a prompt stayed on a device it left")
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Slice 2: sealing AT THE CROSSING, for a runtime that holds no key
+# ---------------------------------------------------------------------------
+
+#: What the runtime supplies and a provider's declaration may therefore NOT.
+#: ``component`` and ``step_index`` are the crossing the recorder just made and
+#: ``outcome`` is what the validation seam measured; a provider that could
+#: restate any of the three could seal a record about a crossing that did not
+#: happen, or call an exhausted budget a validated answer. The runtime owns
+#: them, the provider owns everything else.
+CROSSING_OWNED = ("component", "step_index", "outcome")
+
+
+@dataclass(frozen=True)
+class CrossingSealer:
+    """Seal one model decision at the crossing that produced it.
+
+    ``backends/python/runtime.py`` is stdlib-only by construction: it cannot
+    import this module, and a second copy of the MAC living in the backend is
+    the item 272 mistake with a signing key attached. So the runtime holds a
+    CALLABLE and learns nothing — exactly the shape item 250 Slice 3a already
+    uses for the WAL sink, which is a callable because the runtime holds no WAL
+    handle either.
+
+    The call is total. It returns ``(record, None)`` on a seal and
+    ``(None, {"link", "reason"})`` on a refusal, so the runtime never has to
+    catch an exception it cannot name, and the refusal reaches the artifact as
+    a stated fact rather than as a traceback.
+
+    ``route_table`` is item 512's, and is optional here for one reason only: a
+    program that declares no ``model role`` has no table to check against, and
+    that program's crossings are still recordable. Supplying one engages
+    :func:`check_placement`.
+    """
+
+    key: bytes
+    route_table: Any = None
+
+    def __call__(self, crossing: Any, draft: Any,
+                 outcome: str) -> tuple:
+        """``(sealed record, None)`` or ``(None, refusal)``. Never raises for a
+        malformed draft: a refusal is the answer, not an accident."""
+        if not (isinstance(crossing, (tuple, list)) and len(crossing) == 2):
+            return None, {
+                "link": EVIDENCE_INCOMPLETE,
+                "reason": f"the crossing is not a (component, step_index) "
+                          f"pair ({crossing!r}), so the record would key to "
+                          f"nothing `revl.wal.model_decisions` indexes"}
+        component, step_index = crossing
+        if component is None or step_index is None:
+            return None, {
+                "link": EVIDENCE_INCOMPLETE,
+                "reason": f"the crossing is ({component!r}, {step_index!r}); "
+                          "an evidence object with no crossing cannot be "
+                          "joined to the WAL record it is evidence for"}
+        if not isinstance(draft, Mapping):
+            return None, {
+                "link": EVIDENCE_INCOMPLETE,
+                "reason": "model-decision evidence is engaged for this run and "
+                          f"the crossing ({component!r}, {step_index!r}) "
+                          "published no declaration, so there is nothing to "
+                          "seal. The provider declares what answered, where, "
+                          "what it was given and under which rule; revl cannot "
+                          "see any of it through the host body and will not "
+                          "invent it"}
+        restated = [m for m in CROSSING_OWNED if m in draft]
+        if restated:
+            return None, {
+                "link": EVIDENCE_VOCABULARY,
+                "reason": "the declaration restates " + ", ".join(restated)
+                          + ", which the runtime owns: the crossing is the one "
+                            "the recorder just made and the outcome is the one "
+                            "the validation seam measured, so a provider that "
+                            "could set them could seal a record about a "
+                            "crossing that did not happen"}
+        members = dict(draft)
+        members["component"] = component
+        members["step_index"] = step_index
+        members["outcome"] = outcome
+        if outcome != "validated":
+            # The crossing owns the outcome, so it owns the coherence of the
+            # choice WITH the outcome. A provider declares from inside the host
+            # body, before the validation seam has decided anything, so it can
+            # legitimately name the candidate the host returned and the retry
+            # can then exhaust around it. `_check_candidates` already says what
+            # the record means in that case — "an outcome of 'exhausted' took
+            # no candidate" — so this states it rather than refusing a run for
+            # a contradiction the provider could not have foreseen. Nothing is
+            # lost: the candidate set is still on the record in the order it
+            # was offered; what changes is the claim that one was TAKEN.
+            members["chosen"] = None
+        if self.route_table is not None:
+            try:
+                verdict = check_placement(members, self.route_table)
+            except EvidenceRefused as error:
+                return None, {"link": error.link, "reason": error.reason}
+            if verdict is not None:
+                return None, {"link": verdict.link, "reason": verdict.reason}
+        try:
+            record = seal(self.key, **members)
+        except EvidenceRefused as error:
+            return None, {"link": error.link, "reason": error.reason}
+        except TypeError as error:
+            return None, {
+                "link": EVIDENCE_VOCABULARY,
+                "reason": f"the declaration does not name the members of a "
+                          f"model-decision record ({error})"}
+        return record, None
+
+
+# ---------------------------------------------------------------------------
+# Slice 3: reading the decision back out of the artifact alone
+# ---------------------------------------------------------------------------
+
+#: Where a model-evidence key comes from when one is not passed explicitly.
+#: Domain-separated from `revl.attest`'s pair for the same reason
+#: :func:`key_id` is: these are two protocols that may share key material, and
+#: an operator who points one at the other's key should get a key-identity
+#: refusal, not a silent cross-protocol verification. A secret is NEVER
+#: hardcoded here.
+KEY_ENV = "REVL_MODEL_EVIDENCE_KEY"
+KEY_FILE_ENV = "REVL_MODEL_EVIDENCE_KEY_FILE"
+
+
+def resolve_key(key_path: Optional[str], *, env=None) -> Optional[bytes]:
+    """The evidence key from, in order: an explicit path, :data:`KEY_FILE_ENV`
+    (a path), :data:`KEY_ENV` (the secret bytes) — or ``None``.
+
+    ``None`` is a legal answer here and is NOT a hole. `revl attest` raises
+    without a key because signing without one is impossible; an offline reader
+    with no key has a real and useful job, which is to report that a seal is
+    present and was not checked. Reading nothing out of an unchecked seal is
+    the fail-closed behaviour; refusing to run at all would only push the
+    reader to skip the command."""
+    if env is None:
+        import os  # noqa: PLC0415 - lazy, so the module keeps no import effect
+        env = os.environ
+    from .attest import load_key  # noqa: PLC0415 - one key-file reader, not two
+    if key_path:
+        return load_key(key_path)
+    file_env = env.get(KEY_FILE_ENV)
+    if file_env:
+        return load_key(file_env)
+    inline = env.get(KEY_ENV)
+    if inline:
+        return inline.encode("utf-8")
+    return None
+
+
+#: The member of a `model-decision` WAL record that carries the sealed evidence
+#: object, and the member that carries the refusal when sealing was engaged and
+#: failed. Absent by default on both counts: a WAL written by a run that never
+#: engaged evidence is byte-identical to a pre-517 one.
+WAL_EVIDENCE_MEMBER = "evidence"
+WAL_REFUSAL_MEMBER = "evidenceRefused"
+
+
+def from_wal_record(decision: Any) -> Any:
+    """The sealed evidence object carried by one ``model-decision`` WAL record,
+    or ``None``.
+
+    The join is :func:`crossing_key`'s and no second correlation is introduced:
+    the evidence rides ON the record it is evidence for, so
+    ``revl.wal.model_decisions`` indexes both at once and a reader holding the
+    index holds the evidence."""
+    if not isinstance(decision, Mapping):
+        return None
+    return decision.get(WAL_EVIDENCE_MEMBER)
+
+
+def reconstruct(record: Any, key: bytes, *, roles: Any = None,
+                at: Any = None) -> dict:
+    """Rebuild one model decision FROM THE ARTIFACT ALONE — the roadmap item's
+    own exit clause, and the half Slice 1 explicitly did not claim.
+
+    Takes a sealed record (off a WAL, out of a bundle, from anywhere) and the
+    key, and returns what the decision WAS: the crossing, the placement, what
+    answered, what it was given, what it could have said and what it said, how
+    it was asked, and under which rule. Nothing here consults a live process, a
+    host, a provider or the program; the record is the whole input.
+
+    Fail-closed, and the ordering is the point: ``decision`` is ``None``
+    whenever ``verified`` is false. A reader never gets the contents of a
+    record whose MAC did not check out, so an edited field does not merely
+    'fail its digest' in a field somewhere — it withholds the reading. That is
+    what makes the tamper test non-vacuous at this layer: flipping one byte of
+    a sealed record on disk does not give a wrong answer, it gives no answer.
+
+    ``roles`` engages the item 512 cross-check (:func:`check_placement`) after
+    the MAC verifies. Offline it is optional for the same reason it is optional
+    on the sealer: an offline reader may not hold the program's table, and a
+    reader that does hold it gets the stronger claim.
+
+    ``at`` is the crossing the reader FOUND this record at — for a WAL, the
+    ``(component, stepIndex)`` :func:`revl.wal.model_decisions` indexed it by.
+    Supplying it engages the join check: a record whose sealed body names
+    another crossing is refused with :data:`EVIDENCE_CROSSING` even when its
+    MAC is valid, because a genuine record of one crossing lifted onto another
+    is still a false account of this one. :func:`verify` cannot make this check
+    — it sees one side — and a reader that holds both and does not make it is
+    the fail-open half.
+    """
+    verdict = verify(record, key)
+    if verdict.ok and at is not None:
+        found = tuple(at)
+        named = crossing_key(record)
+        if found != named:
+            verdict = Verdict(
+                False, EVIDENCE_CROSSING,
+                f"the record was found at crossing {list(found)} and its "
+                f"sealed body names {list(named)}; the MAC is valid, so this "
+                "is a genuine record of another crossing lifted onto this one")
+    if verdict.ok and roles is not None:
+        try:
+            placement = check_placement(record, roles)
+        except EvidenceRefused as error:
+            placement = Verdict(False, error.link, error.reason)
+        if placement is not None:
+            verdict = placement
+    if not verdict.ok:
+        return {"verified": False, "link": verdict.link,
+                "reason": verdict.reason, "crossing": None, "decision": None,
+                "reproducible": None}
+    sampling = dict(record["sampling"])
+    binding = dict(record["prompt_binding"])
+    candidates = list(record["candidates"])
+    chosen = record["chosen"]
+    ok, missing = reproducible(record)
+    return {
+        "verified": True,
+        "link": "",
+        "reason": "",
+        "crossing": list(crossing_key(record)),
+        "decision": {
+            # the crossing, which is the WAL index key
+            "component": record["component"],
+            "stepIndex": record["step_index"],
+            # where it ran
+            "role": record["role"],
+            "residence": record["residence"],
+            # what answered, and on what host profile
+            "modelDigest": record["model_digest"],
+            "placementDigest": record["placement_digest"],
+            # what it was given
+            "promptBindingMode": binding["mode"],
+            "promptBinding": binding["value"],
+            "promptSuppressionReason": binding["reason"],
+            "origins": list(record["origins"]),
+            # what it could have said, and what it said
+            "candidates": candidates,
+            "chosen": chosen,
+            "chosenDigest": candidates[chosen] if isinstance(chosen, int)
+            and not isinstance(chosen, bool) else None,
+            "outcome": record["outcome"],
+            # how it was asked
+            "sampling": sampling,
+            # under what rule, and how far down the ladder
+            "policyDigest": record["policy_digest"],
+            "fallbackDepth": record["fallback_depth"],
+            # what it kept
+            "retained": record["retained"] is not None,
+            # who sealed it, and when
+            "keyId": record["key_id"],
+            "recordedAt": record["recorded_at"],
+        },
+        "reproducible": {"ok": bool(ok), "missing": list(missing)},
+    }

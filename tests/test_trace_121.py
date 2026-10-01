@@ -1018,12 +1018,22 @@ def test_each_generation_gets_its_own_digest_salt():
 # a composition that declares NO confidentiality surface: a web-tainted value
 # crosses a model emission, so the checker records a real origin (`web`) as
 # reaching the crossing, and neither `secret` nor `confidential` can exist.
+# The fetch is a crossing of its own, so it is marked and bound first (one
+# `emit` marks one crossing, issue #1427); that needs a value binding, which
+# is why the flow sits in a provide method rather than the activation body.
 _CLEAN_MODEL_SRC = (
     "extern emission[web.fetch] fn fetch() -> Untrusted[Str] "
     "= @py { return \"x\" }\n"
     "service Model { emission fn complete(p: Str) -> Str }\n"
-    "component Agent requires m: Model {\n"
-    "  emit m.complete(fetch())\n"
+    "service Run { emission fn go() -> Str }\n"
+    "component Agent requires m: Model provides r: Run {\n"
+    "  provide r {\n"
+    "    fn go() {\n"
+    "      let page = emit fetch()\n"
+    "      emit m.complete(page)\n"
+    "      return \"ok\"\n"
+    "    }\n"
+    "  }\n"
     "}\n")
 
 # the same shape, but the program binds a provider key to `model.complete`
@@ -1372,7 +1382,8 @@ service Loop { emission fn go(p: Str) -> Int }
 
 
 def _emit_flow(body: str) -> str:
-    import emit as py_emit
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    py_emit = python_backend_emitter()
 
     src = (_FLOW_PRELUDE + """
 component Agent requires model: Model, tool: Tool provides agent: Loop {
@@ -1393,7 +1404,10 @@ def test_the_completion_site_rides_the_seam():
     code = _emit_flow("""      let t = emit model.complete(["p"])
       return 1""")
     assert "_revl_validate_retry(lambda: _revl_ctx.model.complete(['p'])" in code
-    assert "'Agent.go#c1')" in code
+    # item 513 slice 2 appended the crossing's grammar-registry key after the
+    # site, so the site is no longer the last argument. What this test is about
+    # is unchanged: the site is present, positional, and names this crossing.
+    assert "'Agent.go#c1', grammar=" in code
 
 
 def test_a_crossing_reading_the_completions_binding_is_marked():

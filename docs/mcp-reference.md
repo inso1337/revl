@@ -265,6 +265,12 @@ component you just loaded. Returns the result and the trace it produced.
 
 - Inputs: `key` (provided key, required), `method` (operation name, required),
   `args` (positional arguments).
+- Realms: a key resolves where its provider publishes it. A shared-realm
+  provider (a router included) answers first. A key provided only by a
+  component placed with `isolate <key> in realm("<label>")` resolves in that
+  realm. A key isolated into two or more realms has no single provider, and the
+  call is refused with every provider and its realm named. The approval ticket
+  for the call carries the realm of the provider it reached.
 
 ### `revl_state`
 
@@ -392,7 +398,9 @@ NAME - the multi-agent workspace primitive. A lease is NOT a lock: the running
 component keeps serving every call. It governs who may REPLACE it while you
 iterate. By default a swap that would replace someone else's leased component is
 WARNED at plan/swap but proceeds; under a boundary policy that declares `leases
-enforced` (item 33) that swap is REFUSED at admission. Leases expire on their
+enforced` (item 33) that swap is REFUSED at admission, and so is an unload,
+commit confirm or abort that would take the component down, or a load or restore
+that would boot one under the leased name. Leases expire on their
 TTL, so a walked-away agent never wedges the workspace
 ([component-leases.md](component-leases.md)).
 

@@ -92,9 +92,9 @@ class _FakeRoot:
 
 class _FakeRuntime:
     @staticmethod
-    def realm_label(realm: str):
+    def realm_label(realm: str, _key: str):
         # identity: the label IS the realm string, so _FakeRoot.isolate can key
-        # the handle map by it.
+        # the handle map by it (one routed key, so the key adds nothing here).
         return realm
 
 
@@ -224,7 +224,8 @@ def _build_driver(ir):
     backend_dir = backends_root() / "python"
     if str(backend_dir) not in sys.path:
         sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415
+    from revl._paths import python_backend_emitter  # noqa: PLC0415
+    emit = python_backend_emitter()
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415

@@ -77,6 +77,7 @@ from .compiler import compile_files
 from .distribute import distributability
 from .errors import RevlError
 from .peer_offer import PlacementSlot, offer_admission, offer_eligible
+from .refusal import refusals
 from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS, resource_base
 from .tee_attestation import TeeError, TeeRequirement
 from .typecheck import FN_HEAD, parse_type
@@ -248,16 +249,114 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
-def _parse_probe(expr: str) -> dict:
-    """`key.method('a', 'b')` -> {"key","method","args"} for the rust runner,
-    whose probes are structured rather than eval'd strings."""
+def _parse_probe(expr: str, ir: dict | None = None) -> dict:
+    """`key.method('a', 41)` -> {"key","method","args"} for the rust and go
+    runners, whose probes are structured rather than eval'd strings.
+
+    Issue #1559: every argument used to be sent as a STRING, so a go
+    consumer's `ops.run(41)` decoded `"41"` into an `int64`, failed silently
+    and ran with 0. Each argument is now a typed JSON value: the literal's own
+    type (a quoted string, `true`/`false`, an integer, a float), converted to
+    the parameter type the operation declares in `ir` when that type is a
+    scalar. A literal that cannot be that type is refused by name, never
+    passed on to be misread."""
     match = _PROBE_RE.match(expr)
     if not match:
-        raise RuntimeError(f"cannot parse probe {expr!r} for the rust backend (use key.method('a', 'b'))")
+        raise RuntimeError(f"cannot parse probe {expr!r} (use key.method('a', 41))")
     key, method, arg_str = match.groups()
-    arg_str = arg_str.strip()
-    args = [a.strip().strip("'\"") for a in arg_str.split(",")] if arg_str else []
+    tokens = _probe_tokens(expr, arg_str)
+    types = _probe_param_types(ir, key, method) if ir is not None else None
+    args = []
+    for i, token in enumerate(tokens):
+        declared = types[i] if types is not None and i < len(types) else None
+        args.append(_probe_arg(expr, token, declared))
     return {"key": key, "method": method, "args": args}
+
+
+def _probe_tokens(expr: str, arg_str: str) -> list[tuple[str, bool]]:
+    """Split a probe's argument list on top-level commas. Each token is
+    `(text, quoted)`; a quoted string may hold commas."""
+    tokens: list[tuple[str, bool]] = []
+    i, n = 0, len(arg_str)
+    while i < n:
+        while i < n and arg_str[i] in " \t":
+            i += 1
+        if i >= n:
+            break
+        if arg_str[i] in "'\"":
+            quote, j = arg_str[i], i + 1
+            while j < n and arg_str[j] != quote:
+                j += 1
+            if j >= n:
+                raise RuntimeError(f"probe {expr!r}: unterminated string argument")
+            tokens.append((arg_str[i + 1:j], True))
+            i = j + 1
+        else:
+            j = i
+            while j < n and arg_str[j] != ",":
+                j += 1
+            tokens.append((arg_str[i:j].strip(), False))
+            i = j
+        while i < n and arg_str[i] in " \t":
+            i += 1
+        if i < n:
+            if arg_str[i] != ",":
+                raise RuntimeError(f"probe {expr!r}: expected `,` between arguments")
+            i += 1
+    return tokens
+
+
+def _probe_param_types(ir: dict, key: str, method: str) -> list | None:
+    """The declared parameter types of `key.method`, read off the service the
+    composition binds `key` to (provided or required), or None."""
+    services = ir.get("services") or {}
+    for comp in ir.get("components") or []:
+        for table in ("provides", "requires"):
+            service = (comp.get(table) or {}).get(key)
+            if service is None:
+                continue
+            decl = ((services.get(service) or {}).get("methods") or {}).get(method)
+            if decl is not None:
+                return [p.get("type") for p in decl.get("params") or []]
+    return None
+
+
+def _probe_arg(expr: str, token: tuple[str, bool], declared) -> object:
+    text, quoted = token
+    if quoted:
+        value: object = text
+    elif text in ("true", "false"):
+        value = text == "true"
+    elif re.fullmatch(r"-?\d+", text):
+        value = int(text)
+    elif re.fullmatch(r"-?(\d+\.\d*|\.\d+)([eE][-+]?\d+)?|-?\d+[eE][-+]?\d+", text):
+        value = float(text)
+    else:
+        value = text
+    kind = str(declared).strip() if declared is not None else None
+    try:
+        if kind in ("Int", "Int32"):
+            if isinstance(value, bool) or not re.fullmatch(r"-?\d+", str(value).strip()):
+                raise ValueError
+            return int(str(value).strip())
+        if kind == "Float":
+            if isinstance(value, bool):
+                raise ValueError
+            return float(value)
+        if kind == "Bool":
+            if isinstance(value, bool):
+                return value
+            if str(value) in ("true", "false"):
+                return str(value) == "true"
+            raise ValueError
+        if kind == "Str":
+            return value if isinstance(value, str) else (
+                ("true" if value else "false") if isinstance(value, bool) else str(value))
+    except ValueError:
+        raise RuntimeError(
+            f"probe {expr!r}: argument {text!r} is not a {kind}, the type the "
+            f"operation declares for it") from None
+    return value
 
 
 # --------------------------------------------------------------------------
@@ -2107,6 +2206,95 @@ def capability_realm_diagnostic(processes: dict, ir: dict,
     return None
 
 
+def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
+    """Schedule the routed model actions onto each host's declared devices
+    (item 515, `revl.model_schedule`). Prints the decision, one line per
+    placement, and returns `(refusal, {host: spec entry})`. The entry is what
+    the host's child is handed under `model_schedule.SPEC_KEY`; a host with
+    no routed model action has none, so its spec is unchanged."""
+    from . import model_schedule  # noqa: PLC0415 - loaded only at plan time
+    try:
+        schedules = model_schedule.placement_schedules(files, processes)
+    except model_schedule.ScheduleRefusal as exc:
+        return str(exc), {}
+    for host in schedules:
+        backend = _canonical_backend(processes[host.host].get("backend", "py"))
+        if backend not in model_schedule.READING_TIERS:
+            return (f"host `{host.host}` routes model action(s) and is placed on "
+                    f"the {backend} tier, whose process runner does not read a "
+                    f"model schedule; a schedule its child never reads is a "
+                    f"decision nothing enforces, so the placement is refused. "
+                    f"Place the component on a "
+                    f"{' or '.join(model_schedule.READING_TIERS)} process "
+                    f"(item 515, docs/model-scheduling.md)"), {}
+    for host in schedules:
+        for line in host.lines():
+            print(f"  {line}", flush=True)
+    for line in model_schedule.binding_lines(
+            model_schedule.binding_manifest(schedules)):
+        print(f"  {line}", flush=True)
+    return None, {host.host: model_schedule.handoff(host) for host in schedules}
+
+
+def model_binding_view(files, placement: dict) -> tuple[list[str], str | None]:
+    """`revl audit --placement`: each model role's binding per host and the
+    bindings digest (item 515 S5), computed by the same scheduler the
+    conductor runs. `(lines, None)`, or `([], diagnostic)` when the placement
+    cannot be scheduled. Empty lines for a composition with no routed model
+    action, so its audit output is unchanged."""
+    from . import model_schedule  # noqa: PLC0415
+    try:
+        names = _component_names(files)
+    except RevlError as exc:
+        # A composition DOCUMENT argument (item 439) is not a module and is
+        # not read here; say so rather than failing an audit that worked.
+        return [f"model bindings (item 515): not computed, the arguments do "
+                f"not parse as modules ({exc})"], None
+    expanded, err = expand_tiers(placement, names)
+    if err:
+        return [], err
+    try:
+        schedules = model_schedule.placement_schedules(
+            files, expanded.get("processes") or {})
+    except model_schedule.ScheduleRefusal as exc:
+        return [], str(exc)
+    manifest = model_schedule.binding_manifest(schedules)
+    if manifest is None:
+        return [], None
+    return (["model bindings (item 515): each role's device per host, as "
+             "declared and scheduled; not evidence of what a provider loaded"]
+            + ["  " + line for line in model_schedule.binding_lines(manifest)],
+            None)
+
+
+def _component_names(files) -> list[str]:
+    from . import model_schedule  # noqa: PLC0415
+    program = model_schedule.composition_program(files)
+    return [c.name for c in program.components]
+
+
+def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
+                             to_backend: str) -> tuple[dict | None, str | None]:
+    """The model schedule a swap successor is handed (item 515), as
+    `(spec entry or None, refusal or None)`. Scheduled against the devices the
+    predecessor's host declared; None when the component routes no model
+    action."""
+    from . import model_schedule  # noqa: PLC0415
+    devices = (old_spec.get("modelSchedule") or {}).get("devices")
+    try:
+        decided = model_schedule.placement_schedules(
+            files, {succ: {"components": [component], "devices": devices}})
+    except model_schedule.ScheduleRefusal as exc:
+        return None, str(exc)
+    if not decided:
+        return None, None
+    if _canonical_backend(to_backend) not in model_schedule.READING_TIERS:
+        return None, (f"component {component!r} routes model action(s) and "
+                      f"the {to_backend} tier's runner does not read a model "
+                      f"schedule (item 515)")
+    return model_schedule.handoff(decided[0]), None
+
+
 # --------------------------------------------------------------------------
 # named-instance placement (roadmap item 10 — the placement horizon)
 # --------------------------------------------------------------------------
@@ -2442,6 +2630,31 @@ def placement_slice(ir: dict, kept) -> dict:
     return out
 
 
+def seam_typing(ir: dict, key_services: dict) -> dict:
+    """The declared types a node process needs to decode a seam value (issue
+    #1566): for each key it serves or proxies, each method's parameter types
+    and return type, plus the document's type table for the nested fields.
+
+    The wire carries an `Int` as a JSON number (docs/interop-bridge.md,
+    "Canonical value encoding"), which JSON.parse turns into a JS `number`,
+    while the ts tier's `Int` is a `bigint`. Nothing on the wire says which
+    numbers are `Int`s, so the node runner converts by the declared types it
+    is handed here (`bridge.ts` `decodeAs`). Only node specs carry this, so
+    every other tier's spec is unchanged."""
+    services = ir.get("services") or {}
+    signatures: dict = {}
+    for key, service in sorted(key_services.items()):
+        table = {}
+        for method, spec in ((services.get(service) or {}).get("methods") or {}).items():
+            spec = spec or {}
+            table[method] = {
+                "params": [(p or {}).get("type") for p in spec.get("params") or []],
+                "returns": spec.get("returns"),
+            }
+        signatures[key] = table
+    return {"signatures": signatures, "types": ir.get("types") or {}}
+
+
 def host_ref_pins(ir: dict, own, files) -> dict:
     """The three host-module pin keys a placement spec carries for a process
     hosting the components `own` (item 396 option B / 410).
@@ -2496,6 +2709,21 @@ _EMIT_GATE_PATHS = {
     "go": _GO_DIR / "emit.py",
     "java": _JAVA_DIR / "emit.py",
 }
+
+
+class PlanRefusal(RuntimeError):
+    """A tier REFUSED a slice at plan time: an answer, carrying the refusing
+    tier's own sentence.
+
+    A `RuntimeError` subclass because that is what every caller of this module's
+    build path already catches, and because the gate's own node-arm refusal
+    (`_dryrun_emit`) has always been spelled as one. Its job is to be a type the
+    gate can name in an `except` clause, so that an emitter FAULT is no longer
+    indistinguishable from a tier limit (issue #1406): the gate used to catch
+    `Exception`, so `'NoneType' object has no attribute 'get'` out of a buggy
+    emitter was reported to the author as "component 'X' cannot be placed on the
+    `rust` tier", sending them to rewrite a program that was never the problem.
+    """
 
 
 def _emit_gate_module(backend: str):
@@ -2573,7 +2801,7 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
                                  & unemittable)
                 reach_str = ", ".join(reached) or "a py-only extern"
                 details.append(f"{cname} (reaches {reach_str})")
-            raise RuntimeError(
+            raise PlanRefusal(
                 "a node-placed component reaches a `@py`-only extern (no `@ts` "
                 "body and no `@ts ref`), which the ts tier cannot emit: "
                 + "; ".join(details)
@@ -2581,11 +2809,21 @@ def _dryrun_emit(backend: str, sliced: dict) -> None:
                 "across the seam as a bridge proxy (place it on `py`, give the "
                 "extern a `@ts` body, or point it at a host module with "
                 "`= @ts ref sym from \"...\"`)")
-        module.emit(safe)
-    elif backend == "go":
-        module.emit_placement(sliced, "emitted")
-    else:  # py, rust, java
-        module.emit(sliced)
+    # A tier limit is an ANSWER and becomes a `PlanRefusal`; anything else the
+    # emitter raises is a FAULT and propagates with its traceback intact (issue
+    # #1406). `refusals(module)` is THIS module object's own `EmitError` -- the
+    # class is defined inside each dynamically loaded `emit.py`, so there is
+    # none to name here and two loads of the same file give two unrelated
+    # classes.
+    try:
+        if backend == "node":
+            module.emit(safe)
+        elif backend == "go":
+            module.emit_placement(sliced, "emitted")
+        else:  # py, rust, java
+            module.emit(sliced)
+    except refusals(module) as refusal:
+        raise PlanRefusal(str(refusal)) from refusal
 
 
 def tier_capability_gate(ir: dict, placed: dict, backends: dict) -> str | None:
@@ -2608,14 +2846,18 @@ def tier_capability_gate(ir: dict, placed: dict, backends: dict) -> str | None:
         if backend and backend != "py":
             by_backend.setdefault(backend, []).append(cname)
     for backend, comps in by_backend.items():
+        # `PlanRefusal` and nothing wider (issue #1406). `_dryrun_emit` raises it
+        # for a tier limit and lets an emitter FAULT through untouched, so a bug
+        # inside an emitter is no longer rendered as this program's fault: it
+        # keeps its traceback and reaches whoever can fix it.
         try:
             _dryrun_emit(backend, placement_slice(ir, set(comps)))
-        except Exception as whole:  # noqa: BLE001 — any refusal is a plan diagnostic
+        except PlanRefusal as whole:
             culprit, reason = None, str(whole).strip()
             for cname in comps:
                 try:
                     _dryrun_emit(backend, placement_slice(ir, {cname}))
-                except Exception as single:  # noqa: BLE001
+                except PlanRefusal as single:
                     culprit, reason = cname, str(single).strip()
                     break
             named = f"component {culprit!r}" if culprit else "a component"
@@ -2923,6 +3165,20 @@ def process_cycle_refusal(requires: dict, provides: dict, owner: dict,
         "  the partition along the component DAG instead of across it.")
 
 
+def _tier_emitter(name: str, path) -> object:
+    """Load a backend `emit.py` and hand the CALLER the module object.
+
+    The caller keeps it because `EmitError` is a class on the module OBJECT: a
+    second `exec_module` produces a different class, and an `except` against it
+    would not catch the instance the first module raised (issue #1406). One
+    function so the three build steps below load an emitter the same way, and so
+    a test can substitute a refusing or a faulting emitter for any of them."""
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 def _emit_ts_module(ir: dict, tmp: Path) -> str:
     """Emit the cordis-ts module for node processes into backends/typescript/
     _gen/ so its `../runtime.ts` / `cordis` imports resolve.
@@ -2951,10 +3207,17 @@ def _build_java(ir: dict, tmp: Path) -> str:
     out.mkdir()
     gen = tmp / "java_gen" / "revl"
     gen.mkdir(parents=True)
-    spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
-    emit_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(emit_module)
-    (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
+    emit_module = _tier_emitter("revl_java_emit", _JAVA_DIR / "emit.py")
+    # issue #1406: a java tier limit is an answer, and the callers of this
+    # function report a `RuntimeError` as one (`abort(str(exc))` in the
+    # conductor, `error: could not build ...` in `revl run`). An `EmitError` is a
+    # `ValueError`, so before this it escaped every one of those catches as a
+    # traceback. An emitter FAULT is not caught and still does.
+    try:
+        components = emit_module.emit(ir)
+    except refusals(emit_module) as refusal:
+        raise RuntimeError(f"java emit failed:\n{refusal}") from refusal
+    (gen / "Components.java").write_text(components, encoding="utf-8")
 
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
     # Estop.java carries the operator E-Stop seam (item 443, issue #122): the
@@ -2981,16 +3244,36 @@ def _build_java(ir: dict, tmp: Path) -> str:
 def _build_rust(ir: dict, tmp: Path) -> str:
     """Regenerate the runner's components.rs (proxies/stub/plugin table) from the
     running IR, then cargo build. Regenerating per composition is what makes the
-    rust runner general; for user_cache it reproduces the committed module."""
+    rust runner general; for user_cache it reproduces the committed module.
+
+    The module is put back once cargo has read it (issue #1288). It is a
+    COMMITTED golden — tools/regen_goldens.py's rust target owns it, and owns it
+    as the same bytes as backends/rust/golden/user_cache.rs — so leaving another
+    composition's emission in the checkout is a modified golden, not scratch.
+    `revl run --backend rust` already restored it around this call
+    (src/revl/run_rust.py); the placement path reached the same write through
+    `ensure_backend` and never did, and a `swap ... --to rust` reaches it again
+    mid-run. An examples/outcome.rvl emission left here this way was swept into
+    an unrelated commit and surfaced days later as a one-file drift on someone
+    else's PR. Restoring at the one site that writes covers every caller."""
     ir_json = tmp / "rust_ir.json"
     ir_json.write_text(json.dumps(ir), encoding="utf-8")
     emitted = subprocess.run([sys.executable, str(_BACKENDS_DIR / "rust" / "emit.py"), str(ir_json)],
                              capture_output=True, text=True)
     if emitted.returncode:
         raise RuntimeError(f"rust emit failed:\n{emitted.stderr.strip()}")
-    (_RUST_RUNNER / "src" / "components.rs").write_text(emitted.stdout, encoding="utf-8")
-    build = subprocess.run(["cargo", "build", "--manifest-path", str(_RUST_RUNNER / "Cargo.toml")],
-                           capture_output=True, text=True)
+    components = _RUST_RUNNER / "src" / "components.rs"
+    committed = components.read_bytes() if components.exists() else None
+    try:
+        components.write_text(emitted.stdout, encoding="utf-8")
+        build = subprocess.run(["cargo", "build", "--manifest-path",
+                                str(_RUST_RUNNER / "Cargo.toml")],
+                               capture_output=True, text=True)
+    finally:
+        # cargo has compiled the module by now, so the built binary keeps this
+        # composition while the checkout keeps its golden.
+        if committed is not None:
+            components.write_bytes(committed)
     if build.returncode:
         raise RuntimeError(f"cargo build (rust runner) failed:\n{build.stderr.strip()}")
     return str(_RUST_RUNNER / "target" / "debug" / "revl_placement_runner")
@@ -3002,13 +3285,15 @@ def _build_go(ir: dict, tmp: Path) -> str:
     `go build`. Regenerating per composition is what makes the go runner general
     — cordis-go services are static Go interfaces, so generality is codegen, not
     a runtime-generic proxy (the same shape the rust runner takes)."""
-    spec = importlib.util.spec_from_file_location("revl_go_emit", _GO_DIR / "emit.py")
-    emit_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(emit_module)
+    emit_module = _tier_emitter("revl_go_emit", _GO_DIR / "emit.py")
+    # A go tier limit becomes the one-diagnostic `RuntimeError` every caller
+    # already reports. Narrowed from `except Exception` for issue #1406: that
+    # catch also swallowed an emitter FAULT into the same sentence, so a bug in
+    # the go emitter read as a property of the author's program.
     try:
         source = emit_module.emit_placement(ir, "emitted")
-    except Exception as exc:  # noqa: BLE001 — surface emit failures as one diagnostic
-        raise RuntimeError(f"go emit failed:\n{exc}") from exc
+    except refusals(emit_module) as refusal:
+        raise RuntimeError(f"go emit failed:\n{refusal}") from refusal
     # emit_placement concatenates gen.go and bridge_gen.go with a form-feed
     # sentinel so each file carries its own import block.
     module_src, bridge_src = source.split("\f", 1)
@@ -3058,10 +3343,12 @@ def _build_java_real(ir: dict, tmp: Path, jdk_bin: str, cordis_classes: str) -> 
     out.mkdir()
     gen = tmp / "java_real_gen" / "revl"
     gen.mkdir(parents=True)
-    spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
-    emit_module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(emit_module)
-    (gen / "Components.java").write_text(emit_module.emit(ir), encoding="utf-8")
+    emit_module = _tier_emitter("revl_java_emit", _JAVA_DIR / "emit.py")
+    try:                                       # issue #1406, as in `_build_java`
+        components = emit_module.emit(ir)
+    except refusals(emit_module) as refusal:
+        raise RuntimeError(f"java emit failed:\n{refusal}") from refusal
+    (gen / "Components.java").write_text(components, encoding="utf-8")
     compile_result = subprocess.run(
         [str(Path(jdk_bin) / "javac"), "--release", "21", "-cp", cordis_classes, "-d", str(out),
          str(_JAVA_DIR / "placement" / "Estop.java"),
@@ -3607,6 +3894,16 @@ def run_placement(files, placement_path: str, once: bool = False,
     if tee_problem:
         return abort(tee_problem)
 
+    # --- model scheduling (item 515, slice S4): a process may declare the
+    # devices it offers (`[[processes.<p>.devices]]`), and every routed model
+    # action of a component placed there is scheduled onto one of its declared
+    # candidates. No candidate fitting is a refusal here, before anything
+    # spawns. A composition with no `route model` block schedules nothing and
+    # prints nothing (docs/model-scheduling.md).
+    model_problem, model_handoffs = _model_schedules(files, processes)
+    if model_problem:
+        return abort(model_problem)
+
     if placement.get("report_colocation"):
         for advice in colocation_advice(processes, placed, ir):
             print(f"  co-location: {advice}", flush=True)
@@ -4061,6 +4358,18 @@ def run_placement(files, placement_path: str, once: bool = False,
             # path calls too so the pins survive a re-host (see `do_swap`).
             **host_ref_pins(ir, own, files),
         }
+        if backend == "node":
+            # issue #1566: the declared types the node runner decodes seam
+            # values by (an `Int` arrives as a JSON number and must become a
+            # `bigint`). Absent on every other tier's spec.
+            key_services = dict(provides[pname])
+            key_services.update({k: e["service"] for k, e in proxies.items()})
+            spec["typing"] = seam_typing(ir, key_services)
+        if pname in model_handoffs:
+            # item 515: this host's model schedule, re-derived and installed
+            # by the child before any component activates. Absent for a host
+            # that routes no model action, so its spec is unchanged.
+            spec["modelSchedule"] = model_handoffs[pname]
         if serve_keys:
             # `methods` is the stub's allowlist: the operations the *service
             # declaration* admits for each exported key, read off the IR. The
@@ -4219,11 +4528,11 @@ def run_placement(files, placement_path: str, once: bool = False,
             spec["module"] = built["node"]
         elif backend == "rust":
             spec["components"] = [_snake(c) for c in spec["components"]]
-            spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
+            spec["probe"] = [_parse_probe(p, ir) for p in spec["probe"]]
         elif backend == "go":
             # go keeps PascalCase component names (RevlLoad switches on them);
             # only probes are structured rather than eval'd strings.
-            spec["probe"] = [_parse_probe(p) for p in spec["probe"]]
+            spec["probe"] = [_parse_probe(p, ir) for p in spec["probe"]]
         elif backend == "java":
             spec["module"] = "revl.Components"
             iface_keys = (set(spec["proxies"]) | set(spec.get("serve", {}).get("keys", []))
@@ -4861,6 +5170,13 @@ def run_placement(files, placement_path: str, once: bool = False,
                 "methods": {k: methods.get(provides[old][k], []) for k in serve_keys},
             },
         }
+        if _canonical_backend(to_backend) == "node":
+            # issue #1566: the same declared seam types the boot path hands a
+            # node process, rebuilt for the successor's own keys.
+            key_services = dict(provides[old])
+            key_services.update({k: e.get("service") for k, e in succ_spec["proxies"].items()
+                                 if e.get("service")})
+            succ_spec["typing"] = seam_typing(ir, key_services)
         # roadmap 421 F8: carry the predecessor's correlation guard onto the
         # successor. Without this a swap SILENTLY DISARMS the seam, because the
         # successor's serve spec is built fresh from socket/keys/methods and a
@@ -4872,6 +5188,21 @@ def run_placement(files, placement_path: str, once: bool = False,
         # Carried only when the successor tier can actually RUN the guard: the
         # guard is built in `_process_runner.py`, so a swap onto a non-python
         # tier drops it, the same rule the boot path applies.
+        # item 515: the successor gets its OWN model schedule, re-derived for
+        # the component it hosts, on the devices the predecessor's host
+        # declared, from the files it is about to load. Copying the
+        # predecessor's entry would name the wrong host and the wrong
+        # component set, so the child would refuse it at boot. A candidate
+        # that no longer fits those devices, or a scheduled successor on a
+        # tier that does not read a schedule, refuses the swap here instead.
+        succ_model, model_refusal = _successor_model_schedule(
+            files, specs[old], succ, component, to_backend)
+        if model_refusal:
+            print(f"swap refused: {model_refusal}", flush=True)
+            print("  running composition untouched.", flush=True)
+            return
+        if succ_model is not None:
+            succ_spec["modelSchedule"] = succ_model
         _old_corr = old_serve.get("correlation")
         if _old_corr and to_backend in _CORRELATION_SEALING_TIERS:
             succ_spec["serve"]["correlation"] = {

@@ -69,8 +69,8 @@ STRIPE = "api.stripe.com"
 # class-(c) crossing without declaring an `extern` of its own (which the
 # untrusted-author profile refuses outright).
 _DECLS = (
-    "service Raw { emission fn send(host: Str, body: Str) }\n"
-    "service Gw { emission fn send(host: Str, body: Str) }\n"
+    "service Raw { emission[gwsend] fn send(host: Str, body: Str) }\n"
+    "service Gw { emission[raw] fn send(host: Str, body: Str) }\n"
 )
 
 

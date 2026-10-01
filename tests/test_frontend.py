@@ -120,6 +120,11 @@ REJECTIONS = {
     # service op, but whose declared function type carries no async color, is a
     # compile error — the sound replacement for the silent coroutine leak.
     "a1_async_arrow_sync_type.rvl": "carries no async color — the caller would receive an unawaited suspension (A1)",
+    # issue #1151: `Async[T]` is position-restricted and a transparent type
+    # alias's right-hand side is not one of its positions, so an alias of
+    # `Async[T]` is refused at the DECLARATION — before the arrow that uses it
+    # is ever asked whether it declares its own colour.
+    "a1_alias_of_async.rvl": "`Async[T]` is not a value type (`Async[Str]`)",
     # roadmap item 117 (harness finding #40): a SYNC provide method reaching an
     # async *service operation* through a required key in EXPRESSION position (a
     # ternary arm) — the blind spot the name-based reach left open — is refused
@@ -304,6 +309,20 @@ REJECTIONS = {
     # the position the `emit` sits in, and a marker written there is refused.
     "g4_nested_unmarked_emission.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     "g4_nested_emit_expression.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    # issue #1427: the same rule, on the spellings the two fixtures above do
+    # not reach. Both of them nest a REQUIRED SERVICE crossing in an ACTIVATION
+    # body with an UNSCOPED declaration, so three axes went unmeasured: the
+    # host emission extern carrier, a provide-method body, and a
+    # capability-scoped extern. The head's carrier is an axis too, and the
+    # extern carrier was the one that admitted.
+    "g4_nested_host_emission_activation.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_method.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_scoped.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_scoped_method.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_host_emission_in_service_emit.rvl": "call to emission `charge` must be marked `emit` (G4)",
+    "g4_nested_service_emission_in_host_emit.rvl": "call to emission `ledger.fetch` must be marked `emit` (G4)",
+    "g4_nested_emit_expression_host.rvl": "`emit` nested in the arguments of an `emit`: one marker admits one crossing (G4)",
+    "g4_nested_unmarked_emission_method.rvl": "call to emission `b.fetch` must be marked `emit` (G4)",
     # --- the indirection cluster ------------------------------------------
     # One shape recurs across all of these: an obligation is carried through an
     # INDIRECTION — a spawn handle, an alias, an arrow, a first-class function
@@ -406,6 +425,25 @@ REJECTIONS = {
     # unit can no longer disclose the token into an ordinary sink.
     "gsecret_service_return_discloses.rvl":
         "a Secret[T] value flows into an extern host call (a disclosure sink)",
+    # roadmap item 512: the PLACEMENT dimension. A `model role` says where a
+    # model call runs, and an action that routes the `confidential` origin to a
+    # role declared `off_device` is refused naming the action, the origin and
+    # the role — the item's exit test verbatim. The fixture arrived with slice
+    # 3 rather than with the rule: `examples/rejections/` is a census corpus
+    # root, and until the self-host decided `route model` a file here would
+    # have entered the census as an out-of-slice `BAD`.
+    "gmodelplace_confidential_off_device.rvl":
+        "routes the `confidential` origin to model role `cloud`",
+    # roadmap item 516 slice 2: the same rule where the arm names a model
+    # COUNCIL. A council's members are placed separately, so the council's own
+    # residence is the most permissive of theirs and the refusal names the
+    # MEMBER that made the join rather than the council. Its admitting twin is
+    # `examples/model_council_binding.rvl`, which is this file with the
+    # proposer on an `on_device` role: one word apart, and only one of them
+    # compiles.
+    "gmodelplace_council_member_off_device.rvl":
+        "routes the `confidential` origin to model council `Release`, whose "
+        "member `proposer` runs on model role `vast`",
     # roadmap item 472: the RETENTION dimension of the same qualifier family. A
     # `Retained[T, P]` value past P's deadline may not reach a persistence sink
     # (a crossing whose declared capability scope means durable storage). The
@@ -472,6 +510,10 @@ REJECTIONS = {
     # drift rejections, which need a running composition and so cannot be a
     # single-file fixture.
     "service_compat_duplicate.rvl": "duplicate service `Cache`",
+    # G-COUNCIL-SPLIT (item 516, docs/design/543-model-council.md): a council
+    # aggregation written to admit on a tie. The fixture landed with commit
+    # 0c21295e and this table did not follow it.
+    "gcouncilsplit_on_tie_allow.rvl": "admits when the members disagree",
 }
 
 # ------------------------------------------------------------------ coverage
@@ -531,6 +573,36 @@ def test_rejection(filename, expected):
     with pytest.raises(RevlError) as excinfo:
         compile_files([str(EXAMPLES / "rejections" / filename)])
     assert expected in str(excinfo.value)
+
+
+@pytest.mark.parametrize("filename", [
+    "g4_emit_arrow_argument_inline.rvl",
+    "g4_emit_arrow_argument_let_arrow.rvl",
+    "g4_emit_arrow_argument_let_value.rvl",
+])
+def test_a_marked_crossing_in_an_arrow_argument_is_admitted(filename):
+    """An arrow's body runs when the arrow is called, not while the enclosing
+    `emit`'s arguments are evaluated. The inline spelling was refused as a
+    nested `emit` because the emit-argument position leaked into the arrow
+    body; its two `let` twins, the same crossings in the same order, compiled.
+    All three are admitted."""
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / filename)])
+    assert ir is not None
+
+
+def test_an_unmarked_crossing_in_an_arrow_argument_is_still_refused():
+    """The refusing twin: clearing the argument position for the arrow body
+    does not exempt the body. An unmarked emission there is refused for its
+    missing marker, as it is in an arrow bound by `let`."""
+    from revl import compile_source
+
+    src = (ROOT / "tests" / "fixtures" / "g4_emit_arrow_argument_inline.rvl"
+           ).read_text(encoding="utf-8").replace(
+        "=> emit approvals.approve(t, a)", "=> approvals.approve(t, a)")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "arrow_unmarked.rvl")
+    assert "call to emission `approvals.approve` must be marked `emit` (G4)" \
+        in str(excinfo.value)
 
 
 def test_a1_async_op_via_ternary_in_async_method_ok():

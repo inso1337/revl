@@ -15,7 +15,7 @@ audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
 dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
-profile  attest  dash  repair  bundle  emit  verify  deploy
+profile  pool  attest  dash  repair  bundle  emit  verify  deploy
 deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -515,6 +515,12 @@ question.
 - `--mcp-scope COMPONENT` - treat `COMPONENT` as MCP/agent-admitted so the
   policy's `mcp` sandbox allow-list applies to it; repeatable, `*` = every
   component.
+- `--placement PLACEMENT` - a TOML/JSON placement map. Also prints the item-411
+  sandbox envelope per sandboxed process, and each model role's binding per
+  host with the model bindings digest (item 515,
+  [model-scheduling.md](model-scheduling.md)). A placement whose routed model
+  actions cannot be scheduled exits nonzero with the scheduler's refusal.
+  Human output only; the `--json` body is unchanged.
 
 ### `revl goal audit`
 
@@ -854,6 +860,14 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   value outside a declared `under "<prefix>"` / `in [...]` bound each refuse the
   boot before any runtime is imported. See
   [environment-binding.md](environment-binding.md).
+- `--providers FILE` - JSON/TOML provider configuration binding each
+  `model role` to a runtime adapter (OpenAI-compatible, Anthropic Messages,
+  Gemini). The composition's model `requires` keys are then served by those
+  adapters. Checked before any runtime is imported: an `on_device` role bound
+  to an endpoint off the device, a crossing on an unbound or undeclared role, a
+  binding that reaches past its role, a credential written into the file, or
+  an unset credential variable each refuse the boot. py tier only. `--plan`
+  prints the bindings. See [model-providers.md](model-providers.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
   refused and the run keeps going.
 - `--record` - record the effect accumulator so the REPL can step backwards
@@ -884,6 +898,49 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
 - `--once` - bring the composition up, then tear down LIFO and exit (with
   `--placement`, run probes across processes first; with a non-py backend,
   boot the tier's process, prove no residue, exit).
+- `--pool private` - run the composition on a PRIVATE PEER POOL member instead
+  of this machine (roadmap item 524). The artifact is pinned by hash, the peer
+  re-hashes what it runs, and the result comes back with a signed execution
+  receipt that is verified before anything is recorded as delivered. `private`
+  is the only value: a public or swarm pool needs a different threat model and
+  is absent rather than unimplemented. See
+  [design/567-pool-dispatch.md](design/567-pool-dispatch.md) and the
+  [`revl pool`](#revl-pool) verbs.
+  - `--pool-dir DIR` - the operator's pool directory (charter, roster,
+    identities, delivery ledger).
+  - `--peer ID` - the admitted member to run on. A peer that is not in the
+    roster is refused on `not-a-member`.
+  - `--peer-addr HOST:PORT` - where that member's `revl pool serve` is
+    listening. The address is how to REACH the peer; its identity is the key it
+    signs with, so an address nobody vouched for reaches a peer whose receipts
+    then fail to verify.
+  - `--dispatch-identity PATH` - the operator's PRIVATE identity file, which
+    signs the task. The peer holds only its public half.
+  - `--attest-identity PATH` - the private identity file that attests the
+    returned receipt. Its fingerprint must be in the charter's attest authority
+    (`pool init --attest-identity`) or the receipt is checked and counts for
+    nothing.
+  - `--pool-runner {run-once-py, test-py}` - what the peer does with the
+    artifact. `run-once-py` (default) boots the composition and proves teardown
+    leaves no residue, which needs a cordis-py runtime ON THE PEER; `test-py`
+    runs the artifact's own declared tests and needs only the revl frontend. A
+    runner the peer does not implement is refused on `unknown-runner`, never
+    defaulted.
+  - `--pool-timeout SECONDS` - how long to wait for the peer (default 300). A
+    timeout leaves the task OUTSTANDING in the ledger, because a task whose
+    fate is unknown is neither delivered nor dropped.
+
+  Every other `revl run` flag is honoured by the LOCAL runner and cannot cross
+  to a pool member, so `--pool private` refuses it by name on
+  `unsupported-with-pool` rather than accepting it and ignoring it. What the
+  peer does with the artifact is `--pool-runner` and nothing else.
+
+  Only a composition whose audited G8 boundary is EMPTY is dispatched. That is
+  `EffectClass.pure` and nothing weaker is claimed: an extern whose declared
+  class is `pure` still runs host code, so reading a declared class as an
+  effect class would be fail-open on the one arrow that sends work to a machine
+  nobody trusts. A composition that crosses is refused on
+  `effect-class-unproven`, naming what the audit saw.
 
 Under `--placement` the conductor waits for each child's own `[<name>] DOWN`
 line - the runner's statement that its LIFO unwind covered every registered
@@ -912,7 +969,25 @@ LIFO), ending in a checked verdict + residue proof
 - `--wal FILE` - a write-ahead log written by `revl run --wal` (required).
 - `--restore SNAPSHOT.json` - on roll-forward, the item-15 snapshot to
   re-admit so recovery resumes the persisted generation.
-- `--json` - machine-readable output.
+- `--approval-policy auto` - on `--restore`, re-arm the auto-approve policy the
+  snapshot was taken under, so a class-(c) activation crossing re-prompts
+  instead of firing unprompted.
+- `--policy POLICY` - the boundary-policy file. On `--restore` it re-binds the
+  posture the snapshot was taken under; a `recovery may re-issue owed
+  emissions` rule also turns on the item-440 re-issue seam.
+- `--forward` - finalize forward a two-phase admission whose runtime advanced
+  past the crash and whose surface still matches. Without it, recover only
+  reports each un-finalized decision.
+- `--model-only` - accept a run against the in-memory model (see below).
+- `--json` - machine-readable output. The verdict carries `world`.
+
+`revl recover` cannot bind the real outside world yet, so it replays against an
+in-memory model (`DictWorld`). Every call it reports is marked `[modelled, not
+performed]`, the verdict carries `"world": "model"` and `"worldCalls"`, and a
+model run never writes an at-most-once fence to the WAL. Exit status: `0`
+clean (with `--model-only` if the model stood in for any call), `1` honest
+residue, `3` clean in the model after the model stood in for at least one call,
+without `--model-only`, so nothing out there was reconciled. See [crash-recovery.md](crash-recovery.md#5b-the-model-is-not-the-world-issue-1477).
 
 ### `revl estop`
 
@@ -1169,6 +1244,183 @@ of [revl-attest.md](revl-attest.md) for the trust boundary.
   record; falls back to the `REVL_ATTEST_SIGNER` env var.
 - `--json` - machine-readable output.
 
+### `revl pool`
+
+Stand up and operate a private peer pool (roadmap item 524): several
+independent operators running work for each other without trusting each other's
+machines. The verbs declare a pool, admit a peer that proves its identity and
+its artifact, read the roster, check that members are still there, run work on
+a member and read the delivery ledger, and withdraw a peer. See
+[design/550-private-peer-pool.md](design/550-private-peer-pool.md) for the trust
+progression and the failure direction of every step in it, and
+[design/567-pool-dispatch.md](design/567-pool-dispatch.md) for the task
+envelope, the one-result ledger and the channel.
+
+Work reaches a member through [`revl run --pool private`](#revl-run) on the
+operator's side and `pool serve` on the peer's. The peer re-hashes the artifact
+it is about to run, signs an execution receipt over the result, and the
+operator verifies the result by hash and the receipt by signature before the
+ledger records it as delivered.
+
+The pool is a signed charter plus an append-only roster, and a directory of the
+peers' public keys. A peer's identity is a key, not an address, and its join
+request pins the charter by digest, so a peer agrees to a set of terms rather
+than to a pool name. Every refusal names one lowercase link (`artifact-digest`,
+`replayed-join`, `grant-ceiling`, ...), and the verb exits nonzero on one.
+
+Several operator commands can run against one pool directory at once. Every
+verb that changes pool state (`init`, `register`, `rotate`, `revoke-key`,
+`join`, `withdraw`, `probe`, and `run --pool private`) holds an exclusive lock
+on `pool.lock` in the directory for its read-modify-write, never while waiting
+on a peer, and every state file is replaced atomically, so no update is lost
+and `status` never reads half a file. The lock is advisory: it binds `revl`
+processes, not other programs editing the files.
+
+A peer's identity is an asymmetric key pair by default (issue #1278): the peer
+draws it with `pool keygen`, the operator pins only the public half with `pool
+register`, and a join, an offer and a withdrawal are each verifiable by any
+holder of that public key rather than only by the operator. A compromised
+operator key therefore forges no peer's join. The original shared-key MAC
+backing is still available as `--identity shared-key`, and `--identity mixed`
+admits both during a migration, in which case `pool status` names the members
+still on the weaker one. There is no fallback between the two: `sign_alg`
+selects one verifier and its failure is a refusal, and a peer with a pinned
+public key may never present a shared-key join. See
+[design/555-asymmetric-peer-identity.md](design/555-asymmetric-peer-identity.md)
+for the key lifecycle and what the signature binds.
+
+- `init` - declare a pool and sign its charter.
+  - `--dir DIR` - where `charter.json` and `roster.json` are written.
+  - `--pool-id ID` - the pool's name. A peer pins the charter by digest, so
+    renaming a pool does not let old terms be reused.
+  - `--ceiling CAP` - the most authority this pool will ever delegate to any
+    member at any tier. Repeatable. Every tier grant is diffed against it.
+  - `--entry-caps CAP` - the grant the entry tier hands a newly admitted peer.
+    Repeatable. Not covered by `--ceiling` means the pool admits nobody.
+  - `--artifact DIGEST` - an artifact digest this pool admits. Repeatable.
+  - `--trust-floor LEVEL` - the minimum attested trust a joining peer clears.
+  - `--identity MODE` - `asymmetric` (default), `shared-key` or `mixed`. The
+    mode is inside the signed charter body, so it cannot be flipped without
+    re-signing.
+  - `--revoke-identity PATH` - a public identity file whose fingerprint may
+    also revoke. Repeatable. Give this when withdrawals should be signed with a
+    key pair.
+  - `--attest-identity PATH` - a public identity file whose fingerprint may
+    attest an execution receipt. Repeatable. The public half is pinned in the
+    pool's directory at the same time, because naming a fingerprint says who
+    may attest and the directory is what holds the key a verdict is checked
+    against. An execution receipt is an ASYMMETRIC record, so a pool with no
+    `--attest-identity` can count no receipt at all and no member can rise
+    above the entry tier.
+  - `--key PATH` - the operator signing key (falls back to
+    `REVL_ATTEST_KEY_FILE` / `REVL_ATTEST_KEY`).
+- `keygen` - the peer side: draw a key pair on this machine. The private half is
+  written 0600 and never leaves it; the public half is what the operator pins.
+  - `--peer-id ID`, `--out PATH` (private), `--public PATH`
+- `register` - pin a peer's public key. The only way a key enters the
+  directory: a join request cannot introduce the key it is checked under. Check
+  the fingerprint over a second channel before pinning.
+  - `--dir DIR`, `--public PATH`
+- `rotate` - replace a peer's active key. The old key stays in the directory and
+  keeps verifying what it signed; it authorises nothing from the rotation on.
+  - `--dir DIR`, `--public PATH` (the NEW public half), `--reason TEXT`
+- `revoke-key` - withdraw a key's authority. It keeps verifying, so the records
+  it signed stay checkable by anyone holding the public half.
+  - `--dir DIR`, `--peer-id ID`, `--key-id FP`, `--reason TEXT`
+- `request` - the peer side: sign a join request against a charter it was
+  given, carrying its signed peer offer and the artifact digest it will run.
+  - `--charter PATH`, `--peer-id ID`, `--artifact DIGEST`, `--out PATH`
+  - `--ceiling CAP` - the most authority this peer will accept. Repeatable. A
+    tier grant not covered by it is refused.
+  - `--trust LEVEL`, `--region NAME`, `--hardware NAME` - the facets this peer
+    attests.
+  - `--identity-key PATH` - this peer's private identity file from `pool
+    keygen`. The join and the offer are both signed with it.
+  - `--key PATH` - this peer's shared key, exchanged with the operator out of
+    band. Used only when `--identity-key` is not given.
+- `join` - the operator side: decide a peer's signed join request against the
+  charter. Admits at the entry tier or refuses, naming the link.
+  - `--dir DIR`, `--join PATH`, `--key PATH`
+  - `--peer-key PATH` - needed only for a legacy shared-key join. A peer with a
+    pinned public key is verified against that.
+- `status` - members, tiers, what each holds, the effect class each tier
+  admits, who may admit, revoke and attest, and which members are on which
+  identity backing. Each member's row also carries what it owes
+  (`outstanding=N`) and its liveness: `health=live@<instant>`,
+  `health=unreachable` or `health=unverified` with `since`, `failures`, the
+  link and `last-live`, or `health=unknown` if nothing ever contacted it.
+  Needs no key.
+  - `--dir DIR`
+  - `--json` - the charter, the roster with its event ledger, the identity
+    directory and the health record.
+  - `--require-live SECONDS` - a health check: exit 1, naming the members on
+    stderr, if any member's most recent contact was not a verified heartbeat
+    or delivery within SECONDS. It withdraws nobody.
+- `probe` - check that members are still there. Sends each a probe signed with
+  the operator identity tasks are signed with; the member's `pool serve`
+  answers with a heartbeat signed under its own key, echoing the probe's nonce.
+  The heartbeat counts only if it verifies under an ACTIVE key the directory
+  pins for that member and answers this probe; anything else at the address is
+  recorded `unverified`, never live (`heartbeat-signature`, `heartbeat-key`,
+  `stale-heartbeat`, `probe-refused`, ...). Results go to `health.json` in the
+  pool directory. A probe changes no authority: an unreachable member stays a
+  member until `pool withdraw` removes it under the revoke authority. Exits 1
+  if any probed member is not live, and on an empty pool. See
+  [design/550-private-peer-pool.md](design/550-private-peer-pool.md#liveness).
+  - `--dir DIR`
+  - `--peer ID` - a member to probe. Repeatable. Default: every member.
+  - `--peer-addr HOST:PORT` - where that member's `pool serve` listens. Needs
+    exactly one `--peer`. Without it the address of the member's last verified
+    contact is used, and a member never contacted is refused on `no-address`.
+  - `--dispatch-identity PATH` - the operator's private identity file, the one
+    `run --pool private` signs tasks with.
+  - `--timeout SECONDS` - per member (default 10).
+  - `--json` - every outcome, with the recorded health row.
+- `withdraw` - remove a peer and report, in three disjoint sets, what that
+  revokes (an inverse exists), what it retains (no inverse: the work is done
+  and the ledger keeps it) and what it orphans (outstanding work, handed to the
+  lawful-retry dispatcher). Every key the directory pins for the peer is
+  revoked, not only the one that signed its join: each confers no authority and
+  each still verifies what it signed, so the ledger stays checkable.
+  - `--dir DIR`, `--peer ID`, `--reason TEXT`, `--key PATH`
+  - `--identity-key PATH` - sign the withdrawal receipt with an operator key
+    pair, so any holder of the matching public key can check who removed whom.
+    Its fingerprint must be in the charter's revoke authority.
+- `serve` - the PEER side: listen for signed tasks, run the artifact the task
+  pins BY HASH, and answer with a signed execution receipt. It holds its own
+  private identity and the operator's PUBLIC one, so there is no secret here
+  that could admit anybody, which is what makes running it on a machine the
+  operator does not trust coherent. Every refusal names a link
+  (`task-signature`, `charter-identity`, `artifact-digest`, `replayed-task`,
+  ...) and is answered on the connection rather than dropped. It also answers
+  `pool probe` with a signed heartbeat, after checking the probe against the
+  same pinned operator key; a probe runs nothing.
+  - `--charter PATH` - the charter this peer joined. A task must pin its
+    digest, so a charter re-signed with different terms invalidates every task
+    minted under the old ones.
+  - `--identity-key PATH` - this peer's private identity file from `pool
+    keygen`. It signs the receipt and names the peer a task must address.
+  - `--operator-public PATH` - the operator's public identity, pinned out of
+    band. A task that does not verify under it is refused before any member of
+    it is read as meaningful.
+  - `--host HOST` / `--port PORT` - bind address (default loopback) and port
+    (0 asks the OS for a free one, which is printed).
+  - `--allow-remote` - permit a non-loopback bind. The channel has NO transport
+    security: every record on it is signed, so nothing can be forged
+    undetected, and nothing on it is secret - the artifact source crosses in
+    the clear. A confidential cross-machine channel is roadmap item 118's mTLS
+    work, which this is a caller of rather than a second copy of.
+  - `--workdir DIR` - where artifacts are written and run (default: a fresh
+    temporary directory removed on exit).
+  - `--timeout SECONDS` - how long one artifact may run (default 300).
+  - `--once` - serve one task and exit.
+- `ledger` - the delivery ledger: every task dispatched, its state
+  (`dispatched`, `delivered`, `orphaned`, `refused`), and the append-only event
+  log. A refused SECOND delivery for a task is an appended event carrying both
+  result digests, which is the visible half of "delivered twice must be
+  impossible or visible". Needs no key, for the same reason `status` does not.
+  - `--dir DIR`, `--json`
+
 ### `revl erase-report`
 
 Right-to-erasure evidence for one realm: in-process state gone (no-residue
@@ -1357,7 +1609,11 @@ source plus the runtime manifest, so one artifact carries every tier.
   (required).
 - `--backend BACKEND` - a backend to emit into the bundle; repeatable. Omit to
   emit every backend (python, typescript, rust, java, go, wasm). An emitter
-  that refuses this IR is recorded as skipped, not as a failure.
+  that is absent from this machine is omitted quietly and the bundle still
+  exits 0; an emitter that *refuses* this IR is recorded under
+  `refusedBackends` in the runtime manifest with its own diagnostic, printed
+  to stderr in the emitter's own words, and the bundle exits 4
+  (`docs/bundle.md` §4).
 - `--topology PLACEMENT` - a placement/topology map (TOML or JSON) carried in
   the bundle as `topology.json`; omit for a single-process bundle.
 - `--json` - print the bundle path and its runtime manifest as JSON.
@@ -1497,7 +1753,31 @@ becomes an `emission`).
 - `--key KEY` - provision key (default: `imported`).
 - `--backend {ts, py}` - host block backend for the generated externs
   (default: `ts`).
+- `--undo TOOL=INVERSE[:result]` - declare `INVERSE` as the tool that reverts
+  `TOOL`, making `TOOL` `witnessed` (repeatable). `INVERSE` receives `TOOL`'s
+  arguments, or with `:result` its `structuredContent`. Your assertion, not the
+  server's.
 - `-o`, `--output PATH` - output path (default: stdout).
+
+`revl mcp proxy [OPTIONS] -- COMMAND [ARG ...]` - gate an existing MCP server
+with no `.rvl` written ([mcp-proxy.md](mcp-proxy.md)). The proxy starts
+`COMMAND`, speaks MCP over stdio to it and to its own client, classifies each
+upstream tool with the same classifier `revl mcp import` uses, and routes every
+tool call through a live session with the approval policy on: approval, the
+write-ahead log and declared undos apply at call time.
+
+- `upstream` - the server command after `--` (required).
+- `--undo TOOL=INVERSE[:result]` - as for `revl mcp import`; a witnessed tool
+  runs without a prompt and is reverted on abort.
+- `--trust-read-only-hints` - admit a tool whose uncontradicted `readOnlyHint:
+  true` revl cannot check, as `plain`. By default such a tool is gated like any
+  emission and its verdict reads `gated: unchecked read-only claim`.
+- `--upstream-timeout SECONDS` - how long to wait for one upstream answer
+  (default: `120`).
+- `--wal PATH` - the session write-ahead log (default: the per-user state
+  directory).
+- `--operator-profile PROFILE`, `--operator TOKEN`, `--policy POLICY`,
+  `--approval-record-values {bound, withheld}` - as for `revl mcp serve`.
 
 ### `revl import`
 
@@ -1599,7 +1879,10 @@ projection cannot express - a resource handle (an `extern acquire` return), a
 generated file also ships an `httpTransport(base)` factory that drops straight
 onto a `revl serve --http` face (below): `base` is the service's route prefix
 `http://host:port/<composition>/<key>`, and each call POSTs its positional
-arguments as a JSON array.
+arguments as a JSON array. That face serves the canonical path only for an
+operation marked public, and none can be yet, so a client of `revl serve
+--http` today reaches the routed operations, which the generated class calls
+at their routes.
 
 `--face webui` projects a different typed boundary from the same IR: the Cordis
 WebUI channel of ONE component (item 457 slice S4, design note 530 Decision B;
@@ -1673,22 +1956,64 @@ array, or a `sourcesContent` whose length does not match `sources`.
 
 Serve a composition's OWN provided operations (the fourth quadrant: hints
 derived by the compiler), over one of two transports. Distinct from `revl mcp
-serve`, which serves the compiler itself. The transport decides nothing: the
-operation set, the checked emission hints and the wire shape are all the
-compiler's.
+serve`, which serves the compiler itself. The checked emission hints and the
+wire shape are the compiler's.
+
+Neither transport ever decodes an authority value from a request (item 569,
+issues #1502 and #1503). An operation with a parameter whose type carries
+`Principal` (directly, inside a generic, or inside a record or variant) or
+whose declared type carries `Trusted[...]` is withheld: it is not served, not
+listed, and a request naming it is refused with the operation, the parameter
+and its type. A `Principal` comes only from the validator that mints it
+(`Auth.validate`, `stdlib/auth.rvl`), and a `Trusted[...]` value only from
+first-party code, so `stdlib/admit.rvl`'s `admission.admit` (whose `granted` is
+`Trusted[List[Str]]`) is never served. `revl serve` prints each withheld
+operation to stderr at start.
+
+The face authenticates nobody itself: a routed handler that takes a `Bearer`
+runs `auth.validate`, and on the py tier `stdlib/auth.rvl` backs that with an
+HS256 JWT validator (issue #1554). It verifies the signature and requires
+`exp`, `iss`, `aud` and `sub`. Configure it through the environment of the
+`revl serve` process, never through `--config`:
+
+- `REVL_AUTH_HS256_SECRET` (or `REVL_AUTH_HS256_SECRET_FILE`, a file holding
+  it) - the shared key, at least 32 bytes.
+- `REVL_AUTH_ISSUER` - the exact `iss` a token must carry.
+- `REVL_AUTH_AUDIENCE` - the audience a token's `aud` must contain.
+- `REVL_AUTH_LEEWAY` - optional clock-skew allowance, 0 to 300 seconds.
+
+A valid token's `sub` becomes the `Principal`'s subject. A bad token is a `401`.
+With no validator configured, every authenticated route answers `503`
+`auth_not_configured`, naming the variables to set. The any-token test stub
+(a non-blank token is that subject) runs only with
+`REVL_AUTH_INSECURE_DEV_STUB=1`, and is refused if a key is also set. With
+that flag set to any value, `revl serve --http` refuses to start on a
+non-loopback `--host` (exit 2, naming the flag and the address), before it
+loads or binds anything; `127.0.0.1`, `::1` and names that resolve only to
+loopback still start. The ts,
+rust, go, java and wasm tiers have no validator body, so emitting a composition
+that composes `stdlib/auth.rvl` for them is refused at compile time.
 
 - `FILES` (required).
 - One transport (mutually exclusive; required):
-  - `--mcp` - serve over the MCP stdio protocol.
-  - `--http` - serve over HTTP. Each provided operation is
-    `POST /<composition>/<key>/<op>`, with the request and response bodies in
-    the canonical value encoding ([interop-bridge.md](interop-bridge.md)) - the
-    server face `revl export client` pairs with (item 424 gap (c), D-424c.6). A
-    request body is the operation's positional arguments as a JSON array (or an
-    object `{"args": [...]}`, or empty for a no-argument call); a success replies
+  - `--mcp` - serve over the MCP stdio protocol. Every provided operation that
+    is not withheld is a tool.
+  - `--http` - serve over HTTP. The face serves the composition's PUBLIC
+    SURFACE, not its wiring: the routed operations (a `route` clause, item 457)
+    at their declared method and path, plus any operation explicitly marked
+    public at `POST /<composition>/<key>/<op>`. The language has no public
+    marking yet, so today the face serves the routed operations only; a
+    canonical path answers `404`, and a withheld operation's canonical path or
+    route answers `403` naming the parameter. On the canonical path the request
+    and response bodies are the canonical value encoding
+    ([interop-bridge.md](interop-bridge.md)) - the server face
+    `revl export client` pairs with (item 424 gap (c), D-424c.6). A request
+    body is the operation's positional arguments as a JSON array (or an object
+    `{"args": [...]}`, or empty for a no-argument call); a success replies
     `{"ok": true, "value": <encoded result>}`, the exact shape the placement
-    bridge returns. `GET /` returns the manifest: the served operations, their
-    compiler-derived `readOnly`/`emission` hints, and the gate FRONTIER the face
+    bridge returns. `GET /` returns the manifest: exactly the served surface
+    (its canonical operations with their compiler-derived
+    `readOnly`/`emission` hints, and its routes) and the gate FRONTIER the face
     was projected under. The face is LOCAL contract only - it makes no safety
     claim about any callee it in turn reaches - and binds loopback by default.
 - `--host HOST` - `--http` bind address (default: `127.0.0.1`).
@@ -1745,9 +2070,12 @@ verbs it accepts today:
   recomputed hashes tier by tier: version, source, independent pin, dependency
   lock, IR, policy surface, backend version, attestation, and emitted artifact. Each
   tier reports OK, MISMATCH, or "cannot verify" (nothing was recorded for it -
-  honest degradation, not a pass). `reproduce` is a verifier and changes no truc
-  state, so the launcher intercepts it before the component dispatch rather than
-  routing it through `cli.rvl`.
+  honest degradation, not a pass). On the emitted-artifact tier a backend that
+  is absent from this machine is "cannot verify"; a backend that *refuses* the
+  rebuilt IR is a MISMATCH quoting the emitter's own diagnostic, with no rebuilt
+  hash, because nothing was rebuilt (issue #1403). `reproduce` is a verifier and
+  changes no truc state, so the launcher intercepts it before the component
+  dispatch rather than routing it through `cli.rvl`.
   - `component` - the component to reproduce, `name` or `name@version`
     (required; omitting it exits 2). `@version` is a pin: it is checked against
     the version the registry records for the entry (its `version` file, carried

@@ -36,12 +36,11 @@ dependents cannot over-read it. It touches neither the oracle nor its generator.
 
 from __future__ import annotations
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
 
 from revl.gate import admit
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 CRATE = ROOT / "crates" / "revl-gate"
@@ -55,10 +54,7 @@ def _generator():
     """Load `tools/build_gate_crate.py` by path, the way the drift gate does, so
     the canonical `COVERED_LAYER` constant comes from the file under test."""
     path = ROOT / "tools" / "build_gate_crate.py"
-    spec = importlib.util.spec_from_file_location("revl_build_gate_crate", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["revl_build_gate_crate"] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("revl_build_gate_crate", path)
     return module
 
 
@@ -216,11 +212,9 @@ def test_the_crate_cannot_admit_the_type_layer_probes():
         "no admitting VERDICT arm may exist, or the type-layer probes could be "
         "admitted through `admit`"
     )
-    spec = importlib.util.spec_from_file_location(
-        "boundary_census", ROOT / "tools" / "gate_reference_census.py")
-    census = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = census
-    spec.loader.exec_module(census)
+    census = load_by_path(
+        "boundary_census",
+        ROOT / "tools" / "gate_reference_census.py")
     certify = census.build_admission_certify()
     for src in TYPE_LAYER_PROBES:
         assert not certify(src), (

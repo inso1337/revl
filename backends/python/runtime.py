@@ -317,7 +317,212 @@ def _json_schema_error(value, schema, path: str = "$"):
 _VALIDATE_MISSING = object()
 
 
-def validate_response(value, schema, where: str = "", constructors=None):
+# ---------------------------------------------------------------------------
+# item 513 slice 2: the provider seam
+# (docs/design/542-grammar-constrained-decoding.md, §9)
+#
+# Slice 1 derived a decoding grammar and bound it in the IR, and nothing read
+# it. This is the half that lets a provider receive it, and the half that makes
+# an honoured decode a CHECKED claim rather than an assumed one.
+#
+# Three calls, and the split between them is the whole design:
+#
+#   `revl_decode_grammar(key)`  - look at the stated constraint. No claim.
+#   `revl_constrain(key, dialects)` - take it, in the first dialect the provider
+#       names that the crossing can supply. TAKING IT IS THE CLAIM: a provider
+#       that calls this is saying "I constrained this decode with exactly this
+#       artifact", and the claim is checked when the response settles.
+#   `validate_response(..., grammar=...)` - the existing seam, now also deciding
+#       whether a claim that was made is true.
+#
+# A provider that never calls `revl_constrain` claims nothing and is validated
+# exactly as it was before, and the crossing records that the grammar was stated
+# and not taken, so nothing downstream can read the crossing as constrained. A
+# provider that DOES claim and then returns something outside the artifact it
+# named gets a NAMED refusal (`GrammarNotHonouredError`) rather than a silent
+# downgrade. That is the fail-open direction closed at the only point where a
+# claim exists to be false.
+# ---------------------------------------------------------------------------
+
+class GrammarNotHonouredError(ResponseValidationError):
+    """Item 513 (§9.3): a provider took the crossing's decoding constraint and
+    returned a completion outside it.
+
+    A subclass of :class:`ResponseValidationError` on purpose. It is a response
+    fault of the same kind and the same retryability -- a re-issued completion may
+    well be honoured -- so it rides item 257's existing retry loop and the body
+    observes the same terminal typed fault on exhaustion. What the subclass adds
+    is a NAME: "the provider said it constrained this decode and it did not" is a
+    different operational problem from "the model answered badly", and a
+    diagnostic that cannot tell them apart sends the reader to the wrong place.
+    """
+
+
+#: Every validated crossing's stated grammar, keyed `"Service.method"` for a
+#: service operation and `"extern:name"` for an extern. Populated once at module
+#: import by the emitted document (`register_grammars`), so a provider can find
+#: the constraint for the crossing it is about to serve without the compiler
+#: having to thread it through a call signature it does not own.
+_revl_grammars: "dict[str, dict]" = {}
+
+#: The claim a provider made for the completion currently in flight: the digest
+#: of the artifact it took, or None. Fiber-local for the same reason the model-
+#: hop registers are: two crossings can be in flight in one process and a claim
+#: must not travel between them.
+_revl_grammar_claim: "contextvars.ContextVar[Optional[str]]" = \
+    contextvars.ContextVar("_revl_grammar_claim", default=None)
+
+
+def register_grammars(table: dict) -> None:
+    """Record the document's stated decoding grammars. Emitted once per module,
+    and only when some crossing is `validated`, so a document with no validated
+    crossing is byte-identical to one compiled before this slice."""
+    _revl_grammars.update(table)
+
+
+def revl_decode_grammar(key: str):
+    """The constraint revl states for crossing ``key``, or None when that
+    crossing states none. Reading it is not taking it: a provider that only
+    wants to look (to log it, to decide whether it can honour it, to cache a
+    compiled grammar under its digest) makes no claim and is verified exactly as
+    before."""
+    return _revl_grammars.get(key)
+
+
+def revl_constrain(key: str, dialects=("gbnf",)):
+    """Take crossing ``key``'s constraint in the first of ``dialects`` it can
+    supply, and CLAIM to honour it. Returns ``(dialect, artifact, digest)``, or
+    None when the crossing states no grammar or names no dialect the provider
+    asked for.
+
+    ``gbnf`` yields the grammar text; ``json-schema`` yields the schema object of
+    the second dialect (§10), derived from the same crossing and carrying its own
+    digest. The digest is returned so a provider may cache a compiled artifact
+    under it, and it is what the claim is recorded as: naming one dialect while
+    having constrained with the other is detectable rather than believed.
+
+    A provider that cannot honour ANY dialect must not call this. Ignoring the
+    grammar is a legitimate answer -- constraining a decode is a host concern and
+    revl does not require a host to be able to -- and the cost of ignoring it is
+    only that the crossing is no better off than it was before this item.
+    """
+    grammar = _revl_grammars.get(key)
+    if not grammar:
+        return None
+    for dialect in dialects:
+        if dialect == "gbnf" and grammar.get("format") == "gbnf":
+            _revl_grammar_claim.set(grammar["digest"])
+            return ("gbnf", grammar["text"], grammar["digest"])
+        if dialect == "json-schema":
+            wire = grammar.get("wire_schema")
+            if wire:
+                _revl_grammar_claim.set(wire["digest"])
+                return ("json-schema", wire["schema"], wire["digest"])
+    return None
+
+
+def _take_grammar_claim():
+    """Read and clear the in-flight claim. Cleared unconditionally so a claim
+    cannot outlive the completion it was made for and be spent on the next one."""
+    claim = _revl_grammar_claim.get()
+    if claim is not None:
+        _revl_grammar_claim.set(None)
+    return claim
+
+
+def grammar_honoured_error(value, schema, path: str = "$"):
+    """The part of "this completion is inside the stated grammar" that survives
+    into the DECODED value: every member of a closed object is present, and in
+    the order the grammar pins. Returns an error string or None.
+
+    Why this and not a grammar recogniser. The provider hands revl a decoded
+    value, not the bytes it decoded, so whitespace, number spelling and string
+    escaping are already gone and no recogniser can see them. What is NOT gone is
+    member order, because Python preserves a JSON object's key order on load --
+    and member order is exactly the thing the GBNF derivation pins (§5) and the
+    thing item 257's validator is blind to. So this check is precisely the DELTA
+    between the two derivations, which makes it the only part worth checking
+    separately: everything else the grammar says about a value, the validator has
+    already said.
+
+    It is therefore necessary and not sufficient, and §9.5 says so plainly rather
+    than letting "the grammar was honoured" read as a proof.
+    """
+    if not isinstance(schema, dict):
+        return None
+    if "oneOf" in schema:
+        for arm in schema["oneOf"]:
+            if _json_schema_error(value, arm, path) is None:
+                return grammar_honoured_error(value, arm, path)
+        return None                      # no arm matches: the validator's fault
+    if schema.get("nullable") and value is None:
+        return None
+    if "properties" in schema and isinstance(value, dict):
+        declared = list(schema["properties"])
+        observed = list(value)
+        if observed != declared:
+            return (f"{path}: the stated grammar pins the members "
+                    f"{declared!r}; the completion has {observed!r}")
+        for name, sub in schema["properties"].items():
+            err = grammar_honoured_error(value[name], sub, f"{path}.{name}")
+            if err is not None:
+                return err
+        return None
+    extra = schema.get("additionalProperties")
+    if isinstance(extra, dict) and isinstance(value, dict):
+        for name, item in value.items():
+            err = grammar_honoured_error(item, extra, f"{path}.{name}")
+            if err is not None:
+                return err
+        return None
+    items = schema.get("items")
+    if isinstance(items, dict) and isinstance(value, list):
+        for i, item in enumerate(value):
+            err = grammar_honoured_error(item, items, f"{path}[{i}]")
+            if err is not None:
+                return err
+    return None
+
+
+def _grammar_claim_error(value, schema, grammar):
+    """Judge the in-flight claim against what arrived. None when there is nothing
+    to judge (no grammar stated, or no provider claim) or when the claim holds."""
+    claim = _take_grammar_claim()
+    if isinstance(grammar, str):
+        # The emitted call site names the crossing's REGISTRY KEY; the grammar
+        # itself lives in the module's one registry.
+        grammar = _revl_grammars.get(grammar)
+    if not grammar or claim is None:
+        return None
+    digests = {grammar.get("digest")}
+    wire = grammar.get("wire_schema") or {}
+    digests.add(wire.get("digest"))
+    if claim not in digests:
+        # The provider constrained with SOMETHING, and not with what this
+        # crossing states. That is worse than not constraining at all: the
+        # caller would read the crossing as pinned to a type it was not pinned
+        # to.
+        return (f"the provider claims to have constrained this decode with "
+                f"grammar {claim[:12]}..., which is not the grammar this "
+                f"crossing states ({(grammar.get('digest') or '')[:12]}...)")
+    if claim == wire.get("digest"):
+        # The `json-schema` dialect promises schema-validity and nothing more,
+        # so it is NOT held to the GBNF member order: JSON Schema does not
+        # describe member order, and refusing a provider that honoured exactly
+        # what it was handed is the false reject §5 forbids.
+        #
+        # There is still a residue, and missing it would have been fail-open.
+        # The artifact the provider was handed is the WIRE schema, which is
+        # strictly tighter than the schema item 257 validates against: it closes
+        # the nested objects 257 leaves open and requires every member. So a
+        # json-schema claim is judged against the artifact that was actually
+        # handed over, not against the looser one the validator uses. §10.3.
+        return _json_schema_error(value, wire.get("schema") or {}, "$")
+    return grammar_honoured_error(value, schema)
+
+
+def validate_response(value, schema, where: str = "", constructors=None,
+                      grammar=None):
     """Item 257 (§4): the validate-on-response seam. Check ``value`` against the
     derived ``schema`` REGARDLESS of what the provider did, and on success
     construct the revl ADT value from the validated tag/value so the tagged wire
@@ -327,12 +532,26 @@ def validate_response(value, schema, where: str = "", constructors=None):
 
     ``constructors`` maps each case tag to its emitted ADT case class. Absent
     (a non-ADT validated return, e.g. a record or a primitive), the validated
-    value is returned as-is."""
+    value is returned as-is.
+
+    ``grammar`` (item 513 slice 2) is the constraint this crossing STATES. It
+    changes nothing for a provider that ignored it; for one that took it through
+    :func:`revl_constrain`, the claim is checked here and a false claim is a
+    named :class:`GrammarNotHonouredError`. The schema check runs FIRST either
+    way, so a response that is simply malformed is reported as malformed rather
+    than as a broken provider contract."""
     err = _json_schema_error(value, schema, "$")
     if err is not None:
+        _take_grammar_claim()
         raise ResponseValidationError(
             f"{where}: response failed validation: {err}"
             if where else f"response failed validation: {err}",
+            where=where, schema=schema, value=value)
+    claim_err = _grammar_claim_error(value, schema, grammar)
+    if claim_err is not None:
+        raise GrammarNotHonouredError(
+            f"{where}: stated decoding grammar not honoured: {claim_err}"
+            if where else f"stated decoding grammar not honoured: {claim_err}",
             where=where, schema=schema, value=value)
     if constructors and isinstance(value, dict) and "tag" in value:
         tag = value["tag"]
@@ -348,7 +567,8 @@ def validate_response(value, schema, where: str = "", constructors=None):
 
 
 def validate_retry(make_call, budget: int, schema, where: str = "",
-                   constructors=None, site: "Optional[str]" = None):
+                   constructors=None, site: "Optional[str]" = None,
+                   grammar=None):
     """Item 257 (Slice 2, §5.2): the read-with-a-cost validation-retry loop.
 
     Fire ``make_call`` — the model completion call, and ONLY it — and validate its
@@ -377,7 +597,8 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
     while True:
         value = make_call()
         try:
-            validated = validate_response(value, schema, where, constructors)
+            validated = validate_response(value, schema, where, constructors,
+                                          grammar)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
                 _revl_record_model_call(started, attempt + 1, budget + 1, value,
@@ -396,11 +617,15 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
         # item 121 Slice 2: and mint the value-flow token for this static site,
         # naming the crossing the recorder just made for the winning attempt.
         revl_note_validated_completion(site)
+        # item 518: consult the shadow observer for THIS crossing, after the
+        # answer has validated and with no path from it to the return below.
+        _revl_serve_shadow(_revl_recorded_crossing.get(), value)
         return validated
 
 
 async def validate_retry_async(make_call, budget: int, schema, where: str = "",
-                               constructors=None, site: "Optional[str]" = None):
+                               constructors=None, site: "Optional[str]" = None,
+                               grammar=None):
     """Item 257 (Slice 2, §5.2): the async colour of :func:`validate_retry`.
 
     ``make_call`` returns a FRESH coroutine per attempt (the emitter passes the
@@ -415,7 +640,8 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
         if inspect.isawaitable(result):
             result = await result
         try:
-            validated = validate_response(result, schema, where, constructors)
+            validated = validate_response(result, schema, where, constructors,
+                                          grammar)
         except ResponseValidationError:  # noqa: PERF203 — retry is the point
             if attempt >= budget:
                 _revl_record_model_call(started, attempt + 1, budget + 1, result,
@@ -425,6 +651,9 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
             continue
         _revl_record_model_call(started, attempt + 1, budget + 1, result)
         revl_note_validated_completion(site)
+        # item 518: the async colour crosses the same seam. The observer is
+        # synchronous on both, so one implementation serves both colours.
+        _revl_serve_shadow(_revl_recorded_crossing.get(), result)
         return validated
 
 
@@ -480,6 +709,18 @@ def revl_reset_run_trace_state() -> None:
     _revl_validated_completions.set(None)
     _revl_last_emission_index.set(None)
     _revl_pending_produced_by.set(None)
+    # item 517 Slice 2: the evidence sealer is per-RUN state, so a generation
+    # boundary drops it. A `--watch` reload that re-engages gets a fresh one; a
+    # reload that does not is a run with no evidence, which reads as exactly
+    # that rather than inheriting the previous generation's engagement.
+    _revl_model_evidence_sealer.set(None)
+    _revl_model_evidence_draft.set(None)
+    # item 518: a generation boundary ends the window too. A shadow that
+    # survived a `--watch` reload would accumulate one generation's crossings
+    # into the next generation's ledger.
+    _revl_shadow.set(None)
+    _revl_in_shadow.set(False)
+    _revl_shadow_faults.set(())
 
 
 # item 242: the model-hop observations live in THIS fiber, KEYED BY THE CROSSING
@@ -525,6 +766,111 @@ _revl_recorded_crossing: "contextvars.ContextVar[Optional[tuple]]" = \
 # decision lives only on the trace (item 121) as before.
 _revl_model_decision_sink: "contextvars.ContextVar[Optional[Callable]]" = \
     contextvars.ContextVar("_revl_model_decision_sink", default=None)
+
+# ---------------------------------------------------------------------------
+# item 517 Slice 2: the model decision as a SIGNED evidence object, sealed at
+# the crossing that produced it.
+#
+# This module is stdlib-only by construction — it ships with the cordis-py
+# runtime and imports nothing from `revl` — so it cannot take a MAC and must
+# not learn how. A second copy of `revl.model_evidence`'s construction living
+# here, beside a signing key, is the item 272 duplication mistake in the worst
+# possible place. So the runtime holds a CALLABLE and knows nothing about what
+# it does: exactly the shape Slice 3a's WAL sink already uses, and for the same
+# reason (the runtime holds no WAL handle either).
+#
+#   `_revl_model_evidence_sealer`  the run's sealer, or None. Installed by
+#                                  `revl_engage_model_evidence`. Its contract is
+#                                  `(crossing, draft, outcome) -> (record, None)`
+#                                  or `(None, {"link", "reason"})`; it is TOTAL,
+#                                  so a malformed declaration is an answer here
+#                                  and never an exception the runtime would have
+#                                  to classify without the vocabulary to do it.
+#   `_revl_model_evidence_draft`   what the PROVIDER declared for the crossing
+#                                  it is making: which weights answered, on what
+#                                  host profile, how the prompt was bound, what
+#                                  the candidates were, under which policy. revl
+#                                  cannot see any of that through an opaque host
+#                                  body, so it is declared or it is absent, and
+#                                  absent is a refusal rather than a guess.
+#
+# Both are contextvars for the reason every register above is: a child Task
+# copies rather than shares, so two live activations never cross-attribute.
+# ---------------------------------------------------------------------------
+
+_revl_model_evidence_sealer: "contextvars.ContextVar[Optional[Callable]]" = \
+    contextvars.ContextVar("_revl_model_evidence_sealer", default=None)
+
+_revl_model_evidence_draft: "contextvars.ContextVar[Optional[dict]]" = \
+    contextvars.ContextVar("_revl_model_evidence_draft", default=None)
+
+
+class RevlModelEvidenceRefused(RuntimeError):
+    """A model crossing could not be sealed while evidence was ENGAGED.
+
+    Raised out of the crossing, which is the whole point: a run that asked for
+    every model decision to be accountable and then made one it cannot account
+    for must not proceed as though it had. The refusal reaches the WAL FIRST
+    (`evidenceRefused` on the crossing's `model-decision` record), so a
+    post-mortem reader of the artifact sees which crossing refused and why even
+    though the process died here.
+
+    Carries `link` and `reason` verbatim from the sealer, so a caller branches
+    on the check that fired rather than on the wording."""
+
+    def __init__(self, link: str, reason: str, crossing=None):
+        super().__init__(f"{link}: {reason}")
+        self.link = link
+        self.reason = reason
+        self.crossing = crossing
+
+
+def revl_engage_model_evidence(sealer: "Optional[Callable]") -> None:
+    """Engage (or, with None, disengage) signed model-decision evidence for
+    this run.
+
+    OPT-IN, and that is a decision rather than a default. A run that does not
+    engage writes precisely the `model-decision` record item 250 Slice 3a
+    writes, byte for byte, and an offline reader reports "not sealed" instead
+    of inferring anything — the same absent-by-default discipline the rest of
+    the WAL keeps. A run that DOES engage has said every model crossing must be
+    accountable, and from here a crossing that cannot be sealed stops the run
+    (`RevlModelEvidenceRefused`) rather than degrading quietly to the unsigned
+    record. Those are the only two behaviours; there is no third one where a
+    crossing is silently unsealed on an engaged run.
+
+    `sealer` is `revl.model_evidence.CrossingSealer` in this tree. It is passed
+    as a bare callable so this module stays stdlib-only and holds no key."""
+    _revl_model_evidence_sealer.set(sealer)
+
+
+def revl_model_evidence_engaged() -> bool:
+    """Whether this fiber's run has a sealer installed."""
+    return _revl_model_evidence_sealer.get() is not None
+
+
+def revl_declare_model_decision(**members) -> None:
+    """The PROVIDER's declaration for the crossing it is about to make.
+
+    Called from inside the host body that performs the completion, which is the
+    only place that knows what this names: which weights answered
+    (`model_digest`), on what host profile (`placement_digest`, item 538's own
+    digest, opaque to revl), how the prompt was bound (`prompt_binding`), what
+    the input carried (`origins`), what the candidates were and which was taken
+    (`candidates`, `chosen`), how it was asked (`sampling`), under which rule
+    (`policy_digest`, `fallback_depth`) and where it ran (`role`, `residence`).
+
+    It may NOT name `component`, `step_index` or `outcome`: the crossing is the
+    one the recorder just made and the outcome is the one the validation seam
+    measured, so a provider able to set them could seal a record about a
+    crossing that never happened, or call an exhausted budget a validated
+    answer. The sealer refuses a declaration that restates any of the three.
+
+    CONSUMED by the crossing that follows, exactly like the keyed observation
+    and the `producedBy` marker above: a later crossing never inherits an
+    earlier provider's declaration. Declaring on a run with no sealer engaged
+    is harmless and does nothing."""
+    _revl_model_evidence_draft.set(dict(members))
 
 # ---------------------------------------------------------------------------
 # Slice 2: the value-flow token that gates `producedSeq` (§2.2, the NEW
@@ -586,7 +932,10 @@ def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]",
 
     Item 250 Slice 3a rides it too: `sink`, when the recorder has a WAL
     attached, is the callable that appends THIS crossing's `model-decision`
-    record (`sink(llm, outcome)`). It is published beside the key rather than
+    record (`sink(llm, outcome, evidence=None, evidence_refused=None)`; item
+    517 Slice 2 added the two keyword members, both absent by default so a run
+    that seals nothing writes the Slice-3a record unchanged). It is published
+    beside the key rather than
     looked up later because the seam that writes it runs after `make_call`
     returns, in the same fiber, with no WAL handle of its own. Absent (the
     default) means no durable sink: the decision stays trace-only."""
@@ -598,6 +947,114 @@ def revl_note_emission_index(component: "Optional[str]", index: "Optional[int]",
 def revl_recorded_crossing() -> "Optional[tuple]":
     """The crossing this fiber recorded most recently, or None."""
     return _revl_recorded_crossing.get()
+
+
+# ---------------------------------------------------------------------------
+# item 518 (issue #1192): the shadow seam.
+#
+# A shadow serves a declared fraction of a model action to a SUCCESSOR role
+# while the incumbent's answer stays the one handed back to the body. The
+# scheduling, the selection, the stamping and the accounting are
+# `revl.shadow_routing`'s and none of them are here: this module is everything
+# an emitted component imports and it may not grow a dependency on the
+# compiler package. What is here is the seam itself, one hook consulted at the
+# completion crossing, whose return value is discarded.
+#
+# Three properties the placement below is chosen for, each measured in
+# `tests/test_shadow_runtime_518.py` rather than asserted here:
+#
+#   * The hook cannot change the answer. It is called after the response has
+#     validated and its result is ignored, so `validate_retry` returns the
+#     object `validate_response` produced whatever the observer does. A seam
+#     that could substitute an answer would be a cutover, not a shadow.
+#   * It fires once per crossing, on the attempt that validated, and it is
+#     handed the crossing the recorder minted for that attempt. An exhausted
+#     budget raises before it and is NOT shadowed: with no incumbent answer
+#     there is nothing to compare a successor's against.
+#   * A fault in the observer stops the SHADOW and never the incumbent. The
+#     exception is caught, the hook is detached, and the fault is kept for the
+#     operator to read (`revl_shadow_faults`), because a shadow that failed
+#     silently would leave a window that looks short rather than broken.
+# ---------------------------------------------------------------------------
+
+#: The observer, or None. Absent is the default and every path below is then a
+#: no-op, which is what makes this seam additive: an emitted program that
+#: never attaches one behaves exactly as it did before.
+_revl_shadow: "contextvars.ContextVar[Optional[Callable]]" = \
+    contextvars.ContextVar("_revl_shadow", default=None)
+
+#: Re-entrancy. The successor's own completion crosses this same seam, so
+#: without this register the observer would observe itself, unboundedly. Set
+#: for the duration of the hook and RESTORED rather than cleared, so a nested
+#: seam cannot re-arm the shadow from inside it.
+_revl_in_shadow: "contextvars.ContextVar[bool]" = \
+    contextvars.ContextVar("_revl_in_shadow", default=False)
+
+#: `(crossing, repr(exception))` per swallowed observer fault, oldest first.
+_revl_shadow_faults: "contextvars.ContextVar[tuple]" = \
+    contextvars.ContextVar("_revl_shadow_faults", default=())
+
+
+def revl_attach_shadow(observe: Callable) -> None:
+    """Wire this fiber's model completion seam to a shadow observer.
+
+    ``observe(crossing, value)`` is called with the ``(component, stepIndex)``
+    crossing the recorder just minted and the RAW host return of the
+    completion that validated, which is the value `revl_host_usage` reads and
+    not the constructed response the body receives. Whether that crossing is
+    served in shadow, whether the successor is consulted at all, and what is
+    recorded are the observer's decisions: this seam decides nothing and reads
+    no share, so the declared fraction lives in exactly one place.
+
+    Attaching resets the fault list, because a fresh window's faults are its
+    own."""
+    _revl_shadow.set(observe)
+    _revl_shadow_faults.set(())
+
+
+def revl_detach_shadow() -> None:
+    """Stop shadowing this fiber. Faults recorded so far are kept, so a caller
+    that detaches on a fault can still read what the fault was."""
+    _revl_shadow.set(None)
+
+
+def revl_shadow_attached() -> bool:
+    """Whether an observer is wired in this fiber."""
+    return _revl_shadow.get() is not None
+
+
+def revl_shadow_faults() -> tuple:
+    """Every observer fault this seam swallowed, oldest first.
+
+    Non-empty means the window is INCOMPLETE: the incumbent answered and the
+    shadow did not, so a caller that reads a ledger without reading this reads
+    a short window as a clean one."""
+    return _revl_shadow_faults.get()
+
+
+def _revl_serve_shadow(crossing, value) -> None:
+    """Consult this fiber's shadow observer for one completion crossing.
+
+    Returns nothing, by construction: the caller's next statement returns the
+    incumbent's validated answer and there is no path from here to it."""
+    observe = _revl_shadow.get()
+    if observe is None or _revl_in_shadow.get():
+        return
+    if not isinstance(crossing, tuple) or len(crossing) != 2 \
+            or crossing[0] is None:
+        # Recording is off, or the timeline was hand-built: there is no
+        # crossing to key an observation on, and a shadow keyed on None would
+        # accumulate every completion in the process under one key.
+        return
+    token = _revl_in_shadow.set(True)
+    try:
+        observe(crossing, value)
+    except Exception as error:  # noqa: BLE001 - a shadow may not break the run
+        _revl_shadow.set(None)
+        _revl_shadow_faults.set((*_revl_shadow_faults.get(),
+                                 (crossing, repr(error))))
+    finally:
+        _revl_in_shadow.reset(token)
 
 
 def _revl_record_model_call(started: float, attempts: int, attempt_ceiling: int,
@@ -666,9 +1123,44 @@ def _revl_write_model_decision(obs: tuple, validated: bool) -> None:
     exist on the WAL. Neither the prompt nor the response text is ever written.
     `outcome` says whether the response VALIDATED or the retry budget was
     EXHAUSTED (item 257): the crossing happened and cost tokens either way, so
-    the record is written either way."""
+    the record is written either way.
+
+    Item 517 Slice 2 rides the same call. With a sealer engaged
+    (`revl_engage_model_evidence`) the provider's declaration for this crossing
+    is sealed into an evidence object and handed to the sink beside the `llm`
+    payload, so one WAL record carries both the observation and the signed
+    account of it and `revl.wal.model_decisions` indexes them together. Three
+    outcomes, and no fourth:
+
+    * **no sealer** — unchanged, byte for byte. The decision is recorded and
+      not sealed, and an offline reader says exactly that.
+    * **sealed** — the record carries `evidence`.
+    * **engaged and unsealable** — the record carries `evidenceRefused` (the
+      link and the reason), and `RevlModelEvidenceRefused` is then raised out
+      of the crossing. The run does not continue as though the decision had
+      been accounted for. The write happens BEFORE the raise, so the artifact
+      states the refusal even though the process stops here."""
     sink = _revl_model_decision_sink.get()
+    sealer = _revl_model_evidence_sealer.get()
+    crossing = _revl_recorded_crossing.get()
+    draft = _revl_model_evidence_draft.get()
+    # The declaration is consumed whatever happens next, so a crossing that
+    # carried no completion, or one on a run with no sealer, can never inherit
+    # an earlier provider's declaration and seal it as its own.
+    _revl_model_evidence_draft.set(None)
     if sink is None:
+        if sealer is not None:
+            # Engaged, and nowhere durable to put the record. This is the
+            # fail-closed case that looks most like a no-op and is not one: the
+            # run asked for every model decision to be accountable, and an
+            # evidence object that is never written is not evidence.
+            raise RevlModelEvidenceRefused(
+                "incomplete",
+                "model-decision evidence is engaged for this run and this "
+                "crossing has no durable sink (no WAL is attached, or it was "
+                "closed), so the sealed record would exist nowhere. An "
+                "unwritten evidence object is not evidence",
+                crossing)
         return
     _revl_model_decision_sink.set(None)
     latency, attempts, ceiling, raw = obs
@@ -677,7 +1169,19 @@ def _revl_write_model_decision(obs: tuple, validated: bool) -> None:
         model=model, tokens_in=tokens_in, tokens_out=tokens_out, cost=cost,
         latency_seconds=latency, attempts=attempts, attempt_ceiling=ceiling,
         verified_by=[])
-    sink(llm, "validated" if validated else "exhausted")
+    outcome = "validated" if validated else "exhausted"
+    if sealer is None:
+        sink(llm, outcome)
+        return
+    record, refusal = sealer(crossing, draft, outcome)
+    # Write FIRST, raise second. The artifact is the thing a post-mortem reader
+    # is handed, and it must say which crossing refused and why even when the
+    # process stops here — otherwise a refused crossing is indistinguishable
+    # from a run that never engaged evidence at all.
+    sink(llm, outcome, evidence=record, evidence_refused=refusal)
+    if refusal is not None:
+        raise RevlModelEvidenceRefused(refusal.get("link", "incomplete"),
+                                       refusal.get("reason", ""), crossing)
 
 
 _REVL_ANY_CROSSING = object()
@@ -888,28 +1392,36 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
 # ---------------------------------------------------------------------------
 
 class _RealmLabel:
-    """A realm identity. cordis compares isolate labels by object identity,
-    so same-string sharing must go through one object — never rely on
-    string interning."""
+    """The isolation label of one key in one realm. cordis compares isolate
+    labels by object identity, so same-string sharing must go through one
+    object — never rely on string interning."""
 
-    __slots__ = ("name",)
+    __slots__ = ("name", "key")
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, key: str) -> None:
         self.name = name
+        self.key = key
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
-        return f"<realm {self.name}>"
+        return f"<realm {self.name}/{self.key}>"
 
 
 _REALM_LABELS: dict = {}
 
 
-def realm_label(name: str) -> "_RealmLabel":
-    """Process-wide string -> label-object registry: equal strings share a
-    realm (the paper §5.2.1 global-realm convention)."""
-    label = _REALM_LABELS.get(name)
+def realm_label(name: str, key: str) -> "_RealmLabel":
+    """Process-wide `(realm, key)` -> label-object registry: equal realm
+    strings share a realm (the paper §5.2.1 global-realm convention).
+
+    Keyed by the key too, not by the realm string alone (issue #1543). cordis
+    stores a provision under its isolation label (`ctx.isolate(name, label)`
+    then `reflect.store[label]`), which is why its own loader mints one label
+    per key inside a realm (`loader.Realm.access`). One label for the whole
+    realm put `isolate db in realm("wa")` and `isolate api in realm("wa")` in
+    the same slot."""
+    label = _REALM_LABELS.get((name, key))
     if label is None:
-        label = _REALM_LABELS[name] = _RealmLabel(name)
+        label = _REALM_LABELS[(name, key)] = _RealmLabel(name, key)
     return label
 
 
@@ -925,7 +1437,7 @@ def plug(ctx, component: dict, config=None):
     _estop_check(f"plug {component.get('name') or '<component>'}")
     scoped = ctx
     for key, realm in (component.get("isolate") or {}).items():
-        scoped = scoped.isolate(key, realm_label(realm))
+        scoped = scoped.isolate(key, realm_label(realm, key))
     return scoped.plugin(component, config)
 
 
@@ -4099,7 +4611,12 @@ class SessionOwner:
         write the `aborted` completion record naming every seq whose inverse
         actually ran (Decision 5). The absence of `commit-approved` is the
         verdict; this record only lets recover tell a completed abort from a
-        crashed one."""
+        crashed one.
+
+        An inverse that RAISED did not run to completion: it is recorded as
+        `restore-residue` (continue-and-record, issue #1473) and is not named in
+        the `aborted` record, so recover does not read it as done. Every older
+        entry still replays."""
         replayed: list = []
         # escrow replays reverse-seq, in its own two phases (transactional
         # inverses, then owed compensations) — the contract's phase rules.
@@ -4117,9 +4634,27 @@ class SessionOwner:
                         reverse=True)
         transactional = [e for e in escrow if isinstance(e, _Transactional)]
         compensations = [e for e in escrow if isinstance(e, _Compensation)]
+        # issue #1473: continue-and-record, the teardown contract's Phase-1 rule
+        # (teardown-contract.md, "Phase-1 failure"), exactly as a live frame's
+        # `drain` applies it. A raising restore is recorded as `restore-residue`
+        # and the older escrowed entries still replay. Before this the first
+        # raise escaped `Session.abort`: every older undo was skipped and the
+        # session was left loaded, with its owner half settled.
+        failed: set = set()
         for entry in transactional:
-            entry()   # verdict is settled (abort), so this replays
-            if entry.replayed and entry.seq is not None:
+            try:
+                entry()   # verdict is settled (abort), so this replays
+            except BaseException as error:  # noqa: BLE001 — recorded, never re-raised
+                failed.add(id(entry))
+                self.compensation_residue.append(_residue_record(
+                    entry, kind=_RESTORE_RESIDUE, outcome="failed",
+                    attempted_flag=True, attempted={"phase": 1},
+                    error={"type": type(error).__name__,
+                           "message": str(error)}))
+            # a restore that raised did not run to completion, so the `aborted`
+            # record does not name it as replayed
+            if entry.replayed and entry.seq is not None \
+                    and id(entry) not in failed:
                 replayed.append(entry.seq)
         for entry in compensations:
             entry._run_phase2()
@@ -4136,8 +4671,11 @@ class SessionOwner:
         # collect the seqs the live frames replayed too (their inverses ran
         # during the driver's unload)
         for frame in self._registry:
+            raised = {r.get("seq") for r in frame.compensation_residue
+                      if r.get("kind") == _RESTORE_RESIDUE}
             for entry in frame._transactional:
-                if entry.replayed and entry.seq is not None:
+                if entry.replayed and entry.seq is not None \
+                        and entry.seq not in raised:
                     replayed.append(entry.seq)
         replayed = sorted(set(replayed))
         wal = self._wal()

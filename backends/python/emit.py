@@ -79,6 +79,7 @@ _IMPORT_ALIAS = {
     "set_trace": "_revl_set_trace",
     "retry_idempotent": "_revl_retry_idempotent",
     "validate_response": "_revl_validate",
+    "register_grammars": "_revl_register_grammars",
     "validate_retry": "_revl_validate_retry",
     "validate_retry_async": "_revl_validate_retry_async",
     "produced_emit": "_revl_produced_emit",
@@ -471,6 +472,39 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     return _mangle_escaping(name, _EMITTED_BUILTINS | extra)
 
 
+def _method_def_name(name: Any, what: str) -> str:
+    """The ONE rename for a provided service method (issue #1474), used at its
+    definition, at its registration and at every static call site.
+
+    A service method's CONTRACT name is what every dynamic dispatcher looks up
+    (`Session.call`, the bridge, a spawn handle, a lifecycle `call`), and what
+    a remote tier sends over the wire, so it stays the attribute name. Only the
+    `def` statement needs a Python-legal spelling: a keyword or soft keyword
+    (`class`, `from`, `match`, `_`) or `self` gets the injective append-`_`
+    rename for the `def`, the provided class gets the contract name back as an
+    alias (`_Ops.__dict__` holds both), and a static call through a required
+    service reaches it by `getattr(target, 'class')` because `target.class` is
+    not Python. Before this, the definition site renamed and the lookup site
+    did not, so `fn class()` was refused as "method 'class_' is not part of the
+    provided service", and `self` was refused as emitter scaffolding.
+
+    A name that needs no rename is returned unchanged, so every other module is
+    emitted byte-identically."""
+    if not isinstance(name, str) or not name.isidentifier():
+        raise EmitError(f"{what} {name!r} is not a usable Python identifier")
+    if name.startswith("_") and name.lstrip("_").startswith("revl"):
+        raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
+    return _mangle_escaping(name, frozenset({"self"}))
+
+
+def _method_access(target: str, name: str) -> str:
+    """`target.name`, or `getattr(target, 'name')` for a contract name the
+    `def` had to rename (see `_method_def_name`)."""
+    if _method_def_name(name, "method name") == name:
+        return f"{target}.{name}"
+    return f"getattr({target}, {name!r})"
+
+
 def _mangle_kw(name: str) -> str:
     """`_mangle` without the builtin guard: keyword escaping only. For a name
     emitted as an attribute or a runtime string key (see `_mangle`), which
@@ -729,7 +763,7 @@ class _RevlRouter:
         self._served = {realm: 0 for realm in self._realms}
 
     def _handle(self, realm):
-        scoped = self._root.isolate(self._key, realm_label(realm))
+        scoped = self._root.isolate(self._key, realm_label(realm, self._key))
         return scoped.reflect.get(self._key)
 
     def _live(self):
@@ -1098,6 +1132,16 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         # one frame and builds the dict directly, where the generator form
         # entered four (the `dict` call, the genexpr frame, and its resumes)
         # for the same elements (roadmap item 436 F2).
+        if ":=" in target:
+            # Python refuses an assignment expression anywhere in a
+            # comprehension's iterable, and a receiver that is not a bare name
+            # carries one (`a.b.remove(k)` reads `a.b` through the `_fv :=`
+            # temp; bounded arithmetic binds `_bi :=`). Evaluate the receiver
+            # and the key as arguments, outside the comprehension. A plain
+            # receiver keeps the one-frame form above.
+            return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
+                    "_revl_m.items() if kk != _revl_k})"
+                    f"({target}, {args[0]})")
         return ("{" + f"kk: vv for kk, vv in {target}.items() "
                 f"if kk != {args[0]}" + "}")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
@@ -1489,7 +1533,7 @@ class _ComponentEmitter:
                 if not isinstance(method, str) or not method.isidentifier():
                     raise EmitError(f"{where}: bad method name {method!r}")
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-                rendered = f"{target}.{method}({args})"
+                rendered = f"{_method_access(target, method)}({args})"
                 # item 121 Slice 2: a crossing whose arguments the analysis
                 # proved read completion `site`'s binding fires THROUGH the
                 # marker helper, so the recorder can stamp `producedBy` on this
@@ -1501,7 +1545,7 @@ class _ComponentEmitter:
                 site = self._derived_crossings.get(id(expr))
                 if site is not None:
                     self.uses.add("produced_emit")
-                    marked = f"{_runtime_ref('produced_emit')}({site!r}, {target}.{method}"
+                    marked = f"{_runtime_ref('produced_emit')}({site!r}, {_method_access(target, method)}"
                     rendered = f"{marked}, {args})" if args else f"{marked})"
             else:
                 # `Some(x)` is the identity on this tier (item 436 F8) — the
@@ -1534,7 +1578,7 @@ class _ComponentEmitter:
             # `validated` call: `_validated_call` returns None.
             validated = self._validated_call(expr)
             if validated is not None:
-                schema, ctors, retry = validated
+                schema, ctors, retry, gkey = validated
                 if retry:
                     # item 257 (Slice 2, §5.2): the read-with-a-cost retry loop.
                     # On a `ResponseValidationError` the loop re-fires ONLY the
@@ -1552,17 +1596,23 @@ class _ComponentEmitter:
                     # produced edge honest-degrades to absent.
                     comp_site = self._completion_sites.get(id(expr))
                     tail = f", {comp_site!r}" if comp_site is not None else ""
+                    # item 513 slice 2: and the crossing's REGISTRY KEY for
+                    # the stated decoding grammar. A key, not the grammar text:
+                    # the text is already in the module's one registry, and
+                    # inlining it at every call site would put a multi-kilobyte
+                    # literal in the middle of an expression for no gain.
                     if awaited:
                         self.uses.add("validate_retry_async")
                         return (f"(await _revl_validate_retry_async("
                                 f"lambda: {rendered}, {retry}, {schema!r}, "
-                                f"{where!r}, {ctors}{tail}))")
+                                f"{where!r}, {ctors}{tail}, grammar={gkey!r}))")
                     self.uses.add("validate_retry")
                     return (f"_revl_validate_retry(lambda: {rendered}, {retry}, "
-                            f"{schema!r}, {where!r}, {ctors}{tail})")
+                            f"{schema!r}, {where!r}, {ctors}{tail}, "
+                            f"grammar={gkey!r})")
                 self.uses.add("validate_response")
                 return (f"_revl_validate({settled}, {schema!r}, {where!r}, "
-                        f"{ctors})")
+                        f"{ctors}, {gkey!r})")
             return settled
         if kind == "host":
             fn = expr.get("fn") or ""
@@ -1996,13 +2046,16 @@ class _ComponentEmitter:
 
     def _validated_call(self, expr: dict):
         """Item 257: if this `call` node is an `emit` on a `validated` service
-        emission (through a req key), return `(schema, ctors, retry)` for the
+        emission (through a req key), return `(schema, ctors, retry, key)` for the
         validate seam; else None. `schema` is the derived boundary schema carried
         on the method IR; `ctors` is a Python dict-literal mapping each case tag to
         its emitted ADT case class (or `None` when the validated return is not a
         tagged variant, e.g. a record or primitive, and the validated value is used
         as-is); `retry` is the Slice-2 validation-retry budget (§5.2), `0` when no
-        `retry` clause was declared (one attempt, the Slice-1 seam)."""
+        `retry` clause was declared (one attempt, the Slice-1 seam); `key` (item
+        513 slice 2) is this crossing's key in the module's grammar registry,
+        `"Service.method"` -- what a provider passes to `revl_constrain` and what
+        the validate seam resolves the stated grammar through."""
         target = expr.get("target")
         if not (isinstance(target, dict) and target.get("kind") == "req"):
             return None
@@ -2013,7 +2066,8 @@ class _ComponentEmitter:
             return None
         return (spec.get("response_schema"),
                 self._ctor_map(spec.get("response_schema")),
-                spec.get("retry") or 0)
+                spec.get("retry") or 0,
+                f"{svc_name}.{expr.get('method')}")
 
     # -- item 121 Slice 2: the model hop's static value-flow analysis ---------
     #
@@ -2661,17 +2715,25 @@ class _ComponentEmitter:
             out.add(0)
             self._method(out, indent + 1, name, method, where)
         out.add(0)
+        # issue #1474: a method whose `def` had to be renamed is registered
+        # under its contract name too, which is what every dispatcher looks up.
+        for method in methods:
+            contract = method.get("name")
+            spelled = _method_def_name(contract, f"{where}: method name")
+            if spelled != contract:
+                out.add(indent, f"setattr({cls}, {contract!r}, {cls}.{spelled})")
         # runtime-derived revertible provision (R5): the withdrawal inverse is
         # _revl_ctx.provide's own disposer, yielded into the component accumulator
         out.add(indent, f"yield _revl_ctx.provide({name!r})")
         out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict, where: str) -> None:
-        name = _ident(method.get("name"), f"{where}: method name", attr=True)
+        contract = method.get("name")
+        name = _method_def_name(contract, f"{where}: method name")
         service = self.services.get(self.provides.get(provide_name)) or {}
-        spec = (service.get("methods") or {}).get(name)
+        spec = (service.get("methods") or {}).get(contract)
         if spec is None:
-            raise EmitError(f"{where}: method {name!r} is not part of the provided service")
+            raise EmitError(f"{where}: method {contract!r} is not part of the provided service")
         params = [_ident(param, f"{where}.{name}: param") for param in method.get("params") or []]
         # v1/A6: method params are the surface names binding the body and may
         # differ from the service's declared names; only the arity must agree
@@ -5129,11 +5191,125 @@ def _parallel_step_groups(ir: dict) -> dict:
         return {}
 
 
+def _grammar_registry(services: dict) -> dict:
+    """Item 513 slice 2: `{"Service.method": grammar}` for every VALIDATED
+    service emission in the document.
+
+    Two decisions are visible here.
+
+    A validated EXTERN is deliberately absent. Its `@py` body is the provider,
+    so registering it would let that body take the constraint and claim to have
+    honoured it -- but this tier never validates an extern's response (the
+    validate seam fires only at a service-method crossing), so the claim would
+    never be judged. An unjudgeable claim is worse than no claim, so the seam
+    offers none: `revl_constrain("extern:...")` finds nothing.
+
+    That is an argument for withholding the GRAMMAR, and it stands. It is not an
+    argument for withholding the DIAGNOSTIC, which is what it silently also did
+    until issue #1382: the author wrote `validated`, the module came out
+    byte-identical to one without it, and nothing said so. The refusal is in
+    `_refuse_validated_externs` below; read the two together.
+
+    The `json-schema` dialect (slice 4) is composed HERE rather than bound in the
+    IR. It is a pure function of `response_schema`, which the crossing already
+    carries, so the second dialect costs the IR nothing and a tier that does not
+    want it simply does not compose it. When the frontend is not importable (a
+    backend-only context) the registry still carries the GBNF half, which the IR
+    holds outright, and the second dialect is absent rather than wrong.
+    """
+    try:
+        from revl.decode_grammar import json_schema_grammar_for  # noqa: PLC0415
+    except Exception:  # noqa: BLE001 - backend-only: the GBNF half still stands
+        json_schema_grammar_for = None
+    registry: dict = {}
+    for svc_name, svc in sorted((services or {}).items()):
+        for m_name, spec in sorted(((svc or {}).get("methods") or {}).items()):
+            grammar = spec.get("response_grammar")
+            if not grammar:
+                continue
+            entry = dict(grammar)
+            schema = spec.get("response_schema")
+            if json_schema_grammar_for is not None and schema is not None:
+                try:
+                    entry["wire_schema"] = json_schema_grammar_for(schema)
+                except Exception:  # noqa: BLE001 - never break codegen
+                    pass
+            registry[f"{svc_name}.{m_name}"] = entry
+    return registry
+
+
+def _refuse_validated_externs(ir: dict) -> None:
+    """Items 257/513, issue #1382: refuse a `validated` EXTERN by name.
+
+    The sibling of `_grammar_registry`, and the other half of one decision.
+    That function explains why a validated extern is absent from the grammar
+    registry: its `@py` body IS the provider, so a registered grammar would be a
+    claim nothing judges, and an unjudgeable claim is worse than no claim. That
+    argument is sound, and it is an argument for withholding the GRAMMAR. It was
+    also, until this gate, doing duty as an argument for withholding the
+    DIAGNOSTIC, which does not follow: its own premise says an unjudgeable claim
+    is worse than no claim, and accepting the modifier silently is precisely
+    letting the author make one and walk away believing it holds.
+
+    The two carriers are not symmetric on this tier, which is why the refusal is
+    narrower than PR #1381's:
+
+      * a `validated` service OPERATION is lowered here, and stays lowered.
+        `_validated_call` fires at a `key.method(...)` crossing, where revl owns
+        the receiving side: check the completion against `response_schema`, build
+        the declared value through `_ctor_map`, raise a typed fault when it does
+        not conform, honour the Slice-2 `retry` budget. That is the whole seam,
+        and this tier is the only one that has it.
+
+      * a `validated` EXTERN has no such crossing. The seam never fires, the
+        grammar is never offered, and the emitted module is byte-identical to the
+        same extern written WITHOUT `validated` (measured 829 chars either way on
+        1d87845c1). On this carrier the python tier has exactly as little to give
+        as the five tiers PR #1381 made refuse, so it refuses the same way.
+
+    DECLARATION-keyed, matching `validated_boundary.validated_crossings`: the
+    extern wrapper reaches the emitted module whether or not this document also
+    calls it.
+
+    Deliberately NOT wired into `--target temporal`. That target READS this
+    modifier on an extern: `emit_temporal._retry_class` pins a `validated`
+    crossing to at-most-once so a completion is never re-billed as an idempotent
+    write, and its two renderings of one keyed extern differ (5807 vs 6507 chars,
+    `test_validated_pins_to_at_most_once_even_when_keyed`). A refusal there would
+    delete a tested guarantee.
+
+    Raised as `EmitError`, this tier's own refusal channel, so `emit.py` keeps
+    working when run standalone with no `revl` package importable.
+    """
+    for ext in ir.get("externs") or []:
+        if not ext.get("validated"):
+            continue
+        name = ext.get("name") or "?"
+        raise EmitError(
+            f"`validated` extern `{name}` needs a crossing this tier can check, "
+            f"and an extern is not one. The python tier validates a completion at "
+            f"a SERVICE-METHOD crossing, where revl owns the receiving side: it "
+            f"checks the response against the schema derived from the return "
+            f"type, builds the declared value from the validated payload, raises "
+            f"a typed validation fault when it does not conform, and honours the "
+            f"`retry` budget. An extern's host body IS the provider, so the seam "
+            f"has nowhere to fire and the derived grammar would be a claim "
+            f"nothing judges (see `_grammar_registry`). Lowering it anyway emits "
+            f"a module byte-identical to the same extern written WITHOUT "
+            f"`validated`: a checked boundary in the source and an unchecked one "
+            f"in the output, which no byte oracle can catch. So the tier refuses "
+            f"by name rather than answering with less than it was given (items "
+            f"257 and 513, issue #1382). Drop `validated` to accept an unchecked "
+            f"boundary, or declare the crossing as a `service` emission, which "
+            f"this tier lowers in full.")
+
+
 def emit(ir: dict) -> str:
     """Lower one IR document to a cordis-py Python module (as source text)."""
     if not isinstance(ir, dict):
         raise EmitError("IR document must be a dict")
     _refuse_holes(ir)
+    _refuse_validated_externs(ir)
     if ir.get("ir_version") not in (IR_VERSION, 2, 3):
         raise EmitError(f"unsupported ir_version {ir.get('ir_version')!r} (expected {IR_VERSION}, 2, or 3)")
 
@@ -5178,6 +5354,12 @@ def emit(ir: dict) -> str:
         if spec.get("async")
     }
     _PY_USES_AS_ASYNC = False
+
+    # item 513 slice 2: the document's stated decoding grammars, keyed
+    # `Service.method`. Built here from the IR the compiler already bound and
+    # registered once at module import, so a provider can find the constraint
+    # for the crossing it is about to serve.
+    grammar_registry = _grammar_registry(services)
 
     # item 259 slice 2: the checked fan-out plan, per component (empty in a
     # backend-only context where the revl frontend is not importable, or when no
@@ -5255,6 +5437,10 @@ def emit(ir: dict) -> str:
         # item 421 F6: a declared secret type that reaches a `Map` also needs the
         # record field types emitted, so the walk can tell the two apart.
         | ({"declare_secret_types"} if secret_types else set())
+        # item 513 slice 2: the provider seam's registry, emitted only when the
+        # document HAS a validated crossing, so a document without one is
+        # byte-identical to one compiled before this slice.
+        | ({"register_grammars"} if grammar_registry else set())
     )
 
     # Delivery semantics (item 44): the reference runtime driver may auto-retry
@@ -5295,6 +5481,12 @@ def emit(ir: dict) -> str:
             for record, fields in sorted(secret_types.items())
         ) + "}"
         out.add(0, f"{_runtime_ref('declare_secret_types')}({rendered_secret_types})")
+        out.add(0)
+    # item 513 slice 2: the stated decoding grammars. One registry per module
+    # rather than a literal at each call site: the GBNF text of a real response
+    # type runs to kilobytes and a crossing refers to it by key.
+    if grammar_registry:
+        out.add(0, f"{_runtime_ref('register_grammars')}({grammar_registry!r})")
         out.add(0)
     # item 396 option B: a `@py ref` extern emits a lazy import thunk that caches
     # the resolved host symbol in this module-level dict and asserts its colour

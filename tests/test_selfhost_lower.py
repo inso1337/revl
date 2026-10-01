@@ -160,6 +160,143 @@ def _classify(e: RevlError) -> str:
     if e.code in ("G4", "A1"):
         return e.code
     m = e.message
+    # ---- item 512 slice 3: model placement, the DECLARATION half ------------
+    # `selfhost/lower.rvl`'s model-placement section decides `model role` and
+    # `route model` and tags every refusal "MODEL". First in this function, and
+    # not because it is important: two of its messages are substrings of the
+    # ROUTE family's ("`<x>` is routed twice in <C>"), so a later arm would
+    # answer ROUTE for a refusal the gate spells MODEL and turn an agreement
+    # into a tag-mismatch.
+    #
+    # The markers are POSITIVE, the extern-declaration discipline further down:
+    # each is a substring the gate now spells byte for byte. That is what keeps
+    # the item-514 VALUE side OUT — its messages all open "a `<origin>` value
+    # reaches the model crossing", the gate has no flow walk to decide one
+    # with, and two of them end in the same "may not leave the device
+    # (G-MODEL-PLACE)" tail the declaration refusal ends in. Naming those here
+    # would claim an agreement that does not exist, and would report a
+    # no-objection the gate is entitled to as a bypass.
+    if " value reaches the model crossing " not in m and (
+            m.startswith("unknown residence `")
+            # item 516 slice 4 wrote a SECOND "unknown origin class `"
+            # sentence, for a council member's `reads` clause, and the marker
+            # here was an opening with nothing after it. The council one names
+            # the council, which is the phrase that fixes the rule; this is
+            # the same shaping the block below applies to every marker it
+            # shares an opening with.
+            or (m.startswith("unknown origin class `")
+                and " of model council `" not in m)
+            or (m.startswith("model role `")
+                and " is declared twice (first on line " in m)
+            or (m.startswith("action `") and " is routed twice in " in m)
+            or " is routed twice in `route model on " in m
+            or " origin to model role `" in m
+            # item 516 slice 2: the same arm naming a `model council`. It is a
+            # MODEL refusal and not a COUNCIL one because what it refuses is a
+            # `route model` arm, which is item 512's surface; the council is
+            # only what the arm names. The gate spells both sentences - the
+            # `secret` one and the one naming the off-device MEMBER - byte for
+            # byte in its model-placement section. The item-514 value side
+            # spells "model council" too, and the guard at the head of this
+            # condition is what keeps it out.
+            or " origin to model council `" in m
+            or m.endswith(") names no declared model role")
+            or (m.startswith("`route model on ")
+                and (m.endswith(" names no role")
+                     or " names no action of " in m))
+            # ---- item 515: the device profile and the candidate set --------
+            # Seven more sentences the gate now spells byte for byte, added on
+            # the same terms as every marker above: a marker here is a CLAIM
+            # of byte agreement, so only a ported refusal gets one. Item 519's
+            # reach fold is deliberately absent - it is a capability product
+            # over a component's HELD set, the gate has none, and it stays
+            # out for the same reason the item-514 value side does.
+            or m.startswith("unknown device class `")
+            or (m.startswith("model role `") and " declares `memory " in m)
+            or m.endswith(") places the origin on any available role")
+            or " appears twice among the candidates for `" in m
+            or (m.startswith("model council `") and " is one of " in m
+                and " candidates for `" in m)
+            or (m.startswith("the candidates for `")
+                and " do not agree on residence: " in m)
+            or m.endswith(" declare no device profile, so the candidate set "
+                          "cannot be ordered")):
+        return "MODEL"
+    # ---- item 516: the model COUNCIL declaration ---------------------------
+    # `selfhost/lower.rvl`'s model-council section decides `model council` and
+    # tags every refusal "COUNCIL", a separate family from MODEL above: two
+    # constructs, two reference modules (`revl.model_route` and
+    # `revl.model_council`), so a consumer reading the wire learns which one was
+    # refused. The two tags do NOT stand for one code: issue #1190 split the
+    # council's refusals across `G-COUNCIL-SPLIT` and `G-MODEL-PLACE` without
+    # moving the tag, so `SELFHOST_TAG_CODES` maps `COUNCIL` to both and the
+    # SENTENCE is what says which of them a refusal is evidence for
+    # (`docs/design/557-council-disagreement.md` section 3). This function does
+    # not care: it answers the FAMILY, and every marker below is a substring the
+    # gate spells byte for byte either way.
+    #
+    # Beside MODEL and not merged into it because two of these sentences share a
+    # marker with it if either is written loosely: "model role `" opens MODEL's
+    # declared-twice refusal and appears mid-sentence in two council ones, and
+    # both families end a sentence in "model role `<name>`". Each marker below
+    # is therefore SHAPED — an opening plus the phrase that fixes the rule — and
+    # POSITIVE, a substring the gate spells byte for byte.
+    #
+    # That is what keeps the slices this gate does NOT decide out. Slice 2's
+    # BINDING is decided, but under MODEL above, because what it refuses is a
+    # `route model` arm; nothing about it belongs in this block. What is left
+    # out is item 514's ceiling on a council-placed VALUE and item 517's record
+    # of what the members answered, both of which read a flow position the gate
+    # has no walk for; naming their sentences here would claim an agreement
+    # that does not exist and would report a no-objection the gate is entitled
+    # to as a bypass.
+    if ((m.startswith("model council `")
+         and (" is declared twice (first on line " in m
+              or " has the name of the model role declared on line " in m
+              or m.endswith(" declares no `proposer`")
+              or m.endswith(" declares no `aggregate` rule")
+              or " declares two `aggregate` rules (`" in m
+              or m.endswith(" member") or m.endswith(" members")))
+            or (" in model council `" in m
+                and (m.startswith("unknown council function `")
+                     or m.startswith("unknown aggregation rule `")
+                     or m.startswith("unknown quorum basis `")
+                     or m.startswith("unknown tie outcome `")
+                     or (m.startswith("`aggregate ")
+                         and (m.endswith(
+                                  " resolves disagreement toward one member's"
+                                  " answer")
+                              or m.endswith(", which declares no `adversary`")))
+                     or (m.startswith("`quorum ") and m.endswith(
+                         " counts the rule's floor over the members that"
+                         " answered"))
+                     or (m.startswith("`on_tie ") and m.endswith(
+                         " admits when the members disagree"))))
+            or (m.startswith("council function `")
+                and " is declared twice in model council `" in m)
+            or (m.startswith("member `") and " of model council `" in m
+                and m.endswith("`, which is not declared"))
+            or (m.startswith("members `") and " of model council `" in m
+                and " are both placed on model role `" in m)
+            # ---- item 516 slice 4: the per-member input ---------------------
+            # A member's `reads <origin>` clause. Four of the five sentences
+            # open "member `" and name the council, and the phrase that fixes
+            # the rule is the clause itself; the fifth is the origin
+            # vocabulary, whose opening the MODEL block above shares and whose
+            # marker is shaped there for exactly that reason.
+            #
+            # The off-device one is in here rather than in MODEL although the
+            # reference files it under item 512's code: this function answers
+            # the FAMILY, and what it refuses is a clause inside the council
+            # braces, decided by `revl.model_council`. `SELFHOST_TAG_CODES`
+            # already maps `COUNCIL` to both codes.
+            or (m.startswith("member `") and " of model council `" in m
+                and " is declared `reads " in m)
+            or (m.startswith("member `") and " of model council `" in m
+                and "` reads `" in m and m.endswith("` twice"))
+            or (m.startswith("unknown origin class `")
+                and " in member `" in m and " of model council `" in m)):
+        return "COUNCIL"
     if "provision conflict" in m and "(G2)" in m:
         return "G2"
     # item 186, the replacement wave: the unmet-consumer refusal of
@@ -1434,6 +1571,160 @@ component C requires sink: Sink {
   every o in sub { emit sink.write(o) }
 }
 """),
+    # ---- docs/design/457 slice T3b: what the totality rules must NOT refuse -
+    # The accepting twins of the match, alias and destructuring rows in
+    # REJECTED_PROGRAMS. Each is one token away from a refusing neighbour
+    # there, so a rule that over-reached would show up here as a false
+    # rejection rather than as a silent admission nobody measures.
+    ("a match that covers every case", """
+type Status = Active | Retired
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    Retired => 2,
+  }
+}
+"""),
+    ("a catch-all arm covers the cases nothing names", """
+type Status = Active | Retired | Pending
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    _ => 0,
+  }
+}
+"""),
+    # `Opt`/`Result` carry no `types` entry under their APPLIED spelling, so
+    # the reference asks the exhaustiveness question of neither and nor does
+    # the gate. A partial match over one must stay admitted.
+    ("a partial match over an Opt draws no exhaustiveness verdict", """
+fn f(o: Opt[Int]) -> Int {
+  return match o {
+    Some(v) => v,
+    None => 0,
+  }
+}
+"""),
+    # a PARAMETERIZED ADT: the reference looks its `types` entry up under the
+    # applied spelling (`Box[Int]`) and misses, so a missing case is admitted.
+    ("a match over a parameterized ADT draws no verdict", """
+type Box[T] = Full(T) | Empty
+
+fn f(b: Box[Int]) -> Int {
+  return match b {
+    Empty => 0,
+  }
+}
+"""),
+    # an alias CHAIN that terminates is the whole point of the erasure; only a
+    # cycle has no expansion.
+    ("a terminating chain of transparent aliases", """
+type Count = Int
+type Tally = Count
+
+fn f(t: Tally) -> Int {
+  return t
+}
+"""),
+    # `type Status = Pending` over an UNDECLARED head is a one-case nominal,
+    # not an alias, so it is no cycle even though it names only itself-shaped
+    # text.
+    ("a one-case nominal is not an alias", """
+type Status = Pending
+
+fn f(s: Status) -> Int {
+  return 1
+}
+"""),
+    # destructuring a real record, nominal and structural alike.
+    ("record destructuring of a nominal record", """
+type Row = { id: Int, name: Str }
+
+fn f(r: Row) -> Int {
+  let { id, name } = r
+  return id
+}
+"""),
+    ("record destructuring of a structural record", """
+fn f() -> Int {
+  let pt = { x: 1, y: 2 }
+  let { x, y } = pt
+  return x
+}
+"""),
+    # ---- a scoped extern crossing a provide-method boundary (issue #1240) --
+    # The documents this corpus did NOT have. `emit_caps_reach` seeded a
+    # boundary-crossing extern with its own NAME, so `emission[db]` implemented
+    # through `extern emission[db] fn pg_write` measured a crossing called
+    # `pg_write` against a bound spelled `db` and refused a provider that was
+    # exactly in bounds. Nothing here reached the path: every scoped extern in
+    # the tree was either never provided through, or provided through a bound
+    # that happened to name it, so both trees agreed vacuously while the seed
+    # rules disagreed. These are the four shapes that make the agreement a
+    # measurement — a scope REPLACES the name (docs/capabilities.md §2), so all
+    # four admit on the reference and must admit here.
+    ("a provider inside a scoped emission extern's own bound", """
+extern emission[db] fn pg_write(t: Str) = @py { return }
+service Worker { emission[db] fn go(t: Str) }
+component W provides worker: Worker {
+  provide worker { fn go(t) { emit pg_write(t) } }
+}
+"""),
+    # the same crossing one `fn` hop away: the scope is what propagates through
+    # the fixed point, so refactoring a body into a helper cannot move the
+    # verdict.
+    ("a scoped emission extern reached through a helper fn", """
+extern emission[db] fn pg_write(t: Str) = @py { return }
+fn wrapped(t: Str) { pg_write(t) }
+service Worker { emission[db] fn go(t: Str) }
+component W provides worker: Worker {
+  provide worker { fn go(t) { emit wrapped(t) } }
+}
+"""),
+    # a realm-style DOTTED token (item 343) is ONE capability, so the bound and
+    # the crossing compare whole. Scraping idents out of the bracket would have
+    # made this `net` and `edge` and left the bound unmet.
+    ("a dotted capability token on an emission extern", """
+extern emission[net.edge] fn ship(t: Str) -> Int = @py { return 1 }
+service Sink { emission[net.edge] fn send(m: Str) }
+component S provides sink: Sink {
+  provide sink { fn send(m) { emit ship(m) } }
+}
+"""),
+    # the `witnessed` half, which predates the emission one: a witnessed extern
+    # crosses the same boundary (item 243) and seeds the same way, so
+    # `witnessed[fs]` is the capability `fs` and not the capability `stash`,
+    # which no service bound can name.
+    ("a witnessed extern's declared scope meets a provide-method bound", """
+type Stash = { id: Str }
+extern witnessed[fs] fn stash(p: Str) -> Result[Stash, Str]
+  undo unstash(result) = @py { return Ok({}) }
+extern pure fn unstash(w: Stash) -> Bool = @py { return True }
+service Worker { emission[fs] fn go(t: Str) }
+component W provides worker: Worker {
+  provide worker { fn go(t) { emit stash(t) } }
+}
+"""),
+    # Control for the spawn-handle reach label (issue #1261): a bare
+    # `emission` bound names no capability list at all, so the unnameable
+    # crossing the label stands for is within it and both engines admit. The
+    # accepting twin of the `emission[...]` documents in REJECTED_PROGRAMS —
+    # a fix that refused every handle emit would land here.
+    ("a bare emission bound covers a spawn-handle emit", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+"""),
 ]
 
 
@@ -1583,6 +1874,24 @@ boot component B2 provides e2: Env2 {
      _fixture("host_method_not_on_surface"), "HOST-METHOD"),
     ("g4 an extern undo slot's argument type",
      _fixture("g4_extern_undo_wrong_arg_type"), "T1"),
+    # ---- arrows and function values (docs/design/457 T2c) ------------------
+    # An arrow is an expression and item 75(a) settles which one: its body is
+    # walked over the enclosing scope, its arity is exact whatever its
+    # parameter types are, and a name written in its annotation is the
+    # enclosing `fn`'s type parameter or an opaque nominal, never a fresh one.
+    ("t17 an arrow body reaching through an optional",
+     _fixture("t17_arrow_body_unchecked"), "T1"),
+    ("t32 an arrow value's result in a position that cannot hold it",
+     _fixture("t32_arrow_value_result_flows"), "T1"),
+    ("t33 a call through an arrow value at the wrong arity",
+     _fixture("t33_arrow_value_arity"), "T1"),
+    ("t35 an arrow annotation is not quantified",
+     _fixture("t35_arrow_annotation_not_quantified"), "T1"),
+    # ---- optional chaining (docs/design/457 T2d) ---------------------------
+    # `?.` requires an optional on its left; on a value that is always present
+    # the short-circuit is dead syntax the strict tiers cannot render.
+    ("t14 an optional chain on a non-optional",
+     _fixture("t14_optional_chain_on_nonoptional"), "T1"),
     ("g4 emission not declared", _fixture("g4_emission_not_declared"), "G4"),
     ("g4 capability not declared", _fixture("g4_capability_not_declared"), "G4"),
     ("g4 unmarked emission", _fixture("g4_unmarked_emission"), "G4"),
@@ -2592,6 +2901,31 @@ fn f(x: Async[Str]) -> Int {
     ("an async function type outside a module fn parameter",
      'extern pure fn e(cb: (Str) -> Async[Str]) -> Int = @py { return 1 }\n',
      "A1"),
+    # issue #1151: the same two position refusals on a transparent type ALIAS's
+    # right-hand side. `check_and_lower` runs `_resolve_type_aliases` one line
+    # ahead of `_validate_declared_types` and checks each alias target as it
+    # collects it, so the refusal is anchored at the ALIAS DECLARATION and the
+    # arrow that uses the alias never reaches the rule C1 question at all. The
+    # fixture carries that arrow, so the row would red on the arrow's own A1
+    # wording if the phase were placed after the body walk instead of before it.
+    ("an alias of Async[T] (fixture: refused at the declaration, not the arrow)",
+     _fixture("a1_alias_of_async"), "A1"),
+    ("an alias whose right-hand side is an async function type",
+     'type Handler = (Str) -> Async[Str]\nfn f(x: Int) -> Int { return x }\n',
+     "A1"),
+    # the alias walk recurses through the spelling exactly as the signature walk
+    # does, so `Async` nested inside an argument is refused too.
+    ("an alias with Async nested in a type argument",
+     'type Box = List[Async[Str]]\nfn f(x: Int) -> Int { return x }\n',
+     "A1"),
+    # the alias phase is ahead of the SIGNATURE phase, not a line-ordered peer:
+    # the bad alias sits BELOW the bad extern return and still wins, which is
+    # what `_resolve_type_aliases` running before `_validate_declared_types`
+    # means. Were the two swapped, this row would report T1.
+    ("a bad alias below a bad signature is still the alias",
+     'extern pure fn e(x: Int) -> List = @py { return [] }\n'
+     'type Later = Async[Str]\n',
+     "A1"),
     # a config field asks the WELLFORMED question before the is-data one.
     ("a bare builtin generic as a config field", """service S { fn q(a: Str) -> Int }
 component C provides s: S {
@@ -2727,6 +3061,455 @@ component C requires sink: Sink provides api: Api {
   let sub = subscribe src undo sub.close()
   every o in sub { emit sink.write(o) }
   provide api { fn go() { return sink.write("x") } }
+}
+""", "G4"),
+    # ---- docs/design/457 slice T3b: totality and the declaration level ------
+    # `_check_match_exhaustiveness` (both halves), `_resolve_type_aliases`'
+    # cycle and `_lower_let_pattern_stmt`'s "requires a record" arms. All four
+    # fixtures were pinned in TYPE_LAYER_GAP below and have been struck from it.
+    ("a match arm naming a case the ADT does not declare",
+     _fixture("t13_unknown_match_case"), "TYPE"),
+    ("a match over a variant missing a case",
+     _fixture("v2_match_nonexhaustive"), "T1"),
+    # the plural sentence, which is a different string and not a join of the
+    # singular one.
+    ("a match missing two cases", """
+type Status = Active | Retired | Pending
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+  }
+}
+""", "T1"),
+    # the unknown ARM outranks the missing cases: this program trips both and
+    # the reference names the arm.
+    ("an unknown arm outranks the missing cases", """
+type Status = Active | Retired | Pending
+
+fn code(s: Status) -> Int {
+  return match s {
+    Active => 1,
+    Lapsed => 2,
+  }
+}
+""", "TYPE"),
+    # a payload arm binds a name; the case list is read past the payload's own
+    # type spelling, so a payload type that happens to name another case would
+    # otherwise join the declared list.
+    ("a match over a variant with payloads misses one", """
+type Row = { id: Int }
+type Outcome = Ok(Row) | Invalid(Str)
+
+fn describe(o: Outcome) -> Str {
+  return match o {
+    Ok(r) => "ok",
+  }
+}
+""", "T1"),
+    ("a type alias cycle", _fixture("t18_type_alias_cycle"), "TYPE"),
+    # the one-element cycle, whose chain is the same name twice.
+    ("a type alias that names itself", """
+type Handle = Handle
+
+fn open(h: Handle) -> Int {
+  return 1
+}
+""", "TYPE"),
+    # the expansion rewrites a type APPLICATION's ARGUMENTS under the same
+    # stack, so a cycle that runs through one is still a cycle.
+    ("a type alias cycle through a type application", """
+type Handle = List[Ref]
+type Ref = Handle
+
+fn open(h: Handle) -> Int {
+  return 1
+}
+""", "TYPE"),
+    ("record destructuring of a list",
+     _fixture("t5_destructure_nonrecord"), "TYPE"),
+    ("record destructuring of a scalar", """
+fn f(n: Int) -> Int {
+  let { a } = n
+  return 1
+}
+""", "TYPE"),
+    # a DECLARED type whose `types` entry is a variant rather than a record.
+    ("record destructuring of a declared variant", """
+type Status = Active | Retired
+
+fn f(s: Status) -> Int {
+  let { a } = s
+  return 1
+}
+""", "TYPE"),
+    # ---- the `a host emission` reach label (issue #1254) -------------------
+    # A G4 excess refusal THROUGH A HOST EXTERN. No document in the corpus had
+    # this shape, so nothing measured the reach list on it, and the two engines
+    # rendered it differently: the reference's `_method_emissions` notes
+    # `a host emission` for an `emit` step that is not a required-key crossing
+    # and the gate noted nothing, leaving
+    #   reference:  … (reaching `a host emission`, `pg_write()`)
+    #   gate:       … (reaching `pg_write()`)
+    # Same tag, same offending token, both refusing — a divergence on the
+    # MESSAGE half of the agreement alone, which is why the census (which sees
+    # only the documents in the tree) reported no `msg-mismatch`.
+    #
+    # Here rather than in a dedicated test file on purpose. `REJECTED_PROGRAMS`
+    # is what `gate_reference_census.load_corpus` reads and what
+    # `test_rejected_programs_agree` compares byte for byte, so a document here
+    # holds the two reach renderers together on tag AND message. The lane that
+    # found this (issue #1240) kept its own out-of-bounds controls out of this
+    # list precisely because the divergence was still open; with the label
+    # carried, that constraint is lifted.
+    #
+    # The extern is UNSCOPED on purpose: an unscoped emission extern is its own
+    # capability token under every reading of `_emitting_capabilities`, so the
+    # offending token this message quotes does not depend on how a DECLARED
+    # scope is seeded.
+    ("a G4 excess through a host extern", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit pg_write(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # The plain-declaration half of the same crossing: the label lands in the
+    # "reaches" list of the upper-bound refusal as well as the "(reaching …)"
+    # tail of the capability one, and the two are rendered by different arms.
+    ("a plain provider reaching a host extern", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit pg_write(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # Control 1: the same excess through a REQUIRED KEY. The crossing has a
+    # wiring key to name, so neither engine notes the label — a renderer that
+    # started spelling it on every emission would show up here.
+    ("a G4 excess through a required key carries no host label", """
+service Store { emission fn append(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires fs: Store provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit fs.append(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # Control 2: the same host extern, reached from an emit-marked BINDING.
+    # `let receipt = emit pg_write(row)` is a binding whose value carries the
+    # marker; the reference lowers it through its expression path and never
+    # builds an `emit` step from it, so there is no label on either side. This
+    # is the control a fix that labelled every emit-marked call would fail.
+    ("an emit-marked binding carries no host label", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let receipt = emit pg_write(row)
+      return receipt
+    }
+  }
+}
+""", "G4"),
+    # Control 3: an ordinary statement that merely REACHES the same extern
+    # through a helper, with no `emit` marker of its own. It is not an emit
+    # step, so it draws `helper()` and nothing more on both sides.
+    ("an unmarked reach through a helper carries no host label", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+fn helper(row: Str) -> Int { return pg_write(row) }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let receipt = helper(row)
+      return receipt
+    }
+  }
+}
+""", "G4"),
+    # ---- the reach order inside one statement (issue #1261) ----------------
+    # `_method_emissions` notes a statement's evidence at the STATEMENT NODE,
+    # because its `walk` runs over the body LIST and visits each statement dict
+    # whole before recursing into it. At that one visit it notes the step's own
+    # crossing, then `for name in sorted(calls & env.emitting_fns)` over the
+    # names `_calls_in` collected from the WHOLE statement subtree, then the
+    # names passed as VALUES, and only then the sub-nodes.
+    #
+    # Every G4 document above reaches at most one emitting name per statement,
+    # so nothing in the corpus measured that sort, and the gate — which reaches
+    # the names in SOURCE order as it walks — rendered the same refusal with the
+    # same tag and the same offending tokens in a different reach order:
+    #   reference:  … (reaching `audit_log()`, `pg_write()`)
+    #   gate:       … (reaching `pg_write()`, `audit_log()`)
+    # Both engines refuse; the divergence is on the MESSAGE half of item 391's
+    # agreement, which is the half `test_rejected_programs_agree` compares and
+    # `gate_reference_census.load_corpus` reads this list for.
+    #
+    # `pg_write` before `audit_log` in the source on purpose: the two orders are
+    # each other's reverse, so a document written the other way round would
+    # agree whether or not anything sorted.
+    ("two host externs in one statement sort by name", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = pg_write(row) + audit_log(row)
+      return r
+    }
+  }
+}
+""", "G4"),
+    # The plain-declaration half: the same list is rendered by the upper-bound
+    # arm ("reaches …"), which is a separate `g4_verdict` branch.
+    ("two host externs in one statement sort by name, plain half", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = pg_write(row) + audit_log(row)
+      return r
+    }
+  }
+}
+""", "G4"),
+    # An `emit` step and its `compensate` slot are ONE node on the reference and
+    # TWO statements here (parser.rvl reads the compensation as its own `Stmt`),
+    # so the sort runs across the pair — and the step's own crossing stays ahead
+    # of it. A gate that sorted per STATEMENT rather than per node would draw
+    # `fs.append`, `pg_write()`, `audit_log()` here.
+    ("an emit step and its compensate slot sort as one node", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Store { emission fn append(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires fs: Store provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit fs.append(pg_write(row).to_str()) compensate audit_log(row).to_str()
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # A required-key crossing reached DEEPER in the same statement lands after
+    # the sorted names, because the reference notes it on the recursion into the
+    # sub-node and the names at the statement node above it. The walk reaches
+    # `un.revert` first, so a fix that only sorted the names among themselves,
+    # in place, would leave `un.revert` ahead of them.
+    ("a deeper required-key crossing follows the sorted names", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Store { emission fn append(row: Str) -> Int }
+service Undo { emission fn revert(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires fs: Store, un: Undo provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit fs.append(row) compensate un.revert(pg_write(row).to_str() + audit_log(row).to_str())
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # The same two names in a conditional: one statement, two branches, and the
+    # reference still collects the subtree at the statement node.
+    ("a conditional reaching two host externs sorts them", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let r = row == "x" ? pg_write(row) : audit_log(row)
+      return r
+    }
+  }
+}
+""", "G4"),
+    # Control 1: the same two externs in TWO statements. The sort is per node,
+    # so the reference keeps them in source order here — `pg_write()` first.
+    # A fix that sorted the whole accumulated list would fail on this one.
+    ("two host externs in two statements keep source order", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let a = pg_write(row)
+      let b = audit_log(row)
+      return a + b
+    }
+  }
+}
+""", "G4"),
+    # Control 2: an emit step and a compensate slot that cross REQUIRED KEYS.
+    # Those labels are `<key>.<op>`, not names, so nothing is sorted and the
+    # order is the walk's — a renderer that sorted every label would reverse it.
+    ("a compensate slot through required keys keeps its order", """
+service Store { emission fn append(row: Str) -> Int }
+service Undo { emission fn revert(row: Str) -> Int }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper requires un: Undo, fs: Store provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      emit un.revert(row) compensate fs.append(row)
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # Control 3: the same two externs passed as VALUES, one per statement. The
+    # value labels are a second sorted group on the reference, and per node as
+    # well, so these two also stay in source order.
+    ("two host externs passed as values keep source order", """
+extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
+extern emission fn audit_log(row: Str) -> Int = @py { return 0 }
+service Ledger { emission[db] fn post(row: Str) -> Int }
+component Bookkeeper provides ledger: Ledger {
+  provide ledger {
+    fn post(row) {
+      let f = pg_write
+      let g = audit_log
+      return 0
+    }
+  }
+}
+""", "G4"),
+    # ---- an `emit` through a spawn handle (issue #1261) --------------------
+    # `_method_emissions` reads an `emit` step's head off `expr.target` and has
+    # THREE arms: a required-key crossing names its wiring key, and everything
+    # else notes `a host emission` plus the unnameable capability `*`. A spawn
+    # handle's provision call is in that second arm — the handle's component is
+    # a separate activation, so from this method's side there is no key to name.
+    #
+    # `handle_emit` recorded nothing, so a provide method whose only crossing
+    # went through a handle carried an EMPTY reach and the G4 provider bound had
+    # nothing to refuse. Where the spawn-emission bound refused the program on
+    # its own the two engines still rendered different text, and where it did
+    # not (the third document below) the gate raised no objection at all:
+    #   reference:  … emits through an unnameable host boundary
+    #                 (reaching `a host emission`)
+    #   gate:       … but it spawns `Worker`, which emits through `net`
+    #
+    # The gate's wording names the component and its capability and reads
+    # better, which is why the direction was decided before the fix rather than
+    # after: it is not a rendering of the same verdict but a WEAKER one. It
+    # resolves the crossing through the spawn graph to the child's own
+    # capability, and that resolution is what let the third document through.
+    ("a G4 excess through a spawn-handle emit", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+""", "G4"),
+    # The plain-declaration half, rendered by the upper-bound arm.
+    ("the plain half of a spawn-handle emit", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup {  fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+""", "G4"),
+    # The one the reach gap ADMITTED: the supervisor's bound names the very key
+    # the child emits through, so the spawn-emission bound is satisfied and only
+    # the body's own crossing is left to refuse it. No `emission[...]` list can
+    # name `*`, so the reference refuses; the gate saw an empty reach.
+    ("a spawn-handle emit under a bound naming the child's key", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission[net] fn go() -> Int }
+service Sup { emission[net] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           emit w.task.go()
+                           return 0 } }
+}
+""", "G4"),
+    # The provision ALIAS spelling of the same crossing (`let t = w.task`),
+    # which `alias_call` resolves to the same handle op. The reference resolves
+    # it the same way (`Env.provision_locals`), so it draws the same message.
+    ("a spawn-handle emit through a provision alias", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           let t = w.task
+                           emit t.go()
+                           return 0 } }
+}
+""", "G4"),
+    # Control 1: the same composition with NO handle emit in the body. The
+    # crossing is the spawn alone, both engines render the spawn-emission bound,
+    # and a fix that noted the label on the spawn rather than on the emit step
+    # would change this message.
+    ("a spawn with no handle emit draws the spawn-bound verdict", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+
+                           return 0 } }
+}
+""", "G4"),
+    # Control 2: `let r = emit w.task.go()` binds an emit-marked VALUE, which
+    # the reference lowers through its expression path and never builds an
+    # `emit` step from, so neither engine notes the label and the spawn-bound
+    # verdict is the whole answer. This is the control a fix that labelled every
+    # handle call rather than every emit STEP would fail.
+    ("an emit-marked binding through a handle notes no label", """
+service Kv { emission fn write(row: Str) -> Int }
+service Task { emission fn go() -> Int }
+service Sup { emission[db] fn run() -> Int }
+component Worker requires net: Kv provides task: Task {
+  provide task { fn go() { emit net.write("x")  return 0 } }
+}
+component Supervisor requires net: Kv provides sup: Sup {
+  provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
+                           let r = emit w.task.go()
+                           return 0 } }
 }
 """, "G4"),
 ]
@@ -3545,52 +4328,48 @@ TYPE_LAYER_GAP: dict[str, list[tuple[str, str]]] = {
     # `dynamic_reserved_key` moved into REJECTED_PROGRAMS above, where tag AND
     # message are compared, and left this list.
     #
-    # What stays needs the optional-chaining rules the expression slice did not
-    # build: `?.` on a non-optional is decided from the target's type at the
-    # CHAIN, which is T2d's.
-    "expression typing (T1/T2)": [
-        ("t14_optional_chain_on_nonoptional", "T1"),
-    ],
+    # The optional-chaining rule closed the rest (docs/design/457 T2d):
+    # `t14_optional_chain_on_nonoptional` is now in REJECTED_PROGRAMS above,
+    # where tag AND message are compared, so this family has no row left here.
     # calls and signatures: LANDED whole (docs/design/457 T2b). The signature
     # table, `unify`/`substitute`, the host stub surface, `_BUILTIN_SIG` and the
     # four lowering-time method refusals moved all nine of this family's
     # fixtures into REJECTED_PROGRAMS above, where tag AND message are compared,
     # so the family has no row left here.
-    # arrows and function values: arrow-body checking, function-value flow and
-    # arity, arrow annotations. (The self-declared async colour,
-    # t34_arrow_self_declared_async, was in this family until the gate learned
-    # to parse an arrow's written return annotation and refuse a self-declared
-    # `Async[…]` colour — rule C1 — so it now AGREES with the reference and has
-    # left this gap; see agree-refuse/A1 in the census.)
-    "arrows and function values": [
-        ("t17_arrow_body_unchecked", "T1"),
-        ("t32_arrow_value_result_flows", "T1"),
-        ("t33_arrow_value_arity", "T1"),
-        ("t35_arrow_annotation_not_quantified", "T1"),
-    ],
-    # return paths and match: unknown/missing match cases. The RETURN-PATH half
-    # has LANDED (docs/design/457 T3b): `fb_function` runs
-    # `_check_returns_on_every_path` over the statement tree `fb_scan` already
-    # builds, so `t8_missing_return` and `t9_return_path_incomplete` moved into
-    # REJECTED_PROGRAMS above, where tag AND message are compared. What stays
-    # here needs the variant table and the arm algebra, which is T2d's.
-    "return paths and match": [
-        ("t13_unknown_match_case", "TYPE"),
-        ("v2_match_nonexhaustive", "T1"),
-    ],
-    # declarations: alias cycles and non-record destructuring. The DECLARED-TYPE
-    # half of this family has LANDED (slice T1): `selfhost/lower.rvl` `use`s the
-    # spelling algebra in `selfhost/types.rvl` and runs `check_type_wellformed`
-    # over every module `fn`/`extern` signature and every config field, so
-    # `t6_bare_generic` now refuses with the reference's tag and message and has
-    # moved into REJECTED_PROGRAMS above. What stays pinned here is decided
-    # elsewhere: the alias cycle in `_resolve_type_aliases` and the destructuring
-    # rule in `_lower_let_pattern_stmt`, neither of which is a declared-type
-    # question.
-    "declarations": [
-        ("t18_type_alias_cycle", "TYPE"),
-        ("t5_destructure_nonrecord", "TYPE"),
-    ],
+    # arrows and function values: LANDED WHOLE (docs/design/457 T2c). The
+    # self-declared async colour (t34_arrow_self_declared_async) left first,
+    # when the gate learned to parse an arrow's written return annotation and
+    # refuse a self-declared `Async[…]` colour — rule C1. The other four went
+    # with the expression rule: an arrow types as a function value, its body is
+    # walked over the enclosing scope, a call through such a value is checked
+    # for arity and per argument, and an arrow annotation names the enclosing
+    # `fn`'s type parameter or an opaque nominal but never a fresh one. All
+    # four are in REJECTED_PROGRAMS above, where tag AND message are compared.
+    # return paths and match: EMPTY. The RETURN-PATH half landed first
+    # (docs/design/457 T3b): `fb_function` runs `_check_returns_on_every_path`
+    # over the statement tree `fb_scan` already builds, so `t8_missing_return`
+    # and `t9_return_path_incomplete` moved into REJECTED_PROGRAMS above. The
+    # MATCH half closed the rest: `adt_case_row` records each declared
+    # variant's ORDERED case list beside the per-case rows, and
+    # `_check_match_exhaustiveness` runs at the position `_lower_pure_expr`
+    # runs it — the unknown arm first, then the missing cases unless a `_` arm
+    # covers them — so `t13_unknown_match_case` and `v2_match_nonexhaustive`
+    # moved there too, where tag AND message are compared. The key is kept
+    # rather than deleted so the family's name stays attached to the slice that
+    # closed it.
+    "return paths and match": [],
+    # declarations: EMPTY. The DECLARED-TYPE half landed with slice T1
+    # (`selfhost/lower.rvl` `use`s the spelling algebra in `selfhost/types.rvl`
+    # and runs `check_type_wellformed` over every module `fn`/`extern`
+    # signature and every config field, which moved `t6_bare_generic`). T3b
+    # took the other two, each decided somewhere else entirely:
+    # `_resolve_type_aliases`' `expand` recursion at the head of the
+    # declaration level — ahead of `_validate_declared_types`, where the
+    # reference RAISES it — for `t18_type_alias_cycle`, and
+    # `_lower_let_pattern_stmt`'s two "requires a record" arms, read off a
+    # record destructuring pattern the fn-body walk used to step over, for
+    # `t5_destructure_nonrecord`. Both are in REJECTED_PROGRAMS above.
+    "declarations": [],
     # provide-method and component bodies: EMPTY. This family has landed
     # (docs/design/457, the provide-method slice). All seven of its documents —
     # `t1_service_arg_type`, `t4_field_arg_type`,
@@ -3730,7 +4509,7 @@ def test_the_member_rule_and_the_shadowing_rules_agree_on_which_refusal_wins(
     assert admit(src) == f"{ref_tag}|{ref_msg}"
 
 
-def test_the_type_layer_gap_is_exactly_9_fixtures():
+def test_the_type_layer_gap_is_empty():
     """Section 1's measured gap, held as a count so a fixture cannot quietly
     leave or join the pinned set without this number moving in the diff. It was
     42 until the returns-on-every-path rule (docs/design/457 T3b(returns)) took
@@ -3739,13 +4518,22 @@ def test_the_type_layer_gap_is_exactly_9_fixtures():
     more, the declared-type slice (T1) `t6_bare_generic`, and the provide-method
     / component slice the whole `provide-method and component bodies` family,
     all seven of it; on top of those, the name-RESOLUTION half of the G1/G6
-    family (docs/design/457, the G1 read position) took the last two. The
-    twelfth document that moved with T3a, `dynamic_reserved_key`, never had a
-    row here because this pin addresses its fixtures by bare name under
-    `examples/rejections/`."""
-    assert len(_TYPE_LAYER_CASES) == 9, len(_TYPE_LAYER_CASES)
-    names = [name for _, name, _ in _TYPE_LAYER_CASES]
-    assert len(set(names)) == 9, "a fixture is listed twice"
+    family (docs/design/457, the G1 read position) took two more, and the rest
+    of T3b — match exhaustiveness with its unknown-arm twin, the transparent
+    alias cycle and the non-record destructuring rule — took four more,
+    emptying both the `return paths and match` and the `declarations` families.
+    The twelfth document that moved with T3a, `dynamic_reserved_key`, never had
+    a row here because this pin addresses its fixtures by bare name under
+    `examples/rejections/`.
+
+    The last five went together: the optional-chain rule (T2d) took
+    `t14_optional_chain_on_nonoptional` out of the expression-typing family,
+    and the function-value rule (T2c) took the four arrow documents. Nothing is
+    pinned here any more, so this pin now reads as a floor rather than a
+    ceiling: a fixture the gate stops refusing has to come back through a row
+    added here and through `KNOWN_BYPASSES`, in the diff, rather than by
+    widening a number."""
+    assert _TYPE_LAYER_CASES == [], _TYPE_LAYER_CASES
 
 
 @pytest.mark.parametrize("family,name,tag", _TYPE_LAYER_CASES,

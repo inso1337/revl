@@ -398,7 +398,8 @@ def _run_audit(args, ir: dict) -> int:
         # and `--json` already build; a violation refuses admission with a
         # why-trace naming the offending chain.
         from .audit_diff import audit_report  # noqa: PLC0415
-        from .policy import evaluate, load_policy, render_report  # noqa: PLC0415
+        from .policy import (approval_admission, evaluate,  # noqa: PLC0415
+                             load_policy, render_report)
 
         policy = load_policy(args.policy)
         audit = audit_report(ir)
@@ -428,6 +429,21 @@ def _run_audit(args, ir: dict) -> int:
                               evidence=evidence, origins=origins,
                               trusted_publishers=trusted, key=key,
                               evidence_ir=evidence_ir)
+        # item 522 (issue #1196), the confirmation gate's missing half.
+        # `capability C requires approval` is the operator's authority raising
+        # `C` to confirm-required. `policy.approval_admission` enforces it —
+        # but it was only ever CALLED from `mcp.session`, so it was a session
+        # gate, and the surface an operator actually reads before shipping,
+        # `revl audit --policy`, reported the very same composition CLEAN.
+        # Measured on this tree before this line: a computer-use agent that
+        # reaches `ui.click` with no covering `with` edge, under a policy
+        # reading `capability ui.click requires approval`, printed "boundary
+        # policy: clean — every component's reach is within its declared
+        # authority" and exited 0, while loading it in a session refused it.
+        # A gate whose static surface says clean is a gate an operator learns
+        # not to consult. `evaluate` is untouched (every other caller keeps its
+        # exact contract); this is the ONE surface that claimed to be the gate.
+        violations = violations + approval_admission(policy, ir)
         if args.json:
             print(json.dumps(
                 {"policy": args.policy,
@@ -733,6 +749,26 @@ def _run_audit(args, ir: dict) -> int:
         lines, sb_err = sandbox_audit_view(ir, _load_placement(args.placement))
         if sb_err:
             print(f"\nsandbox placement: error: {sb_err}")
+            return 1
+        if lines:
+            print()
+            for line in lines:
+                print(line)
+        # item 515 S5: each model role's binding per host and the bindings
+        # digest. Prints nothing for a composition with no routed model action.
+        from .placement import model_binding_view  # noqa: PLC0415
+        if _wiring_documents(list(args.files))[0]:
+            # A composition document's rows are resolved, not parsed as
+            # modules, and this view reads modules; say so rather than print
+            # nothing, which would read as "no bindings".
+            lines, mb_err = (["model bindings (item 515): not computed for a "
+                              "composition document; run `revl audit` over "
+                              "its modules with --placement"], None)
+        else:
+            lines, mb_err = model_binding_view(
+                list(args.files), _load_placement(args.placement))
+        if mb_err:
+            print(f"\nmodel bindings: error: {mb_err}")
             return 1
         if lines:
             print()
@@ -1231,6 +1267,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "fmt":
         return _run_fmt(args)
     if args.command == "run":
+        if getattr(args, "pool", None):
+            # item 524: the composition runs on a pool MEMBER, not here. The
+            # branch is taken before any local runtime is touched, so nothing
+            # boots on the operator's machine on the way to dispatching it.
+            from .pool_dispatch import run_pool_command  # noqa: PLC0415 — lazy
+            return run_pool_command(args)
         return run_command(args)
     if args.command == "dev":
         from .dev import dev_command  # noqa: PLC0415 — process orchestration is optional
@@ -1243,6 +1285,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_trace(args)
     if args.command == "profile":
         return _run_profile(args)
+    if args.command == "pool":
+        from .peer_pool import pool_command  # noqa: PLC0415 — lazy
+        return pool_command(args)
     if args.command == "attest":
         return _run_attest(args)
     if args.command == "dash":

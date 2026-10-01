@@ -41,14 +41,13 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _census():
-    spec = importlib.util.spec_from_file_location(
-        "gate_reference_census", ROOT / "tools" / "gate_reference_census.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "gate_reference_census",
+        ROOT / "tools" / "gate_reference_census.py")
     return module
 
 
@@ -124,83 +123,97 @@ def test_no_bypass_and_no_new_divergence(census, measured):
 # file pins the divergence per fixture; the two lists move together. Each later
 # slice (T1..T4) refuses a family for real, at which point its fixtures leave
 # BOTH lists and the census baseline is re-recorded.
-KNOWN_BYPASSES = {
-    # -- fn-body binding rules (G1/G6): CLOSED, no row left --
-    # The ASSIGNMENT half landed with item 391's binding-discipline slice (the
-    # `let`/`var`/parameter scope walk over a module `fn` body, plus the
-    # arrow-body write form): `v2_let_reassignment`,
-    # `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
-    # `g6_closure_mutates_capture` refused with the reference's message
-    # byte-for-byte and were struck from this list, and the callable-shadowing
-    # slice struck `shadowed_module_fn_call` the same way. The name-RESOLUTION
-    # rule (docs/design/457 §2.3) took the last two, `g1_template_undeclared`
-    # and `v2_undeclared_fn_var`: a name READ now resolves against the fn's
-    # scope and the callable universe, so the gate refuses both under G1 in the
-    # reference's own sentence and this family has no open bypass.
-    # -- expression typing (T1/T2) --
-    # The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
-    # the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
-    # `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
-    # reference's own sentence and have been struck from this list, and the
-    # provide-method slice has since struck `t30` the same way: the walk over a
-    # component body now carries the environment that slice left empty — the
-    # method parameters at the service's declared types, the body's annotated
-    # and inferred locals, the activation locals at the operations they bind.
-    # What remains is the optional-chain rule, which is T2d's.
-    "examples/rejections/t14_optional_chain_on_nonoptional.rvl",
-    # -- calls and signatures --
-    # CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
-    # type parameters, the arity window, `unify`/`substitute` at a generic call
-    # site, the host stub surface, `_BUILTIN_SIG` with its receiver families and
-    # bottom learning, and the four refusals the reference makes while LOWERING
-    # a method call. All nine of this family's fixtures now refuse with the
-    # reference's own tag and sentence and are struck from this list.
-    # -- arrows and function values --
-    "examples/rejections/t17_arrow_body_unchecked.rvl",
-    "examples/rejections/t32_arrow_value_result_flows.rvl",
-    "examples/rejections/t33_arrow_value_arity.rvl",
-    "examples/rejections/t35_arrow_annotation_not_quantified.rvl",
-    # -- return paths and match --
-    # The RETURN-PATH half landed with docs/design/457 T3b: `fb_function` runs
-    # `_check_returns_on_every_path` over the statement tree the fn-body walk
-    # already builds, so `t8_missing_return` and `t9_return_path_incomplete`
-    # now refuse with the reference's message AND its line and are struck from
-    # this list. What remains needs the variant table and the arm algebra.
-    "examples/rejections/t13_unknown_match_case.rvl",
-    "examples/rejections/v2_match_nonexhaustive.rvl",
-    # -- declarations --
-    # `t6_bare_generic` LEFT this list with the type layer's slice T1:
-    # `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
-    # `selfhost/types.rvl` and runs `check_type_wellformed` over every module
-    # `fn`/`extern` signature and every config field, at the phase position
-    # `_validate_declared_types` gives it. What stays here is decided somewhere
-    # else entirely: the alias cycle in `_resolve_type_aliases`, the
-    # destructuring rule in `_lower_let_pattern_stmt`.
-    "examples/rejections/t18_type_alias_cycle.rvl",
-    "examples/rejections/t5_destructure_nonrecord.rvl",
-    # -- provide-method and component bodies: NONE --
-    # The whole family closed with the provide-method slice (docs/design/457).
-    # `t1_service_arg_type`, `t4_field_arg_type`,
-    # `t7_provide_param_annotation_mismatch`,
-    # `t16_provide_method_missing_return`,
-    # `t31_index_non_int_provide_method` and `t3_config_default_type` now refuse
-    # with the reference's own sentence; `t30_field_read_on_any_provide_method`
-    # left the expression-typing group above in the same change.
-    # -- NOT the type layer: the parameterized rows are STRUCK --
-    # `_check_spawn_attenuation`'s two parameterized rows --
-    # `g4_spawn_widens_parameter` (a `path` cone) and `g4_spawn_widens_budget`
-    # (a `calls` ceiling) -- are STRUCK: `selfhost/lower.rvl` now carries the
-    # `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
-    # so both sides of the attenuation fold are spelled in the boundary's own
-    # namespace and both refuse with the reference's message byte-for-byte.
-    # `examples/rejections/g4_dotted_capability_key.rvl` is the corpus document
-    # for the shape that change caught and nothing spelled: a dotted item-343
-    # emission scope, which the old scope-list reader split into two
-    # capabilities so that the wiring key landed in the declared scope by
-    # accident. The other shape it caught -- a widening laundered through a key
-    # SPELLED the same on both sides -- is pinned by an in-file test in
-    # `selfhost/lower.rvl` instead; see the capability-order header there.
-}
+# -- fn-body binding rules (G1/G6): CLOSED, no row left --
+# The ASSIGNMENT half landed with item 391's binding-discipline slice (the
+# `let`/`var`/parameter scope walk over a module `fn` body, plus the
+# arrow-body write form): `v2_let_reassignment`,
+# `v2_compound_assign_on_let`, `v2_duplicate_let_block_scope` and
+# `g6_closure_mutates_capture` refused with the reference's message
+# byte-for-byte and were struck from this list, and the callable-shadowing
+# slice struck `shadowed_module_fn_call` the same way. The name-RESOLUTION
+# rule (docs/design/457 §2.3) took the last two, `g1_template_undeclared`
+# and `v2_undeclared_fn_var`: a name READ now resolves against the fn's
+# scope and the callable universe, so the gate refuses both under G1 in the
+# reference's own sentence and this family has no open bypass.
+# -- expression typing (T1/T2) --
+# The fn-body STATEMENT layer (docs/design/457 T3a) closed this family for
+# the module-`fn` surface: `t2`, `t11`, `t12`, `t21`, `t22`, `t23`, `t26`,
+# `t27`, `t28`, `t29`, `t36` and `dynamic_reserved_key` now refuse with the
+# reference's own sentence and have been struck from this list, and the
+# provide-method slice has since struck `t30` the same way: the walk over a
+# component body now carries the environment that slice left empty — the
+# method parameters at the service's declared types, the body's annotated
+# and inferred locals, the activation locals at the operations they bind.
+# The optional-chain rule (docs/design/457 T2d) closed the rest: `?.` now
+# requires an optional on its left, so `t14_optional_chain_on_nonoptional`
+# refuses with the reference's own sentence and is struck from this list.
+# This family has no open bypass.
+# -- calls and signatures --
+# CLOSED WHOLE by docs/design/457 T2b: the signature table with its marked
+# type parameters, the arity window, `unify`/`substitute` at a generic call
+# site, the host stub surface, `_BUILTIN_SIG` with its receiver families and
+# bottom learning, and the four refusals the reference makes while LOWERING
+# a method call. All nine of this family's fixtures now refuse with the
+# reference's own tag and sentence and are struck from this list.
+# -- arrows and function values --
+# CLOSED WHOLE by docs/design/457 T2c: an arrow types as a function value
+# (parameters at their annotations or bottom, the result from the body only
+# where no bottom parameter reaches it), its body is walked as an ordinary
+# expression over the enclosing scope, a call through such a value is
+# checked for arity and then per argument, and an annotation's type name
+# resolves to the enclosing `fn`'s type parameter or an opaque nominal and
+# never to a fresh one. All four remaining fixtures of this family now
+# refuse with the reference's own tag and sentence and are struck from this
+# list; `t34_arrow_self_declared_async` left it earlier with rule C1.
+# -- return paths and match: CLOSED, no row left --
+# The RETURN-PATH half landed first (docs/design/457 T3b): `fb_function`
+# runs `_check_returns_on_every_path` over the statement tree the fn-body
+# walk already builds, so `t8_missing_return` and
+# `t9_return_path_incomplete` refuse with the reference's message AND its
+# line. The MATCH half closed the rest: the declaration scan now records
+# each variant's ordered case list, and `_check_match_exhaustiveness` runs
+# at the position `_lower_pure_expr` runs it, so `t13_unknown_match_case`
+# and `v2_match_nonexhaustive` refuse with the reference's own sentence and
+# are struck from this list.
+# -- declarations: CLOSED, no row left --
+# `t6_bare_generic` LEFT this list with the type layer's slice T1:
+# `selfhost/lower.rvl` now `use`s the shared type-spelling algebra in
+# `selfhost/types.rvl` and runs `check_type_wellformed` over every module
+# `fn`/`extern` signature and every config field, at the phase position
+# `_validate_declared_types` gives it. The other two followed with T3b:
+# `_resolve_type_aliases`' `expand` recursion is ported at the head of the
+# declaration level (`t18_type_alias_cycle`), and
+# `_lower_let_pattern_stmt`'s "requires a record" arms are read off a
+# record destructuring pattern the fn-body walk used to step over
+# (`t5_destructure_nonrecord`).
+# -- provide-method and component bodies: NONE --
+# The whole family closed with the provide-method slice (docs/design/457).
+# `t1_service_arg_type`, `t4_field_arg_type`,
+# `t7_provide_param_annotation_mismatch`,
+# `t16_provide_method_missing_return`,
+# `t31_index_non_int_provide_method` and `t3_config_default_type` now refuse
+# with the reference's own sentence; `t30_field_read_on_any_provide_method`
+# left the expression-typing group above in the same change.
+# -- NOT the type layer: the parameterized rows are STRUCK --
+# `_check_spawn_attenuation`'s two parameterized rows --
+# `g4_spawn_widens_parameter` (a `path` cone) and `g4_spawn_widens_budget`
+# (a `calls` ceiling) -- are STRUCK: `selfhost/lower.rvl` now carries the
+# `cap_order` (T, P) order and `lower.py::_cap_keyed`'s key-to-token bridge,
+# so both sides of the attenuation fold are spelled in the boundary's own
+# namespace and both refuse with the reference's message byte-for-byte.
+# `examples/rejections/g4_dotted_capability_key.rvl` is the corpus document
+# for the shape that change caught and nothing spelled: a dotted item-343
+# emission scope, which the old scope-list reader split into two
+# capabilities so that the wiring key landed in the declared scope by
+# accident. The other shape it caught -- a widening laundered through a key
+# SPELLED the same on both sides -- is pinned by an in-file test in
+# `selfhost/lower.rvl` instead; see the capability-order header there.
+#
+# EMPTY: nothing on this list is open any more. It is spelled `set()` rather
+# than `{}` so the empty case stays a SET -- the comparisons below are set
+# differences, and an empty dict literal would make them a type error rather
+# than a measurement.
+KNOWN_BYPASSES: set[str] = set()
 
 
 def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):
@@ -223,6 +236,44 @@ def test_the_open_bypass_surface_is_exactly_the_named_list(census, measured):
         "re-record the census baseline:\n  " + "\n  ".join(fixed))
 
 
+# --- authority rules after a block (tests/fixtures/gate_block_nesting/) -------
+#
+# The gate's statement reader lost track of block nesting. A `}` that began a
+# line ended the enclosing body, so a multi-line activation guard hid every
+# `provide` after it and a multi-line `if`/`while` hid every statement after it
+# in a provide method. A block written on one line was skipped whole. The
+# reference refused all of them under G1 or G4 and the gate raised no objection.
+# The census stayed green because no corpus document put a violation after, or
+# inside, a block.
+#
+# The census compares only the TRACKED buckets against its baseline, so a
+# document here that drifted to a refusal the reference raises for some other
+# reason would read as `no-objection-out-of-slice` and nobody would notice. Each
+# document's bucket is therefore held by name: the file name's prefix is the
+# verdict (`g1_`, `g4_` refused under that guarantee, `ok_` admitted).
+BLOCK_NESTING = ROOT / "tests" / "fixtures" / "gate_block_nesting"
+
+
+def _block_nesting_expected(stem: str) -> str:
+    if stem.startswith("ok_"):
+        return "agree-admit"
+    return "agree-refuse/" + stem.split("_", 1)[0].upper()
+
+
+def test_every_authority_rule_after_a_block_is_refused_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(BLOCK_NESTING.glob("*.rvl"))
+    assert len(docs) >= 40, f"the block-nesting corpus shrank to {len(docs)}"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["block-nesting documents moved:"] + wrong)
+
+
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
     """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
     calls its reference set is read STATICALLY out of `_classify`, so that the
@@ -232,11 +283,9 @@ def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measure
     the row has a blind family and the ratchet cannot see it go unreached.
 
     Here rather than beside the report because the run is already paid for."""
-    spec = importlib.util.spec_from_file_location(
-        "oracle_construct_reach", ROOT / "tools" / "oracle_construct_reach.py")
-    reach = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = reach
-    spec.loader.exec_module(reach)
+    reach = load_by_path(
+        "oracle_construct_reach",
+        ROOT / "tools" / "oracle_construct_reach.py")
     surveyed = reach._census_guarantees()
 
     _, (buckets, _) = measured
@@ -568,3 +617,63 @@ def test_the_frontier_mirror_matches_the_rust(census):
         "1" for _ in range(generator.MAX_LEVEL_ITEMS + 1))
     assert len(flat) < generator.MAX_SOURCE_BYTES // 10
     assert scan(flat) is not None
+
+
+def test_every_sibling_tool_is_loaded_relative_to_this_tool():
+    """`ROOT` is the tree under measurement, and a caller may redirect it.
+
+    The census loads several of its own sibling modules by path. Resolving
+    one of those off `ROOT` asks the MEASURED tree for a module that belongs
+    to the census itself, and a caller that points `ROOT` at a prepared tree
+    then gets a `FileNotFoundError` from a tool it never asked about. That is
+    what item 542 hit the moment it gave `main()` a provenance line to print:
+    `--record` against a prepared tree raised on `tools/corpus_provenance.py`
+    and took `tests/test_evolution_reward.py` red with it.
+
+    Structural rather than behavioural, because the behavioural case only
+    reaches the modules one code path happens to load, and the next sibling
+    tool will be loaded from somewhere else. `backends/python/emit.py` stays
+    on `ROOT` on purpose: the emitter is the SUBJECT of the census, part of
+    the tree being measured, not part of the census.
+    """
+    import ast
+
+    tree = ast.parse((ROOT / "tools" / "gate_reference_census.py").read_text(
+        encoding="utf-8"))
+
+    def spelled(node):
+        """`("ROOT", ["tools", "x.py"])` for `ROOT / "tools" / "x.py"`."""
+        parts = []
+        while isinstance(node, ast.BinOp) and isinstance(node.op, ast.Div):
+            if not isinstance(node.right, ast.Constant) \
+                    or not isinstance(node.right.value, str):
+                return None, []
+            parts.append(node.right.value)
+            node = node.left
+        if not isinstance(node, ast.Name):
+            return None, []
+        return node.id, list(reversed(parts))
+
+    off_the_measured_tree, off_this_tool = [], []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) \
+                or not isinstance(node.func, ast.Attribute) \
+                or node.func.attr != "spec_from_file_location":
+            continue
+        for arg in node.args:
+            base, parts = spelled(arg)
+            if base == "TOOLS":
+                off_this_tool.append("/".join(parts))
+            elif base == "ROOT" and parts[:1] == ["tools"]:
+                off_the_measured_tree.append("/".join(parts))
+
+    assert not off_the_measured_tree, (
+        "these sibling tools are resolved off the tree under measurement "
+        "rather than off this tool, so a redirected ROOT looks for them "
+        "inside the measured tree: " + ", ".join(sorted(
+            set(off_the_measured_tree))))
+    # Not vacuous: a rename of the helper, or a census that stopped loading
+    # siblings by path, would satisfy the assertion above without this file
+    # having checked a single load.
+    assert off_this_tool, (
+        "no sibling tool is loaded off TOOLS; this test checked nothing")

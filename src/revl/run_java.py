@@ -61,6 +61,7 @@ from pathlib import Path
 
 from ._paths import backends_root
 from .errors import RevlError
+from .refusal import refusals
 
 _BACKENDS_DIR = backends_root()
 _JAVA_DIR = _BACKENDS_DIR / "java"
@@ -167,15 +168,30 @@ def _key_service(ir: dict) -> dict[str, str]:
     return out
 
 
-def _emit_components(ir: dict, gen_dir: Path, record: bool = False) -> None:
+def _java_emitter():
+    """Load backends/java/emit.py.
+
+    Loaded, never cached: the emitter carries module-global render state, so a
+    fresh module per emission is the contract this file has always had. The
+    CALLER keeps the module it was handed, because `EmitError` is a class on the
+    module OBJECT -- a second `exec_module` produces a DIFFERENT class, and an
+    `except` against it would not match the instance the first module raised
+    (issue #1393)."""
     spec = importlib.util.spec_from_file_location("revl_java_emit", _JAVA_DIR / "emit.py")
     emit_module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(emit_module)
+    return emit_module
+
+
+def _emit_components(ir: dict, gen_dir: Path, record: bool = False,
+                     emit_module=None) -> None:
+    emit_module = _java_emitter() if emit_module is None else emit_module
     (gen_dir / "Components.java").write_text(
         emit_module.emit(ir, "revl", record=record), encoding="utf-8")
 
 
-def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False) -> str:
+def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False,
+           emit_module=None) -> str:
     """Emit revl/Components.java and compile it + the cordis4j stubs +
     PlacementRunner (for its shared JSON parser) + RunOnce into a classes dir;
     return that dir (the ``java -cp`` classpath).
@@ -189,7 +205,7 @@ def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False) -> str:
     out.mkdir()
     gen = tmp / "java_gen" / "revl"
     gen.mkdir(parents=True)
-    _emit_components(ir, gen, record=record)
+    _emit_components(ir, gen, record=record, emit_module=emit_module)
 
     javac = str(Path(jdk_bin) / "javac")
     stubs = [str(p) for p in (_JAVA_DIR / "stubs").rglob("*.java")]
@@ -213,6 +229,28 @@ def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False) -> str:
     return str(out)
 
 
+def _placements(ir: dict) -> list[dict]:
+    """Every provision of the composition, one entry per (component, key),
+    with the realm an `isolate` places it in (None for the shared realm).
+
+    Issue #1550: the once runner's UP and no-residue proofs resolved every
+    provided key in the SHARED realm. A key a component isolates
+    (`isolate kv in realm("tenant_a")`) is published in its realm only, so the
+    proof threw `no provider` for a composition that had loaded cleanly, and
+    `examples/tenants.rvl` could not run on java at all. Each provision is now
+    checked where it is published: two tenants providing `kv` are two
+    provisions, `kv@tenant_a` and `kv@tenant_b`, and each must be live while
+    the composition is up and gone after teardown."""
+    out: list[dict] = []
+    for comp in ir.get("components") or []:
+        isolate = comp.get("isolate") or {}
+        for key, service in (comp.get("provides") or {}).items():
+            out.append({"component": comp.get("name"), "key": key,
+                        "iface": f"revl.Components${service}",
+                        "realm": isolate.get(key)})
+    return out
+
+
 def _spec(ir: dict, config: dict) -> dict:
     key_service = _key_service(ir)
     return {
@@ -222,6 +260,7 @@ def _spec(ir: dict, config: dict) -> dict:
         "config": config,
         "provides": list(key_service),
         "ifaces": {k: f"revl.Components${s}" for k, s in key_service.items()},
+        "placements": _placements(ir),
     }
 
 
@@ -257,11 +296,21 @@ def run_java(ir: dict, config: dict, files, once: bool = False,
     record = bool(wal_path)
     child_env = dict(os.environ) if record else None
 
+    # issue #1393: the emitter module is loaded HERE, not inside `_build`, so the
+    # `EmitError` class in the catch below belongs to the module instance that
+    # will raise it. The java tier refuses a document it cannot lower by name
+    # (the #1381 family of tier refusals); before this the refusal escaped
+    # `_build` as a raw traceback, because `EmitError` is a `ValueError` and so
+    # matched none of `(RevlError, RuntimeError, OSError)`. It joins that tuple
+    # and nothing wider: an internal emitter fault must still surface loudly.
+    java_emit = _java_emitter()
+
     tmp = Path(tempfile.mkdtemp(prefix="revl_run_java_"))
     try:
         try:
-            classpath = _build(ir, tmp, jdk_bin, record=record)
-        except (RevlError, RuntimeError, OSError) as exc:
+            classpath = _build(ir, tmp, jdk_bin, record=record,
+                               emit_module=java_emit)
+        except (RevlError, RuntimeError, OSError, *refusals(java_emit)) as exc:
             print(f"error: could not build the java composition:\n{exc}",
                   file=sys.stderr)
             return 1

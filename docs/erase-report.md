@@ -65,9 +65,18 @@ exactly what left the system and whether anything was done about it. It does
 
 **External erasure is out of scope.** The state-gone proof (§1) is about
 in-process runtime state only. Data that already crossed the boundary is
-outside this system and outside this proof. A **bare** crossing (§2) left the
-system with nothing done about it and must be handled out of band; the report
-lists it precisely so it can be.
+outside this system and outside this proof. A **bare** emission or host extern
+(§2) left the system with nothing done about it and must be handled out of
+band; the report lists it precisely so it can be.
+
+**"Handled out of band" is not one thing.** For a computer-use crossing the
+report prints the item-522 state instead of `bare`, and the header prints one
+clause per state, because the single sentence above is false for two of them:
+an `uncompensated` crossing has no inverse, so it cannot be handled by running
+one, and an `untouched` crossing changed nothing the target owns, so there is
+nothing to handle. The clauses are built from `ui_transaction.WEAKEST_FIRST`
+rather than written out a second time, so the header cannot go quiet about a
+state the report can tag (`erase_report.OUT_OF_BAND`).
 
 ## Auditor framing
 
@@ -76,7 +85,7 @@ Read the three sections as one claim with an honest boundary:
 > The realm's in-process state can be provably eliminated (R4), doing so cannot
 > affect any other tenant (G2 / `survivors`), and here is the complete list of
 > what this tenant's components ever sent outside the system — with, for each,
-> whether a compensating action was issued. The list of **bare** crossings is
+> whether a compensating action was issued. The crossings left as residue are
 > the exposure that erasing in-process state does not reach.
 
 That is a stronger and more honest artifact than "we deleted the data": it
@@ -88,7 +97,7 @@ isolation, the exhaustive crossing list) from what no type system can
 
 The default rendering leads with the honest-scope header, then the three
 numbered sections. `--json` emits a versioned, self-describing document
-(`kind: "revl.erase-report"`, `schema_version: "1.0"`) in the additive-only
+(`kind: "revl.erase-report"`, `schema_version: "1.1"`) in the additive-only
 spirit of the interchange format (docs/interchange-format.md) — a consumer can
 gate on the MAJOR version and ignore members it does not recognise.
 

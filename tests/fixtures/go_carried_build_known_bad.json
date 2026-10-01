@@ -1,0 +1,16 @@
+{
+  "note": [
+    "The carried set is every document `backends/go/emit.py::emit` routes to",
+    "`_emit_v3_combined`: a top-level fn/type/extern/plain-test beside an",
+    "OBSERVABLE component (issue #1321). `carried` has to mean `builds`, so",
+    "tests/test_go_carried_set_builds.py emits the whole set and runs",
+    "`go build` over it. Every carried document that emits must build unless",
+    "it is named here, with the diagnostic it still produces.",
+    "",
+    "The list is EMPTY: all 123 carried documents build (issue #1356). It",
+    "stays a RATCHET. Removing an entry is the only edit that needs no",
+    "argument. Adding one needs the reason in the entry and an issue behind",
+    "it: a carried document that does not build is a defect, not a baseline."
+  ],
+  "known_bad": {}
+}

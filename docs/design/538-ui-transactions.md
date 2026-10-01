@@ -361,7 +361,10 @@ regenerated.
 ## 10. Slice plan
 
 Each slice is closable on its own and carries the oracle that makes it a
-measurement. Slice 1 is landed; the rest are proposals.
+measurement. All five have now landed; each entry carries its own evidence.
+What the five do NOT include is execution: revl computes a compensation run and
+performs no crossing, which is issue #1369's remainder, and the check-to-use
+race is issue #1371.
 
 **Slice 1: the classification and the two teardown refusals. LANDED.**
 `src/revl/ui_family.py` gains the five classes, the per-verb table, the
@@ -372,32 +375,104 @@ tests. Non-vacuity measured against `agent/1195-typed-computer-use` at
 `effc8b4b`: the five refused programs are all ADMITTED there and refused here,
 and the six controls are admitted on both trees.
 
-**Slice 2: the confirmation gate.** Decide between the three options in
-section 6 and land the raise to `confirm-required`, so an `unknown` or
-`irreversible` crossing without a confirmation is refused by name. Oracle: the
-same program admitted with a confirmation and refused without it, plus a
-control on an ordinary capability. This is the slice that turns section 6's
-honest gap into a check, and it is the largest remaining piece of the item.
+**Slice 2: the confirmation gate. LANDED** (PR #1287). Section 6's third
+option was the one taken: the raise to `confirm-required` is operator-side,
+`capability ui.click requires approval`, and the half that landed is that
+`revl audit --policy` now evaluates it. `policy.approval_admission` had always
+enforced the rule and was called only from `revl.mcp.session`, so the static
+surface an operator reads before shipping reported an unconfirmed composition
+clean and exited 0 while a session refused it. Oracle, as written here:
+`tests/test_ui_transaction_phases_522.py::test_audit_policy_refuses_an_unconfirmed_ui_crossing`
+and `::test_an_activation_body_crossing_with_an_edge_admits`, the same program
+refused without a confirmation and admitted with one, plus
+`::test_a_policy_that_raises_nothing_is_still_clean` as the control. The gate
+reaches a `provide` method loop, which is the shape the item is about.
 
-**Slice 3: the transaction unit and LIFO compensation.** A declared sequence
-whose registered compensations run in reverse on an unmet postcondition. Needs
-slice 2 for `confirm`, and needs item 521's slice 4 for a target that survives
-a phase boundary. Oracle: a five-step transaction whose third step fails runs
-exactly the compensations of steps two and one, in that order, and reports the
-third as uncompensated.
+Section 6's cost of that option is unchanged and is not a remainder of this
+slice: a policy rule is optional, so absence of a rule is silence rather than
+the gate admitting. The other two options are still open questions for
+whoever wants an unconditional raise, and the first of them is a change to
+item 246's non-persistence rule and belongs there.
 
-**Slice 4: `uncompensated` on the residue report.** Extend the residue and
-erase surfaces so a UI transaction's outcome is a third value beside
-`no_residue` and a bare crossing, and so a transaction that ran every
-registered compensation over a step set containing an `irreversible` verb
-still reports `uncompensated`. Oracle: the report for the transaction in slice
-3 names both the compensated steps and the uncompensated one, and does not
-print `no_residue`.
+**Slice 3: the transaction unit and LIFO compensation. LANDED** (issue
+#1369). `ui_transaction.compensation_run(steps, failed_at)` computes the run
+keyed on the step the transaction failed at: the LIFO order, its membership,
+and each step's outcome. Oracle, in the sentence this slice was filed with:
+`tests/test_ui_transaction_run_1369.py::test_the_five_step_oracle`. The control
+that makes it a measurement is `compensateOrder`, the artifact it is keyed
+against: that one is not keyed on the failure, so on the same five steps it
+names three compensations and one of them belongs to a step the failure means
+never executed.
 
-**Slice 5: the postcondition.** A typed postcondition per step, read by a
-fresh `observe`/`find` pair rather than from a return code, with the honest
-limit of section 4 recorded in the report: verified-against-a-spoofable-read
-is not the same word as verified.
+Two rules the oracle does not pin, decided here rather than left to the next
+reader. A step AFTER the failure never executed, so it is `untouched` and not
+residue. The FAILING step's own registered compensation does run: an unmet
+postcondition says revl could not see the effect land, which is not knowing it
+did not, and restoring a field is correct either way.
+
+The unit is only as complete as the step set it is computed over, and that is
+the half issue #1327 held open. `method_plan`'s walk read three statement
+shapes and only the top node of each one's expression, so an actuation written
+in any of seven other positions was not a step of the transaction it is a step
+of. Tail position is the one that matters here, because a `provide` method
+that returns what it clicked has nothing left to bind. Keyed by label, a run
+over such a transaction raised `LookupError`: revl could not be told which step
+failed. Keyed by index it did not raise at all, and reported an aggregate of
+`restored` for a transaction holding an uncompensated click, because the
+aggregate is the weakest state PRESENT and the step that would have dragged it
+down was absent from the fold. The generic walk is section 5.1 of
+`docs/design/553-ui-transaction-phases.md`;
+`tests/test_ui_transaction_run_1369.py`'s last section is the run over that
+shape, of which two tests fail on the walk it replaces and two are the controls
+that say what each run was entitled to claim.
+
+What did not land with it: revl performs nothing. It computes the run, and the
+compensating crossings are the substrate's (item 539), exactly as the
+actuations are. A compensation that is performed and FAILS has no word in
+section 2's five states, and none was invented for it.
+
+**Slice 4: `uncompensated` on the residue report. LANDED** (PR #1287 and
+#1296 for the states and the DOES NOT PROVE clauses, PR #1386 for the run the
+report prints). The oracle as written here was measured on `68c9c354`, by
+running `revl erase-report --realm billing` over the five-step program
+`tests/test_ui_transaction_run_1369.py` compiles. The report names the
+compensated steps and the uncompensated ones separately, prints the aggregate
+as the WEAKEST part, prints the LIFO run keyed on the failure, and refuses the
+clean word:
+
+    computer-use revert split (item 522) - aggregate: UNCOMPENSATED
+      uncompensated  actuate, fetch_receipt
+      restored       type_amount, type_memo, type_note
+      untouched      locate, read_pane
+      claim: residue remains: 3 restored, 2 uncompensated (no inverse
+             exists), 2 untouched (a read; not residue). This set may not be
+             reported as cleanly reverted
+    LIFO COMPENSATION RUN, per detectable failure (item 522 slice 3)
+      if actuate() fails: type_memo(), type_amount()
+        residue after the run: actuate() uncompensated
+        never executed, so nothing to undo: type_note(), fetch_receipt()
+
+`no_residue` appears once in that whole report, in the header's R4 clause about
+in-process state, which is a different claim about a different thing and is the
+one the header exists to keep apart.
+
+**Slice 5: the postcondition. LANDED** (issue #1370). The verdict was
+POSITIONAL: any later reversible crossing in the same method made every earlier
+actuation `verified-against-untrusted-read`, which reports that a read follows
+an actuation and not that the read checks it. A read now carries a step's
+postcondition only when it resolves the same target by provenance and derives
+from crossings later than the actuation, and the plan NAMES the read
+(`postconditionCheckedBy`). A read that follows and checks something else gets
+its own word, `read-not-bound-to-this-step`, because `unverified` would say no
+read follows and the verified word would credit the step with a check of
+another control. Oracle: `tests/test_ui_postcondition_binding_1370.py`, whose
+two programs differ in one string literal and are both
+`verified-against-untrusted-read` before the change.
+
+Section 4's limit is kept rather than engineered away: the read is
+`Untrusted`, the strongest word is still `verified-against-untrusted-read`,
+and the binding says WHICH control was looked at, not that the application's
+answer about it can be believed.
 
 **Not in this item:** the fallback ladder rungs and the target record are item
 521's; accumulated state inside the target application is item 546's; the
@@ -407,16 +482,38 @@ substrate is upstream.
 
 Written down so a reader does not infer more than was measured.
 
-- **Slice 1 does not stop a click.** It stops a program from claiming a click
-  is clean. An `unknown` or `irreversible` UI crossing is still admitted with
-  no confirmation, for the reason in section 6. That is the largest gap in
-  this item today and it is deliberate, not an oversight.
-- **The check-to-use race is open.** Section 4 names it and item 521's slice 4
-  is the fix. Nothing in the tree resolves a UI target into a handle today, so
-  every phase boundary re-resolves by name.
-- **There is no transaction.** No phase list executes, nothing runs LIFO, and
-  no `uncompensated` value is produced anywhere. Section 3's table is a
-  division of responsibility, not an implementation.
+- **Nothing stops a click that no operator rule covers.** Slice 1 stops a
+  program from claiming a click is clean. Slice 2 landed section 6's third
+  option, so `capability ui.click requires approval` is now refused by
+  `revl audit --policy` as well as by a session. Without such a rule an
+  `unknown` or `irreversible` UI crossing is still admitted with no
+  confirmation, because absence of a rule is silence. Section 6 says that is
+  the cost of the option, and the unconditional raise is still not built.
+- **The check-to-use race is open.** Section 4 names it. Item 521's slice 4
+  landed a `UiTarget` carried BY VALUE, which is not a resolved handle, so
+  every phase boundary still re-resolves by name and the window between the
+  check and the use is unbounded. Issue #1371 was closed on 2026-09-25 by PR
+  1416 on a narrower property, and this bullet used to call that issue the
+  open race (corrected 2026-09-29, issue #1572): in an admitted program every
+  `UiTarget` now originates in a target-producing crossing, because
+  `lower._check_ui_target_provenance` refuses a target that is constructed as
+  a record literal, minted by an extern that does not declare the resolution,
+  or rebound by a functional update (`docs/design/565-ui-target-binding.md`
+  §13). That closes the forged target. It does not claim that the target is
+  the one resolved for THIS step, nor that the resolution is still fresh
+  (565 §13.4); both need a resolved handle from the substrate (item 539).
+  Slice 5's binding is re-resolution by name compared across two crossings.
+  It is a stronger statement than position and it is not the race, and slice
+  3 does not close it either.
+- **No phase executes.** Slice 3 COMPUTES the LIFO run and slice 5 computes
+  which read carries which postcondition; neither performs a crossing, drives
+  a desktop, or evaluates a postcondition against a real screen. Section 3's
+  table is still a division of responsibility, and the substrate is item 539.
+- **A step with no bound postcondition starts no run.** A LIFO run is
+  triggered by an unmet postcondition, so an actuation that has none is an
+  actuation whose failure the transaction never learns about. The plan
+  enumerates those steps (`undetectableFailureSteps`) rather than giving them
+  a run nothing would trigger.
 - **The claim that the residue report reads an extern-declared `compensate`
   was read, not re-measured here.** It is item 254's own finding and its
   fixture (`tests/fixtures/erase_net.rvl`) is the evidence. Slice 1 does not

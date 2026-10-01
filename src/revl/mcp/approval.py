@@ -75,7 +75,7 @@ def _semantic(entry: dict) -> dict:
 
 def _called_names(nodes) -> set:
     """Callable names a lowered tree references, both call encodings (the same
-    walk `query._called_names` uses). Used to close the candidate hash over the
+    call channel `query._channels` reads). Used to close the candidate hash over the
     host bodies a component actually reaches (item 427 F4)."""
     from ..lower import _calls_in  # noqa: PLC0415
 
@@ -140,6 +140,11 @@ class ApprovalRequired(Exception):
     def __init__(self, ticket: dict) -> None:
         super().__init__("approval required for a class-(c) crossing")
         self.ticket = ticket
+        # The composition a `load` or `swap` was booting when this was raised,
+        # set by `Session` on the way out. `None` for a call on the running
+        # composition. The server reads it so a swap's ticket names the host
+        # code of the composition the yes admits, not of the one it replaces.
+        self.candidate: dict | None = None
 
 
 def two_step_payload(ticket: dict, *, how_to_approve: str) -> dict:
@@ -695,6 +700,15 @@ class ClassMap:
                     f"reached through {helpers}, so revl cannot trace "
                     f"{dimensions} to this call's arguments. "
                     + self._NO_DATAFLOW_HINT), False
+            # nor is one handed on as a FUNCTION VALUE: whoever receives it
+            # calls it with arguments no site here shows, even when this scope
+            # also calls it directly (issue #1458).
+            if fact["name"] == ext.get("name") and fact.get("asValue"):
+                return None, (
+                    f"`{token}` was not resource-scoped: `{ext.get('name')}` is "
+                    f"also passed as a function value, so revl cannot trace "
+                    f"{dimensions} to the arguments it is called with. "
+                    + self._NO_DATAFLOW_HINT), False
         sites = _call_arg_lists(scope["nodes"], ext.get("name"))
         if not sites:
             return None, (
@@ -778,7 +792,7 @@ class ClassMap:
     def static_taint(self, component: str) -> frozenset[str]:
         """The static item-249 taint over-approximation for a crossing component:
         the post-endorsement origins (declassification already folded into
-        `comp["taint"]["reaches"]`) that reach a sink, intersected with the five
+        `comp["taint"]["reaches"]`) that reach a sink, intersected with the
         taint-fold origins (design §2.2). This is the honest recorded taint on a
         tier with the static audit and the admission floor on a tier without
         runtime value taint. Empty when the component touches no taint."""

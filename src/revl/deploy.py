@@ -613,9 +613,27 @@ class TrustStore:
         return self.keys.get(kid)
 
 
-def _refusal(link: str, reason: str, **extra) -> dict:
-    return {"kind": RECEIPT_KIND, "version": RECEIPT_VERSION,
+def refusal_receipt(kind: str, version: str, link: str, reason: str,
+                    **extra) -> dict:
+    """The five fields every refusal receipt in this tree carries, in one
+    place: the record's `kind` and `version`, the REFUSE verdict, the named
+    LINK the check failed at, and the reason.
+
+    It takes `kind`/`version` rather than reading this module's because two
+    protocols mint refusals with this shape and they are DELIBERATELY not the
+    same record: `revl.deploy.receipt` is an admission decision about a bundle
+    and `revl.pool-receipt` is a join decision about a peer, and each is signed
+    in its own domain precisely so one can never be replayed as the other. What
+    they share is the field set, and that is what lives here. It was declared
+    twice before issue #1332, once in each module, with nothing holding the two
+    spellings together.
+    """
+    return {"kind": kind, "version": version,
             "verdict": REFUSE, "link": link, "reason": reason, **extra}
+
+
+def _refusal(link: str, reason: str, **extra) -> dict:
+    return refusal_receipt(RECEIPT_KIND, RECEIPT_VERSION, link, reason, **extra)
 
 
 def _parse_timestamp(value) -> Optional[float]:
@@ -3317,7 +3335,7 @@ REFUSE_UNKNOWN_PROVIDER = "contract-provider-not-in-update"
 
 
 def reached_emissions(ir: dict) -> list[dict]:
-    """Every emission-extern CALL SITE a composition reaches, with whether it is
+    """Every emission extern a composition reaches, by any route, with whether it is
     deferrable.
 
     Reachability, not declaration — the same discipline
@@ -3331,18 +3349,27 @@ def reached_emissions(ir: dict) -> list[dict]:
     `acquire` externs are absent from this list by construction: their
     reversibility is a registered inverse or an effect bracket.
 
-    Read off `query.Composition`'s per-scope facts: the SAME surface `revl
-    audit` prints and `erase_report._crossings` folds, so this gate can never
-    disagree with the boundary the audit shows. Roadmap item 419b: the earlier
+    Read off `query.Composition`: the per-scope reach the checker computes and
+    the service seam its facts carry, so this gate cannot disagree with the
+    compiler about what a scope reaches. Roadmap item 419b: the earlier
     walk keyed on an `emit` STEP wrapper carrying a `kind: "fn"` expression,
     and missed two shapes that are ordinary revl.
 
     * A provide-method whose body IS the emit (`fn put(k, v) = emit host(v)`)
       lowers to a `return` step (the `emit` marker does not survive), so a
       provider that necessarily crosses an irreversible emission was admitted.
-      The scope facts key on the CALLED NAME instead, which is sound because
-      `emit` is the only spelling that may reach an emission extern, and they
-      also carry what a pure fn reaches transitively.
+      The walk keys on reach instead of the marker.
+    * An extern reached as a FUNCTION VALUE (`let g = host  g(v)`,
+      `apply(host, v)`, `{ f: host }`, `[host]`, an arrow capturing an alias,
+      a helper `fn` returning or forwarding it) has no call site bearing its
+      name. Keying on the called name, as 419b did, admitted every one of
+      them, although the compiler refuses the same bodies on a plain method
+      with "reaches `host (passed as a function value)`". The reach is now
+      `Composition.emission_routes`: the checker's own call and value channels
+      closed by the G4 fixed point, the pair that diagnostic is printed from.
+      A `deferred` extern reached any way but a direct call is NOT deferrable:
+      the value is dispatched as an ordinary call and fires, since only an
+      `emit <extern>(..)` step is enqueued.
     * An emission mediated through a required service's capability-scoped
       operation (`emit store.put(..)` against `emission[host_put] fn put`) was
       not enumerated at all. It is now, tagged with `via` (`"<key>.<method>"`).
@@ -3373,6 +3400,13 @@ def reached_emissions(ir: dict) -> list[dict]:
     def add(component: str, extern, deferrable: bool, via) -> None:
         mark = (component, extern, via)
         if mark in seen:
+            # one component reaching the same extern twice is one row; it is
+            # deferrable only if EVERY route to it is, so a held `emit x(..)`
+            # in one scope cannot launder a value-dispatched `x` in another
+            if not deferrable:
+                for row in found:
+                    if (row["component"], row["extern"], row["via"]) == mark:
+                        row["deferrable"] = False
             return
         seen.add(mark)
         decl = index.externs.get(extern) or {}
@@ -3386,10 +3420,12 @@ def reached_emissions(ir: dict) -> list[dict]:
     for comp in ir.get("components") or []:
         component = comp.get("name") or "?"
         for scope_id in index.scopes_of.get(component) or []:
-            facts = index.scopes[scope_id]["facts"]
-            for fact in facts["externs"]:
-                if fact.get("emission"):
-                    add(component, fact["name"], bool(fact.get("deferred")), None)
+            scope = index.scopes[scope_id]
+            facts = scope["facts"]
+            routes = index.emission_routes(scope["nodes"])
+            for name in sorted(routes):
+                deferred = bool((index.externs.get(name) or {}).get("deferred"))
+                add(component, name, deferred and routes[name], None)
             for fact in facts["emissions"]:
                 key, method = fact["key"], fact["method"]
                 if index.method_scope(component, key, method) is not None:
@@ -3445,6 +3481,16 @@ def federation_admission(plans: Mapping[str, dict], *,
                      if crossing["via"] else f"in `{crossing['component']}`")
             fix = ("declare the extern `deferred` (item 245 class (b)) so "
                    "PREPARE can hold it")
+            decl = next((e for e in plans[composition_id].get("externs") or []
+                         if e.get("name") == crossing["extern"]), {})
+            if decl.get("deferred") and not crossing["via"]:
+                # already `deferred`, yet reached by a route PREPARE cannot
+                # hold: as a function value (or through a helper `fn` that
+                # forwards one), which dispatches the host body as a plain call
+                fix = ("the extern is already `deferred`, but this composition "
+                       "also reaches it as a function value, which calls the "
+                       "host body directly; only an `emit` step naming the "
+                       "extern is enqueued, so call it that way")
             if crossing["via"]:
                 fix = ("deferral is a property of an extern DECLARATION and is "
                        "not spellable on a service method, so this crossing "

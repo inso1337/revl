@@ -9,7 +9,7 @@ Runners:
            whatever provider/model cline is configured with, override with
            --model/--provider). Costs real money.
   local  — posts directly to an OpenAI-compatible /chat/completions endpoint
-           (LM Studio, ollama's OpenAI shim, etc) via stdlib urllib. Free,
+           (LM Studio, ollama's OpenAI shim, etc) via revl's own adapter. Free,
            override with --model/--base-url (default openai/gpt-oss-20b @
            http://localhost:1234/v1).
   mock   — no model; attempt 1 is deliberately broken (exercises the retry
@@ -29,8 +29,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -40,6 +38,11 @@ ROOT = BENCH.parent
 # residue probe, not on compile-rate — see score_raw_ts.py. The revl variants'
 # compile-rate path below is untouched by it.
 sys.path.insert(0, str(BENCH))
+sys.path.insert(0, str(ROOT / "src"))
+from revl.providers import (  # noqa: E402
+    Adapter, CompletionRequest, ProviderError, parse_config,
+)
+from revl.providers.wire_openai import REASONING_KEYS  # noqa: E402,F401
 from score_raw_ts import (  # noqa: E402
     RAW_TS_VARIANT, DEFAULT_CYCLES, probe_source, render_raw_ts_summary,
 )
@@ -157,76 +160,75 @@ def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
     }
 
 
-def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int):
+DEFAULT_LOCAL_MAX_TOKENS = 8192
+
+# Servers that separate a reasoning channel from the answer do not agree on the
+# key: `reasoning` is ollama's, `reasoning_content` the deepseek-style name
+# several OpenAI-compatible servers copied. The adapter reads both, in the order
+# `REASONING_KEYS` (imported above from `revl.providers.wire_openai`) gives.
+
+
+def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
+              max_tokens: int = DEFAULT_LOCAL_MAX_TOKENS):
     """OpenAI-compatible chat-completions runner for a local server (LM Studio,
     ollama's OpenAI shim, etc). Mirrors run_cline's call/return shape but posts
-    directly to `{base_url}/chat/completions` with stdlib urllib — no new
-    dependency, no cost, no cline process to spawn."""
-    url = base_url.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0,
-        "max_tokens": 4096,
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    # The runner is pointed at a base URL the operator names, and urllib
-    # follows a redirect off it by default — re-issuing this POST as a GET,
-    # body dropped, at whatever host `Location` says. A benchmark that silently
-    # measured a different server is not a benchmark, so nothing is followed:
-    # the same policy the emitted crossings carry (`revl.crossing_redirect`),
-    # applied to the one other place in this tree that makes an outbound
-    # request.
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            raise RuntimeError(
-                f"local runner: HTTP {code} redirect refused — "
-                f"{url} is the endpoint you named")
+    directly to `{base_url}/chat/completions` through the runtime's
+    OpenAI-compatible adapter (`revl.providers`): no new dependency, no cost,
+    no cline process to spawn.
 
-    opener = urllib.request.build_opener(_NoRedirect)
+    Two things here are about reasoning models and were measured, not guessed.
+
+    The output cap is large by default. A reasoning model spends the cap on the
+    reasoning channel first, so a small cap does not truncate the answer, it
+    deletes it: the pinned model answered spec `01-kv-provider` with 3693
+    completion tokens of which the answer was 358 characters, and a 16-token cap
+    returned reasoning and an empty `content`. The previous 4096 was close
+    enough to that figure to truncate a longer spec, so the default is the
+    pin's `max_output_tokens`.
+
+    The answer is read from `content`, and from the reasoning channel only when
+    `content` is empty. That ordering matters: when a server sends both, the
+    fenced block in `content` is the answer and the one in the reasoning is a
+    draft the model then revised. Falling back is recorded on the row
+    (`answer_from_reasoning`) rather than done silently, because a corpus
+    scored off draft code is not the same measurement.
+    """
+    # One client: the runtime's OpenAI-compatible adapter (issue #1461). It
+    # refuses redirects, so a benchmark cannot silently measure a server other
+    # than the one named, and it reads `content` and the reasoning channel
+    # separately, which is what the fallback below needs.
+    binding = parse_config({"roles": {"bench": {
+        "provider": "openai-compatible", "base_url": base_url, "model": model,
+        "timeout": timeout, "max_tokens": max_tokens,
+    }}}, "bench/run.py --base-url").binding("bench")
     try:
-        with opener.open(req, timeout=timeout) as resp:
-            status = resp.status
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read()[:400].decode("utf-8", "replace")
-        raise RuntimeError(f"local runner: HTTP {exc.code} from {url}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"local runner: cannot reach {url}: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise RuntimeError(f"local runner: timed out after {timeout}s: {exc}") from exc
+        completion = Adapter(binding).complete(
+            CompletionRequest(prompt=prompt, system=system, temperature=0))
+    except ProviderError as exc:
+        raise RuntimeError(f"local runner: {exc}") from None
 
-    if status != 200:
-        raise RuntimeError(f"local runner: HTTP {status} from {url}: {raw[:400]!r}")
-
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RuntimeError(f"local runner: unparseable JSON from {url}: {exc}") from exc
-
-    try:
-        text = parsed["choices"][0]["message"]["content"]
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(
-            f"local runner: unexpected response shape from {url}: {exc}; "
-            f"body={str(parsed)[:400]}"
-        ) from exc
+    text, reasoning = completion.text, completion.reasoning
+    from_reasoning = False
     if not text or not text.strip():
-        raise RuntimeError(f"local runner: empty completion content from {url}")
+        if reasoning:
+            text, from_reasoning = reasoning, True
+        else:
+            raise RuntimeError(
+                f"local runner: empty completion content from {binding.base_url} "
+                f"(finish_reason={completion.finish_reason!r}, no reasoning "
+                f"channel either)")
 
-    usage = parsed.get("usage") or {}
     return {
         "text": text,
         "cost": 0.0,
-        "output_tokens": usage.get("completion_tokens"),
-        "model": parsed.get("model") or model,
+        # completion_tokens counts the reasoning channel too, and that is the
+        # number tokens-to-green wants: reasoning tokens are paid for.
+        "output_tokens": completion.tokens_out,
+        "reasoning_tokens": completion.reasoning_tokens,
+        "reasoning_chars": len(reasoning),
+        "answer_from_reasoning": from_reasoning,
+        "finish_reason": completion.finish_reason,
+        "model": completion.model or model,
         "provider": "local",
     }
 
@@ -299,7 +301,8 @@ def run_one_raw_ts(spec: dict, system: str, run_dir: Path, args) -> dict:
         if args.runner == "mock":
             reply = run_mock_raw_ts(spec)
         elif args.runner == "local":
-            reply = run_local(system, task, args.model, args.base_url, args.timeout)
+            reply = run_local(system, task, args.model, args.base_url,
+                              args.timeout, args.max_tokens)
         else:
             reply = run_cline(system, task, args.model, args.provider,
                               args.timeout, args.inline_system)
@@ -320,7 +323,11 @@ def run_one_raw_ts(spec: dict, system: str, run_dir: Path, args) -> dict:
     print(f"  {spec['id']}/{RAW_TS_VARIANT}: {flag}{extra}")
     return {"spec": spec["id"], "variant": RAW_TS_VARIANT, "summary": True,
             "model": reply.get("model"), "duration_s": dur,
-            "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0, **rec}
+            "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0,
+            "output_tokens": reply.get("output_tokens"),
+            "reasoning_tokens": reply.get("reasoning_tokens"),
+            "answer_from_reasoning": reply.get("answer_from_reasoning"),
+            "finish_reason": reply.get("finish_reason"), **rec}
 
 
 def main():
@@ -337,6 +344,12 @@ def main():
                     help="--runner local: OpenAI-compatible base URL "
                          "(no trailing /chat/completions)")
     ap.add_argument("--max-iters", type=int, default=3)
+    ap.add_argument("--max-tokens", type=int, default=DEFAULT_LOCAL_MAX_TOKENS,
+                    help="--runner local: output-token cap per call (default "
+                         f"{DEFAULT_LOCAL_MAX_TOKENS}). A reasoning model spends "
+                         "this on the reasoning channel before the answer, so a "
+                         "small cap returns reasoning and an empty answer rather "
+                         "than a truncated one.")
     ap.add_argument("--timeout", type=int, default=240, help="per-call seconds")
     ap.add_argument("--inline-system", action="store_true",
                     help="merge grammar into the user prompt instead of cline -s")
@@ -405,7 +418,8 @@ def main():
                     if args.runner == "mock":
                         reply = run_mock(system, prompt, spec, attempt)
                     elif args.runner == "local":
-                        reply = run_local(system, prompt, args.model, args.base_url, args.timeout)
+                        reply = run_local(system, prompt, args.model, args.base_url,
+                                          args.timeout, args.max_tokens)
                     else:
                         reply = run_cline(system, prompt, args.model, args.provider,
                                           args.timeout, args.inline_system)
@@ -432,7 +446,16 @@ def main():
                              "model": model_seen, "attempt": attempt, "ok": ok,
                              "error": error, "duration_s": dur,
                              "cost": reply.get("cost"),
-                             "output_tokens": reply.get("output_tokens")})
+                             "output_tokens": reply.get("output_tokens"),
+                             # reasoning-model bookkeeping: output_tokens above
+                             # includes the reasoning channel, so the split is
+                             # recorded rather than left for a reader to guess,
+                             # and a `content`-empty reply is flagged where it
+                             # happened instead of silently scored as an answer.
+                             "reasoning_tokens": reply.get("reasoning_tokens"),
+                             "reasoning_chars": reply.get("reasoning_chars"),
+                             "answer_from_reasoning": reply.get("answer_from_reasoning"),
+                             "finish_reason": reply.get("finish_reason")})
                 status = "green" if ok else "red"
                 print(f"  {spec['id']}/{variant} attempt {attempt}: {status}"
                       + (f" — {error.splitlines()[0][:100]}" if error else ""))
@@ -453,11 +476,38 @@ def main():
     print(f"\nresults: {results_path}\nsummary: {run_dir / 'summary.md'}")
 
 
+def scoring_compiler() -> str:
+    """The directory `compile_check` actually imported revl from.
+
+    Asked after the run, not before, so it reports what graded the corpus."""
+    mod = sys.modules.get("revl")
+    path = getattr(mod, "__file__", None) if mod else None
+    if not path:
+        return "revl was never imported"
+    parent = Path(path).parent
+    # Reported relative to the repository when it is inside it. Summaries are
+    # committed and this repository is public, so an absolute path here would
+    # publish the operator's directory layout. A compiler from outside the tree
+    # is the case a reader needs to see, so it is named as such, but by its
+    # directory name only: the fact a reader needs is that it was not this
+    # checkout, and the rest of the path is the operator's layout again.
+    try:
+        return str(parent.relative_to(ROOT))
+    except ValueError:
+        return f"{parent.name} (outside this checkout)"
+
+
 def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
     finals = [r for r in rows if r.get("summary") and r["variant"] != RAW_TS_VARIANT]
     lines = ["# syntax-2.0 acceptance benchmark — run summary", "",
              f"runner: `{args.runner}`" + (f" · model: `{args.model}`" if args.model else ""),
-             f"max iterations: {args.max_iters}", ""]
+             f"max iterations: {args.max_iters}",
+             # Which compiler graded this. An editable install of revl registers
+             # a meta-path finder that is consulted before sys.path, so a run
+             # launched from the wrong interpreter can score against a different
+             # checkout than the one it was pointed at and produce plausible,
+             # wrong numbers. The path is printed rather than assumed.
+             f"scored by: `{scoring_compiler()}`", ""]
     revl_variants = [v for v in args.variants.split(",") if v != RAW_TS_VARIANT]
     if revl_variants:
         lines += ["## revl variants — compile-gated (residue refused at compile)", "",

@@ -71,11 +71,14 @@ def _finite_float(value):
 #
 # Component-position refusals are real v1/v2 limits of the stc-go world: an
 # anonymous record literal has no declared record type to render (declaring
-# one routes the document to the typed-core path, which does not carry a live
-# component), match/arrow/`?.` have no lowering there yet, and bare Opt/Result
-# construction outside return position is refused by the tier's tuple-Opt
-# design. Each refusal names the limit and a workaround. `hole` is refused at
-# the document level by the pre-emit walk.
+# one moves the document to the v3 combined path, where the record type and
+# the live component are rendered together (issue #1321)), match/arrow/`?.`
+# have no lowering there yet, and an Opt/Result construction in a true VALUE
+# position (bound to a local, passed as an argument) is refused by the tier's
+# tuple-Opt design — return position lowers, including inside a ternary, which
+# `_emit_return` spreads into an `if` statement (issue #1376). Each refusal
+# names the limit and a workaround. `hole` is refused at the document level by
+# the pre-emit walk.
 EXPR_DISPATCHERS: dict[str, frozenset[str]] = {
     "component": frozenset({
         "bin", "builtin", "call", "config", "field", "fn", "format",
@@ -222,6 +225,18 @@ def _go_type(t) -> str:
         return "map[%s]%s" % (_go_type(k), _go_type(v))
     if t == "Row":
         return "Row"
+    fn = _v3_split_fn_type(t)
+    if fn is not None:
+        # issue #1356: a function-typed position (a service method taking
+        # `f: (Int, Str) -> Bool`) used to fall through to `_camel`, which
+        # printed the surface spelling into the interface (`f (Int, Str) >
+        # Bool`) and the package did not parse. The v3 renderer has had the
+        # arm since it gained function types; this one never got it, because
+        # before issue #1321 no document put a function-typed service method
+        # beside the typed core.
+        params, returns = fn
+        rendered = ", ".join(_go_type(p) for p in params)
+        return ("func(%s) %s" % (rendered, _go_return(_erase_async(returns)))).rstrip()
     # v3 typed-core: a declared user type (record/variant) renders with the
     # name `_emit_v3_go_types` gave it (_v3_ident, not _camel — snake_case
     # type names must agree between the declaration and every use site).
@@ -464,7 +479,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             if nm in ("Some", "None", "Ok", "Err"):
                 raise EmitError(
                     "Opt/Result construction is only supported in return "
-                    "position on the cordis-go tier (got a bare value)"
+                    "position on the cordis-go tier (got a bare value) - the "
+                    "component world spells an Opt VALUE as `*T` and nothing "
+                    "in it consumes one; lift it into a helper fn instead"
                 )
             src = _expr(callee, env)
             args = ", ".join(_expr(a, env) for a in node.get("args", []))
@@ -493,8 +510,18 @@ def _expr(node, env: _Env, expected=None) -> str:
             # multi-value expression (a service/host call), so bind it first.
             gt = (_go_type(expected) if expected
                   else _go_type(_comp_infer(node.get("right"), env)) or "any")
-            left = _expr(node["left"], env)
+            left_node = node["left"]
+            left = _expr(left_node, env)
             right = _expr(node["right"], env, _comp_infer(node.get("right"), env))
+            if left_node.get("kind") not in ("call", "host", "builtin", "fn"):
+                # issue #1356: an Opt that is READ rather than CALLED (a
+                # config field like `config.limit ?? 0`, a struct field, a
+                # local) holds the VALUE-position form `*T` (`_go_type`), not
+                # `(T, bool)` a service or host call returns (`_go_return`).
+                # Destructuring one with `_v, _ok :=` is Go's "2 variables but
+                # 1 value"; the presence bit is the pointer being non-nil.
+                return ("func() %s { if _v := %s; _v != nil { return *_v }; "
+                        "return %s }()" % (gt, left, right))
             return ("func() %s { _v, _ok := %s; if _ok { return _v }; "
                     "return %s }()" % (gt, left, right))
         if op in ("<<", ">>"):
@@ -599,13 +626,15 @@ def _expr(node, env: _Env, expected=None) -> str:
         raise EmitError(
             "field access is only lowerable on a sized value's `.length` "
             "in the stc-go component world (records need a declared record "
-            "type, and declaring one routes the document to the typed-core "
-            "path, which carries no live component) - lift it into a "
-            "helper fn instead")
+            "type, and this document declares none) - declare the record "
+            "type, which moves the document to the v3 combined path where "
+            "the type and the component are rendered together, or lift it "
+            "into a helper fn instead")
     if kind == "fn":
         # a call to a top-level `fn` by name (component dialect). In the v3
         # typed-core world a document declaring a pure `fn` AND a component
-        # routes to the placement path, where the fn is a real declaration the
+        # routes to the combined path (`_emit_v3_combined`, reached from both
+        # `emit` and `emit_placement`), where the fn is a real declaration the
         # method body can call; otherwise unreachable in practice — a named
         # tier limit beats a fall-through.
         name = _v3_ident(node.get("name"), "function")
@@ -631,7 +660,9 @@ def _expr(node, env: _Env, expected=None) -> str:
             return _v3_comp_construct(node, env)
         raise EmitError(
             "Opt/Result construction is only supported in return position on "
-            "the cordis-go tier (got a bare value)")
+            "the cordis-go tier (got a bare value) - the component world "
+            "spells an Opt VALUE as `*T` and nothing in it consumes one; "
+            "lift it into a helper fn instead")
     if kind == "match":
         if _V3_MODE:
             # v3 method bodies: user ADTs lower to a type switch (needs the
@@ -1016,6 +1047,18 @@ def _comp_infer(node, env: _Env):
         op = node.get("op")
         if op in ("==", "===", "!=", "!==", "<", ">", "<=", ">=", "&&", "||"):
             return "Bool"
+        if op == "??":
+            # `Opt[T] ?? T` answers T, not the Opt. Without this arm the left
+            # operand's type won (a service method's declared `Opt[Int]`), so
+            # `let a = bus.maybe(x) ?? 0` declared the local as the PURE tier's
+            # `RevlOpt[int64]` — a name the component package does not define —
+            # and assigned an `int64` to it. The #1376 ternary refusal was
+            # keeping the only document that binds a `??` in a method body away
+            # from the emitter, so nothing had measured this.
+            lt = _comp_infer(node.get("left"), env)
+            if isinstance(lt, str) and lt.startswith("Opt[") and lt.endswith("]"):
+                return lt[4:-1]
+            return _comp_infer(node.get("right"), env) or lt
         return _comp_infer(node.get("left"), env) or _comp_infer(node.get("right"), env)
     if k == "un":
         return "Bool" if node.get("op") == "!" else _comp_infer(node.get("operand"), env)
@@ -1039,6 +1082,29 @@ def _comp_infer(node, env: _Env):
         if t:
             return t
         return _v3_case_layout().get(node.get("case"), (None, None))[0]
+    if k == "fn":
+        # a call to a top-level `fn` (or extern) by name: its declared return
+        # type, off the per-emit registry. Without this a `firsts(xs).length()`
+        # could not tell a Str receiver from a List one and picked the List
+        # helper, so `revlListLen` was handed a string (issue #1321).
+        return _FN_RET.get(node.get("name"))
+    if k == "call":
+        # a call on a REQUIRED service (`gate.begin_turn(sid)`): the declared
+        # return type off the document's service table. The `fn` arm above does
+        # the same for a top-level fn; without this one a Str-returning service
+        # method answered None and `begin_turn(x) + ":"` picked the List
+        # concat helper over the Str one (issue #1356).
+        target = node.get("target") or {}
+        if target.get("kind") == "req":
+            service = _REQ_SERVICE.get(target.get("name"))
+            methods = (_SERVICES.get(service) or {}).get("methods") or {}
+            return (methods.get(node.get("method")) or {}).get("returns")
+        return None
+    if k == "config":
+        # a config field read: its declared surface type. Without this
+        # `config.label.length` could not tell a Str field from a List one and
+        # lowered to `revlListLen` on a string (issue #1356).
+        return _CONFIG_TYPES.get(node.get("field"))
     if k == "match":
         # a match's value type is its scrutinee's
         return _comp_infer(node.get("scrutinee"), env)
@@ -1049,6 +1115,19 @@ def _comp_infer(node, env: _Env):
             return (_V3_TYPES[tt].get("fields") or {}).get(node.get("name"))
         return None
     return None
+
+
+# The checked Int -> Int32 narrow (docs/arithmetic.md), as a component-path
+# preamble. `_emit_v3_go` and `_emit_v3_combined` write the same function out
+# of their own assembly off `ctx.needs_overflow32`; a document that is only a
+# component has no such ctx, so the text lives here for that path.
+_V3_OVERFLOW32_HELPER = """func revlToI32(v int64) int32 {
+	if v < -2147483648 || v > 2147483647 {
+		panic("revl: Int32 overflow")
+	}
+	return int32(v)
+}
+"""
 
 
 # stdlib helpers referenced by component method bodies live in the shared v3
@@ -1064,6 +1143,11 @@ _COMP_NEEDS_PARSE_INT = False
 # strconv.FormatInt rather than fmt.Sprintf("%d") (item 434 (f)): flags the
 # `strconv` import, which this tier does not otherwise always carry.
 _COMP_NEEDS_STRCONV = False
+# `Int.to_int32` in a component body (docs/arithmetic.md): flags the checked
+# narrow helper `revlToI32`. The pure typed-core path already emits it off
+# `ctx.needs_overflow32`; a method body reaches the same helper through this
+# flag, so a component-only document carries it too (issue #1347).
+_COMP_NEEDS_OVERFLOW32 = False
 # A `timer` step (item 57) in a component body: flags the clock coeffect +
 # timer scheduler preamble (_TIMER_PREAMBLE). Timers lower to a revertible
 # schedule whose inverse is cancellation, wired into the same effect ledger.
@@ -1196,6 +1280,16 @@ def _comp_builtin(method, recv_surface, target, args):
             _COMP_NEEDS_PARSE_INT = True
             return "revlParseInt(%s)" % (target,)
         return "int64(%s)" % (target,)
+    # The narrow half of the same pair. It was missing here while the pure
+    # typed-core path had it (`revlToI32`, the checked narrow that panics out
+    # of range), so a method body calling `.to_int32()` hit the unknown-method
+    # fall-through and the conformance matrix read that as a go tier limit.
+    # It is not one: the helper exists, the checker admits the call, and the
+    # widen beside it was already lowered (issue #1347).
+    if method == "to_int32":
+        global _COMP_NEEDS_OVERFLOW32
+        _COMP_NEEDS_OVERFLOW32 = True
+        return "revlToI32(%s)" % (target,)
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str): strconv.FormatInt
     # base 10 is exact decimal for an int64 and takes the int64 directly, where
     # fmt.Sprintf("%d", x) boxes it into an `any` first (item 434 (f)).
@@ -1209,6 +1303,13 @@ def _comp_builtin(method, recv_surface, target, args):
             # `strconv.FormatFloat(x, 'g', -1, 64)`) — so `x.to_str()` and `${x}`
             # agree on this tier. FormatInt would not compile on a float64.
             return "strconv.FormatFloat(%s, 'g', -1, 64)" % target
+        if recv_surface == "Int32":
+            # issue #1356: an `Int32` receiver is a Go `int32`, which
+            # FormatInt's int64 parameter does not accept. The pure v3
+            # renderer has widened it since item 434 (f); this one never did,
+            # and `_go_widen_int` cannot see it: that helper widens the
+            # ir_version 1/2 `int` and answers an already-int64 Int unchanged.
+            return "strconv.FormatInt(int64(%s), 10)" % target
         return "strconv.FormatInt(%s, 10)" % _go_widen_int(target)
     # The Map value type (docs/stdlib-2.0.md §Map): the same helpers the v3
     # tier uses; they live in _V3_MAP_PREAMBLE, pulled in by
@@ -1642,7 +1743,32 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             surface = _comp_infer(step.get("value"), env)
             if surface is not None:
                 env.var_types[step["name"]] = surface
-            out.append("%s%s := %s" % (pad, name, _expr(step["value"], env, surface)))
+            value = _expr(step["value"], env, surface)
+            # item 280, the method-body twin: a user-variant binding must hold
+            # its INTERFACE type, not the concrete case struct `:=` infers
+            # (`o := OutcomeFound{...}`). A later `match` type-switches on it,
+            # and Go rejects a type switch on a concrete struct ("o is not an
+            # interface"). `_go_v3_stmt` has pinned this on the pure tier since
+            # item 280; the method body reached the same shape only once the
+            # combined renderer started carrying documents that declare a type
+            # beside a component (issue #1321), and it never got the fix.
+            go_t = (_go_v3_type(surface, _V3_TYPES)
+                    if surface and _V3_TYPED_COMPONENTS and _V3_TYPES else "")
+            # issue #1356, the same omission one type down: a bare integer or
+            # float literal binding defaults to Go `int`/`float64` through
+            # `:=`, and commit 2da3a0431 converged the v3 component tier on
+            # int64. `var i = 0` then declared an `int` that no helper taking
+            # the tier's Int accepts (`revlStrCharAt(path, i)`). `_go_v3_stmt`
+            # has pinned the declared type on the pure tier since item 434;
+            # this renderer never did.
+            pinned = (_go_type(surface)
+                      if _V3_MODE and surface in ("Int", "Float") else "")
+            if go_t and _go_v3_is_interface(surface, _V3_TYPES):
+                out.append("%svar %s %s = %s" % (pad, name, go_t, value))
+            elif pinned in ("int64", "float64"):
+                out.append("%svar %s %s = %s" % (pad, name, pinned, value))
+            else:
+                out.append("%s%s := %s" % (pad, name, value))
             out.append("%s_ = %s" % (pad, name))
         elif s == "assign":
             name = _safe_local(step["name"])
@@ -1785,6 +1911,22 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
         return
     cc = _construction_case(expr)
     rs = ret_surface.strip() if isinstance(ret_surface, str) else ""
+    if isinstance(expr, dict) and expr.get("kind") == "if" \
+            and (rs.startswith("Opt[") or rs.startswith("Result[")):
+        # A ternary in RETURN position over the tuple convention (issue #1376).
+        # `Opt[T]` is `(T, bool)` here and `Result[T, E]` is `(T, E, bool)`, so
+        # a branch that constructs one has no single-expression Go form and the
+        # value IIFE the ordinary ternary arm builds cannot carry it — which is
+        # why `(n > 0) ? Some(n) : None` refused while the same method written
+        # as `if (n > 0) { return Some(n) }  return None` emitted. Spread the
+        # ternary into that `if` statement instead and let each branch take the
+        # ordinary return lowering. Recursive, so a nested ternary and a mixed
+        # pair (one construction, one Opt-valued call) lower the same way.
+        out.append("%sif %s {" % (pad, _expr(expr.get("cond"), env)))
+        _emit_return(expr.get("then"), ret_surface, env, out, pad + "\t")
+        out.append("%s}" % pad)
+        _emit_return(expr.get("else"), ret_surface, env, out, pad)
+        return
     if cc and rs.startswith("Opt[") and cc[0] in ("Some", "None"):
         inner = rs[4:-1]
         if cc[0] == "Some":
@@ -2027,6 +2169,8 @@ def _scan_step_for_inserts(step, bind, env, candidates):
 
 
 _REQ_SERVICE = {}  # req name -> service type
+_CONFIG_TYPES: dict = {}  # config field name -> declared surface type
+_SERVICES: dict = {}  # the document's service table, for method return types
 
 
 def _service_of_req(name, services, reqs_map):
@@ -2093,6 +2237,7 @@ def _refuse_required_stream(component: dict, tier: str) -> None:
 
 def _emit_component(comp, services, out):
     global _BIND_HOST, _REQ_SERVICE, _BIND_MAP_VALUE, _BIND_IS_PTR
+    global _CONFIG_TYPES, _SERVICES
     name = comp["name"]
     _refuse_required_stream(comp, "cordis-go")
     cname = _camel(name)
@@ -2102,6 +2247,13 @@ def _emit_component(comp, services, out):
 
     # per-component maps
     _REQ_SERVICE = dict(requires)
+    # the declared surface type of each config field, and the document's
+    # service table. `_comp_infer` reads both to type a method-body receiver
+    # (`config.label.length`, `svc.begin(x) + ":"`); without them the receiver
+    # answered None and the builtin renderer guessed the List form.
+    _CONFIG_TYPES = {f.get("name"): f.get("type")
+                     for f in (comp.get("config") or []) if f.get("name")}
+    _SERVICES = services or {}
     _BIND_HOST = {}
     _BIND_MAP_VALUE = {}
     _BIND_IS_PTR = {}
@@ -2270,17 +2422,98 @@ def _collect_host_calls(node, acc):
             _collect_host_calls(x, acc)
 
 
+def _stub_host_type(recv: str) -> str:
+    """The Go type name a generated host stub declares for family `recv`.
+
+    Agrees with `_host_type_of_acquire`, which is what types the `let`-bound
+    receiver: placement mode renames the type when a declared record collides
+    with it, and the bind's field type must be the same name the stub
+    declares."""
+    name = _camel(recv)
+    if _V3_TYPED_COMPONENTS and name in _V3_TYPES:
+        return "Revl" + name
+    return name
+
+
+def _collect_host_bind_methods(node, binds: dict, acc: set) -> None:
+    """Record (family, verb) for every method called on a host-BOUND receiver.
+
+    `let job = effect Job.run(..)` binds a host object, and `job.run("start")`
+    inside a provide method lowers to `revlSelf.job.Run("start")`, a METHOD
+    on the bind's type. The stub emitter only ever declared free functions, so
+    the type had no such method and the package did not build (issue #1356).
+    """
+    if isinstance(node, dict):
+        if node.get("kind") == "call" and "method" in node:
+            target = node.get("target") or {}
+            if target.get("kind") in ("name", "var"):
+                family = binds.get(target.get("id") or target.get("name"))
+                if family:
+                    acc.add((family, str(node.get("method"))))
+        for v in node.values():
+            _collect_host_bind_methods(v, binds, acc)
+    elif isinstance(node, list):
+        for x in node:
+            _collect_host_bind_methods(x, binds, acc)
+
+
+def _collect_host_binds(node, binds: dict) -> None:
+    """bind name -> host family, for every `let-effect` acquiring a host object
+    beyond the fixed Pool/Map/Stream runtime."""
+    if isinstance(node, dict):
+        if node.get("step") == "let-effect":
+            acquire = node.get("acquire") or {}
+            if isinstance(acquire, dict) and acquire.get("kind") == "host":
+                recv, _, _meth = str(acquire.get("fn", "")).partition(".")
+                if recv and recv not in ("Pool", "Map", "Stream"):
+                    binds[str(node.get("bind"))] = recv
+        for v in node.values():
+            _collect_host_binds(v, binds)
+    elif isinstance(node, list):
+        for x in node:
+            _collect_host_binds(x, binds)
+
+
 def _emit_host_stubs(ir) -> list[str]:
     """Deterministic stubs for host receivers this document references beyond
     Pool/Map (e.g. an awaited `Job.run`). Emitted only when referenced, so the
-    Pool/Map-only scenarios stay byte-identical."""
+    Pool/Map-only scenarios stay byte-identical.
+
+    Each referenced family gets a TYPE as well as its constructors, because
+    `_host_type_of_acquire` types a `let`-bound receiver as `*Job`. Before
+    issue #1356 only the free functions were emitted, so the bind's declared
+    type was undefined and every verb called on the receiver was missing."""
     acc: set = set()
     _collect_host_calls(ir, acc)
-    if not acc:
+    binds: dict = {}
+    _collect_host_binds(ir, binds)
+    methods: set = set()
+    _collect_host_bind_methods(ir, binds, methods)
+    if not acc and not methods:
         return []
     out = ["// ---- generated host stubs (hosts beyond the fixed runtime) ----------"]
+    families = sorted({recv for recv, _ in acc} | {recv for recv, _ in methods})
+    bound = {recv for recv in binds.values()}
+    for recv in families:
+        out.append("// %s is a deterministic stub for a host family with no"
+                   " runtime on this tier." % _stub_host_type(recv))
+        out.append("type %s struct{}" % _stub_host_type(recv))
+        out.append("")
     for recv, meth in sorted(acc):
-        out.append("func %s(_args ...any) any {" % (_camel(recv) + _camel(meth)))
+        # A constructor whose result a `let-effect` binds answers the family
+        # pointer the bind is declared as; one nothing binds keeps `any`, so
+        # the Pool/Map-free scenarios that only `await` a host verb move no
+        # bytes beyond the type declaration above.
+        ret = "*%s" % _stub_host_type(recv) if recv in bound else "any"
+        body = ("&%s{}" % _stub_host_type(recv)) if recv in bound else "nil"
+        out.append("func %s(_args ...any) %s {" % (_camel(recv) + _camel(meth), ret))
+        out.append("\thostRecord(%s)" % _go_string("%s.%s" % (recv, meth)))
+        out.append("\treturn %s" % body)
+        out.append("}")
+        out.append("")
+    for recv, meth in sorted(methods):
+        out.append("func (_h *%s) %s(_args ...any) any {"
+                   % (_stub_host_type(recv), _camel(meth)))
         out.append("\thostRecord(%s)" % _go_string("%s.%s" % (recv, meth)))
         out.append("\treturn nil")
         out.append("}")
@@ -2719,6 +2952,31 @@ def _refuse_stream_document_top_level(ir: dict) -> None:
                 "module missing a section you wrote, so the tier refuses by name "
                 "instead (item 130 §4.6) — split the %s into its own document, "
                 "or try `--backend py`" % (described, key, key))
+
+
+def _component_is_observable(comp: dict) -> bool:
+    """Does dropping this component lose something the author wrote?
+
+    The pure typed-core path routes PAST components (see `_emit`), which is
+    right for a document whose component is scaffolding around the record or
+    pure-fn shape the corpus case is actually about — an empty component, or a
+    bare `provides` with no methods, renders to nothing anyone can call. A
+    component with a method body or an activation step is a different matter:
+    dropping it answers with a module whose routes are simply absent.
+
+    So this is the routing predicate that decides between the two (issue
+    #1321): False keeps the document on the pure path, byte-for-byte with the
+    frozen fixtures, and True sends it to `_emit_v3_combined`, which renders
+    the declarations AND the components in one package. The self-host port
+    mirrors it in `selfhost/emit_go.rvl::component_is_observable`, because the
+    documents it answers for are exactly the ones whose byte agreement with
+    this tier the port's marker suppression may keep."""
+    if comp.get("body"):
+        return True
+    for step in comp.get("provides") or []:
+        if step.get("methods"):
+            return True
+    return False
 
 
 def _stream_head(node, env) -> str:
@@ -3672,8 +3930,28 @@ def _host_runtime() -> str:
     src = src.replace("@SECRET_RESET@", _SECRET_RESET if _SECRET_MODE else "")
     if _V3_TYPED_COMPONENTS:
         for name in _HOST_RUNTIME_RENAMES:
-            if name in _V3_TYPES:
-                src = re.sub(r"\b%s\b" % name, "Revl" + name, src)
+            if name not in _V3_TYPES:
+                continue
+            if name == "Row":
+                # issue #1356. `Row` is not a type with behaviour, it is a
+                # bare ALIAS naming the shape a query answers, and the stub's
+                # `Query` reads nothing out of it and returns nil. Renaming it
+                # to `RevlRow` made the host answer `[]RevlRow` where the
+                # provide method that declares `-> List[Row]` over the same
+                # call returns `[]Row`, and the package did not build, for
+                # ten of the sixteen carried documents this issue counts.
+                #
+                # A document that declares `type Row = { .. }` is saying what
+                # its pool answers with, and the frontend leaves a host verb's
+                # RESULT opaque on purpose (src/revl/typecheck.py, the
+                # `_HOST_ARG_SIG` header), so nothing contradicts it. Drop the
+                # alias and let `Query` answer the declared record. The stub
+                # still answers no rows, so only the TYPE moves.
+                src = src.replace(
+                    "// Row is a query result row.\ntype Row = map[string]string\n",
+                    "")
+                continue
+            src = re.sub(r"\b%s\b" % name, "Revl" + name, src)
     return src
 
 
@@ -3685,6 +3963,15 @@ def _needs_sync(ir) -> bool:
 # record. Placement mode renames the HOST side to `Revl<Name>` so the declared
 # record struct keeps its name (see _host_runtime / _host_type_of_acquire).
 _HOST_RUNTIME_RENAMES = ("Row", "Map", "Pool")
+
+
+# The host families whose CONSTRUCTOR is spelled `<Root>.<verb>(..)` in source
+# (`src/revl/lower.py::_HOST_CALLABLES`). In a component position the frontend
+# lowers that to a `host` IR node, which `_expr` renders as the free function
+# `PoolOpen(..)`. In a plain top-level `fn` it stays an ordinary `call` on a
+# `field` of a `var`, so the pure renderer used to print the source spelling
+# `Pool.Open(..)`, a method Go's host runtime does not declare (issue #1356).
+_V3_HOST_ROOTS = frozenset({"Map", "Pool", "Job", "Stream"})
 
 
 # item 421 F6: the go tier's confidentiality funnel, the peer of
@@ -4392,6 +4679,44 @@ def _v3_split_fn_type(name: str):
     return None
 
 
+def _v3_host_constructor(callee: dict, ctx) -> str | None:
+    """`Pool.open(..)` in a plain top-level `fn` -> the Go name `PoolOpen`.
+
+    issue #1356. The frontend lowers a host verb to a `host` IR node only in a
+    component position; in a pure `fn` body it stays a `call` on a `field` of
+    a `var` named for the family root, and this renderer printed the source
+    spelling `Pool.Open(..)`. Go's host runtime declares the constructors as
+    FREE functions (`func PoolOpen(url string, size int64) *Pool`) and only
+    the per-instance verbs as methods, so the family root has no `Open`.
+
+    Answers None for anything that is not one of those roots, including a
+    local binding or a declared type that happens to share the name: a
+    receiver the document bound is an ordinary value with ordinary methods.
+    """
+    if callee.get("kind") != "field":
+        return None
+    target = callee.get("target") or {}
+    if target.get("kind") not in ("var", "name"):
+        return None
+    root = target.get("name") or target.get("id")
+    if root not in _V3_HOST_ROOTS:
+        return None
+    if root in ctx.var_types or root in (ctx.types or {}):
+        return None
+    verb = callee.get("name")
+    go = _camel(root) + _camel(verb)
+    # Keyed on the DOTTED host verb, the spelling `_expr`'s own host arm uses,
+    # rather than on the bare method name: the two paths lower the same verb
+    # and a second spelling of the same test would read as a second construct.
+    if f"{root}.{verb}" == "Map.new":
+        # item 113: the host Map is generic and Go cannot infer `V` from the
+        # argument-less constructor. A pure-fn `Map.new()` has no enclosing
+        # let-effect to learn the value type from, so it takes the historical
+        # surface, exactly as `_expr`'s fallback does.
+        return f"{go}[string]"
+    return go
+
+
 def _go_v3_type(t, types: dict) -> str:
     """Surface type -> Go type for the v3 tier."""
     if t is None or t == "" or t == "Unit":
@@ -4524,6 +4849,9 @@ class _V3GoCtx:
         self.needs_overflow = False     # trapping + - * on Int
         self.needs_overflow32 = False   # trapping + - * on Int32, and to_int32
         self.needs_parse_int = False    # Str.to_int (revlParseInt helper)
+        # `v[k]` on an `Any`-typed receiver (issue #1356): go's index operator
+        # is type-directed, so the read goes through `revlAnyIndex`.
+        self.needs_any_index = False
         # Int -> Str through strconv.FormatInt rather than fmt.Sprintf("%d"):
         # `%d` takes ...any and boxes the operand (item 434 (f)).
         self.needs_strconv = False
@@ -5070,6 +5398,9 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if is_ctor:
             return _go_v3_construct(ctx, cname, arg_renders, expected,
                                     arg_nodes=arg_nodes)
+        host = _v3_host_constructor(callee, ctx)
+        if host is not None:
+            return f"{host}({', '.join(arg_renders)})"
         callee_src = _go_v3_expr(callee, ctx)
         return f"{callee_src}({', '.join(arg_renders)})"
 
@@ -5091,6 +5422,15 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
             # VALUE, silently, where every other tier faults (issue #957). Route
             # it through the helper so the miss is the same fault here.
             return f"revlMapIndex({target}, {_go_v3_expr(node.get('index'), ctx)})"
+        if _go_v3_type(_go_v3_infer_type(target_node, ctx), ctx.types) == "any":
+            # issue #1356: `v[k]` where `v` is statically `Any`. Go's index
+            # operator is type-directed and an interface value has none, so
+            # this emitted a bare `v[k]` that did not compile. Reflection is
+            # the faithful lowering: the same read python and typescript
+            # make on a value whose shape only the runtime knows.
+            ctx.needs_reflect = True
+            ctx.needs_any_index = True
+            return f"revlAnyIndex({target}, {_go_v3_expr(node.get('index'), ctx)})"
         return f"{target}[{_go_v3_expr(node.get('index'), ctx)}]"
 
     if kind == "len":
@@ -6297,9 +6637,20 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
         out.append(f"{pad}_ = {_go_v3_expr(node['expr'], ctx)}")
     elif step == "assert":
         expr = _go_v3_expr(node["expr"], ctx)
-        tn = t_name or "t"
         out.append(f"{pad}if !({expr}) {{")
-        out.append(f'{pad}\t{tn}.Fatalf("assertion failed: %s", {_go_string(expr)})')
+        if t_name:
+            out.append(
+                f'{pad}\t{t_name}.Fatalf("assertion failed: %s", {_go_string(expr)})')
+        else:
+            # issue #1356: an `assert` in an ORDINARY `fn` body, which the
+            # emitted test receiver never reaches. This arm defaulted to the
+            # bare name `t` and emitted `t.Fatalf(...)` into a function with
+            # no `*testing.T` in scope, so the package did not compile. Every
+            # other tier answers a plain-fn assert with a runtime fault
+            # (python `assert`, typescript `throw`, java `AssertionError`);
+            # `panic` is go's.
+            out.append(
+                f'{pad}\tpanic("assertion failed: " + {_go_string(expr)})')
         out.append(f"{pad}}}")
     else:
         raise EmitError(f"unsupported v3 statement step {step!r}")
@@ -8540,6 +8891,37 @@ func revlMapIndex[K comparable, V any](m map[K]V, k K) V {
 }
 ''' % _MAP_MISS_MSG
 
+_V3_ANY_INDEX_HELPER = '''// revlAnyIndex is the subscript `v[k]` where `v` is statically `Any` (issue
+// #1356). Go's index operator is type-directed and an interface value has
+// none, so the read goes through reflection, exactly as python and typescript
+// read a value whose shape only the runtime knows. A miss, an out-of-range
+// position and a value that is not indexable all FAULT, which is the answer
+// the same subscript gives on every other tier.
+func revlAnyIndex(v any, k any) any {
+\trv := reflect.ValueOf(v)
+\tswitch rv.Kind() {
+\tcase reflect.Map:
+\t\tkv := reflect.ValueOf(k)
+\t\tif kv.IsValid() && kv.Type().ConvertibleTo(rv.Type().Key()) {
+\t\t\tif e := rv.MapIndex(kv.Convert(rv.Type().Key())); e.IsValid() {
+\t\t\t\treturn e.Interface()
+\t\t\t}
+\t\t}
+\t\tpanic("revl: map index: no entry for key")
+\tcase reflect.Slice, reflect.Array:
+\t\ti, ok := k.(int64)
+\t\tif !ok {
+\t\t\tpanic("revl: list index: position is not an Int")
+\t\t}
+\t\tif i < 0 || i >= int64(rv.Len()) {
+\t\t\tpanic("revl: list index: out of range")
+\t\t}
+\t\treturn rv.Index(int(i)).Interface()
+\t}
+\tpanic("revl: index: value is not indexable")
+}
+'''
+
 _V3_FTOA_HELPER = r'''// revlFtoa renders a Float as ECMAScript Number::toString does (the canonical
 // cross-tier Float -> Str form, docs/strings.md): shortest round-trip digits,
 // "1e+21"/"NaN"/"Infinity", a whole-number float as "0", negative zero as "0".
@@ -8964,6 +9346,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("")
         out.append(_V3_LIST_INDEX_OF_EQ)
         out.append("")
+    if ctx.needs_any_index:
+        out.append(_V3_ANY_INDEX_HELPER)
     if ctx.needs_float_div:
         # A function, not an expression: Go rejects a *constant* `1.0 / 0.0`
         # at compile time, where IEEE defines +Inf. Through a call it is an
@@ -9191,6 +9575,85 @@ def _refuse_deferred_emissions(ir: dict) -> None:
         refuse_approval_on_ownerless_tier(ir, "go")
     except RevlError as exc:
         raise EmitError(exc.message) from None
+def _refuse_validated_emissions(ir: dict) -> None:
+    """Items 257/513 tier gate (issue #1373): a `validated` emission is a CHECKED
+    boundary. The crossing validates the completion against the schema derived
+    from its return type, builds the declared value from the validated payload,
+    raises a typed validation fault when it does not conform, and honours the
+    stated decoding grammar and the `retry` budget. This tier has none of that
+    seam, and it used to DROP the modifier and both derived keys silently:
+    byte-identical output with and without `validated`, no marker, nothing for a
+    byte oracle to catch. So it refuses by name instead, through EmitError, this
+    tier's existing refusal channel.
+
+    The scan and the single canonical wording live in `revl.validated_boundary`,
+    shared by all five tiers so five backends do not invent five messages.
+    DECLARATION-keyed, not call-site keyed (`_refuse_deferred_emissions` above is
+    the other shape): the tier emits the crossing whether or not this document
+    also calls it, so an uncalled declaration still reaches the output as an
+    unchecked boundary."""
+    try:
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    except ModuleNotFoundError:  # standalone `python3 emit.py`: put src/ on the path
+        import pathlib
+        import sys as _sys
+        src = pathlib.Path(__file__).resolve().parents[2] / "src"
+        if src.is_dir() and str(src) not in _sys.path:
+            _sys.path.insert(0, str(src))
+        from revl.errors import RevlError
+        from revl.validated_boundary import (
+            refuse_validated_on_unvalidating_tier,
+        )
+    try:
+        refuse_validated_on_unvalidating_tier(ir, "go")
+    except RevlError as exc:
+        raise EmitError(exc.message) from None
+
+
+
+
+
+#: The refusals that read the WHOLE document and answer about the TIER rather
+#: than about one rendering path. A hole has no implementation to lower, a
+#: fault test has no driver here, and a deferred emission has no session owner
+#: here, and none of that changes with which renderer the document reaches.
+#:
+#: Held as one list because this backend has TWO entry points -- `emit` and
+#: `emit_placement` -- and a document is admissible or not regardless of which
+#: one it arrives through. Issue #1379 measured what happens when each entry
+#: keeps its own copy of the list: a fault test and a called `deferred`
+#: emission were both refused through `emit` and ADMITTED through
+#: `emit_placement`, the second emitting Go byte-identical to the same
+#: document without them, so the construct was silently dropped rather than
+#: lowered or refused. `tests/test_go_placement_refusals.py` asserts this
+#: tuple holds every document-level refusal in the module, so the next one
+#: added cannot reach only one of the two entries.
+#:
+#: `_refuse_stream_document_top_level` is deliberately NOT here. It is a fact
+#: about a rendering path rather than about the tier: it refuses because the
+#: live stc-go path drops top-level `fn`s and the pure path drops the stream's
+#: component, and the combined renderer the placement path uses drops neither
+#: (measured: that document places, with `func double(...)` and the stream's
+#: acquisition both in the output). Adding it here would refuse documents this
+#: tier can and does emit.
+_DOCUMENT_REFUSALS = (
+    _refuse_holes,
+    _refuse_deferred_emissions,
+    _refuse_validated_emissions,
+    _refuse_fault_tests,
+)
+
+
+def _refuse_inadmissible_document(ir: dict) -> None:
+    """Run every tier-wide refusal, in the order `emit` has always run them.
+
+    Called from both entry points rather than mirrored into each, so there is
+    one list to add to and no second one to forget."""
+    for refuse in _DOCUMENT_REFUSALS:
+        refuse(ir)
 
 
 _REVL_SYNC_SUFFIX = "_revl_sync"
@@ -9269,9 +9732,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     ver = ir.get("ir_version")
     if ver not in (1, 2, 3):
         raise EmitError("cordis-go backend targets ir_version 1, 2 or 3, got %r" % (ver,))
-    _refuse_holes(ir)
-    _refuse_deferred_emissions(ir)
-    _refuse_fault_tests(ir)
+    _refuse_inadmissible_document(ir)
     # Instance-parametric `spawn` (docs/design-v2-instances.md, phase 1) is an
     # acquisition inside a `let-effect` step (acquire.kind == "spawn"); it is
     # lowered below to a child-fiber plug on the real stc-go runtime. The old
@@ -9280,10 +9741,15 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     # removed now that the lowering exists.
 
     # ir_version-3 routing:
-    #   * No component, or any top-level pure declaration (functions / types /
-    #     externs / tests) present -> the pure typed-core path (`_emit_v3_go`):
-    #     ordinary Go, no stc runtime (the v3_* fixtures, and the pure-fn /
-    #     record / ADT / test corpus cases whose component is incidental).
+    #   * No component, or a top-level pure declaration (functions / types /
+    #     externs / tests) beside none but INCIDENTAL components -> the pure
+    #     typed-core path (`_emit_v3_go`): ordinary Go, no stc runtime (the
+    #     v3_* fixtures, and the pure-fn / record / ADT / test corpus cases
+    #     whose component is incidental).
+    #   * A top-level pure declaration beside an OBSERVABLE component -> the
+    #     combined path (`_emit_v3_combined`): both, in one package. Before
+    #     issue #1321 there was no such arm and the document took the pure
+    #     path, which renders none of the components it routes past.
     #   * A component and NOTHING top-level -> a live stc-go component whose
     #     method/step bodies use v3 expressions; the stc-go path below renders
     #     them with the converged expression renderer.
@@ -9322,11 +9788,22 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         # document must stay on the stc-go runtime path even though it also
         # carries top-level `test` blocks (FR-5); the pure path would drop the
         # components and refuse the lifecycle steps.
+        if any(_component_is_observable(comp)
+               for comp in (ir.get("components") or [])):
+            # ... and the pure path drops every component it routes past,
+            # which is only acceptable while the component is incidental
+            # (issue #721). A component with a method body or an activation
+            # step is not: dropping it answers with a module whose routes are
+            # simply absent. Carry the document on the combined renderer
+            # instead: the typed-core tier and the live stc-go components in
+            # one package, which the placement path has emitted since commit
+            # 141aa7e3d and `emit` never learned about (issue #1321).
+            return _emit_v3_combined(ir, package, placement=False)
         return _emit_v3_go(ir, package)
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
-    global _COMP_NEEDS_STRCONV
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
@@ -9388,6 +9865,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
     _COMP_NEEDS_STRCONV = False
+    _COMP_NEEDS_OVERFLOW32 = False
 
     # Emit the body first so `_COMP_NEEDS_STDLIB` settles before the import
     # block and preamble are assembled. For ir_version 1/2 no v3 feature is
@@ -9501,6 +9979,10 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append(_V3_MAP_PREAMBLE)
     if _COMP_NEEDS_PARSE_INT:
         out.append(_V3_PARSE_INT_HELPER)
+    if _COMP_NEEDS_OVERFLOW32:
+        # `Int.to_int32` in a method body: the same checked narrow the pure
+        # typed-core path emits off `ctx.needs_overflow32` (issue #1347).
+        out.append(_V3_OVERFLOW32_HELPER)
     if needs_result_preamble:
         # component tier keeps the sealed interface (see _COMP_RESULT_PREAMBLE):
         # witnessed `@go` externs hand-construct RevlOk/RevlErr.
@@ -9522,7 +10004,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
 
     out.extend(_emit_host_stubs(ir))
 
-    return "\n".join(out) + "\n"
+    return _drop_unused_time_import("\n".join(out) + "\n")
 
 
 # ==========================================================================
@@ -9774,7 +10256,12 @@ def _emit_go_dispatch(sname, methods, out):
                 out.append("\t\ta%d := %s" % (i, dec))
             else:
                 out.append("\t\tvar a%d %s" % (i, _go_type(p["type"])))
-                out.append("\t\t_ = json.Unmarshal(_revlArg(args, %d), &a%d)" % (i, i))
+                # issue #1559: an argument the declared type cannot hold is an
+                # error, never the zero value (a string "41" read as 0).
+                out.append("\t\tif err := json.Unmarshal(_revlArg(args, %d), &a%d); err != nil {" % (i, i))
+                out.append('\t\t\treturn nil, fmt.Errorf("argument %d of %s.%s: %%v", err)'
+                           % (i, sname, mname))
+                out.append("\t\t}")
         call = "svc.%s(%s)" % (_camel(mname),
                                ", ".join("a%d" % i for i in range(len(params))))
         _emit_go_dispatch_encode(call, m.get("returns"), out)
@@ -10008,19 +10495,51 @@ def _emit_go_bridge(ir: dict) -> list[str]:
     return out
 
 
+_TIME_IMPORT = '\t"time"\n'
+_TIME_USE = re.compile(r"\btime\.")
+
+
+def _drop_unused_time_import(module: str) -> str:
+    """Remove the `"time"` import from a module that never uses it (issue
+    #1559). A `lifecycle test` imports `time` for the unload waits
+    (`time.Sleep`), but one with no `unload` step emits none, and go refuses
+    to build a package with an unused import. Deciding on the finished text
+    covers every writer of `time.` at once (a lifecycle wait, the teardown
+    preamble's budgets, the timer preamble). The match is conservative: any
+    `time.` token keeps the import, so the worst case is the old behavior."""
+    head, sep, rest = module.partition(_TIME_IMPORT)
+    if not sep or _TIME_USE.search(rest) or _TIME_USE.search(head):
+        return module
+    return head + rest
+
+
 def _emit_v3_placement(ir: dict, package: str) -> str:
-    """A v3 typed-core composition for the placement runner, in ONE package:
-    the pure typed-core tier (record structs, ADT sealed interfaces, pure
-    `fn`s, externs, plain `test` blocks — ordinary Go) PLUS the live stc-go
-    components (service interfaces, keys, impls, load helpers) PLUS the
-    interop bridge. This is the go mirror of the rust tier's `_emit_v3`
-    (types + components in one module), extended with the bridge the placement
-    runner links against.
+    """The placement runner's half of the combined renderer (see
+    `_emit_v3_combined`): the same module, plus the interop bridge appended by
+    `_emit_placement`."""
+    return _emit_v3_combined(ir, package, placement=True)
+
+
+def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
+    """A v3 typed-core composition in ONE package: the pure typed-core tier
+    (record structs, ADT sealed interfaces, pure `fn`s, externs, plain `test`
+    blocks, ordinary Go) PLUS the live stc-go components (service interfaces,
+    keys, impls, load helpers). This is the go mirror of the rust tier's
+    `_emit_v3`, which renders types and components in one module.
+
+    Two callers reach it. `emit_placement` adds the interop bridge the
+    placement runner links against. `emit` uses it for a document whose
+    component the pure typed-core path would otherwise route past and DROP
+    (issue #1321). The combined module is the third path that fork was
+    missing, so the document is carried rather than refused.
 
     Record structs are emitted with EXPORTED, json-tagged fields (`_V3_TYPED_COMPONENTS`)
     so record values survive the bridge's plain-JSON wire encoding — the go
-    mirror of the rust tier's serde derives. The pure tier (`emit`) keeps
-    unexported fields byte-for-byte with the frozen fixtures."""
+    mirror of the rust tier's serde derives, and the same convention the live
+    stc-go path in `_emit` already uses for a document that declares types.
+    The pure tier (`_emit_v3_go`) keeps unexported fields byte-for-byte with
+    the frozen fixtures; no document that reaches the pure tier reaches here,
+    so no frozen output moves."""
     types = ir.get("types") or {}
     functions = ir.get("functions") or []
     externs = ir.get("externs") or []
@@ -10030,11 +10549,23 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
 
     global _V3_MODE, _V3_TYPES, _V3_TYPED_COMPONENTS
     global _COMP_NEEDS_STDLIB, _COMP_NEEDS_MAP, _COMP_NEEDS_PARSE_INT
-    global _COMP_NEEDS_STRCONV
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
-    global _COMP_NEEDS_STREAM_DRAIN
+    global _COMP_NEEDS_STREAM_DRAIN, _COMP_NEEDS_STREAM_EVENT
+    global _STREAM_ITER_COUNTER
+    global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+    global _WITNESSED_EXTERNS, _WITNESSED_COUNTER
+    global _FN_RET
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
+    # item 320 / issue #1321: the declared return type of every top-level fn
+    # and extern, which `_comp_infer` reads to type a call in a method body.
+    # `_emit` has built this since item 320; this path never did, so every
+    # method-body call answered `None` and a receiver-typed builtin guessed.
+    _FN_RET = {}
+    for _decl in list(functions) + list(externs):
+        if _decl.get("name"):
+            _FN_RET[_decl["name"]] = _decl.get("returns")
     _V3_MODE = True
     _V3_TYPES = types
     _V3_TYPED_COMPONENTS = True
@@ -10042,12 +10573,37 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     _COMP_NEEDS_MAP = False
     _COMP_NEEDS_PARSE_INT = False
     _COMP_NEEDS_STRCONV = False
+    _COMP_NEEDS_OVERFLOW32 = False
     _COMP_NEEDS_TIMER = False
     _TIMER_COUNTER = 0
+    _STREAM_ITER_COUNTER = 0
     _COMP_NEEDS_STREAM = False
     _COMP_NEEDS_STREAM_DRAIN = False
+    _COMP_NEEDS_STREAM_EVENT = False
+    _COMP_NEEDS_TEARDOWN = False
+    _COMP_NEEDS_METHOD_WITNESSED = False
+    # items 243/247: the document's witnessed externs by name. `_emit` has
+    # built this registry since item 243; this path never did, so
+    # `_witnessed_extern` matched nothing and a witnessed effect in a carried
+    # component lowered as an ORDINARY bracket with a nil inverse: the proof
+    # inverse silently dropped, no teardown frame, no compensation phase. The
+    # emitted module compiled, which is why nothing caught it.
+    _WITNESSED_EXTERNS = {
+        ext["name"]: ext for ext in externs
+        if ext.get("class") == "witnessed"
+    }
+    _WITNESSED_COUNTER = 0
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
+    # item 102: a lifecycle test's `advance` step drives the clock coeffect,
+    # which lives in the timer preamble. A component with a timer normally
+    # flags it, but an `advance` alone is enough (`_emit` does the same scan).
+    if any(
+        s.get("step") == "advance"
+        for t in tests if t.get("lifecycle")
+        for s in (t.get("body") or [])
+    ):
+        _COMP_NEEDS_TIMER = True
     has_spawn = _spawn_targets(ir) and any(
         comp.get("body") or comp.get("provides") for comp in components)
 
@@ -10095,7 +10651,35 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         used_opt = True
     used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
     # the Map SUBSCRIPT helper (issue #957), gated on its own like above
-    used_map_index = "revlMapIndex(" in "\n".join(body)
+    body_blob = "\n".join(body)
+    used_map_index = "revlMapIndex(" in body_blob
+
+    # The two tiers in this one package disagree about what a Result IS. The
+    # pure typed-core renderer builds the FLAT STRUCT form (item 434 (d):
+    # `.Ok` / `.OkV` / `.ErrV`, `_V3_RESULT_PREAMBLE`); the component renderer
+    # and a witnessed `@go` extern body build the SEALED INTERFACE form
+    # (`RevlOk[T, E]` / `RevlErr[T, E]`, `_COMP_RESULT_PREAMBLE`). Only one of
+    # the two can be declared in a package. `_emit` declares the sealed form
+    # and `_emit_v3_go` the struct form, each on a path that renders one tier;
+    # this path renders BOTH, and picked the struct form unconditionally, so a
+    # witnessed extern's hand-written `RevlOk[...]` did not resolve.
+    #
+    # Decide from what the RENDERED body actually built (the discipline
+    # `_emit` already uses for its own Result scan) rather than from the IR:
+    # a declared `Result[T, E]` return type alone builds neither form.
+    sealed_result = ("RevlOk[" in body_blob) or ("RevlErr[" in body_blob)
+    struct_result = ("OkV" in body_blob) or ("ErrV" in body_blob)
+    if sealed_result and struct_result:
+        raise EmitError(
+            "this document needs BOTH Result representations in one Go "
+            "package: the component tier builds the sealed-interface form "
+            "(RevlOk/RevlErr, from a witnessed extern or a witnessed effect "
+            "step) and the pure typed-core tier builds the flat-struct form "
+            "(Ok/OkV/ErrV, from a `match` on a Result or a checked division). "
+            "Go declares one `RevlResult[T, E]` per package, so the two "
+            "cannot share this module. Split the witnessed extern and the "
+            "Result-matching pure fn into separate documents"
+        )
 
     imports: list[str] = []
     if pure_tests or has_lifecycle:
@@ -10131,6 +10715,20 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         imports.append('\t"math"')
     if ctx.needs_strconv or _COMP_NEEDS_STRCONV:
         imports.append('\t"strconv"')
+    if _COMP_NEEDS_TEARDOWN:
+        # `runCompensationPhase`'s budget/deadline (`time`) and the two
+        # `REVL_COMPENSATION_*_MS` env reads (`os`, `strconv`). The live path
+        # in `_emit` guards each against Go's single-import rule by hand; this
+        # block is de-duplicated by the `sorted(set(imports))` below.
+        imports.append('\t"time"')
+        imports.append('\t"os"')
+        imports.append('\t"strconv"')
+    if (_RECORD_MODE and _COMP_NEEDS_TEARDOWN) or _COMP_NEEDS_STREAM_EVENT:
+        # item 322 Slice 1 (the durable WAL sink) and item 130 Slice 5 (a typed
+        # event decodes the delivered item against its derived schema) both
+        # marshal with encoding/json, the way `_emit` imports it for the same
+        # two producers.
+        imports.append('\t"encoding/json"')
     if ctx.needs_strings:
         imports.append('\t"strings"')
     # The host runtime's Map.Keys and _V3_MAP_PREAMBLE's revlMapKeys both sort
@@ -10147,8 +10745,12 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
     out.append("// revl -> cordis-go (ir_version 3, typed-core + live components):")
-    out.append("// the pure typed-core tier (records/ADTs/pure fns) plus the stc-go")
-    out.append("// components and the interop bridge, in one package (placement).")
+    if placement:
+        out.append("// the pure typed-core tier (records/ADTs/pure fns) plus the stc-go")
+        out.append("// components and the interop bridge, in one package (placement).")
+    else:
+        out.append("// the pure typed-core tier (records/ADTs/pure fns) plus the stc-go")
+        out.append("// components, in one package.")
     out.append("package %s" % package)
     out.append("")
     if imports:
@@ -10165,6 +10767,8 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append("")
         out.append(_V3_LIST_INDEX_OF_EQ)
         out.append("")
+    if ctx.needs_any_index:
+        out.append(_V3_ANY_INDEX_HELPER)
     if ctx.needs_float_div:
         out.append("func revlDiv(a, b float64) float64 { return a / b }")
         out.append("")
@@ -10211,7 +10815,10 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append("\treturn p")
         out.append("}")
         out.append("")
-    if ctx.needs_overflow32:
+    # `or _COMP_NEEDS_OVERFLOW32`: the narrow can come from a component
+    # METHOD body as well as from a top-level fn (issue #1347), and the
+    # method renderer does not write into `ctx`.
+    if ctx.needs_overflow32 or _COMP_NEEDS_OVERFLOW32:
         out.append("func revlAddI32(a, b int32) int32 { return revlToI32("
                    "int64(a) + int64(b)) }")
         out.append("func revlSubI32(a, b int32) int32 { return revlToI32("
@@ -10281,7 +10888,12 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
     if ctx.needs_parse_int or _COMP_NEEDS_PARSE_INT:
         # after the Opt preamble: revlParseInt's return type is RevlOpt
         out.append(_V3_PARSE_INT_HELPER)
-    if used_result:
+    if sealed_result:
+        # the component tier's form (see the fork above): a witnessed extern's
+        # `@go` body hand-constructs RevlOk/RevlErr, and `_emit_witnessed_step`
+        # asserts on them.
+        out.append(_COMP_RESULT_PREAMBLE)
+    elif used_result:
         out.append(_V3_RESULT_PREAMBLE)
     if used_map or _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)
@@ -10289,16 +10901,26 @@ def _emit_v3_placement(ir: dict, package: str) -> str:
         out.append(_V3_MAP_INDEX_HELPER)
     if ctx.used_stdlib or _COMP_NEEDS_STDLIB:
         out.append(_V3_STDLIB_PREAMBLE)
+    if _COMP_NEEDS_TEARDOWN:
+        out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _RECORD_MODE:
+            # item 322 Slice 1: the durable WAL sink the teardown records
+            # through. `_emit` appends it beside the teardown preamble; a
+            # carried document emitted with `--record` got the teardown and
+            # not the sink.
+            out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
         out.append(_TIMER_PREAMBLE)
     if _COMP_NEEDS_STREAM:
         out.append(_STREAM_PREAMBLE)
     if _COMP_NEEDS_STREAM_DRAIN:
         out.append(_STREAM_DRAIN_PREAMBLE)
+    if _COMP_NEEDS_STREAM_EVENT:
+        out.append(_STREAM_EVENT_PREAMBLE)
     out.extend(body)
     out.extend(host_stubs)
 
-    return "\n".join(out).rstrip() + "\n"
+    return _drop_unused_time_import("\n".join(out).rstrip() + "\n")
 
 
 def emit_placement(ir: dict, package: str = "emitted") -> str:
@@ -10322,7 +10944,18 @@ def emit_placement(ir: dict, package: str = "emitted") -> str:
 
 
 def _emit_placement(ir: dict, package: str = "emitted") -> str:
+    # `--record` is an `emit` option; placement never sets it. Pin it here so
+    # the flag cannot arrive holding whatever the previous `emit(record=True)`
+    # left behind (`_reset_v3_typed_component_state` restores three globals,
+    # not this one).
+    global _RECORD_MODE
+    _RECORD_MODE = False
     ir = _dedup_colour_erased_poly_externs(ir)  # item 388, stage 6
+    # Before any branching, so every branch gets the same answer about whether
+    # the document is admissible at all (issue #1379). Two of the three
+    # branches below reach `emit`, which runs this again; it only reads the
+    # document, so a second run costs a walk and cannot change the verdict.
+    _refuse_inadmissible_document(ir)
     has_top_level = bool(ir.get("functions") or ir.get("types")
                          or ir.get("externs") or ir.get("tests"))
     if ir.get("ir_version") == 3:

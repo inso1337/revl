@@ -9,6 +9,7 @@ layout it is running under.
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 
 # `.../src/revl`
@@ -56,3 +57,45 @@ def stdlib_root() -> Path:
     if checkout.is_dir():
         return checkout
     return _PKG_DIR / "stdlib"
+
+
+def python_backend_first() -> Path:
+    """Put the cordis-py backend directory FIRST on `sys.path`, and return it.
+
+    Every backend directory ships a module named `emit`, and the reference
+    tier is reached with a bare `import emit`. "Insert the python directory
+    if it is absent" let whichever backend directory sat earlier on `sys.path`
+    answer that import: pytest's default import mode prepends the directory of
+    every test module it collects, so one session that collected
+    `backends/java/` ran the JAVA emitter wherever revl meant the python one,
+    and reported its refusals as "the py emitter refused" (issue #1449, 13
+    tests in `tests/test_crash_recovery.py` and
+    `tests/test_phase1_bracket_fault.py`).
+    """
+    backend = backends_root() / "python"
+    entry = str(backend)
+    if not sys.path or sys.path[0] != entry:
+        while entry in sys.path:
+            sys.path.remove(entry)
+        sys.path.insert(0, entry)
+    return backend
+
+
+def python_backend_emitter():
+    """The cordis-py backend's `emit` module, and never another backend's.
+
+    `import emit` after `python_backend_first()`. If `emit` is already
+    imported from some other file, that module is what a bare import returns,
+    so this refuses loudly instead of handing it on.
+    """
+    backend = python_backend_first()
+    import emit  # noqa: PLC0415 - backend import after path setup
+
+    want = (backend / "emit.py").resolve()
+    got = Path(getattr(emit, "__file__", "") or "").resolve()
+    if got != want:
+        raise ImportError(
+            f"the module `emit` is {got}, not the python backend's emitter "
+            f"{want}; another backend's emitter was imported under the bare "
+            "name `emit` earlier in this process")
+    return emit

@@ -3,6 +3,7 @@
 #
 # Install (once per clone):   git config core.hooksPath tools/hooks
 # Skip for one commit:        git commit --no-verify
+# Which python:               tools/hooks/resolve-python (REVL_HOOK_PYTHON wins)
 #
 # Kept under ~20s on purpose. A hook people wait a minute for is a hook people
 # turn off. Anything slower belongs in CI.
@@ -17,20 +18,31 @@ set -e
 root=$(git rev-parse --show-toplevel)
 cd "$root"
 
-# In a git worktree the checkout has no `.venv` of its own — it lives beside
-# the main checkout. Resolving the interpreter only against $root made this
-# hook print "SKIPPED (no pytest)" for every worktree agent, which is exactly
-# where an unverified commit is most likely. Fall back to the primary
-# checkout's venv (git-common-dir points at the shared .git).
+# Every python step below runs on ONE interpreter, the committer's:
+# REVL_HOOK_PYTHON, else the active virtualenv, else this checkout's .venv, else
+# python3 on PATH. tools/hooks/resolve-python picks it and refuses, loudly, an
+# interpreter without pytest or one whose own revl is another tree's. A linked
+# worktree used to fall back to the PRIMARY checkout's .venv instead: another
+# python version, without the committer's cordis-py runtime, and an editable
+# revl naming the primary checkout's src/ (issue #1608).
+# main_root is only used below to suggest a node_modules link.
 main_root=$(cd "$(git rev-parse --git-common-dir)/.." 2>/dev/null && pwd || echo "$root")
-if [ -x .venv/bin/pytest ]; then
-    PYTEST=.venv/bin/pytest
-elif [ -x "$main_root/.venv/bin/pytest" ]; then
-    PYTEST="$main_root/.venv/bin/pytest"
-elif command -v pytest >/dev/null 2>&1; then
-    PYTEST=pytest
-else
-    PYTEST=""
+PY=$(sh tools/hooks/resolve-python "$root") || exit 1
+# `-P -m pytest` (python 3.11+) runs pytest without putting the working
+# directory first on sys.path, as the `pytest` script does.
+
+# An interpreter can carry an editable install of revl pointing at another
+# checkout's src/ (a plain `.pth` path entry); resolve-python refuses one whose
+# revl is another tree's, and this export is the second line of defence.
+# tests/conftest.py puts this tree's src/ on sys.path for the pytest process,
+# but every python a test or a step starts would still import the installed
+# revl and measure a tree other than the one being committed. PYTHONPATH entries come before
+# site-packages and before anything a `.pth` appends, so exporting this tree's
+# src/ first makes the process and all of its children agree.
+# tests/test_child_python_resolves_this_tree.py holds it.
+if [ -d "$root/src/revl" ]; then
+    PYTHONPATH="$root/src${PYTHONPATH:+:$PYTHONPATH}"
+    export PYTHONPATH
 fi
 
 fail=0
@@ -65,28 +77,60 @@ echo "pre-commit:"
 # `tests/` exactly as before; and a --timeout backstop (when pytest-timeout is
 # present) means a single wedged cross-tier test can never hang the commit.
 TIMEOUT_ARGS=""
-if [ -n "$PYTEST" ] && "$PYTEST" --help 2>/dev/null | grep -q -- '--timeout'; then
+if "$PY" -P -m pytest --help 2>/dev/null | grep -q -- '--timeout'; then
     TIMEOUT_ARGS="--timeout=60 --timeout-method=thread"
 fi
-if [ -n "$PYTEST" ]; then
-    SEL=$(python3 tools/affected_tests.py --root "$root" --base HEAD --format machine 2>/dev/null)
+# A commit that stages nothing (`--allow-empty`, a message-only `--amend`)
+# changes no file, so no test can be affected by it. The selector cannot tell
+# that case apart: it sees an empty change set, which it must treat as "could
+# not read the diff" and answer with the FULL suite, and the FULL suite under
+# the per-test timeout above takes over an hour on a loaded machine and
+# cannot pass (issue #1449). git can tell it apart, positively: `diff --cached
+# --quiet` exits 0 only when the index matches HEAD. Any error is non-zero and
+# falls through to the selector and its fail-safe.
+NOTHING_STAGED=""
+SEL=""
+if git diff --cached --quiet 2>/dev/null; then
+    NOTHING_STAGED=1
+else
+    SEL=$("$PY" tools/affected_tests.py --root "$root" --base HEAD --format machine 2>/dev/null)
+fi
+
+# git exported the committing repository into this hook (GIT_DIR and
+# GIT_INDEX_FILE in a linked worktree, GIT_INDEX_FILE and GIT_CONFIG_PARAMETERS
+# elsewhere). The two git reads above needed them: for `commit -a` and
+# `commit <paths>` what is being committed lives in a temporary index only
+# GIT_INDEX_FILE names. Nothing below does, and every test fixture that shells out to git would inherit them
+# and act on THIS repository instead of its tmp dir: `git init` there set
+# core.bare=true in the shared .git/config, `git config user.name t` set the
+# shared identity, and `git add` rewrote a worktree's index. Clear git's own list of
+# repository-local variables (the set it clears itself before running a command
+# in another repository), and the author identity and date git also exports,
+# which would otherwise outrank every fixture's own `git config user.name`.
+# tests/conftest.py strips the same sets for any pytest run; this covers the
+# steps it does not reach.
+unset $(git rev-parse --local-env-vars)
+unset GIT_AUTHOR_NAME GIT_AUTHOR_EMAIL GIT_AUTHOR_DATE \
+    GIT_COMMITTER_NAME GIT_COMMITTER_EMAIL GIT_COMMITTER_DATE
+
+if [ -n "$NOTHING_STAGED" ]; then
+    echo "  frontend                           nothing staged (the commit changes no file)"
+else
     SEL_FULL=$(printf '%s\n' "$SEL" | sed -n 's/^FULL //p')
     if [ -z "$SEL" ] || [ -z "$SEL_FULL" ]; then
-        # selector unavailable (no python3, parse error) -> previous behavior
-        step "frontend + emitted-code validation" "$PYTEST" tests/ $TIMEOUT_ARGS -q
+        # selector unavailable (it crashed, parse error) -> previous behavior
+        step "frontend + emitted-code validation" "$PY" -P -m pytest tests/ $TIMEOUT_ARGS -q
     elif [ "$SEL_FULL" = "1" ]; then
-        step "frontend + emitted-code validation (full)" "$PYTEST" tests/ $TIMEOUT_ARGS -q
+        step "frontend + emitted-code validation (full)" "$PY" -P -m pytest tests/ $TIMEOUT_ARGS -q
     else
         SEL_PYTEST=$(printf '%s\n' "$SEL" | sed -n 's/^PYTEST //p')
         if [ -n "$SEL_PYTEST" ]; then
             n=$(printf '%s' "$SEL_PYTEST" | wc -w | tr -d ' ')
-            step "frontend (affected: $n node(s))" "$PYTEST" $SEL_PYTEST $TIMEOUT_ARGS -q
+            step "frontend (affected: $n node(s))" "$PY" -P -m pytest $SEL_PYTEST $TIMEOUT_ARGS -q
         else
             echo "  frontend                           no affected tests (docs/config-only change)"
         fi
     fi
-else
-    echo "  frontend                           SKIPPED (no pytest)"
 fi
 
 # The TypeScript backend suite runs tsc over emitted code and shells out to the
@@ -108,7 +152,7 @@ fi
 
 # Emitters are pure Python and the matrix needs no toolchain, so this always
 # runs: it catches a backend that stops emitting a construct entirely.
-step "conformance matrix (emit)" python3 tools/conformance.py
+step "conformance matrix (emit)" "$PY" tools/conformance.py
 
 if [ "$fail" -ne 0 ]; then
     echo
@@ -119,7 +163,7 @@ fi
 # Say what could not be checked here rather than implying it passed. The rust
 # tier resolves cordis-rs from crates.io; where that is unreachable the cargo
 # tests skip, and only CI covers them.
-if ! python3 - <<'PY' 2>/dev/null
+if ! "$PY" - <<'PY' 2>/dev/null
 import socket, sys
 try:
     socket.create_connection(("static.crates.io", 443), timeout=3).close()

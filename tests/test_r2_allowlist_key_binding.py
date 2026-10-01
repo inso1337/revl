@@ -75,7 +75,7 @@ _OPS_HOST = (
     "}\n"
 )
 
-_OPS_DECL = "service Ops { emission fn stash(p: Str) }\n"
+_OPS_DECL = "service Ops { emission[fs] fn stash(p: Str) }\n"
 
 # gen N for the `Session.admit` proofs: the ambient host-backed `ops` provider.
 _ADMIT_BASE = _OPS_DECL + (
@@ -88,7 +88,7 @@ _ADMIT_BASE = _OPS_DECL + (
 
 # the model-authored per-turn source. `Ops` is AMBIENT but is NOT granted.
 _TURN_HONEST = _OPS_DECL + (
-    "service Turn { emission fn go(p: Str) }\n"
+    "service Turn { emission[ops] fn go(p: Str) }\n"
     "component TurnC requires ops: Ops provides turn: Turn {\n"
     "  provide turn { fn go(p) { emit ops.stash(p) } }\n"
     "}\n"
@@ -210,7 +210,7 @@ def test_decoy_turn_cannot_fire_an_ungranted_ambient_host_effect(gate_factory,
 _PROPOSE_DECLS = _OPS_DECL + (
     "service Tool {\n"
     "  fn describe() -> Str\n"
-    "  emission fn run(p: Str)\n"
+    "  emission[ops] fn run(p: Str)\n"
     "}\n"
 )
 _PROPOSE_BASE = _PROPOSE_DECLS + (
@@ -261,16 +261,16 @@ def test_decoy_candidate_is_refused_at_propose(gate_factory, artifact):
 # =========================================================================== #
 
 _NESTED = _OPS_DECL + (
-    "service Nested { emission fn go(p: Str) }\n"
+    "service Nested { emission[ops] fn go(p: Str) }\n"
     "component NestedC requires ops: Ops provides nested: Nested {\n"
     "  provide nested { fn go(p) { emit ops.stash(p) } }\n"
     "}\n"
 )
 _DECIDER_TURN = (
     "service Admission {\n"
-    "  emission fn admit(source: Str, granted: Trusted[List[Str]]) -> Str\n"
+    "  emission[host_admit] fn admit(source: Str, granted: Trusted[List[Str]]) -> Str\n"
     "}\n"
-    "service Turn { emission fn go(s: Str) -> Str }\n"
+    "service Turn { emission[admission] fn go(s: Str) -> Str }\n"
     "component TurnC requires admission: Admission provides turn: Turn {\n"
     '  provide turn { fn go(s) = emit admission.admit(s, ["Ops"]) }\n'
     "}\n"
@@ -350,7 +350,7 @@ def test_a_granted_reach_admits_even_alongside_an_own_provision():
     src = (
         _OPS_DECL
         + "service Inner { fn v() -> Str }\n"
-        + "service Turn { emission fn go(p: Str) }\n"
+        + "service Turn { emission[ops] fn go(p: Str) }\n"
         + "component InnerProv provides inner: Inner {\n"
         '  provide inner { fn v() = "x" }\n'
         "}\n"

@@ -25,9 +25,11 @@ Four rules bound capability, each at a different scope:
 | **item 33** (composition policy) | the **composition** — which boundaries the assembled graph may cross |
 | **item 55** (operator authority) | the **operators** — who may act on the running system |
 | **item 66** (this) | the **lineage** — a spawned child holds no more than its spawner |
+| **item 519** (this) | the **surrogate** — a model role reaches no further than the component that consults it |
 
 Attenuation is the last of the four. G4 says *a component may not exceed its
-declaration*; item 66 says *a child may not exceed its parent*.
+declaration*; item 66 says *a child may not exceed its parent*; item 519 says
+*a model may not reach past the component it steers*.
 
 ## What a component holds, what a child reaches
 
@@ -43,13 +45,39 @@ unnameable host `*`). This is the spawner's *own* authority — deliberately
 lacks by routing it through one child into another.
 
 **Reached** — what an instance can actually do. A component's `emit` steps name
-the boundaries its code crosses (`_collect_emit_caps`): the required key of
-every emission, and `*` for a host emission or first-class dispatch that no key
-can name. Closed over the spawn graph, so a child that itself spawns a
-grandchild reaching `kv_c` *reaches* `kv_c` too. This is more precise than a
-component's *declared* emission surface: a worker that only ever emits through
-`kv_a` provably does not reach `kv_b`, whatever its service's bare `emission`
-promises — the reach is bounded by the keys it wires through `requires`.
+the boundaries its code crosses (`_collect_emit_caps_pairs`), and `*` for a host
+emission or first-class dispatch that nothing can name. Closed over the spawn
+graph, so a child that itself spawns a grandchild reaching `kv_c` *reaches*
+`kv_c` too. This is more precise than a component's *declared* emission surface:
+a worker that only ever emits through `kv_a` provably does not reach `kv_b`,
+whatever its service's bare `emission` promises — the reach is bounded by what
+it wires through `requires`.
+
+### What names a boundary here
+
+Both sides of the fold are spelled in the **boundary's** namespace, never in a
+component's local `requires` spelling. Two components wire the same boundary
+under whatever key each likes, so comparing keys compares two identifiers that
+name nothing in common — and renaming a child's key was enough to launder a
+boundary past the rule above.
+
+| the method being crossed | the element |
+|---|---|
+| declares `emission[db]` | the declared token, `db` |
+| declares `emission` with no list | the **service** it is declared on |
+| a host emission, or a first-class dispatch | the unnameable `*` |
+
+The middle row is item 561 (issue #1265): a method that declines to name what it
+reaches leaves the boundary with exactly one name it owns, the declaration it
+sits on. Naming it by the consumer's key instead made a parent wired `net: Net`
+and a child wired `net: Kv` compare equal, which is the same widening the top
+row refuses. `docs/design/561-undeclared-emission-boundary.md` has the
+measurement, including why `*` is the wrong element here even though it is the
+right one for a disjointness question.
+
+The G4 **provider** bound is a different question and still reads the wiring key
+(`docs/capabilities.md` §3), as does G6 confinement: a statement spells a key,
+so that is what those rules have to talk about.
 
 The check, at admission of every activation-body spawn:
 
@@ -101,6 +129,53 @@ only `kv_a` — a spawn may narrow a child's capabilities, never widen them
 
 (`examples/rejections/g4_spawn_widens_capability.rvl`.)
 
+## The model role in the product (item 519)
+
+A spawn is not the only edge that can amplify. A **model is an authority
+surrogate**: it picks which capability the component consulting it reaches for.
+Until item 519 the product accounted for services, realms, taints and budgets
+but not for the model, so a component holding `net` whose decisions run through
+a role able to reach `shell` was accounted as if the role were inert. Its
+*effective* ceiling is the pair's, not its own.
+
+A `model role` (item 512, `docs/design/531-model-placement.md`) therefore
+carries a declared **reachable-capability set**:
+
+```revl
+model role local on_device  reaches [model.complete]
+model role cloud off_device reaches [model.complete, net.request]
+```
+
+and the rule is item 66's with a model-route edge in place of a spawn edge:
+
+```
+reach(role)  ⊆  held(component)         → admit (the role attenuates, or matches)
+reach(role)  ⊄  held(component)         → REFUSE (the surrogate widens)
+```
+
+The refusal names both sets:
+
+```
+`Classifier` routes `classify` (*) through model role `local`, which reaches
+`shell.exec`, but `Classifier` holds only `model.complete` — a component's
+effective ceiling is the pair's, so a model may not reach past the component
+that consults it (G-MODEL-PLACE)
+```
+
+**Undeclared is not empty.** A role with no `reaches` clause reaches the
+unnameable `*`, which no held set covers, so it is refused. Reading silence as
+"reaches nothing" would make a model nobody has described contribute nothing to
+the product, and a model nobody has described is exactly the one whose reach is
+unknown. It is the same choice `_spawn_emission_surface` already makes for a
+service method that declares `emission` with no capability list.
+
+The question is asked only of a component that holds a boundary which could be
+a model call, because a role can only steer an action that reaches a boundary.
+An admitted composition records the product per edge under
+`manifest.model_reach`, including `attenuated` — what the component holds that
+the role does not reach. The section is role-only: a composition that declares
+no `model role` has no `model_reach` key.
+
 ## The audit chain (G8)
 
 `revl audit` shows the attenuation chain per instance — the spawner → child
@@ -124,6 +199,54 @@ record per lineage edge:
 `attenuated` is what the parent held but did **not** pass down. The section is
 additive and spawn-only: a composition with no spawns has no `instances` key,
 so its manifest is byte-identical to before.
+
+## The admission kernel (item 544)
+
+The product accounts for services, realms, taints and budgets, and item 519
+adds the model role. Item 544 adds the one authority that has **no legal
+holder**: the admission kernel.
+
+Item 520 states the invariant the self-evolution programme rests on: a system
+may evolve its behaviour, never the rules that govern its authority. Stated as
+a policy that is a rule some later generation can propose a change to, and the
+loop's proposal channel is exactly the mechanism for proposing changes to
+rules. So it is stated here instead, as a capability nothing may hold.
+
+`src/revl/kernel_boundary.py` enumerates the kernel once: a capability token
+per member (`kernel.admission`, `kernel.attest`, `kernel.taint`,
+`kernel.retention`, `kernel.gate`, `kernel.census`, `kernel.formal`), the tree
+paths each stands for, and the guarantee each refusal cites. The rule is item
+66's with the kernel on the left instead of a spawner, and the fold is
+intersection rather than coverage:
+
+```
+held(kernel)  n  effective(C)  =  {}   ->  admit
+held(kernel)  n  effective(C) !=  {}   ->  REFUSE, naming both sets
+```
+
+`effective(C)` is what the component holds, folded with what any authority
+surrogate it routes through can reach, which is the `model_reach[].effective`
+record item 519 writes, consumed rather than re-derived. A role that declared no
+`reaches [...]` clause contributes the unnameable `*`, because an absent
+declaration is not a proof of narrowness, and `*` is disjoint from nothing.
+
+The difference from a diff check is the whole item. A diff check asks whether a
+candidate touched a kernel path, which is answered after the fact against a
+changed-file set and is evaded by any route that reaches the same state without
+editing those files. This asks whether the component can hold the authority at
+all.
+
+**Retention is on the kernel side.** A loop permitted to update retention
+policies as ordinary behaviour tuning is a loop that can extend its own
+`Retained[T, P]` deadline, which is an authority change wearing the clothes of
+a cache setting; `G-RETAIN` is the guarantee it relaxes. So `kernel.retention`
+is a member of the set, and an untrusted author may not declare a `retention`
+policy at all (`admit_profile.check_no_retention_policy`). Naming a policy the
+trusted composition declares is unaffected: what an untrusted author may not
+do is mint the policy that bounds its own data.
+
+`docs/design/545-kernel-boundary-capability.md` carries the design, the
+non-vacuity measurement and the residuals.
 
 ## Soundness
 

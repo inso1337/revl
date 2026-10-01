@@ -77,9 +77,10 @@
 //!    an operation the running `Store` does not declare is REFUSED here (`A6`,
 //!    the reference's own sentence), which is decidable only by resolving the
 //!    requirement against the running declaration the wire carries. py goes one
-//!    step further on `cache_layer` and ISSUES an admission. That last step is
-//!    the half of the question this gate does not answer, and it is reported as
-//!    a gap rather than as an agreement.
+//!    step further on `cache_layer` and ISSUES an admission, and so does this
+//!    crate's separate ADMISSION surface since docs/design/457 T6: it types the
+//!    provide-method body against the running `Store`'s declaration. The
+//!    verdict surface itself still issues no admission.
 //! 3. **The screen is not cheap, and its cost is super-linear in candidate
 //!    size.** The py in-process round-trip is tenths of a millisecond. This one
 //!    is milliseconds at 218 bytes and grows roughly with the SQUARE of the
@@ -140,12 +141,11 @@ use std::time::Instant;
 /// provides `store`, `App` provides `app` and requires `store`, and the item-346
 /// service block names the two services the composition declares (`Store`,
 /// `AppSvc`) behind the `!services` header that says the list is the whole one,
-/// each with the operations it declares AND, for a PLAIN operation, its
-/// declared parameter list and return. Those operation names are what let a
-/// candidate's call through `requires store: Store` be RESOLVED against the
-/// RUNNING declaration rather than only against its name; the parameter lists
-/// and the returns are what let it be TYPED against it (issue #346). `put` is
-/// an `emission`, so its return is withheld and no certified body may call it.
+/// each with the operations it declares AND each operation's declared parameter
+/// list. Those operation names are what let a candidate's call through
+/// `requires store: Store` be RESOLVED against the RUNNING declaration rather
+/// than only against its name; the parameter lists are what let it be TYPED
+/// against it (issue #346).
 /// `tests/test_inprocess_gate_rust.py` recomputes that wire from the py
 /// harness's own `base_manifest()`, so a py-side change to the running
 /// composition reds here instead of leaving the two tiers admitting into
@@ -175,16 +175,33 @@ component CacheLayer requires store: Store provides cache: Cache {
 /// rule resolves every annotation against the declared services. INTO the held
 /// composition the name resolves out of the manifest's `!services` block, and
 /// the fold then has nothing to refuse: `cache_layer` neither collides with
-/// `Kv`/`App` nor closes a cycle, so the VERDICT surface's honest answer is a
-/// no-objection. The last step - ISSUING an admission - is asked separately, on
-/// the admission surface (`issue_admission_into`), and as of docs/design/457 T6
-/// it says yes: the provide-method body is typed against the running `Store`'s
-/// declaration, which the manifest's service block now spells in full.
+/// `Kv`/`App` nor closes a cycle, so the honest answer is a no-objection.
+///
+/// The last step - ISSUING an admission - is asked separately, on the admission
+/// surface (`issue_admission_into`), and as of docs/design/457 T6 it says yes:
+/// the provide-method body is typed against the running `Store`'s declaration,
+/// which the manifest's service block now spells in full.
 const CACHE_LAYER: &str = r#"
 service Cache { fn lookup(key: Str) -> Str }
 component CacheLayer requires store: Store provides cache: Cache {
   provide cache { fn lookup(key) = store.get(key) }
 }
+"#;
+
+/// A candidate the ADMISSION surface really does admit INTO the held
+/// composition: interface declarations only, over the closed scalar vocabulary,
+/// naming no service the running composition already declares.
+///
+/// The interface-only control beside `cache_layer`: on THIS wire, through THIS
+/// call, the gate issues a green whose bytes equal `revl.gate.admit_into`'s for
+/// a candidate with no component at all, so the admission surface is measured
+/// on both shapes it covers.
+const FRESH_INTERFACE: &str = r#"
+service Telemetry {
+  fn record(name: Str, value: Int) -> Unit
+  fn flush() -> Bool
+}
+type Millis = Int
 "#;
 
 /// `bench/inprocess_gate_harness.py::_CALLS_MISSING_METHOD`, the py harness's
@@ -339,6 +356,13 @@ fn batch() -> Vec<Candidate> {
             into: Some(HELD_MANIFEST),
         },
         Candidate {
+            name: "fresh_interface",
+            source: FRESH_INTERFACE,
+            note: "interface declarations only, naming no running service; py ADMITS it into the running manifest and so does this gate's ADMISSION surface",
+            shared_with_py: false,
+            into: Some(HELD_MANIFEST),
+        },
+        Candidate {
             name: "incomplete_provide",
             source: INCOMPLETE_PROVIDE,
             note: "provides a service but omits a declared method; py refuses",
@@ -430,16 +454,18 @@ impl Arm {
     }
 }
 
-/// One screened ADMISSION arm. The verdict surface and the admission surface
-/// answer different questions and are reported separately on purpose: "is there
-/// something here I can refuse" is `Arm`, and "may this run" is this. A host
-/// that only wants a local refusal never reads this field.
+/// The ADMISSION surface's answer to the same question, recorded beside the
+/// verdict rather than merged into it (issue #346; docs/design/457 T6).
+///
+/// `Verdict` answers "is there something here I can refuse" and has no admitting
+/// arm by design; `Admission` answers "may this run" and has exactly one. They
+/// are different questions with different soundness stories, so the report
+/// carries both and never lets one stand in for the other. `admitted` is the
+/// only field a host may read as a green, and `basis` is the certificate's
+/// why-trace - evidence for a log, not part of the contract.
 struct AdmissionArm {
-    /// `"admitted"` for an ISSUED admission, and otherwise the withheld
-    /// verdict's own arm name.
     kind: &'static str,
-    /// The certificate's why-trace, `None` when nothing was issued. Off the
-    /// wire by contract: it is evidence for a log, not part of the answer.
+    admitted: bool,
     basis: Option<String>,
     json: String,
 }
@@ -448,6 +474,7 @@ impl AdmissionArm {
     fn of(admission: &Admission) -> AdmissionArm {
         AdmissionArm {
             kind: admission.kind(),
+            admitted: admission.is_admitted(),
             basis: admission.basis().map(|b| b.to_string()),
             json: admission.to_json(),
         }
@@ -463,15 +490,12 @@ struct Record {
     code: Option<String>,
     message: Option<String>,
     json: String,
-    /// The rows this candidate was admitted into, and the manifest arm's
-    /// verdict - `None` for a standalone-only candidate.
-    into: Option<(&'static str, Arm)>,
-    /// The ADMISSION question, standalone (`issue_admission`) and - for a
-    /// manifest-arm candidate - against the running composition
-    /// (`issue_admission_into`). Issue #346, docs/design/457 T6: the verdict
-    /// surface still issues no admission, and this is where one can be issued.
+    /// The standalone ADMISSION question for the same bytes.
     admission: AdmissionArm,
-    admission_into: Option<AdmissionArm>,
+    /// The rows this candidate was admitted into, the manifest arm's verdict and
+    /// the manifest arm's ADMISSION answer - `None` for a standalone-only
+    /// candidate.
+    into: Option<(&'static str, Arm, AdmissionArm)>,
 }
 
 fn screen_batch(batch: &[Candidate]) -> Vec<Record> {
@@ -488,12 +512,13 @@ fn screen_batch(batch: &[Candidate]) -> Vec<Record> {
                 code: verdict.code().map(|c| c.to_string()),
                 message: verdict.message().map(|m| m.to_string()),
                 json: verdict.to_json(),
-                into: c
-                    .into
-                    .map(|manifest| (manifest, Arm::of(&admit_into(c.source, manifest)))),
                 admission: AdmissionArm::of(&issue_admission(c.source)),
-                admission_into: c.into.map(|manifest| {
-                    AdmissionArm::of(&issue_admission_into(c.source, manifest))
+                into: c.into.map(|manifest| {
+                    (
+                        manifest,
+                        Arm::of(&admit_into(c.source, manifest)),
+                        AdmissionArm::of(&issue_admission_into(c.source, manifest)),
+                    )
                 }),
             }
         })
@@ -520,7 +545,7 @@ fn admission_offenders(records: &[Record]) -> Vec<String> {
         .map(|r| format!("{}: {}", r.name, r.json))
         .collect();
     for r in records {
-        if let Some((manifest, arm)) = &r.into {
+        if let Some((manifest, arm, _)) = &r.into {
             if !arm.json.contains("\"admitted\":false")
                 || !matches!(arm.kind, "refused" | "no_objection" | "outside_frontier")
             {
@@ -528,23 +553,63 @@ fn admission_offenders(records: &[Record]) -> Vec<String> {
             }
         }
     }
-    // The ADMISSION surface is a different type and a different question, so it
-    // is held to a different clause: an arm may say yes, and when it does the
-    // wire must say so too. What may not happen is the two disagreeing - a
-    // `"admitted":true` under a withheld arm, or an `Admitted` arm whose wire
-    // still reads false - because a host branches on one of the two.
-    for r in records {
-        for (label, arm) in [("admission", Some(&r.admission)),
-                             ("admission_into", r.admission_into.as_ref())] {
-            let Some(arm) = arm else { continue };
-            let yes = arm.kind == "admitted";
-            if yes != arm.json.contains("\"admitted\":true")
-                || (!yes && !matches!(arm.kind, "refused" | "no_objection" | "outside_frontier"))
-                || yes != arm.basis.is_some()
-            {
-                bad.push(format!("{} {}: {}", r.name, label, arm.json));
+    bad
+}
+
+/// The ADMISSION surface's own clauses, held over the batch (issue #346).
+///
+/// Three, and the third is what keeps the other two from being satisfied by a
+/// gate that simply never admits:
+///
+/// 1. an ISSUED admission writes `"admitted":true` on the wire and carries a
+///    non-empty basis, so a host can tell a green from a withholding without
+///    re-deriving anything;
+/// 2. a WITHHELD answer writes `"admitted":false` and carries no basis, and its
+///    arm is one of the verdict surface's three names, so switching a consumer
+///    from `admit` to `issue_admission` changes nothing it already handled;
+/// 3. at least one candidate is admitted INTO the held manifest. Without that
+///    clause a crate whose `certify_into` returned `None` unconditionally would
+///    satisfy clauses 1 and 2 vacuously, and the report would price the manifest
+///    admission gap as total when it is not.
+fn issued_admission_offenders(records: &[Record]) -> Vec<String> {
+    let mut bad = Vec::new();
+    let check = |label: String, arm: &AdmissionArm, bad: &mut Vec<String>| {
+        if arm.admitted {
+            if !arm.json.contains("\"admitted\":true") {
+                bad.push(format!("{}: an issued admission must say so on the wire: {}",
+                                 label, arm.json));
+            }
+            if arm.basis.as_deref().unwrap_or("").is_empty() {
+                bad.push(format!("{}: an issued admission must carry a basis", label));
+            }
+        } else {
+            if !arm.json.contains("\"admitted\":false") {
+                bad.push(format!("{}: a withheld answer may not read as an admission: {}",
+                                 label, arm.json));
+            }
+            if arm.basis.is_some() {
+                bad.push(format!("{}: a withheld answer must carry no basis", label));
+            }
+            if !matches!(arm.kind, "refused" | "no_objection" | "outside_frontier") {
+                bad.push(format!("{}: unknown withheld arm `{}`", label, arm.kind));
             }
         }
+    };
+    for r in records {
+        check(format!("{} (admission)", r.name), &r.admission, &mut bad);
+        if let Some((manifest, _, adm)) = &r.into {
+            check(format!("{} (admission into {})", r.name, manifest), adm, &mut bad);
+        }
+    }
+    if !records
+        .iter()
+        .any(|r| r.into.as_ref().is_some_and(|(_, _, adm)| adm.admitted))
+    {
+        bad.push(String::from(
+            "no candidate was ADMITTED into the held manifest, so the manifest \
+             admission arm is not exercised at all and a surface that admitted \
+             nothing would report the same thing",
+        ));
     }
     bad
 }
@@ -573,7 +638,7 @@ fn shape_offenders(records: &[Record]) -> Vec<String> {
     };
     for r in records {
         check(r.name.to_string(), r.kind, &r.code, &r.message, &mut bad);
-        if let Some((manifest, arm)) = &r.into {
+        if let Some((manifest, arm, _)) = &r.into {
             check(format!("{} (into {})", r.name, manifest), arm.kind, &arm.code,
                   &arm.message, &mut bad);
         }
@@ -881,19 +946,10 @@ fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: 
     let version = gate_version();
     let admission_json = |arm: &AdmissionArm| {
         format!(
-            "{{\"arm\":{},\"admitted\":{},\"basis\":{},\"wire\":{}}}",
+            "{{\"verdict\":{},\"admitted\":{},\"basis\":{},\"wire\":{}}}",
             json_string(arm.kind),
-            arm.kind == "admitted",
+            arm.admitted,
             arm.basis.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
-            json_string(&arm.json),
-        )
-    };
-    let arm_json = |arm: &Arm| {
-        format!(
-            "{{\"verdict\":{},\"code\":{},\"message\":{},\"wire\":{}}}",
-            json_string(arm.kind),
-            arm.code.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
-            arm.message.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
             json_string(&arm.json),
         )
     };
@@ -901,7 +957,7 @@ fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: 
         .iter()
         .map(|r| {
             format!(
-                "{{\"name\":{},\"note\":{},\"shared_with_py\":{},\"source\":{},\"verdict\":{},\"code\":{},\"message\":{},\"wire\":{},\"manifest\":{},\"into\":{},\"admission\":{},\"admission_into\":{}}}",
+                "{{\"name\":{},\"note\":{},\"shared_with_py\":{},\"source\":{},\"verdict\":{},\"code\":{},\"message\":{},\"wire\":{},\"admission\":{},\"manifest\":{},\"into\":{}}}",
                 json_string(r.name),
                 json_string(r.note),
                 r.shared_with_py,
@@ -910,18 +966,21 @@ fn report_json(records: &[Record], cost: &Cost, order_drift: &[String], closed: 
                 r.code.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
                 r.message.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
                 json_string(&r.json),
-                r.into
-                    .as_ref()
-                    .map(|(manifest, _)| json_string(manifest))
-                    .unwrap_or_else(|| "null".into()),
-                r.into
-                    .as_ref()
-                    .map(|(_, arm)| arm_json(arm))
-                    .unwrap_or_else(|| "null".into()),
                 admission_json(&r.admission),
-                r.admission_into
+                r.into
                     .as_ref()
-                    .map(admission_json)
+                    .map(|(manifest, _, _)| json_string(manifest))
+                    .unwrap_or_else(|| "null".into()),
+                r.into
+                    .as_ref()
+                    .map(|(_, arm, adm)| format!(
+                        "{{\"verdict\":{},\"code\":{},\"message\":{},\"wire\":{},\"admission\":{}}}",
+                        json_string(arm.kind),
+                        arm.code.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+                        arm.message.as_deref().map(json_string).unwrap_or_else(|| "null".into()),
+                        json_string(&arm.json),
+                        admission_json(adm),
+                    ))
                     .unwrap_or_else(|| "null".into()),
             )
         })
@@ -1003,7 +1062,23 @@ fn verdict_cell(record: &Record) -> String {
 fn into_cell(record: &Record) -> String {
     match &record.into {
         None => "not asked".to_string(),
-        Some((_, arm)) => arm_cell(arm.kind, arm.code.as_deref()),
+        Some((_, arm, _)) => arm_cell(arm.kind, arm.code.as_deref()),
+    }
+}
+
+/// The ADMISSION surface's cell: what `issue_admission` said about the bytes,
+/// and what `issue_admission_into` said where the candidate is also proposed
+/// against the running composition. Never abbreviated to a tick: an admission
+/// is the one answer a host may act on as a green, so it is spelled out.
+fn admission_cell(record: &Record) -> String {
+    let standalone = if record.admission.admitted { "ADMITTED" } else { "withheld" };
+    match &record.into {
+        None => standalone.to_string(),
+        Some((_, _, adm)) => format!(
+            "{} / {}",
+            standalone,
+            if adm.admitted { "ADMITTED into" } else { "withheld into" }
+        ),
     }
 }
 
@@ -1013,10 +1088,11 @@ fn render_markdown(records: &[Record], cost: &Cost, order_drift: &[String], clos
         .iter()
         .map(|r| {
             format!(
-                "| `{}` | {} | {} | {} | {} |\n",
+                "| `{}` | {} | {} | {} | {} | {} |\n",
                 r.name,
                 verdict_cell(r),
                 into_cell(r),
+                admission_cell(r),
                 if r.shared_with_py { "yes" } else { "no" },
                 r.note
             )
@@ -1073,22 +1149,45 @@ bench/inprocess_gate_rust/Cargo.toml -- --write`).
 Gate surface: `api={api}`, `language={language}`, `frontier={frontier}`.
 Layer decided: {layer}.
 
-## This gate issues no admissions - read this before wiring it in
+## The VERDICT surface issues no admissions - read this before wiring it in
 
 The py harness (`bench/results/inprocess-gate.md`) proves an IDENTITY:
 `revl.gate.admit` IS the reference admission path, so the in-process verdict IS
 the reference verdict. **This harness cannot and does not claim that.**
 `revl-gate` is the self-host front end compiled to rust; it decides the
-composition/guarantee layer and runs NO type layer, so it has no admission arm
-at all. Its three verdicts are `refused`, `no_objection` and `outside_frontier`,
-and the wire reports `"admitted": false` on every one of them.
+composition/guarantee layer and runs NO type layer, so its VERDICT surface has
+no admission arm at all. Its three verdicts are `refused`, `no_objection` and
+`outside_frontier`, and the wire reports `"admitted": false` on every one of
+them.
 
-What the rust embed buys is the other direction: a local, Python-free REFUSAL
-that agrees with the reference compiler on the covered corpus. A refusal is
-worth acting on. A no-objection is NOT an admission - before running anything,
-get a reference verdict (`revl compile`, or `revl.gate.admit` on py).
+What the rust embed buys on that surface is the other direction: a local,
+Python-free REFUSAL that agrees with the reference compiler on the covered
+corpus. A refusal is worth acting on. A no-objection is NOT an admission -
+before running anything, get a reference verdict (`revl compile`, or
+`revl.gate.admit` on py).
 
-## The manifest arm (issue #346): half of it closed here
+## The ADMISSION surface, and how small it is
+
+`revl_gate::issue_admission` / `issue_admission_into` are a SEPARATE type for a
+separate question, with exactly one admitting arm, and the batch is screened on
+them too (the `admission` column below). A green from them is the reference's
+own answer: `tests/test_inprocess_gate_rust.py::test_every_rust_admission_is_a_
+py_admission` holds every admission this harness records to
+`revl.gate.admit`/`admit_into` on the identical bytes, wire included, with zero
+tolerance.
+
+The arm is confined to `ADMITTED_LAYER` - interface declarations, and since
+docs/design/457 T6 components whose provide-method bodies are parameter reads
+and calls on a required service, over a closed scalar vocabulary - the region
+where every term is one this gate types itself. In this batch
+`fresh_interface` is admitted both standalone and INTO the held composition,
+and `cache_layer` INTO it (its standalone text names a `Store` it never
+declares). Everything outside that grammar is WITHHELD, including
+`standalone_twin`, which the py gate admits: its inlined `Store` declares an
+`emission`. That asymmetry is the surface being conservative, and it is the
+direction this crate is allowed to err in.
+
+## The manifest arm (issue #346)
 
 `revl_gate::admit_into(source, manifest)` is real as of issue #346: it folds
 G2/G3 over the UNION of the running composition's rows and the candidate, so a
@@ -1123,21 +1222,24 @@ What that closes and what it does not, against `held_manifest` =
   `"admitted": true` on a wire byte-identical to py's. It is a SECOND question
   on a separate type, so `revl_gate::Verdict` still has no `Admitted` arm and
   its manifest arm still reports `"admitted": false` - a consumer that never
-  asks the admission question sees exactly what it saw before. What stays open
-  is the refusal surface's type layer: the compatibility relation on a
-  redeclaration, and every construct outside the admission surface's closed
+  asks the admission question sees exactly what it saw before.
+  `fresh_interface` is admitted the same way, the interface-only control. What
+  stays open is the refusal surface's type layer: the compatibility relation on
+  a redeclaration, and every construct outside the admission surface's closed
   grammar.
 
 ## The batch, screened in-process
 
-| candidate | standalone | into the held manifest | shared with the py harness | note |
-|---|---|---|---|---|
+| candidate | standalone | into the held manifest | admission | shared with the py harness | note |
+|---|---|---|---|---|---|
 {rows}
-{refused} refused, {no_objection} no-objection, {declined} declined. Every one of them
-serialises as `"admitted": false`; nothing in this batch produced anything a
-host could read as an admission, and every refusal it did issue is a refusal the
-py admission gate also issues, with the same guarantee tag
-(`tests/test_inprocess_gate_rust.py`).
+{refused} refused, {no_objection} no-objection, {declined} declined. Every one of those
+VERDICTS serialises as `"admitted": false`; nothing on that surface produced
+anything a host could read as an admission, and every refusal it did issue is a
+refusal the py admission gate also issues, with the same guarantee tag
+(`tests/test_inprocess_gate_rust.py`). The `admission` column is the other
+surface, and every green in it is a real reference admission, held to
+`revl.gate` wire and all.
 
 Verdicts are order-independent: screening the batch in a fixed order and in a
 shuffled order in the same process yields identical per-candidate verdicts on
@@ -1162,14 +1264,13 @@ not declare). The other four come back as no-objections:
 
 Every one of those four is in the TOLERATED direction: a no-objection is never
 an admission, so none of them is a false admit. Together they are the reason the
-crate's VERDICT surface has no `Admitted` arm, and the reason an embedder that
-reads a no-objection as a green ships an unsafe host. A green is a different
-call (`issue_admission`), answered only inside the admission surface. The one candidate this gate
+crate has no `Admitted` arm, and the reason an embedder that reads a
+no-objection as a green ships an unsafe host. The one candidate this gate
 declines outright (`frontier_oversized`) is the fail-closed path working: `py`
 ADMITS it, and rather than decide a construct it does not cover, the gate says
 so.
 
-### The `admit_into` gap, priced - and one leg of it closed
+### The `admit_into` gap, closed
 
 Before #346 the realistic agent shape - admit a candidate AGAINST the running
 composition - was not available on rust at all. It now is for the ambient half:
@@ -1375,8 +1476,10 @@ fn main() -> ExitCode {
     let cost = measure(iters, warmup);
 
     let admission = admission_offenders(&records);
+    let issued = issued_admission_offenders(&records);
     let shape = shape_offenders(&records);
     let ok = admission.is_empty()
+        && issued.is_empty()
         && shape.is_empty()
         && order_drift.is_empty()
         && closed.oversized_declined
@@ -1408,7 +1511,7 @@ fn main() -> ExitCode {
     for r in &records {
         match &r.into {
             None => println!("  [     -] {:20} not asked", r.name),
-            Some((_, arm)) => println!(
+            Some((_, arm, _)) => println!(
                 "  [{}] {:20} {}",
                 if arm.kind == "refused" { "refuse" } else { "     -" },
                 r.name,
@@ -1417,10 +1520,41 @@ fn main() -> ExitCode {
         }
     }
     println!(
-        "\nno arm reads as an admission: {}",
+        "\nthe ADMISSION surface (revl_gate::issue_admission[_into], issue #346):"
+    );
+    for r in &records {
+        let into = match &r.into {
+            None => String::from("not asked"),
+            Some((_, _, adm)) => if adm.admitted {
+                String::from("ADMITTED")
+            } else {
+                format!("withheld ({})", adm.kind)
+            },
+        };
+        println!(
+            "  {:20} standalone {:22} into manifest {}",
+            r.name,
+            if r.admission.admitted {
+                String::from("ADMITTED")
+            } else {
+                format!("withheld ({})", r.admission.kind)
+            },
+            into
+        );
+    }
+    println!(
+        "\nno VERDICT arm reads as an admission: {}",
         if admission.is_empty() { "holds" } else { "FAILED" }
     );
     for offender in &admission {
+        println!("  OFFENDER {}", offender);
+    }
+    println!(
+        "the ADMISSION surface's clauses (a green says so, a withholding does \
+not, and at least one green is issued into the held manifest): {}",
+        if issued.is_empty() { "holds" } else { "FAILED" }
+    );
+    for offender in &issued {
         println!("  OFFENDER {}", offender);
     }
     println!(
@@ -1473,7 +1607,8 @@ fn main() -> ExitCode {
     }
 
     println!(
-        "\n{}: no admission issued + wire shape + order-independence + fail-closed",
+        "\n{}: no VERDICT reads as an admission + the ADMISSION surface's clauses \
++ wire shape + order-independence + fail-closed",
         if ok { "PASS" } else { "FAIL" }
     );
     if ok {

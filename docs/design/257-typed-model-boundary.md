@@ -199,10 +199,21 @@ revl already maps a surface type to a JSON Schema fragment:
 tool's `inputSchema`/`outputSchema` (`schema.py:137,171`). It takes the type as
 a NAME STRING, which is exactly how a return type is carried in the IR
 (`returns: str | None`), so deriving the boundary schema is one call against the
-shape that is already there. There is no second mapping and this design forbids
-inventing one: a divergence between "the schema MCP shows" and "the schema the
+shape that is already there. This design does not fork a rendering for the
+boundary: a divergence between "the schema MCP shows" and "the schema the
 boundary validates" would be a latent bug factory. One derivation, two consumers
 (MCP projection and boundary validation), pinned by a shared test.
+
+**CORRECTION (issue #1272).** This paragraph used to say "there is no second
+mapping". That was wrong when it was written. `src/revl/export_openapi.py`
+carries a second, independent type-to-schema mapping for `revl export openapi`,
+and it renders several constructors differently on purpose (a `$ref` into a
+`components` block, a bare-`Opt` field dropped from `required`, a refusal where
+this one degrades). The scope of the rule above is the FRAGMENT mapping and its
+consumers, which are the MCP projection and the three gated boundaries in
+`lower.py`. The document mapping, why it is separate, and the differential test
+that now holds the two together are in
+`docs/design/1272-two-type-to-schema-mappings.md`.
 
 **Derive on the qualifier-stripped return type (HIGH-2).** The SECURE spelling of
 a validated model emission in the default taint profile is
@@ -425,6 +436,74 @@ The division of labor is the honest one: the provider's cooperation is a
 speed-up, the revl-side validation is the promise. A design that let the promise
 ride on the provider passing the schema would be no promise at all, because the
 provider is the untrusted party whose output is the thing under suspicion.
+
+### 4.1 Which tiers have this seam, and what the others do instead
+
+The seam described above is python's. `validate_response`, `validate_retry`,
+`register_grammars`, `revl_constrain` and `ResponseValidationError` are declared
+in `backends/python/runtime.py` and emitted by `backends/python/emit.py`, and
+appear in no file under `backends/{typescript,rust,wasm,go,java}`.
+
+Until issue #1373 those five tiers did not refuse a `validated` emission, they
+DROPPED it. One program compiled twice, differing only in the modifier, gave
+byte-identical output both ways on all five, with no marker anywhere:
+typescript 899/899, rust 4468/4468, wasm 2909/2909, go 5748/5748 and java
+6000/6000 characters on the service-operation carrier, and 616/616, 647/647,
+682/682, 503/503 and 5446/5446 on the extern carrier (measured at `ecd476877`;
+python, which lowers the operation carrier, gave 3148 against 1218). The author
+wrote a constraint, the tier emitted a program without it, and said nothing. A
+wrong lowering is caught by a byte oracle and a refusal is caught by its
+message; nothing catches a tier that emits less than it was given and stays
+quiet.
+
+**Refuse, not lower, on all five.** The typescript tier is the only one worth
+arguing over: its runtime already carries `_jsonSchemaError`, a faithful mirror
+of the python `_json_schema_error` over section 3's derived subset, written for
+item 130's event contracts, so it could check the shape today. It is still
+refused, because the shape check is one of five parts. A tier that lowered only
+the check would silently drop the declared-value construction of section 3.2
+(so the tagged wire shape leaks into the matched-over value), item 513's grammar
+claim, section 5.2's `retry` budget and item 121's provenance token: the same
+silent drop one layer down, in a boundary that now reads as validated. Rust,
+wasm, go and java have none of the five parts, so there is nothing to argue
+there.
+
+The gate is `revl.validated_boundary.refuse_validated_on_unvalidating_tier`,
+one scan and one wording shared by all five rather than five inventions, wired
+into each tier's existing `EmitError` channel through a thin
+`_refuse_validated_emissions` wrapper. That is the arrangement item 245's
+`deferred` tier gate already uses, for the same reason. It differs from that one
+in being keyed on the DECLARATION rather than the call site: `deferred`'s whole
+lowering is the enqueue at the call, while a `validated` crossing reaches the
+emitted module (as a service interface, or as an extern wrapper) whether or not
+this document also calls it. It raises under G4/`validated`, the tag `lower.py`
+already uses for this modifier.
+
+Two things are deliberately outside the gate.
+
+- **The python tier**, which owns the seam at the service-operation carrier and
+  keeps lowering it in full. It has its own narrower refusal for the OTHER
+  carrier (issue #1382, `_refuse_validated_externs`): an extern's host body IS
+  the provider, so even on python the seam has nowhere to fire. The two
+  diagnostics say different things because the tiers are in different positions,
+  but they share their three load-bearing clauses verbatim, and
+  `tests/test_validated_tier_refusal_1373.py` pins that agreement.
+- **`--target temporal`**, a rendering of the typescript emitter that returns
+  from `emit()` before the cordis refusals run. That target READS `validated` on
+  an extern: `_retry_class` pins the crossing to at-most-once so a completion is
+  never re-billed as an idempotent write, and its two renderings of one keyed
+  extern differ. It does drop the modifier on a service-method crossing, but a
+  blanket refusal there would delete a tested guarantee along with the drop.
+  What is left is narrower than this issue and needs its own decision.
+
+**The self-host needs no port.** `validated` is a named LEFT OUT of
+`selfhost/lower.rvl`'s gate slice: `ext_decl_verdict` and `ext_decl_name` both
+return early on the modifier, so the self-host lowerer raises no verdict for a
+validated declaration and there is no derivation to keep in tag-and-message
+agreement with the reference. The self-host emitters are byte-agreement oracles
+over a corpus, and no corpus document declares a validated crossing; adding one
+would not help, because a refused document produces no emitted bytes to compare.
+The refusal is pinned executably instead.
 
 ## 5. The typed-fault path: safe-to-retry, budget declared, no double-emit
 
@@ -871,8 +950,12 @@ Non-goals:
   this the right or safe tool".
 - No new declassifier and no taint change: the validated response is
   `Untrusted`, full stop.
-- No second type-to-schema mapping: the boundary runs `json_schema_for` or it is
-  a bug (section 3.1).
+- No second FRAGMENT mapping: the boundary runs `json_schema_for` or it is a bug
+  (section 3.1). Corrected scope (issue #1272): `revl export openapi` has always
+  had a mapping of its own, for a document rather than a validation fragment.
+  This non-goal never reached it and does not now; the two are held together by
+  the differential in `tests/test_schema_mapping_differential_1272.py`
+  (`docs/design/1272-two-type-to-schema-mappings.md`).
 - No automatic validation of every emission return: `validated` is opt-in so the
   IR / emit path stays byte-identical and the guarantee is a reviewable
   declaration. NOTE the scope (MEDIUM-2): "byte-identical" covers IR and emit, not
@@ -904,5 +987,11 @@ Open questions:
   rather than strict JSON Schema) needs a stricter `{"oneOf": [T, {"type":
   "null"}]}` form for a validating boundary. MCP tolerates `nullable`; a strict
   validator may not. Slice 1 will settle this against the chosen validator and,
-  if it must change, change it in the one mapping (which MCP then also gets),
-  never forking a second rendering.
+  if it must change, change it in the fragment mapping (which MCP then also
+  gets), never forking a second rendering for the boundary. Issue #1272 adds a
+  constraint to settling it: `export_openapi.py` already spells the same type
+  `{"oneOf": [T, {"type": "null"}]}`, so the two mappings currently answer this
+  question differently, and the differential names that divergence
+  (`OPT_NULLABLE_VS_ONEOF`). Settling it has to settle it on both sides or drop
+  the entry from the table in
+  `docs/design/1272-two-type-to-schema-mappings.md`.

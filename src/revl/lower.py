@@ -71,7 +71,14 @@ from .taint import (
     splice_declassifiers,
     strip_qualifiers,
 )
+from . import model_answer
+from . import model_council as _model_council
 from . import model_route as _model_route
+from .decode_grammar import (
+    GrammarDerivationError,
+    decode_grammar_for,
+    grammar_refusal_reason,
+)
 from .mcp.schema import (
     _parse_type as _schema_parse_type,
     expressibility_reason,
@@ -1576,6 +1583,15 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
                 "`Principal` is the reserved opaque authorization principal and "
                 "cannot be declared as a revl type",
                 hint=PRINCIPAL_PRODUCER_HINT, code="G4", category="route")
+        if decl.name in model_answer.PROVIDED:
+            # item 516 slice 3: `Answer[T]` / `Aggregate[T]` are PROVIDED, for
+            # the reason `Principal` is reserved just above. A program that
+            # declares its own `Aggregate[T]` can declare it without the
+            # constructor that carries the members' disagreement, and the
+            # exhaustiveness rule over that constructor would then be checking
+            # a type the program had already opted out of.
+            raise model_answer.reserved_name_error(filename, decl.line,
+                                                   decl.name)
         if decl.fields:
             fields: dict[str, str] = {}
             for field in decl.fields:
@@ -1599,7 +1615,40 @@ def _lower_type_decls(program: Program, filename: str) -> dict:
                 seen.add(case.name)
                 cases.append({"name": case.name, "payload": case.payload})
             types[decl.name] = {"params": decl.params, "kind": "variant", "cases": cases}
-    return types
+    # item 516 slice 3: the model council's answer type, seeded only into a
+    # program that NAMES it. `revl.model_answer` holds the table and the
+    # condition; see its docstring for why a program that names nothing gets
+    # nothing (every IR in the tree stays byte-identical).
+    return model_answer.seeded(types, _declared_type_strings(program))
+
+
+def _declared_type_strings(program: Program):
+    """Every type the program wrote down, as the author spelled it.
+
+    The same surface `_validate_declared_types` walks - module functions,
+    externs, service methods, record fields and case payloads - because a
+    value of a provided type can only enter a program through a declared
+    signature. A `let` annotation inside a body is NOT walked and does not
+    need to be: the value it annotates came from one of these.
+    """
+    for fn in program.fn_decls:
+        for p in fn.params:
+            yield p.type
+        yield fn.returns
+    for ext in program.externs:
+        for p in ext.params:
+            yield p.type
+        yield ext.returns
+    for svc in program.services:
+        for m in svc.methods.values():
+            for _, ptype in m.params:
+                yield ptype
+            yield m.returns
+    for decl in program.type_decls:
+        for field in decl.fields:
+            yield field.type
+        for case in decl.cases:
+            yield case.payload
 
 
 # item 130 Slice 5: the typed-event contract table, keyed like `FNS_KEY` /
@@ -2324,6 +2373,15 @@ def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> 
     user = _variant_case_payload(types, scrutinee_type, pattern)
     if user is not None:
         return user
+    # item 516 slice 3: an APPLIED provided type (`Aggregate[Str]`). The
+    # lookup above is keyed by the scrutinee's whole spelling and so finds
+    # nothing for any generic; for the council's answer that would leave every
+    # arm binding an unknown-typed value, and an unknown type unifies with
+    # whatever the arm must produce - which would make `Split(d) => d` compile
+    # in a function returning `T`. See `model_answer.arm_payload`.
+    provided = model_answer.arm_payload(scrutinee_type, pattern)
+    if provided is not None:
+        return provided
     head, args = parse_type(scrutinee_type)
     if head == "Opt" and pattern == "Some" and args:
         return args[0]
@@ -2337,6 +2395,24 @@ def _arm_payload_type(scrutinee_type: str | None, pattern: str, types: dict) -> 
 
 def _check_match_exhaustiveness(expr: ExprMatch, type_env: dict, types: dict, filename: str) -> None:
     type_name = _expr_static_type(expr.scrutinee, type_env, types)
+    # item 516 slice 3: the model council's answer, checked BEFORE the general
+    # rule below and separately from it. Two reasons, both of which the
+    # general rule cannot serve without changing what it admits for programs
+    # that have nothing to do with councils:
+    #
+    #   * the scrutinee is `Aggregate[Str]`, and the general rule looks the
+    #     scrutinee up in `types` by its whole spelling, so it finds nothing
+    #     for any APPLIED generic. `Aggregate[T]` is never written without an
+    #     argument, so under the general rule alone the answer type would be
+    #     the one ADT in the language with no exhaustiveness at all;
+    #   * a `_` arm satisfies the general rule and must not satisfy this one.
+    #     `Split` is the case the construct exists to make un-ignorable, and a
+    #     catch-all that swallows it is `on_tie allow` moved from the
+    #     declaration, where `revl.model_council` refuses it by name, to the
+    #     call site, where nothing was looking.
+    model_answer.check_match(
+        type_name, [pattern for pattern, _, _ in expr.arms], filename,
+        expr.line)
     spec = types.get(type_name or "")
     if spec is None or spec.get("kind") != "variant":
         return
@@ -3946,12 +4022,24 @@ def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: s
         _scan(fns[name].body, name)
 
 
-def _validated_response_schema(name: str, returns: str | None, is_emission: bool,
-                               types: dict, filename: str, line: int,
-                               kind_word: str) -> dict:
-    """Item 257 (§2, §3): check a `validated` emission and derive its boundary
-    schema, refusing at COMPILE TIME when the response type is not fully
-    expressible.
+def _validated_response_ir(name: str, returns: str | None, is_emission: bool,
+                           types: dict, filename: str, line: int,
+                           kind_word: str) -> dict:
+    """Items 257 and 513: check a `validated` emission and derive the two
+    response-shape IR keys, refusing at COMPILE TIME when the response type has
+    no exact schema (257).
+
+    Item 513's grammar walk runs here too, but as an internal drift assertion
+    and not as a second refusal: since issue #1263 put 257's null-ambiguity
+    refusal upstream of it, there is no type it refuses that 257 accepts (issue
+    #1348, measured over 1872 types). The comment at the walk says what a firing
+    would mean.
+
+    Returns `{"response_schema": ..., "response_grammar": ...}`. The schema is
+    what the boundary validates a completion against; the grammar is what a
+    provider constrains the decode with. Both are compile-time constants derived
+    from the same declared type, and the grammar is rendered FROM the schema so
+    the two cannot drift.
 
     Two surface rules (the same place the sibling modifier-validity rules live):
     `validated` is EMISSION-ONLY (a `pure`/`acquire`/`witnessed` classification
@@ -3994,6 +4082,31 @@ def _validated_response_schema(name: str, returns: str | None, is_emission: bool
                  "than ship a vacuous guarantee "
                  "(docs/design/257-typed-model-boundary.md, §3.3)",
             code="G4", category="validated")
+    # Item 513 (§4.2): the grammar walk, kept as an INTERNAL drift assertion
+    # rather than an author-facing refusal, because on a type the gate above
+    # accepted it cannot fire. `decode_grammar._admits_null` and
+    # `mcp.schema.admits_json_null` are the same predicate over the same surface
+    # positions (`Opt` inner, `List` element, `Map` value, record field, variant
+    # payload), so every shape this walk refuses `fully_expressible` refused one
+    # line up. Measured over 1872 constructed types (issue #1348): 0 reach here,
+    # and 1288 are refused by 257 alone, so the containment runs 257-covers-513
+    # and this walk guards no surface of its own.
+    #
+    # It still runs on every validated emission rather than only in a unit
+    # sweep, which is the point of keeping it: if 257's coverage ever narrows,
+    # the grammar rule stops being enforced by anything, and this says so on
+    # real source at the moment it happens. Same idiom as the two assertions
+    # below it, and worded the same way, so nothing here reads as a rule an
+    # author can break.
+    grammar_reason = grammar_refusal_reason(stripped, types)
+    if grammar_reason is not None:
+        raise RevlError(
+            filename, line,
+            f"internal: `validated` emission `{name}` has response type "
+            f"`{stripped}`, which {grammar_reason}, and still passed the "
+            "expressibility gate (gate drift: item 257 no longer refuses a "
+            "shape item 513 §4.2 refuses, so the grammar rule is load-bearing "
+            "again and has to go back to being an author-facing refusal)")
     schema = json_schema_for(stripped, types, validated=True)
     # Defense in depth (§3.3): the `fully_expressible` predicate already accepted
     # this type, so the renderer must leave no unconstrained `x-revlType` stub. A
@@ -4005,7 +4118,19 @@ def _validated_response_schema(name: str, returns: str | None, is_emission: bool
             f"internal: `validated` emission `{name}` derived an unconstrained "
             f"schema for `{stripped}` despite passing the expressibility gate "
             f"(renderer/predicate drift, item 257 §3.3)")
-    return schema
+    # Item 513: the decoding grammar, rendered from the schema object above
+    # rather than from a second walk over the surface type, so grammar and
+    # validator cannot drift. A node the renderer does not recognise raises
+    # rather than rendering a permissive rule (item 513, §3).
+    try:
+        grammar = decode_grammar_for(schema)
+    except GrammarDerivationError as exc:
+        raise RevlError(
+            filename, line,
+            f"internal: `validated` emission `{name}` could not derive a decoding "
+            f"grammar for `{stripped}` despite passing both gates ({exc}; "
+            f"renderer/predicate drift, item 513 §4)") from exc
+    return {"response_schema": schema, "response_grammar": grammar}
 
 
 def _validated_retry_ir(name: str, validated: bool, retry: int, filename: str,
@@ -4036,7 +4161,8 @@ def _validated_retry_ir(name: str, validated: bool, retry: int, filename: str,
 
 
 def _method_validated_ir(m, types: dict, filename: str) -> dict:
-    """Item 257: the additive `validated` + `response_schema` (+ Slice 2 `retry`)
+    """Items 257 and 513: the additive `validated` + `response_schema` +
+    `response_grammar` (+ 257 Slice 2 `retry`)
     IR keys for a service-method emission, or `{}` (byte-identical) when the method
     is neither `validated` nor carries a `retry` clause. Refuses an unexpressible
     return type, and a `retry` without `validated`, at compile time. `m.returns` is
@@ -4046,9 +4172,9 @@ def _method_validated_ir(m, types: dict, filename: str) -> dict:
         filename, m.line, "operation")
     if not getattr(m, "validated", False):
         return {}
-    schema = _validated_response_schema(
+    response_ir = _validated_response_ir(
         m.name, m.returns, m.emission, types, filename, m.line, "operation")
-    return {"validated": True, "response_schema": schema, **retry_ir}
+    return {"validated": True, **response_ir, **retry_ir}
 
 
 # ------------------------------------------------------------ item 457: routes
@@ -4504,9 +4630,9 @@ def _lower_externs(program: Program, filename: str, types: dict,
         # and derive the boundary schema on the qualifier-stripped return type
         # (already stripped in place by extract_and_normalize; re-stripped for
         # order-robustness). Refuses an unexpressible return type at compile time.
-        validated_schema: dict | None = None
+        validated_response_ir: dict = {}
         if decl.validated:
-            validated_schema = _validated_response_schema(
+            validated_response_ir = _validated_response_ir(
                 decl.name, decl.returns, decl.classification == "emission",
                 types, filename, decl.line, "extern")
         # item 257 (Slice 2): the `retry N` budget, legal only alongside
@@ -4879,9 +5005,11 @@ def _lower_externs(program: Program, filename: str, types: dict,
                if decl.config else {}),
             # item 257: the `validated` flag and the derived response schema, a
             # compile-time-constant dict the emit-side validate seam checks the
-            # completion against. ADDITIVE: absent unless the author wrote
-            # `validated`, so every existing extern's IR is byte-identical.
-            **({"validated": True, "response_schema": validated_schema}
+            # completion against, plus item 513's derived decoding grammar, the
+            # compile-time-constant a provider constrains the decode with.
+            # ADDITIVE: absent unless the author wrote `validated`, so every
+            # existing extern's IR is byte-identical.
+            **({"validated": True, **validated_response_ir}
                if decl.validated else {}),
             # item 257 (Slice 2): the retry budget (§5.2), a static crossing
             # attribute. Absent unless `retry N` was written, so byte-identical.
@@ -7502,6 +7630,408 @@ def _refuse_callable_shadowing(program: Program, filename: str) -> None:
         check(decl, declared, getattr(decl, "source", "") or filename)
 
 
+def _check_ui_target_binding(program: Program, types: dict, filename: str) -> None:
+    """The computer-use target record and the signatures that carry it
+    (roadmap item 521, docs/design/565-ui-target-binding.md, Slice 4).
+
+    Slice 1 closed the family's NAMESPACE and slice 2 derived its taint
+    classes, so by here a declared UI token is one of five spellings and an
+    observed value is `Untrusted` by derivation. Neither of those says
+    anything about the target's SHAPE, and the shape is what a later phase
+    reads: `ui.find` returning `Str` names its target by NAME, and a name is
+    re-resolved at every use, so nothing binds an actuation to the
+    observation that justified it, nothing expires, and nothing survives a
+    phase boundary (item 522's check-to-use race, and the reason its
+    postcondition verdict is positional).
+
+    Three refusals, all `G8`/`boundary` like slice 1's, none registering a new
+    guarantee code:
+
+    1. a program declaring a target-carrying verb and no `UiTarget` record;
+    2. a `UiTarget` missing a registry field, or declaring one at the wrong
+       type - `expiry` is design 532 §10's named oracle for this slice and is
+       refused by the same rule as the other nine, not by a special case;
+    3. a producer verb whose return is not the record, or an actuation verb
+       with no parameter that is.
+
+    WHERE THIS RUNS AND WHY. After `_lower_type_decls` (the record table is
+    what the obligation is checked against) and after `extract_and_normalize`
+    stripped the item-249 qualifiers in place, which is why the comparison is
+    against `UiTarget` and not `Untrusted[UiTarget]`: the `Untrusted` half is
+    slice 2's derivation and is profile-gated on `taint_strict`, while this
+    half is not gated at all. An author may write either spelling.
+
+    SCOPE. Externs only. A service method's `emission[ui.find]` scope funnels
+    through the same parser hook slice 1 uses, and deliberately does not reach
+    here: the obligation belongs to the declaration that actually crosses, and
+    a service method declares an interface (item 522's `teardown_refusal`
+    makes the same cut for the same reason).
+
+    Inert for a program that declares no computer-use verb, which is every
+    program in the tree but the item's own fixtures.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    carriers = []
+    for ext in program.externs:
+        for cap in ext.capabilities or ():
+            # The VERB, so a slice-3 ladder rung carries its verb's obligation:
+            # `emission[ui.click.pixel]` would otherwise be the spelling that
+            # takes a bare string target again, which is a fail-open path
+            # opened by adding a rung in a different file.
+            verb = ui_family.verb_of(cap) or ui_family._bare(cap)
+            if verb in ui_family.TARGET_PRODUCERS or \
+                    verb in ui_family.TARGET_CONSUMERS:
+                carriers.append((ext, cap))
+                break
+    if not carriers:
+        return
+
+    spec = types.get(ui_family.TARGET_TYPE)
+    declared = spec.get("fields") if isinstance(spec, dict) \
+        and spec.get("kind") == "record" else None
+    record = ui_family.target_record_refusal(declared)
+    if record is not None:
+        # The line is the target record's own when there is one to point at,
+        # and the declaration that CREATED the obligation when there is not.
+        line = carriers[0][0].line
+        for decl in program.type_decls:
+            if decl.name == ui_family.TARGET_TYPE:
+                line = decl.line
+                break
+        message, hint = record
+        raise RevlError(filename, line, message, hint,
+                        code="G8", category="boundary")
+
+    for ext, token in carriers:
+        signature = ui_family.target_signature_refusal(
+            token, ext.classification, ext.name, ext.returns,
+            [p.type for p in ext.params])
+        if signature is not None:
+            message, hint = signature
+            raise RevlError(filename, ext.line, message, hint,
+                            code="G8", category="boundary")
+
+
+def _ui_nodes(root, kinds: tuple) -> list:
+    """Every node of one of `kinds` reachable from `root`, by reflection over
+    the dataclass graph rather than by a list of statement kinds.
+
+    The list-of-kinds shape is what issue #1327 measured the cost of: a walk
+    that names three statement kinds and reads the top node of each one's
+    expression missed SEVEN spellings of the same crossing, and every miss was
+    in the fail-open direction. A reflective walk has no position to miss, so
+    a new statement or expression node cannot quietly open a hole in the
+    caller below.
+
+    Order is unspecified: the caller asks a question about the SET of nodes in
+    a program (is a target built anywhere?), never about the order they run
+    in. `id()` marks what has been seen, so a shared or cyclic node graph
+    terminates.
+    """
+    import dataclasses  # noqa: PLC0415 - stdlib, kept beside its one user
+
+    found: list = []
+    seen: set[int] = set()
+    stack = [root]
+    while stack:
+        node = stack.pop()
+        if node is None or isinstance(node, (str, bytes, int, float, bool)):
+            continue
+        if id(node) in seen:
+            continue
+        seen.add(id(node))
+        if isinstance(node, kinds):
+            found.append(node)
+        if isinstance(node, (list, tuple, set, frozenset)):
+            stack.extend(node)
+        elif isinstance(node, dict):
+            stack.extend(node.values())
+        elif dataclasses.is_dataclass(node):
+            stack.extend(getattr(node, f.name, None)
+                         for f in dataclasses.fields(node))
+    return found
+
+
+def _ui_target_producers(program: Program) -> set:
+    """The names of this program's externs that RESOLVE a target."""
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    names = set()
+    for ext in program.externs:
+        for cap in ext.capabilities or ():
+            verb = ui_family.verb_of(cap) or ui_family._bare(cap)
+            if verb in ui_family.TARGET_PRODUCERS:
+                names.add(ext.name)
+                break
+    return names
+
+
+def _ui_target_names(body, params, producers: set, returns: dict) -> set:
+    """The names bound to a TARGET in one declaration's scope.
+
+    Only used to decide whether a record UPDATE's base is a target, so it
+    under-approximates on purpose: a name this cannot trace is not reported as
+    a target, and the update over it is admitted. That direction is what keeps
+    the update refusal off records that merely share a field name with the
+    registry (`name`, `action` and `window` are ordinary field names), and it
+    is safe because the CONSTRUCTED and MINTED refusals below hold the
+    invariant on their own - they refuse a target entering the program at all,
+    which needs no dataflow.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    strip = ui_family.strip_qualifiers_shallow
+    names = {n for n, t in params if strip(t) == ui_family.TARGET_TYPE}
+
+    def is_target(expr) -> bool:
+        if isinstance(expr, EmitExpr):
+            return is_target(expr.expr)
+        if isinstance(expr, ExprRecordUpdate):
+            return is_target(expr.base)
+        if isinstance(expr, ExprVar):
+            return expr.name in names
+        if isinstance(expr, ExprCall):
+            callee = expr.callee
+            if isinstance(callee, ExprVar):
+                return callee.name in producers
+            if isinstance(callee, ExprField):
+                return strip(returns.get(callee.name)) == \
+                    ui_family.TARGET_TYPE
+        return False
+
+    bindings = [(s.name, s.value, getattr(s, "type", None))
+                for s in _ui_nodes(body, (LetStmt, AssignStmt))]
+    # A fixpoint rather than one pass: a name may be bound from a later name
+    # in a loop body, and one pass over an unspecified order would answer
+    # differently depending on which node the reflection reached first.
+    changed = True
+    while changed:
+        changed = False
+        for name, value, declared in bindings:
+            if name in names:
+                continue
+            if strip(declared) == ui_family.TARGET_TYPE or is_target(value):
+                names.add(name)
+                changed = True
+    return names
+
+
+def _check_ui_target_provenance(program: Program, types: dict,
+                                filename: str) -> None:
+    """Where an actuated target CAME FROM (roadmap item 521, issue #1371,
+    docs/design/565-ui-target-binding.md §7).
+
+    Slice 4 checks the signature. §7 recorded what that leaves open - "revl
+    checks the signature, not the dataflow between two crossings" - and named
+    slice 2's taint discipline as the bound. Measured on `ecd47687`, that
+    bound runs the wrong way: `ui.find` is a source and `ui.click` is an
+    all-arguments sink, so under `taint_strict` the program that resolves a
+    target and clicks it is REFUSED, while the program that clicks a
+    `UiTarget` record literal it wrote itself is ADMITTED, under every
+    profile. A forged target carries no origin, so there is nothing on it to
+    refuse.
+
+    THE INVARIANT. In an admitted program every `UiTarget` originates in a
+    target-producing crossing. Three refusals hold it, and they are placed on
+    the CONSTRUCTION rather than on the flow to a use, so completeness is not
+    a property of a walk:
+
+    1. CONSTRUCTED - a record literal carrying the declared target's fields,
+       anywhere in the program. Found by reflection over the whole AST, so a
+       literal in a helper `fn`, in a loop body, or in a different component
+       that hands the target over a service is the same refusal.
+    2. MINTED - an extern returning the record without declaring the
+       resolution. A second host boundary handing back a target is the way
+       around rule 1 rather than a use of it.
+    3. REBOUND - a functional update rewriting a REGISTRY-OWNED field of a
+       target. The ten fields are one binding: an update keeps the resolved
+       control's evidence hash and renames what it points at. A field the
+       registry does not name is the author's own (§3's floor) and may still
+       be updated.
+
+    SCOPE, and the two cuts.
+
+    ONLY WHERE SOMETHING ACTUATES. Gated on a declared target CONSUMER, not on
+    the family. A program that resolves targets and never acts on one has no
+    authority at stake, and §3's floor argument says not to refuse where
+    there is none.
+
+    WHAT IT DOES NOT CLAIM, restated from issue #1371 so a reader does not
+    take more from it than it proves: not that the target is the one resolved
+    for THIS step (a program that resolves two and acts on the second acted on
+    a target it resolved), and not that the resolution is still fresh. A
+    resolved HANDLE that a phase boundary carries needs the substrate that
+    resolves a target (item 539) and is not promised here.
+
+    Inert for every program that declares no computer-use actuation.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    strip = ui_family.strip_qualifiers_shallow
+    actuates = False
+    for ext in program.externs:
+        for cap in ext.capabilities or ():
+            verb = ui_family.verb_of(cap) or ui_family._bare(cap)
+            if verb in ui_family.TARGET_CONSUMERS:
+                actuates = True
+                break
+        if actuates:
+            break
+    if not actuates:
+        return
+
+    spec = types.get(ui_family.TARGET_TYPE)
+    if not isinstance(spec, dict) or spec.get("kind") != "record":
+        return  # `_check_ui_target_binding` already refused this program
+    target_fields = set(spec.get("fields") or {})
+    if not target_fields:
+        return
+
+    def refuse(origin: str, where: str, line: int) -> None:
+        message, hint = ui_family.target_origin_refusal(origin, where)
+        raise RevlError(filename, line, message, hint,
+                        code="G8", category="boundary")
+
+    # 2. MINTED, first: it is a property of the DECLARATION table alone, so it
+    # is decided before any body is read and its diagnostic points at the
+    # declaration an author has to change.
+    producers = _ui_target_producers(program)
+    for ext in program.externs:
+        if strip(ext.returns) != ui_family.TARGET_TYPE:
+            continue
+        if ext.name not in producers:
+            refuse(ui_family.MINTED, ext.name, ext.line)
+
+    # 1. CONSTRUCTED. The field set is compared against the PROGRAM'S OWN
+    # declared record, not against the registry: a literal carrying exactly
+    # those keys is a `UiTarget` by revl's own structural inference, and one
+    # carrying any other set is not a target at all (an extra field is already
+    # a type error at the actuation, measured).
+    for node in _ui_nodes(program, (ExprRecord,)):
+        if isinstance(node, ExprAsset):
+            continue  # `asset "..."` - two pinned fields, never a target
+        names = {f[0] for f in node.fields if isinstance(f, tuple)}
+        if names == target_fields:
+            refuse(ui_family.CONSTRUCTED, "", node.line)
+
+    # 3. REBOUND, per declaration scope, because "is this base a target" is a
+    # question about the names visible where the update is written.
+    for body, params, returns in _ui_scopes(program):
+        names = _ui_target_names(body, params, producers, returns)
+        for node in _ui_nodes(body, (ExprRecordUpdate,)):
+            if not _ui_update_base_is_target(node.base, names, producers):
+                continue
+            for field_name, _value in node.updates:
+                if field_name in ui_family.TARGET_FIELDS:
+                    refuse(ui_family.REBOUND, field_name, node.line)
+
+
+def _ui_scopes(program: Program) -> list:
+    """`(body, [(param, declared type)], {method: declared return})` for every
+    declaration with a statement body, one entry per NAME SCOPE.
+
+    A component contributes its activation body and each provide method
+    separately, so a name bound in one method is not read as a target in
+    another. A provide method's parameter types come from the service (A6:
+    the service is the source of truth) and from the optional annotation where
+    the author wrote one.
+    """
+    scopes: list = []
+    for fn in program.fn_decls:
+        scopes.append((fn.body, [(p.name, p.type) for p in fn.params], {}))
+    services = {s.name: s for s in program.services}
+    for comp in program.components:
+        # every service this component can call THROUGH, so a target arriving
+        # from `emit <local>.<method>(...)` is recognised as a target.
+        returns: dict = {}
+        for _local, svc_name, _line in comp.requires or ():
+            svc = services.get(svc_name)
+            for method in (svc.methods or {}).values() if svc else ():
+                returns[method.name] = method.returns
+        scopes.append(([s for s in comp.body or ()
+                        if not isinstance(s, ProvideStmt)], [], returns))
+        for stmt in comp.body or ():
+            if not isinstance(stmt, ProvideStmt):
+                continue
+            svc_name = next((s for key, s, _ in comp.provides or ()
+                             if key == stmt.key), None)
+            svc = services.get(svc_name)
+            for method in stmt.methods:
+                declared = dict(zip(method.params, method.param_types or []))
+                spec = (svc.methods or {}).get(method.name) if svc else None
+                for pname, ptype in (spec.params if spec else ()):
+                    declared.setdefault(pname, ptype)
+                scopes.append((method.body, list(declared.items()), returns))
+    return scopes
+
+
+def _ui_update_base_is_target(base, names: set, producers: set) -> bool:
+    """Is the base of a record update a value this can SHOW is a target?
+
+    Under-approximates: `False` for a base it cannot trace, which admits the
+    update. See `_ui_target_names` for why that direction is the safe one
+    here.
+    """
+    if isinstance(base, EmitExpr):
+        return _ui_update_base_is_target(base.expr, names, producers)
+    if isinstance(base, ExprRecordUpdate):
+        return _ui_update_base_is_target(base.base, names, producers)
+    if isinstance(base, ExprVar):
+        return base.name in names
+    if isinstance(base, ExprCall) and isinstance(base.callee, ExprVar):
+        return base.callee.name in producers
+    return False
+
+
+def _check_ui_rung_prefix_closure(program: Program, ir: dict,
+                                  filename: str) -> None:
+    """The computer-use ladder's prefix-closure rule (roadmap item 521,
+    docs/design/532-typed-computer-use.md §4.2, Slice 3).
+
+    `ui.click.pixel` is admissible only in a component that also reaches
+    `ui.click`. A program that can reach pixels but not semantic targets has
+    no fallback ladder, it has a pixel driver, and the ordering a ladder
+    claims is vacuous for it. §4.2 calls this the strongest form of "never
+    inverts that order" revl can honestly check: a property of the
+    DECLARATION, not of the loop.
+
+    WHY IT RUNS HERE AND NOT AT THE DECLARATION SITE, which is the blocker
+    slices 1 and 2 recorded and could not clear. `parser._capability_list`
+    sees ONE token with no component context, and prefix-closure is a
+    per-component property over a SET of tokens. The set that matters is the
+    G8 AUDIT REACH - what a component can reach, not what its file mentions -
+    and that exists only once the IR is assembled. So the check runs over the
+    finished document, through `policy.component_reach`, which is the same
+    function `revl audit` and the `capability <glob>` policy rules read. One
+    reach definition, not a second copy: a component that declares
+    `ui.click.pixel` on an extern it never calls is not reaching a pixel, and
+    the audit already says so.
+
+    Inert for every program that declares no rung token: the pre-scan below is
+    one loop over the extern list, and the `_boundary` walk runs only when it
+    finds one.
+    """
+    from . import ui_family  # noqa: PLC0415 - leaf module, no cycle
+
+    if not any(ui_family.rung_of(cap) is not None
+               for ext in program.externs for cap in ext.capabilities or ()):
+        return
+
+    from .boundary import _boundary  # noqa: PLC0415 - lazy, as plan/registry do
+    from .policy import component_reach  # noqa: PLC0415 - lazy, avoids a cycle
+
+    audit = {"boundary": _boundary(ir)}
+    lines = {comp.name: comp.line for comp in program.components}
+    for name in sorted(audit["boundary"]):
+        tokens = [reach.token for reach in component_reach(audit, name)]
+        refusal = ui_family.prefix_closure_refusal(name, tokens)
+        if refusal is not None:
+            message, hint = refusal
+            raise RevlError(filename, lines.get(name, 0), message, hint,
+                            code="G8", category="boundary")
+
+
 def check_and_lower(program: Program, ambient: dict | None = None,
                     taint_strict: bool = False, untrusted: bool = False) -> dict:
     """Check and lower a program, optionally against an *ambient* composition
@@ -7566,7 +8096,30 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # flow walk able to ask, at a `model.*` crossing, where this action's model
     # calls are declared to go. A program with no block hands over `{}` and
     # every lookup in the walk misses, so nothing moves.
-    taint_model.model_routes = _model_route.check(program)
+    # Model councils (roadmap item 516) are resolved BEFORE the routes, because
+    # a `route model` arm may name a council where it names a role (slice 2)
+    # and a placement is resolved before anything that names one - the same
+    # sentence that puts the whole model-placement phase ahead of
+    # `_validate_declared_types`. Slice 1 ran this after the routes, which was
+    # right while a council was bound to nothing; the order moved with the
+    # dependency and not with the construct. A council is a DECLARATION checked
+    # at admission and writes no IR, exactly as a route does, so an admitted
+    # program is byte-identical to the same program with the declaration
+    # deleted (docs/design/543-model-council.md). A program declaring no
+    # council walks an empty list and is byte-identical through here.
+    model_councils = _model_council.check(program)
+    model_routes = _model_route.check(program, councils=model_councils)
+    taint_model.model_routes = model_routes
+    # item 512 slice 4: the role TABLE, which is what makes a `model.<tail>`
+    # capability token readable as a placement rather than as an operation
+    # name. `check()` validated it on the line above (it calls `roles()` first
+    # and refuses there); this asks for it again rather than threading it back
+    # out, which keeps `check()`'s return shape the one section 9 of the design
+    # note promised item 514. An empty table leaves every `model.*` crossing
+    # the operation token it has always been. Item 519's attenuation fold reads
+    # the same table, so the two see one set of roles and one set of routes.
+    model_roles = _model_route.roles(program)
+    taint_model.model_roles = model_roles
 
     ambient_services = {
         name: _service_from_ir(name, spec)
@@ -7614,6 +8167,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     _validate_declared_types(program, program.filename)
     _check_principal_producers(program, program.filename)
     types = _lower_type_decls(program, program.filename)
+    # item 521 slice 4: the computer-use target record and the signatures
+    # that carry it. Checked here because the obligation is a program-level
+    # fact (a verb declared in one place, a record declared in another) and
+    # the record table is what it is checked against. Inert - one loop over
+    # the extern list that finds nothing - for a program declaring no UI verb.
+    _check_ui_target_binding(program, types, program.filename)
+    _check_ui_target_provenance(program, types, program.filename)
     types[FNS_KEY] = _signature_table(program, types)
     types[CASES_KEY] = _case_table(types)
     # item 130 Slice 5: the typed-event contracts. Built after the record table
@@ -7914,6 +8474,16 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                                  live_components, services, spawn_reg,
                                  program.filename, untrusted=untrusted)
 
+    # The MODEL ROLE in that same product (item 519): a component's effective
+    # ceiling is the union of what it holds and what the model role it routes
+    # through can reach, so a role reaching past its component is refused with
+    # both sets named. Inert for a program that declares no `model role`, which
+    # is every program that does not opt in (docs/design/541-model-in-
+    # attenuation.md).
+    model_product = _collect(_check_model_attenuation, live_components,
+                             services, model_roles, model_routes,
+                             program.filename)
+
     # Emission budgets, static check (item 260 §3.2): a declared `budget.requests`
     # / `calls` ceiling that the proved cardinality max exceeds is a red compile,
     # and a finite ceiling over an `unbounded`/symbolic body is unprovable. Gated
@@ -7936,6 +8506,13 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         # key, so its manifest is byte-identical to before (docs/capability-
         # attenuation.md).
         manifest["instances"] = attenuation_chain
+    if manifest and model_product:
+        # additive and role-only: a composition that declares no `model role`
+        # has no `model_reach` key, so its manifest is byte-identical to
+        # before. This is the record issue #1223 reads to decide whether a
+        # boundary the kernel must own is inside a component's effective
+        # ceiling (docs/capability-attenuation.md).
+        manifest["model_reach"] = model_product
     if manifest and spawn_reg["named_instances"]:
         # item 10 placement horizon, next slice: enumerate the named instances
         # (`spawn C … as "<name>"`) at the composition layer, so a later
@@ -7949,6 +8526,17 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
         manifest["named_instances"] = sorted(
             spawn_reg["named_instances"],
             key=lambda r: (r["spawner"], r["name"]))
+
+    # THE ADMISSION KERNEL as a capability (item 544): the kernel's own held
+    # set on the left, a component's effective ceiling on the right, and no
+    # intersection admitted. Runs after the manifest is assembled so it reads
+    # item 519's `model_reach` product rather than re-deriving reach from the
+    # AST, and so the per-edge `effective` statement is the one the product
+    # recorded. Inert for a composition that declares no kernel capability and
+    # is not admitted under an untrusted-author profile, which is every program
+    # on the tree (docs/design/545-kernel-boundary-capability.md).
+    _collect(_check_kernel_boundary, live_components, services,
+             program.filename, untrusted=untrusted, manifest=manifest)
 
     # lifecycle tests are lowered last: they check against the component
     # declarations, so a broken component must report itself first
@@ -8085,8 +8673,10 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
                         # is byte-identical.
                         **({"cache": _cache_ir(m.cache)} if m.cache else {}),
                         # item 257: `validated` + the derived `response_schema`,
-                        # additive (byte-identical when absent). The gate refuses
-                        # an unexpressible return type at compile time.
+                        # plus item 513's `response_grammar`; additive
+                        # (byte-identical when absent). The gates refuse an
+                        # unexpressible return type, and one with no unambiguous
+                        # grammar, at compile time.
                         **_method_validated_ir(m, types, program.filename),
                         # item 457: the `route` clause resolved to a bind table +
                         # return classification, additive (byte-identical when the
@@ -8147,6 +8737,12 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # does not qualify, so an IR document for a program with no in-place
     # accumulation is byte-identical to before. See src/revl/ownership.py.
     ownership.annotate_ir(result)
+    # item 521 slice 3: the computer-use ladder's prefix-closure rule, checked
+    # per component over the G8 audit reach. Runs last because the reach is a
+    # property of the assembled IR and not of any one declaration, which is
+    # exactly why slices 1 and 2 could not host this check. Inert (one loop
+    # over the extern list, no boundary walk) unless a rung token is declared.
+    _check_ui_rung_prefix_closure(program, result, program.filename)
     return result
 
 
@@ -8279,6 +8875,45 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
     finally:
         env.type_env = saved_tenv
     return {"kind": "do", "stmts": stmts, "tail": tail}
+
+
+def _refuse_unmarked_emission_call(node: dict, name: str, env: Env,
+                                   filename: str, line: int) -> None:
+    """The marker demand inside an `emit` head's argument list, for the HOST
+    EXTERN carrier (issue #1427).
+
+    `emit` marks one crossing. The head's arguments lower in the enclosing mode
+    (`_emit_head_args`), and every carrier that can cross there has to be held
+    to the same rule, or "one marker per crossing" reads as a property of the
+    required-service spelling rather than of the rule. The `req` and
+    spawn-handle carriers were already held to it — `_lower_postfix` and the
+    `instance-get` arm each refuse an unmarked emission in the argument list.
+    A direct call to an emission extern reaches neither, so `emit send(charge(1))`
+    put a second crossing under one marker and was admitted.
+
+    Scope is deliberately the argument list and nothing wider. Outside it, an
+    unmarked extern call is judged by the provider upper bound
+    (`_method_emissions`: a plain-declared method that reaches an emission
+    extern is refused by name), and this does not touch that judgment. What it
+    fixes is the one position where the reference already promised the
+    arguments are judged as the enclosing position judges them.
+
+    The refusal is the `req` carrier's verbatim, tag and message, because it is
+    the same rule: a crossing the author has not marked."""
+    if not getattr(env, "_in_emit_args", False):
+        return
+    if getattr(env, "_expr_mode", "setup") != "setup":
+        return
+    if not _is_emission_call(node, env):
+        return
+    raise RevlError(
+        filename, line,
+        f"call to emission `{name}` must be marked `emit` (G4)",
+        hint="an emission crosses the system boundary and cannot be reverted; "
+             "`emit` makes that visible at the call site. One marker admits one "
+             "crossing, so hoist this call into an `emit` step of its own",
+        code="G4", category="emission",
+    )
 
 
 def _check_component_call(node: dict, env: Env, filename: str, line: int) -> None:
@@ -8685,6 +9320,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 node = {"kind": "fn", "name": name,
                         "args": _coerce_async_args(name, filled, env, line)}
                 _check_component_call(node, env, filename, line)
+                _refuse_unmarked_emission_call(node, name, env, filename, line)
                 return node
         if isinstance(expr.callee, ExprField) and expr.callee.name in _BUILTIN_METHODS:
             method = expr.callee.name
@@ -8829,9 +9465,23 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                 env.type_env.pop(param, None)
         captures = sorted(_mutable_free_vars(expr.body, scope, set(expr.params)))
         _b1_capture_check(expr, env.type_env, env.types, filename, expr.line)
+        # An arrow's body runs when the arrow is CALLED, not while the
+        # enclosing `emit`'s arguments are evaluated, so it is not in
+        # emit-argument position even when the arrow is written inside one.
+        # `(t, a) => emit approvals.approve(t, a)` passed as an argument is the
+        # same marked crossing it is when bound by `let` first and passed by
+        # name, and the rule (issue #1175) judges an argument as it would be
+        # one statement earlier. Without this the flag leaked into the body and
+        # refused the inline spelling as a nested `emit`.
+        saved_in_args = getattr(env, "_in_emit_args", False)
+        env._in_emit_args = False
+        try:
+            body = _lower_component_pure_expr(expr.body, env, inner, callables,
+                                              pure_only)
+        finally:
+            env._in_emit_args = saved_in_args
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
-                "body": _lower_component_pure_expr(expr.body, env, inner, callables,
-                                                   pure_only)}
+                "body": body}
         # item 75(a) §4/§5.3: the same complete-signature condition as the
         # pure-fn path. Stratum 3 does not *check* an arrow yet (slice 3), but
         # the grammar and the R3 fix land everywhere at once — there is one
@@ -8909,7 +9559,12 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             raise RevlError(filename, stmt.line,
                             f"cannot reassign `{stmt.name}` — it is `let` (single-assignment)",
                             hint="declare it with `var` to make it mutable (syntax-2.0 §3.5)")
-        value = _lower_component_pure_expr(stmt.value, env, scope, callables,
+        # issue #721: the compound spelling desugars to the same assignment the
+        # fn grammar composes (`x += e` is `x = x + e`), so the IR carries one
+        # `assign` step whichever way the author wrote it.
+        assigned = stmt.value if stmt.op == "=" else ExprBin(
+            stmt.op[:-1], ExprVar(stmt.name, stmt.line), stmt.value, stmt.line)
+        value = _lower_component_pure_expr(assigned, env, scope, callables,
                                            pure_only=True)
         _sweep(value, stmt.line)
         out.append({"step": "assign", "name": scope[stmt.name], "value": value})
@@ -12175,7 +12830,14 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                 f"`{ms.name}` is not declared in `{method.name}`",
                                 hint="declare it with `let` (single-assignment) or "
                                      "`var` (mutable)")
-            assigned = _lower_expr(ms.value, env, mode="setup")
+            # issue #721: `x += e` is the same assignment as `x = x + e`, and
+            # the fn grammar already composes it that way (`_lower_stmt`). The
+            # method grammar admits the compound spelling now, so it desugars
+            # here too — the IR carries one `assign` step either way, so no
+            # emitter learns a second shape.
+            value = ms.value if ms.op == "=" else ExprBin(
+                ms.op[:-1], ExprVar(ms.name, ms.line), ms.value, ms.line)
+            assigned = _lower_expr(value, env, mode="setup")
             _sweep(assigned, ms.line)  # item 404
             out.append({"step": "assign", "name": method_locals[ms.name],
                         "value": assigned})
@@ -14635,27 +15297,65 @@ def _collect_emit_caps(node, caps: set) -> None:
             _collect_emit_caps(value, caps)
 
 
-# The token namespace for a boundary that has NO declared capability token: the
-# G2 wiring key names it. A declared capability token is a dotted identifier
-# (`_capability_list`/`_capability_params` in parser.py), so a token carrying a
-# `:` is UNSPELLABLE in source and a wiring key can never collide with — and so
-# never be mistaken by `covers` for — a declared boundary. Rendered back to the
-# bare key by `_cap_render`, so refusal messages and the G8 audit chain read
-# exactly as before.
-_WIRE_NS = "key:"
+# The token namespace for a boundary that NO declaration names: a service
+# method spelling `emission` with no capability list. A declared capability
+# token is a dotted identifier (`_capability_list`/`_capability_params` in
+# parser.py), so a token carrying a `:` is UNSPELLABLE in source and a derived
+# element can never collide with — and so never be mistaken by `covers` for —
+# a declared boundary. Rendered back to the bare name by `_cap_render`, so
+# refusal messages and the G8 audit chain read as a source-level name.
+_UNDECLARED_NS = "svc:"
 
 
-def _wire_cap(key: str) -> "object":
-    """The fold element for a wiring key with no declared capability token."""
+def _undeclared_cap(service: "str | None") -> "object":
+    """The attenuation-fold element for an emission whose declaration names no
+    capability token, keyed by the SERVICE the method is declared on (item 561,
+    issue #1265).
+
+    The service, and NOT the consumer's local `requires` spelling, for
+    `_cap_keyed`'s own reason one declaration weaker. Item 294 moved the
+    DECLARED case onto the boundary's token because two components wire the
+    same boundary under whatever key each likes, so comparing keys compared two
+    identifiers that name nothing in common. A method that declares no token
+    had none to move onto and stayed on the key, and the laundering stayed open
+    behind it: a parent requiring `net: Net` and a child requiring `net: Kv`
+    reach two different boundaries, spelled one key, and the fold derived no
+    widening. The declared corner of that family is
+    `tests/formal_corpus/g4_spawn_widens_capability_same_key.rvl`; the
+    undeclared one is `..._undeclared_emission_same_key.rvl` beside it.
+
+    A service name is composition-independent, so both sides of a fold agree
+    exactly when they name the same declaration — which is already what the
+    declared case means by "the same boundary": a parent requiring `store: S`
+    and a child requiring `db: S` compare equal today, because the token lives
+    on `S` and not on either key.
+
+    NOT the unnameable `*`. `covers` gives `*` one clause — top of the order,
+    covered only by `*` — so a held `*` covers a reached `*`, and resolving
+    both sides of an undeclared emission to `*` admits that widening instead of
+    refusing it. `*` is the fail-closed element for a DISJOINTNESS question
+    (`cap_order.disjoint` is False for every pair touching it, which is why an
+    intersection fold wants it); coverage is a different question and `*` does
+    not answer it the same way. `docs/design/561-undeclared-emission-boundary.md`
+    carries the measurement.
+
+    An unresolvable service (impossible on a validated IR, where a `req` target
+    is typechecked against the `requires` map) degrades to `*`, which is
+    fail-closed on BOTH sides: as a reach element nothing covers it, as a held
+    element it covers nothing but `*`."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    return cap_order.Cap(_WIRE_NS + key, ())
+    if not service:
+        return cap_order.Cap("*", ())
+    return cap_order.Cap(_UNDECLARED_NS + service, ())
 
 
 def _cap_render(cap: "object") -> str:
-    """The source-facing spelling of a fold element: a namespaced wiring key
-    renders as the bare key, everything else as its canonical `(T, P)`."""
+    """The source-facing spelling of a fold element: a derived undeclared
+    boundary renders as the bare service name, everything else as its canonical
+    `(T, P)`."""
     text = cap.to_str()
-    return text[len(_WIRE_NS):] if text.startswith(_WIRE_NS) else text
+    return (text[len(_UNDECLARED_NS):] if text.startswith(_UNDECLARED_NS)
+            else text)
 
 
 def _cap_keyed(key: str, cap_str: str) -> "object":
@@ -14671,8 +15371,8 @@ def _cap_keyed(key: str, cap_str: str) -> "object":
     `parallel._resolve_emission` reads for the very same crossings. The wiring
     key still names the boundary where the declaration does NOT (a method with
     `emission` and no `capabilities[...]` list, an unresolvable service): that
-    element is built by `_wire_cap` in its own token namespace, so a key spelling
-    can never masquerade as a declared token.
+    element is built by `_undeclared_cap` in its own token namespace, so a
+    derived spelling can never masquerade as a declared token.
 
     A malformed stored spelling (impossible on a validated IR) degrades to the
     unnameable `*`, which is fail-closed on BOTH sides: as a reach element it is
@@ -14689,20 +15389,21 @@ def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> lis
     """The `Cap`(s) a single lowered `emit` step crosses, resolved through the
     key-to-token bridge. A req-keyed emission resolves key -> requires-target
     service -> the method being called -> that method's `emission[...]`
-    valuation(s); a bare or unresolvable method declares no token, so the G2
-    wiring key names the boundary (`_wire_cap`, its own namespace); a host
-    emission is the unnameable `*`."""
+    valuation(s); a bare or unresolvable method declares no token, so the
+    SERVICE it is declared on names the boundary (`_undeclared_cap`, its own
+    namespace); a host emission is the unnameable `*`."""
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
     expr = node.get("expr") or {}
     target = expr.get("target") or {}
     if target.get("kind") != "req":
         return [cap_order.Cap("*", ())]
     key = target.get("name")
-    svc = services.get(requires_map.get(key)) if requires_map else None
+    svcname = requires_map.get(key) if requires_map else None
+    svc = services.get(svcname) if svcname else None
     decl = svc.methods.get(expr.get("method")) if svc is not None else None
     cap_strs = getattr(decl, "capabilities", None) if decl is not None else None
     if not cap_strs:
-        return [_wire_cap(key)]
+        return [_undeclared_cap(svcname)]
     return [_cap_keyed(key, s) for s in cap_strs]
 
 
@@ -14747,21 +15448,23 @@ def _held_capabilities_pairs(comp: dict, base_surface: set,
     it was reached through — carrying each declaration's valuation, which is what
     lets a parent that holds `fs.write(path="/tmp")` refuse a child reaching
     wider. A method that declares `emission` with no capability list names no
-    token, so the G2 wiring key names that boundary (`_wire_cap`, its own token
-    namespace). A plain or unresolvable service likewise keeps the namespaced
-    key; a child cannot reach a non-emission key, so that element only ever
-    covers another key-named boundary of the same name."""
+    token, so the SERVICE it is declared on names that boundary
+    (`_undeclared_cap`, its own token namespace) — never the local key, which
+    is a name the boundary does not have. A plain or unresolvable service
+    likewise contributes its service element; a child cannot reach a
+    non-emission service, so that element only ever covers a boundary of the
+    same service."""
     held: set = set(base_surface)
     for key, svcname in (comp.get("requires") or {}).items():
         svc = services.get(svcname)
         emission_methods = ([m for m in svc.methods.values() if m.emission]
                             if svc is not None else [])
         if not emission_methods:
-            held.add(_wire_cap(key))
+            held.add(_undeclared_cap(svcname))
             continue
         for m in emission_methods:
             if not m.capabilities:
-                held.add(_wire_cap(key))
+                held.add(_undeclared_cap(svcname))
             else:
                 for s in m.capabilities:
                     held.add(_cap_keyed(key, s))
@@ -15064,6 +15767,339 @@ def _ceiling_attenuation_check(held: set, child_reach: set) -> "list[dict]":
     return violations
 
 
+def _check_kernel_boundary(components: list[dict], services: dict,
+                           filename: str, untrusted: bool = False,
+                           manifest: dict | None = None) -> list[dict]:
+    """The ADMISSION KERNEL in the capability attenuation product (item 544).
+
+    Item 520 states the invariant: a system may evolve its behaviour, never the
+    rules that govern its authority. `tools/evolution_controller.py` enforces
+    the half it can - a candidate whose CHANGED FILES reach `kernel_boundary.
+    KERNEL_PATHS` is refused - and its own design says why that is not enough:
+    a diff check is answered against a changed-file set, so a route that
+    reaches the same state without editing an enumerated file is not refused by
+    it and cannot be. This is the other half, and it is the one the product
+    already knows how to state:
+
+        held(kernel)  n  effective(C)  =  {}   -> admit
+        held(kernel)  n  effective(C) !=  {}   -> REFUSE, naming both sets
+
+    which is item 66's rule with the KERNEL on the left instead of a spawner,
+    folded by `cap_order.disjoint` rather than `cap_order.covers` because the
+    question is intersection, not coverage. A component does not have to
+    NARROW its way to the kernel; it has to be unable to touch it.
+
+    WHICH WAY IT FAILS. Toward refusing, at both unknowns, and the reading of
+    each is `kernel_boundary`'s rather than this function's: the unnameable `*`
+    is disjoint from nothing (`cap_order.disjoint`'s own rule), and a `key:`
+    element - a boundary whose declaration names no capability token - is an
+    UNDECLARED reach, which is not an empty one. That second reading is scoped
+    to a candidate admitted under the untrusted-author profile (`untrusted`),
+    which is what "a generated component" means here; the first-party tree is
+    the subject of the loop, not a candidate passing through admission, and a
+    DECLARED kernel token is refused on both sides.
+
+    `manifest` is item 519's product record if it is present. Its
+    `model_reach[].effective` is the per-edge ceiling statement, consumed
+    rather than re-derived, and its `reach_declared` is what keeps an absent
+    `reaches [...]` clause from reading as a proof of narrowness.
+
+    Returns the per-component disjointness record for the audit surface; raises
+    on an intersection. Inert for a composition that declares no kernel token
+    and is not admitted under an untrusted-author profile, which is every
+    program on the tree."""
+    from . import kernel_boundary as _kb  # noqa: PLC0415 - lazy, avoids a cycle
+    # A cheap gate first, so the ordinary compile pays a scan of the service
+    # declarations rather than a second walk of every component body. The
+    # kernel namespace reaches a component through exactly three doors: a
+    # service that DECLARES a `kernel.*` emission token, the untrusted-author
+    # profile (which is what opens the unnameable arm), and item 519's product
+    # record. None of them present means there is nothing for the fold to find,
+    # and the pass is skipped rather than run to an empty answer.
+    if not untrusted and not (manifest or {}).get("model_reach"):
+        declared = any(
+            _kb.is_kernel_token(token.split("(", 1)[0])
+            for svc in services.values()
+            for method in getattr(svc, "methods", {}).values()
+            for token in (getattr(method, "capabilities", None) or ()))
+        if not declared:
+            return []
+    base = _spawn_reached_surface_pairs(components, services)
+    record: list[dict] = []
+    for comp in components:
+        own = base.get(comp["name"], set())
+        held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
+        effective = set(held) | set(
+            _strip_ceilings(set(_kb.effective_from_model_reach(
+                comp["name"], manifest))))
+        where = comp.get("source") or filename
+        line = comp.get("line", 1)
+
+        # a DECLARED claim on the namespace that the enumeration has no member
+        # for. Refused before the fold, because there is nothing to fold it
+        # against and reading it as an ordinary boundary is the fail-open shape.
+        stray = _kb.unenumerated(effective)
+        if stray:
+            names = ", ".join(f"`{_cap_render(c)}`" for c in stray)
+            known = ", ".join(f"`{c.token}`" for c in _kb.KERNEL_CAPS)
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` holds {names}, a capability in the reserved "
+                f"`{_kb.KERNEL_NAMESPACE}` namespace that the admission "
+                f"kernel's own enumeration has no member for - a claim on the "
+                f"kernel the compiler cannot check is refused, never admitted "
+                f"(G8)",
+                hint=f"the kernel capability set is enumerated in "
+                     f"`src/revl/kernel_boundary.py` and holds {known}. The "
+                     f"`{_kb.KERNEL_NAMESPACE}` namespace names the rules that "
+                     f"govern authority, so nothing outside the kernel may "
+                     f"declare into it: rename the capability into the "
+                     f"boundary's own namespace, or drop it (item 520/544)",
+                code="G8", category="capability-attenuation",
+            )
+
+        hits = _kb.offending(effective,
+                             undeclared_reaches_kernel=bool(untrusted))
+        if hits:
+            first_member, first_element = hits[0]
+            members = []
+            seen_tokens: set = set()
+            for member, _element in hits:
+                if member.token in seen_tokens:
+                    continue
+                seen_tokens.add(member.token)
+                members.append(member)
+            named = ", ".join(f"`{m.token}`" for m in members)
+            paths = ", ".join(sorted({p for m in members for p in m.paths}))
+            held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held))                 or "no capabilities"
+            if _kb._undeclared(first_element):
+                why = (f"`{comp['name']}` reaches an unnameable host boundary, "
+                       f"and an unnameable reach is not an empty one: nothing "
+                       f"in this composition states that it stops short of the "
+                       f"kernel, so it is not provably disjoint from it. An "
+                       f"authority surrogate that declares no reach lands here "
+                       f"too, because an omitted declaration is not a proof of "
+                       f"narrowness (item 519)")
+                fix = ("name the boundary - give the crossing a declared "
+                       "capability, or give the model role it routes through "
+                       "a `reaches [...]` clause - so the reach can be "
+                       "compared with the kernel's, or drop the crossing")
+            else:
+                why = (f"`{comp['name']}` holds "
+                       f"`{_cap_render(first_element)}`, which is the kernel's "
+                       f"own authority")
+                fix = ("drop the capability; kernel authority is not delegable "
+                       "and no grant confers it, because a grant that could "
+                       "would be the rule this refusal defends")
+            raise RevlError(
+                where, line,
+                f"`{comp['name']}` is inside the admission kernel's authority: "
+                f"its effective ceiling meets {named}, which the kernel holds "
+                f"and nothing else may. A component may evolve its behaviour, "
+                f"never the rules that govern its authority "
+                f"({first_member.guarantee})",
+                hint=f"{why}. {first_member.why} The kernel capability set is "
+                     f"enumerated in `src/revl/kernel_boundary.py` and stands "
+                     f"for {paths}; `{comp['name']}` holds {held_str}. "
+                     f"{fix} (attenuation, item 520/544 - "
+                     f"docs/capability-attenuation.md)",
+                code=first_member.guarantee, category="capability-attenuation",
+            )
+        record.append({
+            "component": comp["name"],
+            "holds": _cap_sorted_strs(held),
+            "kernel": [c.token for c in _kb.KERNEL_CAPS],
+            "disjoint": True,
+        })
+    return record
+
+
+def _model_reach_caps(role) -> set:
+    """A `model role`'s declared reach as fold elements (item 519).
+
+    Resolved through the same bridge every other capability string takes
+    (`cap_order.parse_cap`, with the `_cap_keyed` fallback), so a role's
+    `reaches [fs.write(path="/tmp")]` is compared with its valuation and not as
+    a bare token. A role that declares NO reach resolves to
+    `model_route.UNDECLARED_REACH`, which is the unnameable `*`: covered by
+    nothing, hence refused against any held set that does not itself hold `*`.
+    """
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    out: set = set()
+    for token in role.reach_tokens:
+        if token == "*":
+            out.add(cap_order.Cap("*", ()))
+            continue
+        try:
+            out.add(cap_order.parse_cap(token))
+        except cap_order.CapError:
+            out.add(cap_order.Cap("*", ()))
+    return out
+
+
+def _consults_a_model(held: set) -> bool:
+    """Whether a component holds a boundary that could be a model call (519).
+
+    A sound over-approximation, in the direction the rest of this file takes:
+    a held boundary counts unless its DECLARED capability token proves it is
+    some other boundary. Three shapes count -
+
+    * a token whose head is `model` (the declared model crossing, item 343 -
+      the same token `revl.taint` reads for the origin ceiling);
+    * the unnameable `*` (a host emission or a first-class dispatch, which no
+      `emission[...]` list can name and which may therefore be a model call);
+    * a `svc:` element (`_UNDECLARED_NS`, item 561) - a boundary whose
+      declaration names no capability token at all, so nothing rules a model
+      call out.
+
+    A component whose held boundaries are all declared non-model tokens
+    consults no model, and a `route model` block over it places a call it
+    cannot make. That is not an exemption: a role steers a component by
+    choosing among the boundaries the component can reach, so a component that
+    reaches none has no ceiling for a role to widen. The gate reads the HELD
+    set rather than the component's own emit steps because a provider body
+    crosses through a `requires` key, and it is the key's service that declares
+    the `model.*` token - the body only names the key."""
+    for cap in held:
+        token = cap.token
+        if token == "*" or token.startswith(_UNDECLARED_NS):
+            return True
+        if token == "model" or token.startswith("model."):
+            return True
+    return False
+
+
+def _check_model_attenuation(components: list[dict], services: dict,
+                             roles: dict, routes: dict,
+                             filename: str) -> list[dict]:
+    """The model role in the capability attenuation product (item 519).
+
+    A model is an AUTHORITY SURROGATE: it picks which capability the component
+    consulting it reaches for. Until this check, the product
+    (`docs/capability-attenuation.md`) accounted for services, realms, taints
+    and budgets but not for the model, so a component holding `net` whose
+    decisions run through a role able to reach `shell` was accounted as if the
+    role were inert. Its EFFECTIVE ceiling is the pair's, not its own.
+
+        effective(C)  =  held(C)  u  reach(R)   for every role R that C routes to
+        effective(C)  ⊆  held(C)               -> admit
+        effective(C)  ⊄  held(C)               -> REFUSE, naming both sets
+
+    which is the item-66 rule with a model-route edge in place of a spawn edge,
+    folded by the same `cap_order.covers`, so a parameterised reach is actually
+    compared and a role reaching `fs.write` under a component holding
+    `fs.write(path="/tmp")` is refused.
+
+    WHICH WAY IT FAILS. Toward refusing, at both unknowns. A role that declares
+    no `reaches [...]` clause reaches the unnameable `*`
+    (`model_route.UNDECLARED_REACH`), which no held set covers - reading
+    silence as "reaches nothing" would make an unknown model inert in the
+    product, and an unknown model is the whole reason the item exists. A
+    crossing whose declared token does not PROVE it is some other boundary
+    counts as a model call (`_consults_a_model`).
+
+    SCOPE. Slice 1 of `docs/design/541-model-in-attenuation.md`: the roles a
+    component's `route model` block NAMES, against what that component holds.
+    Which role a given crossing actually reaches is item 512's slice 4 (the
+    crossing carries a `model.<role>` token), and until it lands every named
+    role is folded in, which over-approximates in the refusing direction.
+    "Names" means every candidate of an item-515 ordered set and not only its
+    head: a fallback the scheduler may pick is a role the component routes
+    through, so folding only the head would let the first fallback widen a
+    ceiling the head respects.
+
+    Returns the per-edge product record for the audit surface; raises on a
+    widening. Inert - not even a fold - for a program that declares no role,
+    which is every program on the tree today."""
+    if not roles or not routes:
+        return []
+    from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
+    base = _spawn_reached_surface_pairs(components, services)
+    product: list[dict] = []
+    for comp in components:
+        actions = routes.get(comp["name"])
+        if not actions:
+            continue
+        own = base.get(comp["name"], set())
+        held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
+        if not _consults_a_model(held):
+            continue
+        where = comp.get("source") or filename
+        held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held)) \
+            or "no capabilities"
+        for action in sorted(actions):
+            for origin in sorted(actions[action]):
+                placement = actions[action][origin]
+                # EVERY candidate of an item-515 ordered set, not just the
+                # head: a fallback the scheduler may pick is a role the
+                # component routes through, and a reach checked only on the
+                # head would be widened by the first fallback. A one-role arm
+                # has a one-tuple here, so a program written against item 512
+                # folds exactly what it folded before.
+                for name in placement.get("candidates", (placement["role"],)):
+                    role = roles[name]
+                    reach = _strip_ceilings(_model_reach_caps(role))
+                    extra = cap_order.covers_set(held, reach)
+                    if extra:
+                        extra = sorted(extra, key=lambda c: c.to_str())
+                        offending = ", ".join(_cap_offending(c) for c in extra)
+                        if role.reach_declared:
+                            why = (f"model role `{role.name}` declares "
+                                   f"`reaches [{', '.join(role.reach_tokens)}]` on "
+                                   f"line {role.line}")
+                            fix = (f"narrow `{role.name}`'s `reaches [...]` to what "
+                                   f"`{comp['name']}` holds, or add the matching "
+                                   f"`requires` to `{comp['name']}` so it holds what "
+                                   f"the model it consults can reach")
+                        else:
+                            why = (f"model role `{role.name}` (line {role.line}) "
+                                   f"declares no reach, so its reach is the "
+                                   f"unnameable `*`")
+                            fix = (f"declare it - `model role {role.name} "
+                                   f"{role.residence} reaches [...]` - naming the "
+                                   f"capabilities a call to it can reach; an "
+                                   f"undeclared reach is not an empty one, because "
+                                   f"a model that steers a component is exactly the "
+                                   f"one whose reach must be written down")
+                        raise RevlError(
+                            where, placement.get("line", comp.get("line", 1)),
+                            f"`{comp['name']}` routes `{action}` ({origin}) through "
+                            f"model role `{role.name}`, which reaches {offending}, "
+                            f"but `{comp['name']}` holds only {held_str} - a "
+                            f"component's effective ceiling is the pair's, so a "
+                            f"model may not reach past the component that consults "
+                            f"it (G-MODEL-PLACE)",
+                            hint=f"{why}. A model role is an authority surrogate: it "
+                                 f"chooses which capability the component reaches "
+                                 f"for, so routing through it widens the component's "
+                                 f"effective ceiling to the union "
+                                 f"(docs/capability-attenuation.md, item 519). "
+                                 f"{fix}",
+                            code=_model_route.CODE,
+                            category="capability-attenuation",
+                        )
+                    product.append({
+                        "component": comp["name"],
+                        "action": action,
+                        "origin": origin,
+                        "role": role.name,
+                        "residence": role.residence,
+                        "holds": _cap_sorted_strs(held),
+                        "reaches": _cap_sorted_strs(reach),
+                        "effective": _cap_sorted_strs(held),
+                        "attenuated": _cap_sorted_strs(
+                            {c for c in held
+                             if not cap_order.covered_by_any(reach, c)}),
+                        "reach_declared": role.reach_declared,
+                    })
+    # `role` joins the sort key only to keep an ordered candidate set stable;
+    # a one-role arm produces one record per (component, action, origin), so
+    # the order is the one item 519 shipped.
+    product.sort(key=lambda r: (r["component"], r["action"], r["origin"],
+                                r["role"]))
+    return product
+
+
 def _check_spawn_attenuation(components: list[dict], services: dict,
                              spawn_reg: dict, filename: str,
                              untrusted: bool = False) -> list[dict]:
@@ -15090,9 +16126,10 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
     the wiring key instead compared two identifiers that name nothing in common,
     and renaming a child's `requires` key was enough to launder any boundary
     past the invariant quoted above. A boundary that no declaration tokens (a
-    method with `emission` and no capability list) is still named by its G2
-    wiring key, in its own token namespace (`_wire_cap`), so a key spelling can
-    never masquerade as a declared token.
+    method with `emission` and no capability list) is named by the SERVICE it
+    is declared on, in its own token namespace (`_undeclared_cap`), so a
+    derived spelling can never masquerade as a declared token and two
+    components cannot compare equal merely because they spell a key alike.
 
     Applies to activation-body spawns (see `_activation_spawn_sites`); returns
     the per-instance attenuation chain (spawner → child narrowing) for the G8

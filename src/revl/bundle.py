@@ -68,8 +68,14 @@ Design decisions (documented in docs/bundle.md):
     no key is available the bundle is still produced, minus `attestation.json`;
     `verify` then reports the attestation tier as `cannot verify`, never a pass.
   * **Backends**, every backend whose emitter is a pure in-repo function is
-    emitted by default; `--backend` narrows the set. An emitter that refuses
-    this IR (e.g. wasm on floats) is recorded as skipped, not a bundle failure.
+    emitted by default; `--backend` narrows the set. An emitter that is ABSENT
+    here is omitted quietly and the bundle still exits 0: nothing was decided
+    about the composition. An emitter that REFUSES this IR (e.g. wasm on floats)
+    is a different fact and is recorded as one: its own diagnostic goes into
+    `refusedBackends` in the runtime-manifest, is printed in the emitter's own
+    words, and `revl bundle` exits `REFUSED_EXIT`. The bundle is still written,
+    because a bundle that documents which tiers refused and why is more useful
+    to ship than no bundle at all (issue #1400).
 """
 
 from __future__ import annotations
@@ -87,6 +93,7 @@ from pathlib import Path
 from ._paths import stdlib_root
 from .errors import RevlError
 from .hostfile import _contained  # same canonical containment jail hostref uses
+from .refusal import refusal_class
 
 # Reuse the item-297 reproduce vocabulary and projections verbatim, no new
 # status scheme, no new surface derivation.
@@ -106,6 +113,18 @@ BUNDLE_VERSION = "1.0"
 ONEFILE_KIND = "revl.bundle.onefile"
 ONEFILE_VERSION = "1.0"
 ONEFILE_SUFFIX = ".revlbundle1"
+
+#: `revl bundle`'s exit code for "the bundle was written, and at least one tier
+#: REFUSED this composition" (issue #1400). It is not 0, because a bundle
+#: missing a tier the author asked for is not a success and a CI step must not
+#: read it as one; it is not 1 either, because nothing failed to be produced,
+#: the artifact is on disk and usable for the tiers that did emit.
+#:
+#: It is deliberately not 3. Across `revl run --backend <tier>` 3 already means
+#: "that tier's toolchain is absent, skipped with a reason", which is the case
+#: this issue exists to keep DISTINCT from a refusal, and which stays exit 0
+#: here (an emitter that is not installed decided nothing about this IR).
+REFUSED_EXIT = 4
 
 RUNTIME_MANIFEST = "runtime-manifest.json"
 LOCK_NAME = "components.lock"
@@ -151,16 +170,19 @@ def _canonical_ir(ir: dict) -> dict:
     so unless these paths are normalized the recompiled IR, and the attestation
     hash taken over it, would differ by location alone. Everything the bundle
     derives comes from this form, so a bundle built in one directory verifies
-    from another."""
-    out = copy.deepcopy(ir)
-    for comp in out.get("components") or []:
-        for field in ("source", "file"):
-            if comp.get(field):
-                comp[field] = os.path.basename(comp[field])
-    for comp in (out.get("manifest") or {}).get("components") or []:
-        if comp.get("file"):
-            comp["file"] = os.path.basename(comp["file"])
-    return out
+    from another.
+
+    The rewriting itself is `attest.path_normalized_ir`, called rather than
+    re-implemented: `attest.canonical_hash` applies the same normalization at
+    the hashing boundary, and a bundle that normalized differently from the
+    hash it signs would be back to two definitions of one identity (issue
+    #1276). The deep copy stays HERE because callers hand this document to
+    `registry._audit_document`, which rewrites file paths IN PLACE; the shared
+    normalizer returns its argument untouched when there is nothing to rewrite,
+    which would otherwise expose the caller's own IR to that mutation."""
+    from . import attest  # noqa: PLC0415
+
+    return attest.path_normalized_ir(copy.deepcopy(ir))
 
 
 def _ir_text(norm_ir: dict) -> str:
@@ -199,23 +221,52 @@ def _emitter(backend: str):
     return _EMITTERS[backend]
 
 
-def _emit_files(backend: str, norm_ir: dict) -> dict[str, str] | None:
-    """Emit `backend` source from the IR as a {filename: text} map, or None when
-    the emitter is absent or refuses this IR. A single-string emitter is wrapped
-    under the backend's conventional filename; the wasm emitter already returns a
-    per-module map, whose keys become `<module>.wat`."""
+# The three-way emitter outcome (absent / refused / faulted) is decided the same
+# way by every entry point that loads an emitter, so it is decided in one place
+# (issue #1406). `_refusal_class` stays as the name this module's tests reach
+# for; `refusal_class` is the same function.
+_refusal_class = refusal_class
+
+
+def _emit_files(backend: str, norm_ir: dict) -> tuple[dict[str, str] | None, str | None]:
+    """Emit `backend` source from the IR, as `(files, refusal)`.
+
+    Three outcomes, kept apart on purpose (issue #1400):
+
+      * `({filename: text}, None)`, the emitter produced an artifact. A
+        single-string emitter is wrapped under the backend's conventional
+        filename; the wasm emitter already returns a per-module map, whose keys
+        become `<module>.wat`.
+      * `(None, None)`, the emitter is ABSENT here (no `backends/<backend>/
+        emit.py`, or a module with no `emit`). Nothing was decided about this
+        IR; the backend is omitted quietly and the bundle still succeeds.
+      * `(None, "<sentence>")`, the emitter REFUSED this IR, and the sentence is
+        the emitter's own diagnostic verbatim.
+
+    These used to collapse into one `None`, which is the whole of issue #1400:
+    a tier that said by name why it could not lower a construct was recorded as
+    if its toolchain were simply missing, and `revl bundle` exited 0.
+
+    A fault INSIDE an emitter is neither of those and is not caught here: it
+    propagates, exactly as it does through the `revl run` / `revl test` /
+    emitter-CLI boundaries (issue #1393). The previous blanket `except
+    Exception` swallowed a genuine emitter crash into the same silent omission,
+    so a bundle could be missing a tier because the emitter had a bug and say
+    nothing at all."""
     module = _emitter(backend)
     if module is None or not hasattr(module, "emit"):
-        return None
+        return None, None
+    refusal_class = _refusal_class(module)
+    refusals = (refusal_class,) if refusal_class is not None else ()
     try:
         emitted = module.emit(copy.deepcopy(norm_ir))
-    except Exception:  # noqa: BLE0001, an emitter that refuses this IR is a skip, not a crash
-        return None
+    except refusals as error:
+        return None, str(error)
     if isinstance(emitted, dict):
-        return {f"{name}.wat": text for name, text in sorted(emitted.items())}
+        return {f"{name}.wat": text for name, text in sorted(emitted.items())}, None
     if isinstance(emitted, str):
-        return {_SINGLE_FILE.get(backend, f"components.{backend}"): emitted}
-    return None
+        return {_SINGLE_FILE.get(backend, f"components.{backend}"): emitted}, None
+    return None, None
 
 
 # --------------------------------------------------------------- lock / policy
@@ -442,12 +493,21 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         json.dumps(policy, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
     # emitted/<backend>/, each backend's artifact, with recorded file hashes.
+    # An omitted backend is recorded under `skippedBackends` either way, but the
+    # reason is no longer one sentence covering two different facts: a refusal
+    # also lands in `refusedBackends`, carrying the emitter's own diagnostic, and
+    # that map is what makes `revl bundle` exit non-zero (issue #1400).
     backend_records: dict = {}
     skipped: dict = {}
+    refused: dict = {}
     for backend in backends:
-        files = _emit_files(backend, norm_ir)
+        files, refusal = _emit_files(backend, norm_ir)
         if files is None:
-            skipped[backend] = "emitter unavailable or refused this IR"
+            if refusal is None:
+                skipped[backend] = "emitter unavailable here"
+            else:
+                skipped[backend] = f"emitter refused this IR: {refusal}"
+                refused[backend] = refusal
             continue
         backend_dir = out_dir / "emitted" / backend
         backend_dir.mkdir()
@@ -513,6 +573,7 @@ def build_bundle(sources: list[str], out: str, *, backends=DEFAULT_BACKENDS,
         },
         "backends": backend_records,
         "skippedBackends": skipped,
+        "refusedBackends": refused,
         "policy": policy,
         "evidence": {"attestation": attested, "gauntlet": gauntlet_verdict},
         "topology": has_topology,
@@ -816,7 +877,16 @@ def _check_emitted(bundle: Path, norm_ir: dict, manifest: dict) -> list[Check]:
     checks: list[Check] = []
     for backend in sorted(records):
         label = f"emitted [{backend}]"
-        files = _emit_files(backend, norm_ir)
+        files, refusal = _emit_files(backend, norm_ir)
+        if refusal is not None:
+            # The bundle committed an artifact for this tier and the tier now
+            # refuses the rebuilt IR. That is a divergence in what the bundle
+            # claims, not an unverifiable tier, so it is a MISMATCH carrying the
+            # emitter's own sentence.
+            checks.append(Check(label, MISMATCH,
+                                f"{backend}: the emitter now refuses this IR, so the "
+                                f"committed artifact cannot be rebuilt: {refusal}"))
+            continue
         if files is None:
             checks.append(Check(label, UNVERIFIED,
                                 f"{backend} emitter is unavailable here; artifact not re-emitted"))
@@ -848,6 +918,41 @@ def _emitted_bytes_drift(bundle: Path, backend: str, files: dict[str, str]) -> s
         if not path.exists() or path.read_text(encoding="utf-8") != text:
             return name
     return None
+
+
+def _check_refused(norm_ir: dict, manifest: dict) -> list[Check]:
+    """Each RECORDED refusal is re-checked: that tier still refuses the rebuilt
+    IR, and refuses it with the same sentence.
+
+    A recorded refusal is part of the surface the bundle asserts, so it is
+    checked like every other part of it. Without this line the record would be
+    a comment: a bundle could claim a tier refused while that tier emits fine
+    today, and nothing would say so. Empty for a bundle that recorded no
+    refusal, which keeps a refusal-free report byte-identical to what it was."""
+    recorded = manifest.get("refusedBackends") or {}
+    checks: list[Check] = []
+    for backend in sorted(recorded):
+        label = f"refused [{backend}]"
+        was = str(recorded[backend])
+        files, refusal = _emit_files(backend, norm_ir)
+        if refusal is None and files is None:
+            checks.append(Check(
+                label, UNVERIFIED,
+                f"{backend} emitter is unavailable here; the recorded refusal "
+                "could not be re-checked"))
+        elif refusal is None:
+            checks.append(Check(
+                label, MISMATCH,
+                f"{backend} no longer refuses this IR; the recorded refusal is stale",
+                was, "the emitter produced an artifact"))
+        elif refusal != was:
+            checks.append(Check(
+                label, MISMATCH,
+                f"{backend} refuses this IR with a different diagnostic",
+                was, refusal))
+        else:
+            checks.append(Check(label, OK, f"{backend} still refuses: {was}"))
+    return checks
 
 
 def _check_backend_version(manifest: dict) -> Check:
@@ -1015,6 +1120,7 @@ def _verify_bundle_dir(path: str, *, env=None) -> "VerifyReport":
     report.checks.append(_check_lock(bundle, norm_ir))
     report.checks.append(_check_policy(bundle, norm_ir))
     report.checks.extend(_check_emitted(bundle, norm_ir, manifest))
+    report.checks.extend(_check_refused(norm_ir, manifest))
     report.checks.append(_check_backend_version(manifest))
     report.checks.append(_check_attestation(bundle, norm_ir, env))
     report.checks.append(_check_gauntlet(bundle, norm_ir))
@@ -1088,7 +1194,8 @@ def render(report: VerifyReport) -> str:
 
 def run_bundle(args) -> int:
     """`revl bundle <sources...> --out DIR`, assemble a reproducible bundle.
-    Exits 0 on success, 1 on a compile/draft refusal, 2 on a usage error."""
+    Exits 0 on success, 1 on a compile/draft refusal, 2 on a usage error, and
+    REFUSED_EXIT when the bundle was written but at least one tier refused it."""
     if not args.out:
         print("error: revl bundle needs --out DIR", file=sys.stderr)
         return 2
@@ -1102,8 +1209,8 @@ def run_bundle(args) -> int:
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
+    manifest = _read_json(Path(out) / RUNTIME_MANIFEST)
     if args.json:
-        manifest = _read_json(Path(out) / RUNTIME_MANIFEST)
         doc = {"bundle": out, "manifest": manifest}
         if packed is not None:
             doc["oneFile"] = packed
@@ -1112,6 +1219,24 @@ def run_bundle(args) -> int:
         print(f"wrote bundle {out}")
         if packed is not None:
             print(f"wrote one-file bundle {packed}")
+
+    # A refusal is reported on stderr in the emitter's own words, on every
+    # output mode: `--json` carries it inside the manifest, but a human reading
+    # a piped run would otherwise see nothing (issue #1400).
+    refused = manifest.get("refusedBackends") or {}
+    if refused:
+        # stdout is block-buffered when it is not a terminal, so without this the
+        # refusal reaches a log file ABOVE the `wrote bundle` line it qualifies.
+        sys.stdout.flush()
+    for backend in sorted(refused):
+        print(f"refused: the {backend} tier refused this composition, so the "
+              f"bundle carries no {backend} artifact:\n"
+              f"         {refused[backend]}", file=sys.stderr)
+    if refused:
+        names = ", ".join(sorted(refused))
+        print(f"bundle written WITHOUT {len(refused)} of {len(backends)} "
+              f"backend(s): {names}", file=sys.stderr)
+        return REFUSED_EXIT
     return 0
 
 

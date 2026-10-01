@@ -57,8 +57,8 @@ _BASE = (
     "    return\n"
     "}\n"
     "service Ops {\n"
-    "  emission fn stash(p: Str)\n"
-    "  emission fn shout(sink: Str, msg: Str)\n"
+    "  emission[fs] fn stash(p: Str)\n"
+    "  emission[announce] fn shout(sink: Str, msg: Str)\n"
     "}\n"
     "component Agent provides ops: Ops {\n"
     "  provide ops {\n"
@@ -71,7 +71,7 @@ _BASE = (
 # The untrusted per-turn source: composes ONLY the granted `ops` tool — a
 # witnessed fs mutation and an immediate emission. It declares no host code.
 _TURN_OK = (
-    "service Turn { emission fn run(p: Str, sink: Str) }\n"
+    "service Turn { emission[ops] fn run(p: Str, sink: Str) }\n"
     "component TurnComp requires ops: Ops provides turn: Turn {\n"
     "  provide turn {\n"
     '    fn run(p, sink) { emit ops.stash(p); emit ops.shout(sink, "from-turn") }\n'

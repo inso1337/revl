@@ -53,6 +53,28 @@ def _parse_type(name: str | None):
     return head, args
 
 
+def admits_json_null(type_name: str | None) -> bool:
+    """Does this surface type's JSON derivation accept a bare `null` document?
+
+    Exactly two surface shapes do: `Unit`, which renders as `{"type": "null"}`,
+    and any `Opt[_]`, which adds `null` alongside its inner rendering. A variant
+    never does at a validated boundary (every case is a tagged object, so a
+    nullary case is `{"tag": "Nil"}`, not `null`), a record renders as an object,
+    and a `List`/`Map` renders as an array/object.
+
+    This is asked of the SURFACE type, never of the derived schema, because a
+    JSON document carries ONE `null` and a derived schema carries ONE nullability
+    flag: by the time the nesting has been rendered, the thing that distinguishes
+    `Opt[Opt[T]]` from `Opt[T]` is already gone (issue #1263).
+    """
+    if not type_name:
+        return False
+    if type_name == "Unit":
+        return True
+    head, args = _parse_type(type_name)
+    return head == "Opt" and bool(args)
+
+
 def json_schema_for(type_name: str | None, types: dict | None = None,
                     *, validated: bool = False,
                     seen: frozenset = frozenset()) -> dict:
@@ -93,6 +115,17 @@ def json_schema_for(type_name: str | None, types: dict | None = None,
         return {"type": "array",
                 "items": json_schema_for(args[0], types, validated=validated, seen=seen)}
     if head == "Opt" and args:
+        # A NULL-AMBIGUOUS `Opt` has no JSON rendering at all (issue #1263).
+        # `{**inner, "nullable": True}` folds the outer layer into a flag on the
+        # inner schema, so when the inner type already accepts `null` the outer
+        # layer vanishes and `Opt[Opt[Str]]` derives the SAME dict as `Opt[Str]`.
+        # Renaming the flag does not help: JSON has one `null`, so no document
+        # can say which layer produced it. Degrade to the honest stub rather than
+        # hand back a schema that claims two distinct types are one. A `validated`
+        # boundary never reaches this line, having been refused by
+        # `fully_expressible` below.
+        if admits_json_null(args[0]):
+            return {"x-revlType": type_name}
         inner = json_schema_for(args[0], types, validated=validated, seen=seen)
         return {**inner, "nullable": True} if inner else {"nullable": True}
     if head == "Map" and len(args) == 2:
@@ -167,6 +200,12 @@ def fully_expressible(type_name: str | None, types: dict | None = None,
     - an **unknown nominal** type (a name `types` does not carry);
     - an **untagged `Result[T, E]`** (its derivation is an untagged `oneOf`,
       which cannot name a constructor and, for `T == E`, admits no valid value);
+    - a **null-ambiguous `Opt`** (`Opt[Unit]`, `Opt[Opt[U]]`, issue #1263): the
+      inner type already accepts `null`, and a JSON document carries one `null`,
+      so the outer layer has no document of its own. Both spellings derive the
+      same schema and a validator built on it accepts values for the wrong type;
+      a caller who needs to tell two absences apart declares a named variant that
+      tags each one;
     - a **`Map[K, V]` with `K != Str`** (the mapping drops `K`, so a validator
       cannot enforce the key type; JSON object keys are strings, so `Map[Str, V]`
       is expressible and any non-`Str`-key map is refused);
@@ -187,6 +226,11 @@ def fully_expressible(type_name: str | None, types: dict | None = None,
     if head == "List" and args:
         return fully_expressible(args[0], types, seen)
     if head == "Opt" and args:
+        # a NULL-AMBIGUOUS `Opt` (issue #1263): `Opt[Unit]`, `Opt[Opt[U]]`. Its
+        # inner type already accepts `null`, so the outer layer has no JSON
+        # document of its own and the derivation erases it.
+        if admits_json_null(args[0]):
+            return False
         return fully_expressible(args[0], types, seen)
     if head == "Map" and len(args) == 2:
         # JSON object keys are strings: only a `Str` key survives derivation.
@@ -227,6 +271,11 @@ def expressibility_reason(type_name: str | None, types: dict | None = None,
     if head == "List" and args:
         return expressibility_reason(args[0], types, seen)
     if head == "Opt" and args:
+        if admits_json_null(args[0]):
+            return (f"reaches `{type_name}`, whose inner type `{args[0]}` already "
+                    "accepts `null`, so the outer `Opt` has no JSON document of "
+                    "its own and both layers derive the same schema (declare a "
+                    "named variant that gives each absence a tag)")
         return expressibility_reason(args[0], types, seen)
     if head == "Map" and len(args) == 2:
         if args[0] != "Str":
@@ -299,9 +348,10 @@ def tools_from_ir(ir: dict, *, composition: str = "revl") -> list[dict]:
     tools: list[dict] = []
 
     for component in ir.get("components") or []:
+        provided = provided_methods(component)
         for key, service_name in (component.get("provides") or {}).items():
             service = services.get(service_name) or {}
-            bodies = _provide_methods(component, key)
+            bodies = provided.get(key) or {}
             for op_name, op in (service.get("methods") or {}).items():
                 observed = _method_effects(bodies.get(op_name) or [], component,
                                            services, externs, reach)
@@ -403,13 +453,20 @@ def _tool(composition: str, key: str, service_name: str, op_name: str, op: dict,
     }
 
 
-def _provide_methods(component: dict, key: str) -> dict[str, list]:
-    """The lowered method bodies a component installs at `key`."""
+def provided_methods(component: dict) -> dict[str, dict[str, list]]:
+    """The lowered method bodies a component installs, per provide key:
+    `{key: {method_name: body}}`. The first `provide` step for a key wins.
+
+    This is the one reader of the lowered `provide` step's shape.
+    `revl.shadow_runtime.declared_actions` takes its action names from it
+    rather than walking the same steps again."""
+    blocks: dict[str, dict[str, list]] = {}
     for step in component.get("body") or []:
-        if step.get("step") == "provide" and step.get("name") == key:
-            return {m.get("name"): m.get("body") or []
-                    for m in step.get("methods") or []}
-    return {}
+        if step.get("step") == "provide":
+            blocks.setdefault(step.get("name"), {
+                m.get("name"): m.get("body") or []
+                for m in step.get("methods") or []})
+    return blocks
 
 
 def _called_fns(node, found: set) -> None:
@@ -520,43 +577,271 @@ def _method_effects(body: list, component: dict, services: dict,
 
 
 # ---------------------------------------------------------------- MCP -> revl
+#
+# ONE classification serves two surfaces: `revl mcp import` renders it as revl
+# source, and `revl mcp proxy` (revl.mcp.proxy) loads the same rendering into a
+# live session and gates calls with it. The proxy never re-derives a class: a
+# runtime observation can only feed a tool name back in through `distrust`,
+# which removes a read-only claim before this function reads it.
 
-def import_tools(manifest: dict, *, service: str = "Imported",
-                 key: str = "imported", backend: str = "ts") -> str:
-    """Turn an MCP server's `tools/list` result into revl source: a service
-    declaration plus an extern-backed provider skeleton.
+EFFECT_PLAIN = "plain"
+EFFECT_EMISSION = "emission"
+EFFECT_WITNESSED = "witnessed"
 
-    Trust direction: an MCP annotation is the server author's assertion, and
-    revl has no way to check it, so **only** an explicit `readOnlyHint: true`
-    avoids `emission` — everything else (including an absent annotations
-    block) is classified irreversible and lands on the G8 audit surface.
+
+def parse_undo_specs(specs) -> dict[str, dict]:
+    """`TOOL=INVERSE` or `TOOL=INVERSE:result` (the CLI `--undo` spelling) ->
+    `{tool: {"tool": inverse, "with": "arguments" | "result"}}`.
+
+    `with` says what the inverse receives: the forward call's own arguments
+    (the default, the soft-delete/restore shape), or the forward call's
+    `structuredContent` object (`:result`, the "delete returns what it removed"
+    shape)."""
+    out: dict[str, dict] = {}
+    for spec in specs or []:
+        tool, sep, inverse = str(spec).partition("=")
+        mode = "arguments"
+        if inverse.endswith(":result"):
+            inverse, mode = inverse[:-len(":result")], "result"
+        elif inverse.endswith(":arguments"):
+            inverse = inverse[:-len(":arguments")]
+        if not sep or not tool or not inverse:
+            raise ValueError(f"--undo expects TOOL=INVERSE[:result], got {spec!r}")
+        if tool in out:
+            raise ValueError(f"--undo names {tool!r} twice")
+        out[tool] = {"tool": inverse, "with": mode}
+    return out
+
+
+def _read_only_contradiction(tool: dict, annotations: dict) -> str | None:
+    """Why a tool's OWN declaration contradicts its `readOnlyHint: true`, or None.
+
+    MCP defines `destructiveHint` as meaningful only when the tool is NOT
+    read-only, so a tool that sets both has declared an effect its read-only
+    claim denies. A revl-served upstream (`revl serve --mcp`) also carries the
+    checker's own classification under `x-revl`, and an `emission` there is a
+    declared crossing."""
+    if annotations.get("destructiveHint") is True:
+        return "it also declares `destructiveHint: true`"
+    provenance = tool.get("x-revl")
+    if isinstance(provenance, dict) and provenance.get("classification") == "emission":
+        return "its `x-revl` provenance classifies it `emission`"
+    return None
+
+
+def classify_imported_tools(manifest, *, undo: dict | None = None,
+                            distrust: dict | None = None,
+                            trust_read_only: bool = True) -> list[dict]:
+    """Classify each tool of an MCP `tools/list` result. The single source of
+    the effect class for both `revl mcp import` and `revl mcp proxy`.
+
+    Trust direction: an MCP annotation is the server author's assertion, so
+    **only** an explicit `readOnlyHint: true` avoids `emission`, and only while
+    nothing contradicts it:
+
+      * `plain`: the tool claims `readOnlyHint: true` and neither its own
+        declaration, the operator, nor an observation (`distrust`) contradicts
+        the claim. The claim is still UNCHECKED: revl cannot see into the
+        upstream, so `readOnlyClaim` says `unchecked`, never `verified`.
+      * `witnessed`: the operator declared an undo for it (`undo`, from
+        `--undo TOOL=INVERSE`). A declared undo is the operator's statement
+        that the tool mutates and names the tool that reverts it.
+      * `emission`: everything else, including an absent or malformed
+        annotations block. This is the most restrictive class (class (c)
+        under the approval policy: a human yes per call).
+
+    `distrust` maps a tool name to the reason its read-only claim is no longer
+    believed (the proxy's runtime observation). Either way the claim is removed
+    and the tool falls to `emission` by the rule above, not by a second rule.
+
+    `trust_read_only` decides what an UNCHECKED claim is worth. `True` (the
+    default, and what `revl mcp import` uses) admits it as `plain`: the
+    importer writes source for a human to review before anything runs.
+    `False` (the default of `revl mcp proxy`, which enforces at run time with
+    no review step) holds it at `emission` and sets `gated` to say why; the
+    claim itself stays `unchecked`, since nothing refuted it either.
+
+    Each entry: `name`, `op` (a unique revl identifier), `effect`,
+    `readOnlyClaim` (`none` / `unchecked` / `contradicted` / `observed`),
+    `gated` (why an uncontradicted claim is still gated, or None), `reasons`,
+    `unclassifiable` (a reason or None), `undo`, `params`, `doc`, `callable`
+    (False when the tool has no usable name).
     """
     tools = manifest.get("tools") if isinstance(manifest, dict) else manifest
     tools = tools or []
+    undo = dict(undo or {})
+    distrust = dict(distrust or {})
 
+    names = [t.get("name") if isinstance(t, dict) else None for t in tools]
+    known = {n for n in names if isinstance(n, str) and n}
+    for tool_name, spec in undo.items():
+        if tool_name not in known:
+            raise ValueError(f"--undo names {tool_name!r}, which the server does not list")
+        if spec["tool"] not in known:
+            raise ValueError(f"--undo {tool_name}={spec['tool']}: the server does not "
+                             f"list {spec['tool']!r}")
+        if spec["tool"] == tool_name:
+            raise ValueError(f"--undo {tool_name}={tool_name}: a tool cannot undo itself")
+    inverses = {spec["tool"]: name for name, spec in undo.items()}
+
+    taken: set[str] = set()
+    out: list[dict] = []
+    for index, tool in enumerate(tools):
+        if not isinstance(tool, dict):
+            tool = {}
+        raw_name = tool.get("name")
+        usable = isinstance(raw_name, str) and bool(raw_name)
+        name_text = raw_name if usable else ""
+        op = _unique_ident(_safe_ident(name_text.rsplit(".", 1)[-1] or name_text), taken)
+
+        reasons: list[str] = []
+        unclassifiable = None
+        annotations = tool.get("annotations")
+        if annotations is None:
+            annotations = {}
+        elif not isinstance(annotations, dict):
+            unclassifiable = "its `annotations` is not an object"
+            annotations = {}
+        hint = annotations.get("readOnlyHint")
+        if hint is not None and not isinstance(hint, bool):
+            unclassifiable = f"its `readOnlyHint` is {json.dumps(hint)}, not a boolean"
+        if not usable:
+            unclassifiable = "it has no usable `name`"
+        elif names.count(raw_name) > 1:
+            unclassifiable = "the server lists more than one tool under this name"
+
+        claim = "unchecked" if hint is True else "none"
+        if claim == "unchecked":
+            contradiction = _read_only_contradiction(tool, annotations)
+            if contradiction is None and name_text in undo:
+                contradiction = "the operator declared an undo for it"
+            if contradiction is None and name_text in inverses:
+                contradiction = (f"the operator named it as the undo of "
+                                 f"{json.dumps(inverses[name_text])}, so it mutates")
+            if contradiction is not None:
+                claim = "contradicted"
+                reasons.append(f"read-only claim contradicted: {contradiction}")
+            elif name_text in distrust:
+                claim = "observed"
+                reasons.append(f"read-only claim contradicted by observed behaviour: "
+                               f"{distrust[name_text]}")
+
+        gated = None
+        if claim == "unchecked" and not trust_read_only and unclassifiable is None \
+                and name_text not in undo:
+            gated = "unchecked read-only claim"
+
+        spec = undo.get(name_text)
+        if unclassifiable is not None:
+            effect = EFFECT_EMISSION
+            reasons.append(f"unclassifiable ({unclassifiable}): held at the most "
+                           "restrictive class")
+            if spec is not None:
+                reasons.append("the declared undo is ignored for an unclassifiable tool")
+            spec = None
+        elif spec is not None:
+            effect = EFFECT_WITNESSED
+            reasons.append(f"the operator declared {json.dumps(spec['tool'])} as its undo")
+        elif gated is not None:
+            effect = EFFECT_EMISSION
+            reasons.append("gated: unchecked read-only claim. It claims "
+                           "`readOnlyHint: true` and revl cannot check the claim, "
+                           "so it is not trusted")
+        elif claim == "unchecked":
+            effect = EFFECT_PLAIN
+            reasons.append("claims `readOnlyHint: true`; revl cannot check the claim")
+        else:
+            effect = EFFECT_EMISSION
+            if claim == "none":
+                reasons.append("no read-only claim")
+
+        doc = (tool.get("description") or "") if isinstance(tool.get("description"), str) else ""
+        doc_lines = doc.strip().splitlines()
+        schema = tool.get("inputSchema")
+        out.append({
+            "name": raw_name if usable else None,
+            "index": index,
+            "op": op,
+            "effect": effect,
+            "readOnlyClaim": claim,
+            "gated": gated,
+            "reasons": reasons,
+            "unclassifiable": unclassifiable,
+            "undo": dict(spec) if spec is not None else None,
+            "params": _params_from_schema(schema if isinstance(schema, dict) else {}),
+            "doc": doc_lines[0] if doc_lines else "",
+            "callable": usable,
+        })
+    return out
+
+
+def _default_host_body(tool: dict, role: str) -> str:
+    if role == "settled":
+        return "/* the undo is terminal: nothing is left to release */"
+    if role == "undo":
+        return (f"/* undo MCP tool {json.dumps(tool['name'] or '')} by calling "
+                f"{json.dumps(tool['undo']['tool'])} with its {tool['undo']['with']} */")
+    return f"/* call MCP tool {json.dumps(tool['name'] or '')} */"
+
+
+def render_imported_source(tools: list[dict], *, service: str = "Imported",
+                           key: str = "imported", backend: str = "ts",
+                           host_body=None, signature: str = "typed") -> str:
+    """Render classified tools (`classify_imported_tools`) as revl source.
+
+    `signature="typed"` maps each tool's input schema to typed parameters (the
+    `revl mcp import` output). `signature="json"` gives every operation one
+    `arguments: Str` parameter carrying the JSON arguments object verbatim, so
+    a proxy forwards what the client sent without a lossy round trip through
+    revl types. `host_body(tool, role)` supplies the text of each host block
+    (`role` is `call`, `undo` or `settled`); the default is a comment stub."""
+    host_body = host_body or _default_host_body
     ops, methods, externs = [], [], []
+    settled_rendered = False
     for tool in tools:
-        raw_name = tool.get("name") or ""
-        op = _safe_ident(raw_name.rsplit(".", 1)[-1] or raw_name)
-        annotations = tool.get("annotations") or {}
-        read_only = annotations.get("readOnlyHint") is True
-        params = _params_from_schema(tool.get("inputSchema") or {})
-        returns = "Str"  # MCP content is text unless the server says otherwise
+        op = tool["op"]
+        effect = tool["effect"]
+        if signature == "json":
+            params = [("arguments", "Str")]
+        else:
+            params = tool["params"]
         sig = ", ".join(f"{p}: {t}" for p, t in params)
-
-        doc = (tool.get("description") or "").strip().splitlines()
-        if doc:
-            ops.append(f"  // {doc[0][:78]}")
-        if not read_only:
-            ops.append("  // imported without a verifiable read-only claim")
-        ops.append(f"  {'' if read_only else 'emission '}fn {op}({sig}) -> {returns}")
-
-        extern_name = f"mcp_{op}"
-        externs.append(
-            f"extern {'pure' if read_only else 'emission'} fn {extern_name}({sig}) -> {returns}\n"
-            f"  = @{backend} {{ /* call MCP tool {json.dumps(raw_name)} */ }}"
-        )
         call_args = ", ".join(p for p, _ in params)
+        extern_name = f"mcp_{op}"
+
+        if tool["doc"]:
+            ops.append(f"  // {tool['doc'][:78]}")
+        for reason in tool["reasons"]:
+            # every upstream name inside a reason is JSON-quoted, so no reason
+            # carries a line break out of its comment
+            if reason.startswith(("read-only claim", "unclassifiable", "gated")):
+                ops.append(f"  // {' '.join(reason.splitlines())}")
+        if effect == EFFECT_WITNESSED:
+            ops.append(f"  // imported with a declared undo: "
+                       f"{json.dumps(tool['undo']['tool'])} reverts it on abort")
+            ops.append(f"  emission fn {op}({sig})")
+            if not settled_rendered:
+                externs.append("extern pure fn settled_mcp() -> Unit\n"
+                               f"  = @{backend} {{ {host_body(tool, 'settled')} }}")
+                settled_rendered = True
+            externs.append(
+                f"extern acquire fn undo_{extern_name}(w: Str) -> Unit undo settled_mcp()\n"
+                f"  = @{backend} {{ {host_body(tool, 'undo')} }}")
+            externs.append(
+                f"extern witnessed fn {extern_name}({sig}) -> Result[Str, Str] "
+                f"undo undo_{extern_name}(result)\n"
+                f"  = @{backend} {{ {host_body(tool, 'call')} }}")
+            methods.append(f"    fn {op}({call_args}) {{ effect {extern_name}({call_args}) }}")
+            continue
+
+        plain = effect == EFFECT_PLAIN
+        if not plain:
+            ops.append("  // imported without a verifiable read-only claim")
+        ops.append(f"  {'' if plain else 'emission '}fn {op}({sig}) -> Str")
+        externs.append(
+            f"extern {'pure' if plain else 'emission'} fn {extern_name}({sig}) -> Str\n"
+            f"  = @{backend} {{ {host_body(tool, 'call')} }}"
+        )
         methods.append(f"    fn {op}({call_args}) = {extern_name}({call_args})")
 
     header = (
@@ -577,15 +862,37 @@ def import_tools(manifest: dict, *, service: str = "Imported",
     )
 
 
+def import_tools(manifest: dict, *, service: str = "Imported",
+                 key: str = "imported", backend: str = "ts",
+                 undo: dict | None = None) -> str:
+    """Turn an MCP server's `tools/list` result into revl source: a service
+    declaration plus an extern-backed provider skeleton.
+
+    Trust direction: an MCP annotation is the server author's assertion, and
+    revl has no way to check it, so **only** an explicit, uncontradicted
+    `readOnlyHint: true` avoids `emission`. Everything else (including an
+    absent annotations block) is classified irreversible and lands on the G8
+    audit surface. `undo` (`parse_undo_specs`) makes a tool `witnessed`: its
+    declared inverse runs on abort. See `classify_imported_tools`.
+    """
+    return render_imported_source(
+        classify_imported_tools(manifest, undo=undo),
+        service=service, key=key, backend=backend)
+
+
 def _params_from_schema(schema: dict) -> list[tuple[str, str]]:
     properties = schema.get("properties") or {}
-    required = set(schema.get("required") or [])
+    if not isinstance(properties, dict):
+        properties = {}
+    required = schema.get("required") or []
+    required = set(required) if isinstance(required, list) else set()
     params = []
+    taken: set[str] = set()
     for name, spec in properties.items():
-        surface = _surface_type(spec)
+        surface = _surface_type(spec if isinstance(spec, dict) else {})
         if name not in required:
             surface = f"Opt[{surface}]"
-        params.append((_safe_ident(name), surface))
+        params.append((_unique_ident(_safe_ident(name), taken), surface))
     return params
 
 
@@ -600,12 +907,29 @@ def _surface_type(spec: dict) -> str:
     if json_type == "boolean":
         return "Bool"
     if json_type == "array":
-        return f"List[{_surface_type(spec.get('items') or {})}]"
+        items = spec.get("items")
+        return f"List[{_surface_type(items if isinstance(items, dict) else {})}]"
     return "Str"  # unknown/object payloads arrive as text
 
 
 def _safe_ident(name: str) -> str:
+    from ..lexer import KEYWORDS  # noqa: PLC0415 - one keyword list, the lexer's
+
     cleaned = re.sub(r"[^A-Za-z0-9_]", "_", name or "tool")
     if not _IDENT.match(cleaned):
         cleaned = f"t_{cleaned}"
+    if cleaned in KEYWORDS:
+        # a reserved word cannot name a method or parameter (`type` is a common
+        # MCP parameter name); the suffix keeps it readable and unique
+        cleaned = f"{cleaned}_"
     return cleaned
+
+
+def _unique_ident(ident: str, taken: set) -> str:
+    """`ident`, or `ident_2`, `ident_3`... when two names sanitize alike."""
+    candidate, n = ident, 1
+    while candidate in taken:
+        n += 1
+        candidate = f"{ident}_{n}"
+    taken.add(candidate)
+    return candidate

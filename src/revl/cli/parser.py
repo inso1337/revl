@@ -246,7 +246,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="a TOML/JSON placement map: also print the item-411 sandbox "
              "envelope per sandboxed process: the fs/net grant, the effective "
              "reach of each seam-served key, and the externs the [sandbox.needs] "
-             "table vouches (claimed, unverified). Human output only.")
+             "table vouches (claimed, unverified); and each model role's "
+             "binding per host with the model bindings digest (item 515). "
+             "Human output only.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
@@ -959,7 +961,54 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_import.add_argument("--key", default="imported", help="provision key")
     mcp_import.add_argument("--backend", default="ts", choices=("ts", "py"),
                             help="host block backend for the generated externs")
+    mcp_import.add_argument("--undo", action="append", default=[],
+                            metavar="TOOL=INVERSE[:result]",
+                            help="declare INVERSE as the tool that reverts TOOL, "
+                                 "making TOOL `witnessed` (repeatable). INVERSE "
+                                 "receives TOOL's arguments, or with `:result` its "
+                                 "structuredContent. Your assertion, not the server's")
     mcp_import.add_argument("-o", "--output", default=None, help="output path (default: stdout)")
+    # `revl mcp proxy` (issue #1463, docs/mcp-proxy.md): gate an existing MCP
+    # server with the surface `revl mcp import` derives, no .rvl written.
+    mcp_proxy = mcp_sub.add_parser(
+        "proxy", help="gate an existing MCP server: classify its tools as `revl mcp "
+                      "import` does and enforce approval, WAL and undo at call time")
+    mcp_proxy.add_argument("upstream", nargs=argparse.REMAINDER,
+                           metavar="-- COMMAND [ARG ...]",
+                           help="the upstream MCP server to spawn, spoken to over "
+                                "its stdio")
+    mcp_proxy.add_argument("--undo", action="append", default=[],
+                           metavar="TOOL=INVERSE[:result]",
+                           help="declare INVERSE as the upstream tool that reverts "
+                                "TOOL (repeatable): TOOL becomes `witnessed`, runs "
+                                "without a prompt, and is reverted on abort. INVERSE "
+                                "receives TOOL's arguments, or with `:result` its "
+                                "structuredContent")
+    mcp_proxy.add_argument("--trust-read-only-hints", action="store_true",
+                           help="admit a tool whose uncontradicted `readOnlyHint: "
+                                "true` revl cannot check, without a prompt. By "
+                                "default the proxy does not trust an unchecked "
+                                "claim and gates the tool like any emission")
+    mcp_proxy.add_argument("--upstream-timeout", type=float, default=120.0,
+                           metavar="SECONDS",
+                           help="how long to wait for one upstream answer "
+                                "(default: 120)")
+    mcp_proxy.add_argument("--wal", default=None, metavar="PATH",
+                           help="the session write-ahead log (default: the "
+                                "per-user state directory)")
+    mcp_proxy.add_argument("--operator-profile", default=None, metavar="PROFILE",
+                           help="an operator profile (item 55); grant `approve` "
+                                "only to the human, or the agent can answer its "
+                                "own tickets")
+    mcp_proxy.add_argument("--operator", default=None, metavar="TOKEN",
+                           help="which operator in the profile this session runs as")
+    mcp_proxy.add_argument("--policy", default=None, metavar="POLICY",
+                           help="a boundary-policy file (item 33) bound to the session")
+    mcp_proxy.add_argument("--approval-record-values", default="withheld",
+                           choices=("bound", "withheld"),
+                           help="whether an approved crossing's caller-supplied "
+                                "resource value is written to the durable approval "
+                                "log (default: withheld)")
 
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
@@ -1274,6 +1323,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--env", default=None,
                      help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
+    run.add_argument("--providers", default=None, metavar="FILE",
+                     help="JSON/TOML provider configuration binding each "
+                          "`model role` to a runtime adapter (OpenAI-compatible, "
+                          "Anthropic, Gemini). Checked before boot against the "
+                          "program's placement: an on_device role bound off the "
+                          "device, a crossing on an unbound or undeclared role, "
+                          "or a credential in the file refuses the run. "
+                          "Credentials come from the environment variables the "
+                          "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
                      help="boundary policy file (item 33). With --backend wasm it "
                           "enforces the item-289 least-authority chain (host "
@@ -1320,6 +1378,54 @@ def build_parser() -> argparse.ArgumentParser:
                           "with --backend rust/java/wasm: boot the tier's process "
                           "(cordis-rs / cordis4j on a JVM / cordis-wasm on wasmtime), "
                           "prove no residue, exit)")
+
+    run.add_argument(
+        "--pool", default=None, choices=["private"],
+        help="run the composition on a PRIVATE PEER POOL member instead of "
+             "this machine (item 524). The artifact is pinned by hash, the "
+             "peer re-hashes what it runs, and the result comes back with a "
+             "signed execution receipt that is checked before it is recorded "
+             "as delivered. `private` is the only value: a public or swarm "
+             "pool needs a different threat model and is absent rather than "
+             "unimplemented. Needs --pool-dir, --peer, --peer-addr, "
+             "--dispatch-identity and --attest-identity "
+             "(docs/design/550-private-peer-pool.md)")
+    run.add_argument("--pool-dir", default=None, metavar="DIR",
+                     help="with --pool private: the operator's pool directory "
+                          "(charter, roster, identities, delivery ledger)")
+    run.add_argument("--peer", default=None, metavar="ID",
+                     help="with --pool private: the admitted member to run on. "
+                          "A peer that is not in the roster is refused on "
+                          "`not-a-member`")
+    run.add_argument("--peer-addr", default=None, metavar="HOST:PORT",
+                     help="with --pool private: where that member's `revl pool "
+                          "serve` is listening. The address is how to REACH "
+                          "the peer; its identity is the key it signs with")
+    run.add_argument("--dispatch-identity", default=None, metavar="PATH",
+                     help="with --pool private: the operator's PRIVATE "
+                          "identity file that signs the task. The peer holds "
+                          "only its public half")
+    run.add_argument("--attest-identity", default=None, metavar="PATH",
+                     help="with --pool private: the PRIVATE identity file that "
+                          "attests the returned receipt. Its fingerprint must "
+                          "be in the charter's attest authority (`pool init "
+                          "--attest-identity`) or the receipt is checked and "
+                          "counts for nothing")
+    run.add_argument("--pool-runner", default="run-once-py",
+                     choices=["run-once-py", "test-py"],
+                     help="with --pool private: what the peer does with the "
+                          "artifact. `run-once-py` boots the composition and "
+                          "proves teardown leaves no residue (needs a "
+                          "cordis-py runtime ON THE PEER); `test-py` runs the "
+                          "artifact's own declared tests, which needs only the "
+                          "revl frontend. An unlisted runner is refused by the "
+                          "peer, never defaulted")
+    run.add_argument("--pool-timeout", type=float, default=300.0,
+                     metavar="SECONDS",
+                     help="with --pool private: how long to wait for the peer "
+                          "(default: 300). A timeout leaves the task "
+                          "OUTSTANDING in the ledger, because a task whose "
+                          "fate is unknown is neither delivered nor dropped")
 
     dev = sub.add_parser(
         "dev",
@@ -1375,6 +1481,15 @@ def build_parser() -> argparse.ArgumentParser:
                               "recover reports the classification per un-finalized "
                               "decision and changes nothing, matching `revl estop "
                               "--report`")
+    recover.add_argument("--model-only", action="store_true",
+                         help="accept a run against the in-memory model (issue "
+                              "#1477). recover has no real world binding yet, so "
+                              "every inverse, compensation and re-issue it "
+                              "reports is modelled, not performed, and when the "
+                              "model stood in for any call it exits 3 rather "
+                              "than claim reconciliation. With this "
+                              "flag the exit status follows the modelled "
+                              "residue instead (0 clean, 1 residue)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
     estop = sub.add_parser(
@@ -1539,6 +1654,18 @@ def build_parser() -> argparse.ArgumentParser:
         "--mode", default=None, choices=list(REPLAY_MODES),
         help="report readiness for one mode only, instead of all four")
     replay_cmd.add_argument(
+        "--evidence-key", metavar="PATH", default=None,
+        help="the key the run's model-decision evidence objects were sealed "
+             "with (roadmap item 517). With it, every sealed crossing on the "
+             "WAL is verified and its decision is reconstructed from the "
+             "record alone: the placement, what answered, how the prompt was "
+             "bound, the candidate set and the choice, the sampling "
+             "parameters and the policy in force. Without it a seal is "
+             "reported present and UNCHECKED and nothing is read out of it; a "
+             "seal that does not verify yields no reading at all. Falls back "
+             "to REVL_MODEL_EVIDENCE_KEY_FILE (a path) or "
+             "REVL_MODEL_EVIDENCE_KEY (the secret); never hardcoded")
+    replay_cmd.add_argument(
         "--under", metavar="POLICY", default=None,
         help="counterfactual incident replay (roadmap item 467): recompute this "
              "policy's reach rules over the crossings the WAL recorded and name "
@@ -1628,6 +1755,292 @@ def build_parser() -> argparse.ArgumentParser:
              "should declare (narrowed to the observed reach, never past a `*`). "
              "Printed, never applied: apply it and re-run the gate. Combine "
              "with --json for an agent-consumable patch document")
+
+    pool_cmd = sub.add_parser(
+        "pool",
+        help="stand up and operate a private peer pool (item 524): declare a "
+             "pool and its authority view, admit a peer that proves its "
+             "identity and artifact, read the roster, withdraw a peer "
+             "(docs/design/550-private-peer-pool.md)")
+    pool_sub = pool_cmd.add_subparsers(dest="pool_command", required=True)
+
+    pool_init = pool_sub.add_parser(
+        "init",
+        help="declare a pool: sign a charter naming its ceiling, its entry "
+             "tier, the artifacts it admits and who may admit, revoke and "
+             "attest")
+    pool_init.add_argument("--dir", required=True, metavar="DIR",
+                           help="the pool directory to write charter.json and "
+                                "roster.json into")
+    pool_init.add_argument("--pool-id", required=True, metavar="ID",
+                           help="the pool's name. A peer pins the charter by "
+                                "DIGEST, not by this, so renaming a pool does "
+                                "not let old terms be reused")
+    pool_init.add_argument(
+        "--ceiling", action="append", metavar="CAP",
+        help="the MOST authority this pool will ever delegate to any member at "
+             "any tier, in the capability grammar. Repeatable. Every tier "
+             "grant is diffed against it")
+    pool_init.add_argument(
+        "--entry-caps", action="append", metavar="CAP",
+        help="the grant the entry tier hands a newly admitted peer. Repeatable. "
+             "Must be covered by --ceiling or the pool refuses to admit anyone")
+    pool_init.add_argument(
+        "--artifact", action="append", metavar="DIGEST",
+        help="an artifact digest this pool admits. Repeatable. A join pins one; "
+             "a digest not listed here is refused")
+    pool_init.add_argument(
+        "--trust-floor", default="verified",
+        choices=["verified", "attested", "local", "trusted"],
+        help="the minimum attested trust level a joining peer must clear "
+             "(default: verified)")
+    pool_init.add_argument("--key", metavar="PATH",
+                           help="the operator signing key (falls back to "
+                                "REVL_ATTEST_KEY_FILE / REVL_ATTEST_KEY)")
+    pool_init.add_argument(
+        "--identity", default="asymmetric",
+        choices=["asymmetric", "shared-key", "mixed"],
+        help="which identity backing this pool admits (default: asymmetric). "
+             "`asymmetric` means every peer proves itself with a key pair, so "
+             "a compromised operator key cannot forge a peer's join. "
+             "`shared-key` is the original MAC backing. `mixed` admits both "
+             "during a migration, and `pool status` then names the members "
+             "still on the weaker one")
+    pool_init.add_argument(
+        "--revoke-identity", action="append", metavar="PATH",
+        help="a public identity file whose fingerprint may also revoke. "
+             "Repeatable. Give this when withdrawals should be signed with a "
+             "key pair, so a third party can check who removed whom")
+    pool_init.add_argument(
+        "--attest-identity", action="append", metavar="PATH",
+        help="a public identity file whose fingerprint may attest an "
+             "execution receipt. Repeatable. An execution receipt is an "
+             "ASYMMETRIC record, so without at least one of these no receipt "
+             "a peer signs can ever count as evidence and no member can rise "
+             "above the entry tier")
+
+    pool_keygen = pool_sub.add_parser(
+        "keygen",
+        help="the PEER side: draw a key pair on this machine. The private half "
+             "is written 0600 and never leaves; the public half is what the "
+             "operator pins")
+    pool_keygen.add_argument("--peer-id", required=True, metavar="ID",
+                             help="this peer's stable identity")
+    pool_keygen.add_argument("--out", required=True, metavar="PATH",
+                             help="where to write the PRIVATE half. Treat this "
+                                  "file as the identity itself: anyone holding "
+                                  "it can sign as this peer")
+    pool_keygen.add_argument("--public", required=True, metavar="PATH",
+                             help="where to write the public half, the file "
+                                  "handed to the operator out of band")
+
+    pool_register = pool_sub.add_parser(
+        "register",
+        help="pin a peer's public key. The only way a key enters the pool's "
+             "directory: a join request cannot introduce the key it is checked "
+             "under")
+    pool_register.add_argument("--dir", required=True, metavar="DIR",
+                               help="the pool directory")
+    pool_register.add_argument("--public", required=True, metavar="PATH",
+                               help="the peer's public identity file. Check "
+                                    "its fingerprint against what the peer "
+                                    "told you over a second channel before "
+                                    "pinning it")
+
+    pool_rotate = pool_sub.add_parser(
+        "rotate",
+        help="replace a peer's active key. The old key stays in the directory "
+             "and keeps verifying what it signed; it authorises nothing from "
+             "the rotation onward")
+    pool_rotate.add_argument("--dir", required=True, metavar="DIR",
+                             help="the pool directory")
+    pool_rotate.add_argument("--public", required=True, metavar="PATH",
+                             help="the peer's NEW public identity file")
+    pool_rotate.add_argument("--reason", default="rotation", metavar="TEXT",
+                             help="why, recorded against the superseded key")
+
+    pool_revoke_key = pool_sub.add_parser(
+        "revoke-key",
+        help="withdraw a key's authority. It keeps verifying, so the records "
+             "it signed stay checkable by anyone holding the public half")
+    pool_revoke_key.add_argument("--dir", required=True, metavar="DIR",
+                                 help="the pool directory")
+    pool_revoke_key.add_argument("--peer-id", required=True, metavar="ID",
+                                 help="the peer whose key is revoked")
+    pool_revoke_key.add_argument("--key-id", required=True, metavar="FP",
+                                 help="the key fingerprint to revoke")
+    pool_revoke_key.add_argument("--reason", required=True, metavar="TEXT",
+                                 help="why, recorded against the key")
+
+    pool_request = pool_sub.add_parser(
+        "request",
+        help="the PEER side: sign a join request against a charter you were "
+             "given, carrying your signed peer offer and the artifact digest "
+             "you will run")
+    pool_request.add_argument("--charter", required=True, metavar="PATH",
+                              help="the pool's signed charter.json. The request "
+                                   "pins its DIGEST, so a charter re-signed "
+                                   "with different terms invalidates it")
+    pool_request.add_argument("--peer-id", required=True, metavar="ID",
+                              help="this peer's stable identity")
+    pool_request.add_argument("--artifact", required=True, metavar="DIGEST",
+                              help="the candidate artifact this peer will run")
+    pool_request.add_argument("--out", required=True, metavar="PATH",
+                              help="where to write the signed join request")
+    pool_request.add_argument("--ceiling", action="append", metavar="CAP",
+                              help="the MOST authority this peer will accept. "
+                                   "Repeatable. A pool tier grant not covered "
+                                   "by it is refused")
+    pool_request.add_argument("--trust", default="verified",
+                              choices=["verified", "attested", "local",
+                                       "trusted"],
+                              help="the trust level this peer attests "
+                                   "(default: verified)")
+    pool_request.add_argument("--region", default="", metavar="NAME",
+                              help="the placement region facet this peer "
+                                   "attests")
+    pool_request.add_argument("--hardware", default="", metavar="NAME",
+                              help="the hardware facet this peer attests")
+    pool_request.add_argument("--key", metavar="PATH",
+                              help="this peer's SHARED key, the one exchanged "
+                                   "with the operator out of band. Used only "
+                                   "when --identity-key is not given")
+    pool_request.add_argument("--identity-key", metavar="PATH",
+                              help="this peer's private identity file from "
+                                   "`pool keygen`. The join and the offer are "
+                                   "both signed with it, and the result is "
+                                   "verifiable by any holder of the public "
+                                   "half rather than only by the operator")
+
+    pool_join = pool_sub.add_parser(
+        "join",
+        help="decide a peer's signed join request against the charter. Prints "
+             "the receipt and exits 1 on a refusal, naming the link it refused "
+             "on")
+    pool_join.add_argument("--dir", required=True, metavar="DIR",
+                           help="the pool directory")
+    pool_join.add_argument("--join", required=True, metavar="PATH",
+                           help="the peer's signed join request (JSON)")
+    pool_join.add_argument("--peer-key", metavar="PATH",
+                           help="the SHARED key exchanged with this peer out "
+                                "of band. Needed only for a legacy shared-key "
+                                "join; a peer with a pinned public key is "
+                                "verified against that and a shared-key join "
+                                "from it is refused")
+    pool_join.add_argument("--key", metavar="PATH",
+                           help="the operator signing key; its fingerprint must "
+                                "be in the charter's admit authority")
+
+    pool_status = pool_sub.add_parser(
+        "status",
+        help="the operator view: members, tiers, what each holds, the effect "
+             "class each tier admits, and who may admit, revoke and attest")
+    pool_status.add_argument("--dir", required=True, metavar="DIR",
+                             help="the pool directory")
+    pool_status.add_argument("--json", action="store_true",
+                             help="the charter and the full roster, including "
+                                  "the append-only event ledger, and the "
+                                  "health record")
+    pool_status.add_argument(
+        "--require-live", type=float, default=None, metavar="SECONDS",
+        help="exit 1, naming them, if any member was not verified live "
+             "within SECONDS (by `pool probe` or a delivered task). A health "
+             "check: it withdraws nobody")
+
+    pool_probe = pool_sub.add_parser(
+        "probe",
+        help="ask members to prove they are there: send a signed probe, "
+             "verify the signed heartbeat under the member's pinned key, and "
+             "record the answer in health.json. Changes no authority")
+    pool_probe.add_argument("--dir", required=True, metavar="DIR",
+                            help="the pool directory")
+    pool_probe.add_argument("--peer", action="append", metavar="ID",
+                            help="a member to probe. Repeatable. Default: "
+                                 "every member")
+    pool_probe.add_argument("--peer-addr", default=None, metavar="HOST:PORT",
+                            help="where that member's `pool serve` listens. "
+                                 "Needs exactly one --peer. Without it, the "
+                                 "address of the member's last verified "
+                                 "contact is used")
+    pool_probe.add_argument("--dispatch-identity", required=True,
+                            metavar="PATH",
+                            help="the operator's PRIVATE identity file, the "
+                                 "one tasks are signed with. The peer refuses "
+                                 "a probe that does not verify under the "
+                                 "operator key it pinned")
+    pool_probe.add_argument("--timeout", type=float, default=10.0,
+                            metavar="SECONDS",
+                            help="how long to wait for each member "
+                                 "(default: 10)")
+    pool_probe.add_argument("--json", action="store_true",
+                            help="every probe outcome as JSON")
+
+    pool_withdraw = pool_sub.add_parser(
+        "withdraw",
+        help="remove a peer and report, in three disjoint sets, what that "
+             "revokes, what it retains and what it orphans")
+    pool_withdraw.add_argument("--dir", required=True, metavar="DIR",
+                               help="the pool directory")
+    pool_withdraw.add_argument("--peer", required=True, metavar="ID",
+                               help="the peer to withdraw")
+    pool_withdraw.add_argument("--reason", default="operator withdrawal",
+                               metavar="TEXT",
+                               help="why, recorded in the event ledger")
+    pool_withdraw.add_argument("--key", metavar="PATH",
+                               help="the operator signing key; its fingerprint "
+                                    "must be in the charter's revoke authority")
+    pool_withdraw.add_argument(
+        "--identity-key", metavar="PATH",
+        help="an operator private identity file. The withdrawal receipt is "
+             "then signed with it, so any holder of the matching public key "
+             "can check who removed whom. Its fingerprint must be in the "
+             "charter's revoke authority (see `pool init --revoke-identity`)")
+
+    pool_serve = pool_sub.add_parser(
+        "serve",
+        help="the PEER side: listen for signed tasks, run the artifact the "
+             "task pins BY HASH, and answer with a signed execution receipt. "
+             "Holds no secret that could admit anybody")
+    pool_serve.add_argument("--charter", required=True, metavar="PATH",
+                            help="the charter this peer joined, as it was "
+                                 "handed to it. The task must pin its digest")
+    pool_serve.add_argument("--identity-key", required=True, metavar="PATH",
+                            help="this peer's PRIVATE identity file "
+                                 "(`pool keygen --out`). It signs the receipt "
+                                 "and names the peer the task must address")
+    pool_serve.add_argument("--operator-public", required=True, metavar="PATH",
+                            help="the operator's PUBLIC identity file, pinned "
+                                 "out of band. A task that does not verify "
+                                 "under it is refused on `task-signature`")
+    pool_serve.add_argument("--host", default="127.0.0.1", metavar="HOST",
+                            help="bind address (default: loopback)")
+    pool_serve.add_argument("--port", type=int, default=0, metavar="PORT",
+                            help="bind port; 0 asks the OS for a free one and "
+                                 "the chosen port is printed")
+    pool_serve.add_argument(
+        "--allow-remote", action="store_true",
+        help="permit a non-loopback bind. The channel has NO transport "
+             "security: every record on it is signed, so nothing can be "
+             "forged undetected, and nothing on it is secret — the artifact "
+             "source crosses in the clear")
+    pool_serve.add_argument("--workdir", default=None, metavar="DIR",
+                            help="where artifacts are written and run "
+                                 "(default: a fresh temporary directory that "
+                                 "is removed on exit)")
+    pool_serve.add_argument("--timeout", type=float, default=300.0,
+                            metavar="SECONDS",
+                            help="how long one artifact may run (default: 300)")
+    pool_serve.add_argument("--once", action="store_true",
+                            help="serve one task and exit")
+
+    pool_ledger = pool_sub.add_parser(
+        "ledger",
+        help="the delivery ledger: every task dispatched, its state, and the "
+             "append-only event log including every refused second delivery")
+    pool_ledger.add_argument("--dir", required=True, metavar="DIR",
+                             help="the pool directory")
+    pool_ledger.add_argument("--json", action="store_true",
+                             help="the whole ledger as JSON")
 
     attest_cmd = sub.add_parser(
         "attest",
@@ -1788,8 +2201,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--backend", action="append", default=[], metavar="BACKEND",
         choices=list(BUNDLE_BACKENDS),
         help="a backend to emit into the bundle; repeatable. Omit to emit every "
-             f"backend ({', '.join(BUNDLE_BACKENDS)}); an emitter that refuses "
-             "this IR is recorded as skipped, not a failure")
+             f"backend ({', '.join(BUNDLE_BACKENDS)}). An emitter that is absent "
+             "here is omitted quietly (exit 0); an emitter that REFUSES this IR "
+             "is recorded under refusedBackends with its own diagnostic, printed, "
+             "and exits 4")
     bundle_cmd.add_argument(
         "--topology", default=None, metavar="PLACEMENT",
         help="a placement/topology map (TOML or JSON) to carry in the bundle as "

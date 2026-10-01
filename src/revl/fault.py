@@ -37,10 +37,12 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 import sys
 import types
 
-from ._paths import backends_root
+from ._paths import backends_root, python_backend_emitter
+from .refusal import is_refusal
 
 BACKENDS = backends_root()
 
@@ -499,15 +501,33 @@ def _load_py_tier():
     """Import the cordis-py reference tier: ``(emit, runtime, Context,
     FiberState)``.  Raises ``ModuleNotFoundError`` when the runtime is absent —
     the caller decides whether that is a skip or an error."""
-    backend_dir = BACKENDS / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415 — backend import after path setup
+    emit = python_backend_emitter()
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
 
     return emit, runtime_mod, Context, FiberState
+
+
+def _driver_failure(emit, error: BaseException, driver: str) -> str:
+    """The one sentence a driver prints for a failure it caught.
+
+    An emitter REFUSAL is an ANSWER and is named as one, carrying the tier's own
+    diagnostic. The py emitter refuses a document it cannot lower rather than
+    emitting less than it was given (issue #1382 and the #1381 family), and
+    reporting that as "the prop-test driver raised EmitError: ..." under a "1
+    broke" summary claims the property was checked and found false when it was
+    never evaluated (issue #1406). Anything else IS a driver crash and keeps its
+    exception type in the text, which is what tells a reader it is a bug rather
+    than a tier limit.
+
+    `is_refusal` reads the class off the emitter MODULE this run was handed:
+    `EmitError` is defined inside `backends/python/emit.py`, inherits from
+    `ValueError`, and two loads of that file give two unrelated classes.
+    """
+    if is_refusal(emit, error):
+        return f"the py emitter refused this document: {error}"
+    return f"the {driver} driver raised {type(error).__name__}: {error}"
 
 
 def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
@@ -528,8 +548,8 @@ def run_fault_units(ir: dict, units: list, out=None) -> tuple[int, int]:
             outcome = asyncio.run(_drive(ir, unit, emit, runtime_mod, Context, FiberState))
         except Exception as error:  # noqa: BLE001 — a driver crash is a test failure
             failures += 1
-            printer(f"FAIL {unit['name']}: the fault-test driver raised "
-                    f"{type(error).__name__}: {error}")
+            printer(f"FAIL {unit['name']}: "
+                    + _driver_failure(emit, error, "fault-test"))
             continue
         problems = _judge(unit, outcome, FiberState)
         head = f"{unit['name']} [{unit['component']} dies at {where}]"
@@ -802,8 +822,7 @@ def run_sweep(ir: dict, out=None, only: str | None = None) -> tuple[int, dict]:
                                              Context, FiberState, exclude=excluded))
             except Exception as error:  # noqa: BLE001 — a driver crash is a failure
                 results.append((unit,
-                                [f"the fault-test driver raised "
-                                 f"{type(error).__name__}: {error}"], []))
+                                [_driver_failure(emit, error, "fault-test")], []))
                 continue
             results.append((unit, _judge(unit, outcome, FiberState),
                             _notes(outcome)))
@@ -911,6 +930,15 @@ def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
     or ``gap`` (the runner could not drive a faulting activation to a residue
     proof — a named capability gap, never a pass and never counted as a leak).
     """
+    code, output, crash = _run_once(runner, faulted_ir, config, files)
+    return _classify_once(code, output, crash)
+
+
+def _run_once(runner, faulted_ir: dict, config: dict, files) -> tuple:
+    """Run the `--once` runner with its output captured.  Returns ``(code,
+    output, crash)``; *crash* is the reason the runner raised, else ``None``.
+    The capture is what the verdict reads; :func:`_host_lines` recovers the
+    program's own output from it (issue #1614)."""
     import contextlib  # noqa: PLC0415
     import io  # noqa: PLC0415
 
@@ -919,9 +947,15 @@ def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
             code = runner(faulted_ir, config, files, once=True, interactive=False)
     except Exception as error:  # noqa: BLE001 — a runner crash is a capability gap, not a leak
-        return ("gap", f"the --once runner raised "
-                       f"{type(error).__name__}: {error}")
-    output = buffer.getvalue()
+        return (None, buffer.getvalue(),
+                f"the --once runner raised {type(error).__name__}: {error}")
+    return (code, buffer.getvalue(), None)
+
+
+def _classify_once(code, output: str, crash: str | None) -> tuple:
+    """The verdict over one captured `--once` run: see :func:`_once_verdict`."""
+    if crash is not None:
+        return ("gap", crash)
     if "RESIDUE-LEFT" in output:
         return ("residue", "the runner's teardown proof reported RESIDUE-LEFT")
     if code == 3:
@@ -930,6 +964,25 @@ def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
         return ("clean", "")
     return ("gap", _first_error_line(output)
             or f"the --once runner exited {code} without a residue proof")
+
+
+_LOAD_HEADER = "== load composition"
+_RUNNER_EPILOGUE = re.compile(r"^error: the \w+ composition ")
+
+
+def _host_lines(output: str) -> list:
+    """The composition's own output inside a captured `--once` run: every
+    non-empty line after the runner's ``== load composition`` header that is
+    not runner protocol (a ``[run]`` line) and not the runner's closing
+    ``error: the <tier> composition ...`` diagnostic.  Before the header is
+    the build, which the verdict already summarises (issue #1614)."""
+    lines = output.splitlines()
+    start = next((i + 1 for i, line in enumerate(lines)
+                  if line.startswith(_LOAD_HEADER)), len(lines))
+    return [line.rstrip() for line in lines[start:]
+            if line.strip()
+            and not line.lstrip().startswith("[run]")
+            and not _RUNNER_EPILOGUE.match(line)]
 
 
 def _first_error_line(output: str) -> str:
@@ -996,13 +1049,17 @@ def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
     points: list = []
     for unit in corpus:
         faulted = _prune_dependents(_inject(ir, unit), unit["component"])
-        kind, detail = _once_verdict(runner, faulted, config, files)
+        code, output, crash = _run_once(runner, faulted, config, files)
+        kind, detail = _classify_once(code, output, crash)
+        host = _host_lines(output)
         if kind == "clean":
             points.append({"where": unit["where"], "component": unit["component"],
-                           "status": "clean"})
+                           "status": "clean",
+                           **({"hostOutput": host} if host else {})})
         elif kind == "residue":
             points.append({"where": unit["where"], "component": unit["component"],
-                           "status": "residue", "detail": detail})
+                           "status": "residue", "detail": detail,
+                           **({"hostOutput": host} if host else {})})
             return {"tier": tier, "status": "failed", "points": points,
                     "reason": f"residue at {unit['where']}: {detail}"}
         elif kind == "toolchain":  # pragma: no cover — pre-checked above
@@ -1136,6 +1193,20 @@ def _cross_tier_dossier(ir: dict, records: list, cap: int | None) -> dict:
     }
 
 
+def _format_host_output(record: dict, printer) -> None:
+    """Replay what the program printed at each fault point on a captured tier,
+    labelled with the tier and the point, under that tier's line.  The py leg
+    runs in process uncaptured, so its host output already reached the
+    terminal and carries no ``hostOutput`` (issue #1614)."""
+    for point in record.get("points") or []:
+        host = point.get("hostOutput")
+        if not host:
+            continue
+        printer(f"        [{record['tier']}] host output at {point['where']}:")
+        for line in host:
+            printer(f"          {line}")
+
+
 def _format_cross_tier(dossier: dict, printer) -> None:
     """Human-readable rendering: one line per tier, then the agreement verdict."""
     printer("cross-tier fault sweep — the same faults on every runtime "
@@ -1155,6 +1226,7 @@ def _format_cross_tier(dossier: dict, printer) -> None:
             printer(f"  {tier:5} RESIDUE  — {record['reason']}")
         else:
             printer(f"  {tier:5} skipped  — {record['reason']}")
+        _format_host_output(record, printer)
     printer("")
     agreement = dossier["agreement"]
     if dossier["counts"]["disagreements"]:
@@ -1743,8 +1815,7 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
                 ok, detail = asyncio.run(_drive_roundtrip(
                     ir, component, configs, emit, runtime_mod, Context, FiberState))
             except Exception as error:  # noqa: BLE001 — a driver crash is a failure
-                ok, detail = False, (f"the round-trip driver raised "
-                                     f"{type(error).__name__}: {error}")
+                ok, detail = False, _driver_failure(emit, error, "round-trip")
             round_results.append((ok, detail, config))
             if not ok:
                 break  # a shrinking-free counterexample: report the first failing config
@@ -2254,11 +2325,7 @@ def _load_py_emitter():
     """Import the cordis-py backend *emitter only* (no cordis runtime): a prop
     test's body is a pure function, so it needs the emitter to lower+exec it but
     never a live ``Context``.  Returns the ``emit`` module."""
-    backend_dir = BACKENDS / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415 — backend import after path setup
-    return emit
+    return python_backend_emitter()
 
 
 def _prop_module(ir: dict, unit: dict, index: int, emit):
@@ -2472,9 +2539,9 @@ def run_prop_units(ir: dict, units: list, out=None,
         try:
             status, detail = _run_prop_unit(ir, unit, index, emit, rng, random_rounds)
         except Exception as error:  # noqa: BLE001 — a driver crash is a failure
-            status, detail = "fail", {"rounds": 0,
-                                      "error": f"the prop-test driver raised "
-                                               f"{type(error).__name__}: {error}"}
+            status, detail = "fail", {
+                "rounds": 0,
+                "error": _driver_failure(emit, error, "prop-test")}
         results.append((unit, status, detail))
 
         if status == "pass":

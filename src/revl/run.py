@@ -41,10 +41,11 @@ from pathlib import Path
 from typing import NamedTuple
 
 from . import hostref as _hostref
-from ._paths import backends_root
+from ._paths import backends_root, python_backend_emitter
 from .compiler import compile_files
 from .holes import refuse_admission
 from .errors import RevlError
+from .refusal import refusals
 from . import lifecycle
 from . import diagnostics
 from . import taint
@@ -550,6 +551,94 @@ def _key_to_service(ir: dict) -> dict[str, str]:
     return out
 
 
+# ── issue #1513: resolving a provided key from outside every realm ─────────
+#
+# One implementation, shared by `_Driver` (Session.call, MCP revl_call, the
+# REPL), the mock-world lifecycle runner (`revl.mocks`) and the placement
+# process runner (`revl._process_runner`), so no host-side caller keeps a
+# second, shared-realm-only lookup of its own.
+
+
+class _AmbiguousRealm:
+    """The `host_realm` answer for a key isolated into two or more realms."""
+
+    def __repr__(self) -> str:
+        return "AMBIGUOUS_REALM"
+
+
+AMBIGUOUS_REALM = _AmbiguousRealm()
+
+
+def provision_placements(ir: dict, key: str) -> list[tuple[str, str | None]]:
+    """Every `(component, realm)` that provides `key` in `ir`, in declaration
+    order. `realm` is the component's `isolate` placement for `key`, or `None`
+    for the shared root realm."""
+    return [(comp["name"], (comp.get("isolate") or {}).get(key))
+            for comp in _components(ir)
+            if key in (comp.get("provides") or {})]
+
+
+def host_realm(ir: dict, key: str):
+    """The realm a caller outside every realm reaches `key` in: `None` for the
+    shared realm, a realm label, or `AMBIGUOUS_REALM`.
+
+    The shared realm answers first, as Def. 28's default resolution does: a
+    shared-realm provider (a router included) is what `key` names. A key
+    provided ONLY in isolated realms is reached in its placement realm when
+    that realm is unique; G2 is per-(key, realm), so one realm means one
+    provider. A key isolated into two or more realms has no single answer.
+    This is the choice `ClassMap._provider_of` makes when it classifies a
+    call, so a call and its approval decision always name the same provider."""
+    realms = {realm for _name, realm in provision_placements(ir, key)}
+    if not realms or None in realms:
+        return None
+    if len(realms) == 1:
+        return next(iter(realms))
+    return AMBIGUOUS_REALM
+
+
+def resolve_provision(root, runtime, key: str, realm):
+    """Resolve `key` in `realm` (`None` = the shared root realm): an isolated
+    key lives in its placement realm, so it is read through
+    `root.isolate(key, realm(w)).reflect.get(key)`, exactly how `_Router` and
+    the emitted routed-require resolve it. Returns `None` when no live
+    provider has published it there."""
+    if realm is None:
+        return root.get(key)
+    return root.isolate(key, runtime.realm_label(realm, key)).reflect.get(key)
+
+
+def resolve_key(root, runtime, ir: dict, key: str):
+    """The live value a caller outside every realm reaches for `key` (issue
+    #1513), or `None` when there is no single live provider. See
+    :func:`host_realm` for which realm that is."""
+    realm = host_realm(ir, key)
+    if realm is AMBIGUOUS_REALM:
+        return None
+    return resolve_provision(root, runtime, key, realm)
+
+
+def unserved_key_reason(ir: dict, key: str) -> str | None:
+    """Why `resolve_key` found nothing, when the reason is a realm: a key
+    isolated in two or more realms (every provider may be live, but a caller
+    names a key, not a realm), or a single provider isolated in a named realm
+    that is inactive. `None` when the key's provider is in the shared realm,
+    so the caller keeps its own wording for that case."""
+    placements = provision_placements(ir, key)
+    if host_realm(ir, key) is AMBIGUOUS_REALM:
+        realms = {realm for _name, realm in placements}
+        where = ", ".join(f"`{name}` in realm `{realm}`"
+                          for name, realm in placements)
+        return (f"key {key!r} is provided in {len(realms)} realms ({where}); "
+                "a call names a key, not a realm, so it has no single provider "
+                "to reach")
+    if len(placements) == 1 and placements[0][1] is not None:
+        name, realm = placements[0]
+        return (f"key {key!r} is declared but not currently provided: its "
+                f"provider `{name}`, isolated in realm `{realm}`, is inactive")
+    return None
+
+
 def _print_plan(ir: dict, config: dict, backend: str) -> None:
     order = _load_order(ir)
     by_name = {c["name"]: c for c in _components(ir)}
@@ -689,7 +778,8 @@ class _Router:
     def _handle(self, realm):
         """The live provider handle for ``key`` in ``realm``, or ``None`` when
         that realm has no ACTIVE provider (cordis's strict ``reflect.get``)."""
-        scoped = self._root.isolate(self._key, self._runtime.realm_label(realm))
+        scoped = self._root.isolate(self._key,
+                                    self._runtime.realm_label(realm, self._key))
         return scoped.reflect.get(self._key)
 
     def _live(self):
@@ -1440,7 +1530,14 @@ class _Driver:
             if sys.modules.get(name) is gen.module:
                 del sys.modules[name]
 
-    def _emit_module(self, ir: dict) -> types.ModuleType:
+    def _emit_module(self, ir: dict,
+                     source: str | None = None) -> types.ModuleType:
+        # `source` is the emitter's output for `ir` when the caller has already
+        # rendered it. A session swap renders the successor BEFORE it tears the
+        # running generation down, so an emitter refusal leaves that generation
+        # untouched (issue #1446), and hands the same text in here rather than
+        # emitting twice. Everything below still runs at the generation boundary.
+        #
         # item 541: a generation supersedes the ones already disposed (a
         # swap/reload runs `_dispose_all` before re-emitting; an aborted/
         # committed turn disposed its fibers). Reclaim their modules now, before
@@ -1463,7 +1560,8 @@ class _Driver:
         reset = getattr(self.runtime, "revl_reset_run_trace_state", None)
         if reset is not None:
             reset()
-        source = self.emit.emit(ir)
+        if source is None:
+            source = self.emit.emit(ir)
         module = types.ModuleType(f"{self._gen_prefix}{self.generation}")
         filename = f"<revl-run gen{self.generation}>"
         # kept so a replay recorder can quote the emitted line a step came
@@ -1679,18 +1777,18 @@ class _Driver:
             await asyncio.sleep(0)
 
     def _resolve_provision(self, key: str, realm):
-        """Resolve one provided key the way the composition publishes it: an
-        isolated key lives in its placement realm (a worker's provision lands in
-        `realm(w)`, not the shared root realm), so it is read through
-        `root.isolate(key, realm(w)).reflect.get(key)` — exactly how `_Router`
-        and the emitted routed-require resolve it. `realm` is the providing
-        component's own placement for `key` (`None` = the shared root realm), so
-        the SAME key provided by different workers in different realms resolves
-        per provider. Returns `None` when no live provider has published it."""
-        if realm is None:
-            return self.root.get(key)
-        return self.root.isolate(
-            key, self.runtime.realm_label(realm)).reflect.get(key)
+        """Resolve one provided key in `realm` (see :func:`resolve_provision`)."""
+        return resolve_provision(self.root, self.runtime, key, realm)
+
+    def provision_placements(self, key: str) -> list[tuple[str, str | None]]:
+        """Every `(component, realm)` providing `key` in the live composition
+        (see :func:`provision_placements`)."""
+        return provision_placements(self.ir or {}, key)
+
+    def resolve_key(self, key: str):
+        """The live value a caller outside every realm reaches for `key`
+        (see :func:`resolve_key`)."""
+        return resolve_key(self.root, self.runtime, self.ir or {}, key)
 
     def resolved_keys(self) -> set:
         """The keys this composition actually provides — those with a live
@@ -2050,7 +2148,7 @@ class _Driver:
     # -- REPL --------------------------------------------------------------
 
     def _namespace(self) -> dict:
-        return {key: self.root.get(key) for key in _key_to_service(self.ir)}
+        return {key: self.resolve_key(key) for key in _key_to_service(self.ir)}
 
     def _print_keys(self) -> None:
         keys = _key_to_service(self.ir)
@@ -2448,8 +2546,35 @@ def run_command(args, hold_once: bool = False) -> int:
         return _fail(problem, lifecycle.CONFIG)
     config = _merge_env(ir, env, config)
 
+    # issue #1461: `--providers FILE` binds the composition's model crossings to
+    # runtime adapters. Checked here, before the plan and before any runtime is
+    # imported, so a configuration the program's placement forbids refuses the
+    # boot with the diagnostic available on an interpreter with no cordis. The
+    # import is lazy: a run without the flag never loads the package.
+    model_hosts = None
+    if getattr(args, "providers", None):
+        if backend != "py":
+            return _fail(f"--providers binds model hosts on the py tier only; "
+                         f"--backend {backend} has no model host seam",
+                         lifecycle.CONFIG)
+        from . import providers as _providers  # noqa: PLC0415 - lazy
+        try:
+            model_hosts = _providers.bind_for_run(ir, args.files,
+                                                  args.providers)
+        except (_providers.ProviderConfigError, _providers.PlacementRefused,
+                _providers.ProviderError, RevlError) as exc:
+            return _fail(str(exc), lifecycle.CONFIG)
+        except OSError as exc:
+            return _fail(f"cannot read provider configuration: {exc}",
+                         lifecycle.CONFIG)
+
     if getattr(args, "plan", False):
         _print_plan(ir, config, backend)
+        if model_hosts is not None:
+            from .providers import describe_hosts  # noqa: PLC0415 - lazy
+            print("model hosts:")
+            for line in describe_hosts(model_hosts) or ["  (none)"]:
+                print(line)
         return 0
 
     if not _components(ir):
@@ -2497,10 +2622,8 @@ def run_command(args, hold_once: bool = False) -> int:
                         interactive=interactive, policy=policy)
 
     backend_dir = backends_root() / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
     try:
-        import emit  # noqa: PLC0415 — backend import after path setup
+        emit = python_backend_emitter()
         import runtime as runtime_mod  # noqa: PLC0415
         from cordis import Context  # noqa: PLC0415
         from cordis.fiber import FiberState  # noqa: PLC0415
@@ -2531,6 +2654,11 @@ def run_command(args, hold_once: bool = False) -> int:
     # root is the root compile file's directory"). The driver appends them only
     # when the IR carries refs.
     root_dirs = [os.path.dirname(os.path.abspath(f)) for f in args.files]
+    ambient = getattr(args, "ambient", None)
+    if model_hosts:
+        # the model hosts are ambient provisions: provided before any component
+        # loads and withdrawn by the driver at teardown, like `revl dev`'s host
+        ambient = {**(ambient or {}), **model_hosts}
     driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
                      record=bool(getattr(args, "record", False)),
                      trace_path=getattr(args, "trace", None),
@@ -2538,13 +2666,29 @@ def run_command(args, hold_once: bool = False) -> int:
                      wal_path=getattr(args, "wal", None),
                      estop_latch=getattr(args, "estop_latch", None),
                      root_dirs=root_dirs,
-                     ambient=getattr(args, "ambient", None))
+                     ambient=ambient)
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())
         if getattr(args, "watch", False):
             return asyncio.run(driver.watch(args.files))
         return asyncio.run(driver.hold_repl(once=hold_once))
+    except refusals(emit) as exc:
+        # issue #1393: an emit-time refusal is an ANSWER, not a crash. The py
+        # emitter refuses a document it cannot lower rather than silently
+        # dropping part of it (items 257/513 and the tier refusals of #1381 and
+        # #1384), and without this the author read that named refusal as a raw
+        # traceback -- the one shape `revl.diagnostics` exists to avoid, since
+        # reacting to it means parsing prose. Rendered as every other `revl run`
+        # failure is: `_fail` keeps the diagnostic's own first line byte
+        # identical and appends the stage. Emitting the generation IS booting it,
+        # so the stage is `boot`, the same one activation names.
+        #
+        # `refusals(emit)` is this emitter module's own `EmitError` and nothing
+        # wider, on purpose. An internal failure in the emitter must stay loud: a
+        # broader `except` here would turn a real crash into a tidy sentence,
+        # which is a worse defect than the one this closes (issue #1406).
+        return _fail(str(exc), lifecycle.BOOT)
     except ActivationError as exc:
         # item 372: a component's deferred activation did not complete — report
         # it loudly and named, rather than dropping into a REPL over a
