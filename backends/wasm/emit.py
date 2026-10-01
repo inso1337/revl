@@ -4536,7 +4536,10 @@ class _V3Emitter:
             args = node.get("args") or []
             inner = self._infer_type(args[0], scope) if args else "Int"
             return f"Opt[{inner or 'Int'}]"
-        sig = self.fn_sigs.get(name)
+        # the same table `_call_expr` lowers the call through (issue #1600): a
+        # `@wasm`-bodied extern is a callable, so asking for its type first
+        # (an index, a `let`, a method receiver) must not call it unknown.
+        sig = self.fn_sigs.get(name) or self.extern_sigs.get(name)
         if sig is None:
             self._refuse_bodyless_extern(name, "")
             raise EmitError(f"callee {name!r} is not a lowerable function")
