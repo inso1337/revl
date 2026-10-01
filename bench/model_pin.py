@@ -41,7 +41,9 @@ Usage:
   python3 bench/model_pin.py --model <tag> --write            # commit the pin
   python3 bench/model_pin.py --offline                        # unreachable pin
 
-Nothing here imports revl; the checker version is stamped by
+The only thing this imports from revl is its model-endpoint HTTP client
+(`revl.providers`, issue #1461), so the pin and the runtime adapters send the
+same request through the same code. The checker version is still stamped by
 `bench/framework_bench.py`, which owns the report.
 """
 
@@ -51,12 +53,16 @@ import argparse
 import json
 import platform
 import statistics
+import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
+sys.path.insert(0, str(BENCH.parent / "src"))
+
+from revl.providers import (  # noqa: E402
+    Adapter, CompletionRequest, ProviderError, parse_config, request_json,
+)
 DEFAULT_PIN = BENCH / "results" / "framework-bench" / "model-pin.json"
 
 # The endpoint the roadmap names. It is a loopback address on the operator's own
@@ -111,46 +117,25 @@ def _machine() -> str:
 
 
 def _post(url: str, payload: dict, timeout: int) -> dict:
-    return _request(url, timeout, json.dumps(payload).encode("utf-8"))
+    return _request(url, timeout, payload)
 
 
 def _get(url: str, timeout: int) -> dict:
     return _request(url, timeout, None)
 
 
-def _request(url: str, timeout: int, body: bytes | None) -> dict:
-    """One request to the named endpoint, with redirects refused.
+def _request(url: str, timeout: int, body: dict | None) -> dict:
+    """One request to the named endpoint, through revl's model-endpoint client.
 
-    `bench/run.py`'s local runner refuses redirects for the reason that applies
-    here too: urllib follows a redirect by default, re-issuing a POST as a GET
-    against whatever host `Location` names. A pin that identified a different
-    server than the one being measured would be worse than no pin.
+    That client refuses redirects, for the reason that applies here too: urllib
+    follows a redirect by default, re-issuing a POST as a GET against whatever
+    host `Location` names. A pin that identified a different server than the
+    one being measured would be worse than no pin.
     """
-    req = urllib.request.Request(
-        url, data=body, method="POST" if body is not None else "GET",
-        headers={"Content-Type": "application/json"} if body is not None else {},
-    )
-
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            raise PinError(f"model pin: HTTP {code} redirect refused: "
-                           f"{url} is the endpoint you named")
-
-    opener = urllib.request.build_opener(_NoRedirect)
     try:
-        with opener.open(req, timeout=timeout) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read()[:300].decode("utf-8", "replace")
-        raise PinError(f"model pin: HTTP {exc.code} from {url}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise PinError(f"model pin: cannot reach {url}: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise PinError(f"model pin: timed out after {timeout}s: {exc}") from exc
-    try:
-        return json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise PinError(f"model pin: unparseable JSON from {url}: {exc}") from exc
+        return request_json(url, body=body, timeout=timeout, label="model pin")
+    except ProviderError as exc:
+        raise PinError(str(exc)) from None
 
 
 def identity_from_ollama_tags(catalogue: dict, model: str) -> dict:
@@ -320,17 +305,22 @@ def _ollama_sample(endpoint: str, model: str, sampling: dict,
 
 def _openai_sample(endpoint: str, model: str, sampling: dict,
                    timeout: int) -> dict:
+    """One sample through the runtime's OpenAI-compatible adapter, so the pin
+    measures the request a bound `model role` would send."""
+    binding = parse_config({"roles": {"pin": {
+        "provider": "openai-compatible",
+        "base_url": endpoint.rstrip("/") + "/v1",
+        "model": model, "timeout": timeout, "max_tokens": 128,
+    }}}, "model pin").binding("pin")
     started = time.perf_counter()
-    body = _post(endpoint.rstrip("/") + "/v1/chat/completions", {
-        "model": model,
-        "messages": [{"role": "user", "content": PROBE_PROMPT}],
-        "temperature": sampling["temperature"],
-        "top_p": sampling["top_p"],
-        "max_tokens": 128,
-    }, timeout)
+    try:
+        completion = Adapter(binding).complete(CompletionRequest(
+            prompt=PROBE_PROMPT, temperature=sampling["temperature"],
+            top_p=sampling["top_p"]))
+    except ProviderError as exc:
+        raise PinError(str(exc)) from None
     elapsed = time.perf_counter() - started
-    usage = body.get("usage") or {}
-    out = usage.get("completion_tokens")
+    out = completion.tokens_out
     if not isinstance(out, int) or out <= 0 or elapsed <= 0:
         raise PinError("model pin: endpoint reported no usable completion_tokens")
     return {

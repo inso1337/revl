@@ -92,9 +92,9 @@ class _FakeRoot:
 
 class _FakeRuntime:
     @staticmethod
-    def realm_label(realm: str):
+    def realm_label(realm: str, _key: str):
         # identity: the label IS the realm string, so _FakeRoot.isolate can key
-        # the handle map by it.
+        # the handle map by it (one routed key, so the key adds nothing here).
         return realm
 
 

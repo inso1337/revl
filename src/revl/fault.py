@@ -38,6 +38,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import re
 import sys
 import textwrap
 import types
@@ -954,13 +955,15 @@ def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
     or ``gap`` (the runner could not drive a faulting activation to a residue
     proof — a named capability gap, never a pass and never counted as a leak).
     """
-    kind, detail, _output = _once_run(runner, faulted_ir, config, files)
-    return kind, detail
+    code, output, crash = _run_once(runner, faulted_ir, config, files)
+    return _classify_once(code, output, crash)
 
 
-def _once_run(runner, faulted_ir: dict, config: dict, files) -> tuple:
-    """:func:`_once_verdict`, plus the runner's captured output as a third
-    member, which the compensation check reads its markers from."""
+def _run_once(runner, faulted_ir: dict, config: dict, files) -> tuple:
+    """Run the `--once` runner with its output captured.  Returns ``(code,
+    output, crash)``; *crash* is the reason the runner raised, else ``None``.
+    The capture is what the verdict reads; :func:`_host_lines` recovers the
+    program's own output from it (issue #1614)."""
     import contextlib  # noqa: PLC0415
     import io  # noqa: PLC0415
 
@@ -969,17 +972,45 @@ def _once_run(runner, faulted_ir: dict, config: dict, files) -> tuple:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
             code = runner(faulted_ir, config, files, once=True, interactive=False)
     except Exception as error:  # noqa: BLE001 — a runner crash is a capability gap, not a leak
-        return ("gap", f"the --once runner raised "
-                       f"{type(error).__name__}: {error}", buffer.getvalue())
-    output = buffer.getvalue()
+        return (None, buffer.getvalue(),
+                f"the --once runner raised {type(error).__name__}: {error}")
+    return (code, buffer.getvalue(), None)
+
+
+def _classify_once(code, output: str, crash: str | None) -> tuple:
+    """The verdict over one captured `--once` run: see :func:`_once_verdict`."""
+    if crash is not None:
+        return ("gap", crash)
     if "RESIDUE-LEFT" in output:
-        return ("residue", "the runner's teardown proof reported RESIDUE-LEFT", output)
+        return ("residue", "the runner's teardown proof reported RESIDUE-LEFT")
     if code == 3:
-        return ("toolchain", _first_error_line(output) or "runtime not available", output)
+        return ("toolchain", _first_error_line(output) or "runtime not available")
     if code == 0 and "NO-RESIDUE" in output:
-        return ("clean", "", output)
+        return ("clean", "")
     return ("gap", _first_error_line(output)
-            or f"the --once runner exited {code} without a residue proof", output)
+            or f"the --once runner exited {code} without a residue proof")
+
+
+_LOAD_HEADER = "== load composition"
+_RUNNER_EPILOGUE = re.compile(r"^error: the \w+ composition ")
+
+
+def _host_lines(output: str) -> list:
+    """The composition's own output inside a captured `--once` run: every
+    non-empty line after the runner's ``== load composition`` header that is
+    not runner protocol (a ``[run]`` line) and not the runner's closing
+    ``error: the <tier> composition ...`` diagnostic, and not the sweep's own
+    ``[revl-sweep] compensation ran:`` marker, which the compensation check
+    reads (issue #1511).  Before the header is the build, which the verdict
+    already summarises (issue #1614)."""
+    lines = output.splitlines()
+    start = next((i + 1 for i, line in enumerate(lines)
+                  if line.startswith(_LOAD_HEADER)), len(lines))
+    return [line.rstrip() for line in lines[start:]
+            if line.strip()
+            and not line.lstrip().startswith("[run]")
+            and not line.lstrip().startswith(_COMPENSATION_MARK)
+            and not _RUNNER_EPILOGUE.match(line)]
 
 
 def _first_error_line(output: str) -> str:
@@ -1210,12 +1241,18 @@ def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
     points: list = []
     for unit in corpus:
         faulted = _prune_dependents(_inject(observed, unit), unit["component"])
-        kind, detail, output = _once_run(runner, faulted, config, files)
+        code, output, crash = _run_once(runner, faulted, config, files)
+        kind, detail = _classify_once(code, output, crash)
+        host = _host_lines(output)
         if kind == "clean":
-            points.append(_checked_point(ir, tier, unit, output))
+            point = _checked_point(ir, tier, unit, output)
+            if host:
+                point["hostOutput"] = host
+            points.append(point)
         elif kind == "residue":
             points.append({"where": unit["where"], "component": unit["component"],
-                           "status": "residue", "detail": detail})
+                           "status": "residue", "detail": detail,
+                           **({"hostOutput": host} if host else {})})
             return {"tier": tier, "status": "failed", "points": points,
                     "reason": f"residue at {unit['where']}: {detail}"}
         elif kind == "toolchain":  # pragma: no cover — pre-checked above
@@ -1258,6 +1295,16 @@ def _tier_record(tier: str, points: list, **extra) -> dict:
             "reason": ""}
 
 
+def _py_host_lines(output: str) -> list:
+    """The program's own lines in one captured py step: the py leg captures
+    each step's stdout to read the compensation markers (issue #1511), so what
+    the program printed is replayed, labelled, like a compiled tier's
+    (issue #1614), minus the sweep's own markers."""
+    return [line.rstrip() for line in output.splitlines()
+            if line.strip()
+            and not line.lstrip().startswith(_COMPENSATION_MARK)]
+
+
 def _py_tier_sweep(ir: dict) -> dict:
     """Sweep the py reference tier via :func:`run_sweep` (a real activation,
     the runtime interrogated).  Returns the same per-tier record shape as the
@@ -1274,16 +1321,20 @@ def _py_tier_sweep(ir: dict) -> dict:
     points = []
     for section in dossier["components"]:
         for step in section["steps"]:
+            output = outputs.get((section["component"], step["step"]), "")
             if step["problems"]:
-                points.append({"where": step["where"],
-                               "component": section["component"],
-                               "status": "residue",
-                               "detail": "; ".join(step["problems"])})
-                continue
-            unit = {"where": step["where"], "component": section["component"],
-                    "step": step["step"]}
-            points.append(_checked_point(
-                ir, "py", unit, outputs.get((section["component"], step["step"]), "")))
+                point = {"where": step["where"],
+                         "component": section["component"],
+                         "status": "residue",
+                         "detail": "; ".join(step["problems"])}
+            else:
+                unit = {"where": step["where"], "component": section["component"],
+                        "step": step["step"]}
+                point = _checked_point(ir, "py", unit, output)
+            host = _py_host_lines(output)
+            if host:
+                point["hostOutput"] = host
+            points.append(point)
     unreachable = dossier.get("unreachable") or []
     if failed:
         leak = next((p for p in points if p["status"] == "residue"), None)
@@ -1403,6 +1454,20 @@ def _cross_tier_dossier(ir: dict, records: list, cap: int | None) -> dict:
     }
 
 
+def _format_host_output(record: dict, printer) -> None:
+    """Replay what the program printed at each fault point, labelled with the
+    tier and the point, under that tier's line (issue #1614).  Every tier's
+    output is captured now: the compiled tiers' to read the `--once` proof, the
+    py leg's to read the compensation markers (issue #1511)."""
+    for point in record.get("points") or []:
+        host = point.get("hostOutput")
+        if not host:
+            continue
+        printer(f"        [{record['tier']}] host output at {point['where']}:")
+        for line in host:
+            printer(f"          {line}")
+
+
 def _format_cross_tier(dossier: dict, printer) -> None:
     """Human-readable rendering: one line per tier, then the agreement verdict."""
     printer("cross-tier fault sweep — the same faults on every runtime "
@@ -1430,6 +1495,7 @@ def _format_cross_tier(dossier: dict, printer) -> None:
         if unobserved:
             printer(f"        not observed on this tier (not an extern with an "
                     f"inline body): {', '.join(unobserved)}")
+        _format_host_output(record, printer)
     printer("")
     agreement = dossier["agreement"]
     if dossier["counts"]["disagreements"]:

@@ -99,9 +99,16 @@ component and only-when-non-empty: `"isolate": {key: realm}`,
   dict carries `"isolate": {"kv": "tenant_a"}`, and the runtime adapter
   gains `plug(ctx, component, config)` which applies
   `ctx.isolate(key, realm_label(name))` per entry *before*
-  `ctx.plugin(...)`. `realm_label` is a process-wide string→label-object
-  registry — cordis compares labels by identity, so same-string sharing
-  must go through one object, never string interning.
+  `ctx.plugin(...)`. `realm_label` is a process-wide
+  `(realm, key)`→label-object registry — cordis compares labels by
+  identity, so same-string sharing must go through one object, never
+  string interning. It is keyed by the key as well as the realm string
+  because cordis stores a provision under its isolation label: one label
+  for a whole realm put two keys isolated into that realm in the same slot
+  (issue #1543). The TS runtime's `realmLabel(realm, key)` is the same
+  registry. On cordis-rs the emitted `_revl_realm(label)` still mints one
+  `Isolation` per realm string, so two keys in one realm collide there
+  until the rust emitter is changed.
 - *Interception* lowers onto the inject-dict mechanism: the emitted
   `inject` becomes `{"kv": <metadata>, "other": None}` (dict form) when
   any key is intercepted, else stays a list (golden stability). The

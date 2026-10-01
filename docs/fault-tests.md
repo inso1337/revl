@@ -464,6 +464,15 @@ wait on a provision that never arrives). So the compiled-tier sweep prunes the
 target's transitive dependents before the boot — the same hold-out the py
 reference applies (section 9.2), so the two sweep the same fault points.
 
+**What the program prints.** Every leg's output is captured: each compiled-tier
+`--once` run because the verdict is read from it, and each py step because the
+compensation check reads its markers from it (issue #1511). The program's own
+lines (on a compiled tier, everything after `== load composition` that is not
+a `[run]` line or the runner's closing `error: the <tier> composition …`; on
+any tier, never the sweep's `[revl-sweep] compensation ran:` markers) are kept
+on the fault point as `hostOutput` and replayed under the tier's line, labelled
+`[<tier>] host output at <point>:`. They never feed the verdict (issue #1614).
+
 ### 10.2 Agreement, and what a skip means
 
 ```

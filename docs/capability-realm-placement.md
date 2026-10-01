@@ -104,6 +104,17 @@ default runs are byte-identical. Turning the advice into an *enforced* affinity
 of this cut — correctness (capability/realm-consistent placement + a clear
 refusal) is the priority, and the optimization stays conservative.
 
+## Realms inside a process
+
+A placement process plugs each component into the realms its `isolate` map
+names, as `revl run` and `revl mcp` do, so two tenants of one key can share a
+process. A proxy for a key served by another process is provided in that
+key's provider realm, so a local consumer isolated into the same realm sees
+it. Probes and the served seam resolve a key the way `revl_call` does: the
+shared realm first, otherwise the key's single isolated realm. A probe on a
+key isolated into two or more realms is refused, naming each provider and its
+realm.
+
 ## Example
 
 `examples/placement/caprealm_app.rvl` is a composition with two realms
