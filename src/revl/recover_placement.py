@@ -15,7 +15,8 @@ index:
   that crosses processes (an Agent in one process compensating through a
   `tickets` service a Desk in another provides) reaches the providing
   component, and the verdict names the process the placement hosted it in. A
-  key no process of this placement provides is named as unreached; the
+  provider whose activation crosses the boundary is not booted (see
+  `recover_binding.reactivation_refusals`). A key no process of this placement provides is named as unreached; the
   runtime then reports the call as residue.
 * processes are recovered consumers first, so a consumer's compensations run
   before its providers' own, newest first across the run as within a process.
@@ -106,12 +107,14 @@ class _PlacementBinding:
         self.services: dict = {}
         #: process -> the required-service keys its open calls go through
         self.keys: dict = {}
+        #: key -> {component, crossings}, see `reactivation_refusals`
+        self.refused: dict = {}
         self.module = self.runtime = None
 
     def bind(self, recorded: list) -> dict:
         """``{process: CompositionWorld}`` for each ``(entry, path)``."""
         from .recover_binding import (boot_providers, emit_unactivated,  # noqa: PLC0415
-                                      open_keys, plan_wal)
+                                      open_keys, plan_wal, reactivation_refusals)
         plans = {}
         for entry, path in recorded:
             try:
@@ -119,9 +122,11 @@ class _PlacementBinding:
             except RecoveryError as error:
                 raise type(error)(f"process {entry['name']} ({path}): {error}") from None
         self.keys = {name: open_keys(*plan) for name, plan in plans.items()}
+        wanted = set().union(set(), *self.keys.values())
+        self.refused = reactivation_refusals(self.ir, wanted)
         self.module, self.runtime = emit_unactivated(self.ir, self.config, self.cleanup)
         self.session, _booted, self.services = boot_providers(
-            self.ir, set().union(set(), *self.keys.values()), self.config)
+            self.ir, wanted - set(self.refused), self.config)
         return {entry["name"]: self._world(path, plans[entry["name"]],
                                            self.keys[entry["name"]])
                 for entry, path in recorded}
@@ -129,12 +134,14 @@ class _PlacementBinding:
     def _world(self, path: str, plan: tuple, keys: set):
         from .recover_binding import CompositionWorld, _provider_closure  # noqa: PLC0415
         _wal, foreign, _grants, foreign_handles = plan
+        refused = {k: v for k, v in self.refused.items() if k in keys}
         return CompositionWorld(
             files=self.files, digest=self.digest, module=self.module,
             runtime=self.runtime, wal_path=path,
             services={k: v for k, v in self.services.items() if k in keys},
-            booted=_provider_closure(self.ir, keys), provider_session=None,
-            cleanup=[], foreign=foreign, foreign_handles=foreign_handles)
+            booted=_provider_closure(self.ir, keys - set(refused)),
+            provider_session=None, cleanup=[], foreign=foreign,
+            foreign_handles=foreign_handles, refused=refused)
 
     def close(self) -> None:
         session, self.session = self.session, None
@@ -161,7 +168,8 @@ def _reach(ir: dict, entries: list, keys: set) -> tuple:
 
 def _describe(world, keys: set, ir: dict, entries: list) -> dict:
     described = world.describe()
-    described["reached"], described["unreached"] = _reach(ir, entries, keys)
+    described["reached"], described["unreached"] = _reach(
+        ir, entries, keys - set(world.refused))
     return described
 
 

@@ -53,6 +53,10 @@ def process_wal_path(index_path: str, entry: dict) -> str:
 def wal_problem(processes: dict, backends: dict, sandboxes: dict) -> Optional[str]:
     """Why this placement cannot write a WAL per process, or ``None``."""
     for pname in processes:
+        if pname == "estop":
+            return ("--wal with --placement: a process named 'estop' would write "
+                    "its WAL at the path `revl estop --wal` derives for the "
+                    "run's E-Stop latch (FILE.estop). Rename the process.")
         if backends.get(pname) not in WAL_TIERS:
             return (f"--wal with --placement: process {pname!r} runs on the "
                     f"{backends.get(pname)} tier, whose placement runner writes "

@@ -467,12 +467,22 @@ run`, and `--config` the config it ran with. Recover then:
 2. **Loads the composition's emitted module without activating it**, through
    the driver's own plug seam, so extern config and bound secrets are
    installed and no activation body runs again.
-3. **Boots only the providers the open descriptors call through.** A
-   descriptor whose `call.receiver` is a required-service key needs the live
-   provider. Recover boots the components that provide those keys, and what
-   they require, and names them in the verdict (`binding.booted`): booting a
-   provider runs its activation. A second recover with nothing open boots
-   nothing.
+3. **Boots only the providers the open descriptors call through, and only
+   when booting them crosses nothing.** A descriptor whose `call.receiver` is
+   a required-service key needs the live provider. Recover boots the
+   components that provide those keys, and what they require, and names them
+   in the verdict (`binding.booted`). Booting a component runs its
+   activation, so a provider whose activation crosses the boundary (a
+   non-pure extern it reaches, directly or through functions, or an emission
+   method of a service it requires; teardown-position crossings count, since
+   recover unloads what it boots) would make that crossing a second time,
+   and the WAL already holds the first. Recover reads each provider's
+   activation crossings off the IR with `revl audit`'s boundary walk, its
+   provided methods and compensations left out because booting runs neither,
+   and does not boot a provider that has any, or whose required components
+   have any. Each such key is listed in `binding.refused` (`key`,
+   `component`, `crossings`), and every call through it is declined by name
+   (`would-reactivate`). A second recover with nothing open boots nothing.
 4. **Replays the open discharge descriptors through the runtime's own abort
    path** (`runtime.replay_descriptors`): witnessed inverses newest first with
    their fences, then compensations newest first under the Phase-2 budget.
@@ -490,6 +500,7 @@ The verdict carries `"world": "real"` and a `binding` object (`composition`,
 | `fenced` | residue (`fenced-residue`): an earlier attempt spent the at-most-once fence |
 | `unresolved` | residue (`unresolved-residue`): the call names no host body in this binding |
 | `stranded` | residue (`stranded-residue`): an E-Stop is in force, nothing ran |
+| `would-reactivate` | residue (`reactivation-residue`): reaching the receiver needs a provider whose activation crosses (`binding.refused`); not attempted, and no fence is spent |
 
 A descriptor whose arguments were not captured at registration (`args: null`,
 a compensation whose argument is itself a call) or were redacted as
@@ -581,6 +592,10 @@ verdict), so the process rolls forward with the others instead of back alone.
    process's own verdict), and one `residue` whose `outstanding` entries carry
    their `process` and whose proof names each process's residue. It is clean
    only when every process is clean. A second recover performs nothing.
+
+`revl estop --wal FILE` on an index reads every process WAL it names: the
+outstanding entries are listed per process, and the inventory is known only
+when every process WAL could be read.
 
 Read as a WAL, an index has no records, so a reader would call a crashed
 placement clean. Every WAL reader refuses it instead
