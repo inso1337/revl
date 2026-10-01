@@ -27,17 +27,10 @@ import os
 import time
 from dataclasses import replace
 
-from . import wire_anthropic, wire_gemini, wire_ollama, wire_openai
 from .completion import Completion, CompletionRequest
+from .config import WIRES as _WIRES
 from .config import Binding
 from .transport import ProviderError, redact, request_json
-
-_WIRES = {
-    "openai-compatible": wire_openai,
-    "anthropic": wire_anthropic,
-    "gemini": wire_gemini,
-    "ollama": wire_ollama,
-}
 
 
 def read_credential(env_var: str, environ=None) -> str:

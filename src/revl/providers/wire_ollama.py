@@ -26,6 +26,12 @@ from __future__ import annotations
 
 from .completion import Completion, CompletionRequest
 
+#: The `provider` value a binding names to use this wire format, and the
+#: fields it accepts beyond the common ones. `revl.providers.config` builds
+#: its closed vocabulary from these, so the format list is declared once.
+PROVIDER = "ollama"
+FIELDS = frozenset({"devices"})
+
 #: The load options a binding's `devices` table may set per device. CLOSED:
 #: an option the server reads differently per version is not guessed at.
 #: `num_gpu` is how many layers go to the GPU (0 keeps the model on the CPU);

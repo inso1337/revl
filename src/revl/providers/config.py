@@ -63,8 +63,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import wire_anthropic, wire_gemini, wire_ollama, wire_openai
+
+#: `{provider: wire module}`, in the order a refusal lists them. Each wire
+#: module names its own `PROVIDER` and `FIELDS`, so this is the one place the
+#: closed vocabulary of formats is assembled; `PROVIDERS`, the per-provider
+#: field table and the adapter's dispatch all read it.
+WIRES = {w.PROVIDER: w for w in (wire_openai, wire_anthropic, wire_gemini,
+                                 wire_ollama)}
+
 #: The wire formats this package speaks. CLOSED, so a typo is a refusal.
-PROVIDERS = ("openai-compatible", "anthropic", "gemini", "ollama")
+PROVIDERS = tuple(WIRES)
 
 #: The providers whose endpoint may be on this device (a loopback server).
 LOCAL_PROVIDERS = ("openai-compatible", "ollama")
@@ -78,12 +87,7 @@ _COMMON_FIELDS = frozenset({
     "provider", "model", "base_url", "api_key_env", "max_tokens",
     "temperature", "timeout", "residence", "reaches",
 })
-_PROVIDER_FIELDS = {
-    "openai-compatible": frozenset(),
-    "anthropic": frozenset({"anthropic_version"}),
-    "gemini": frozenset({"api", "project", "location"}),
-    "ollama": frozenset({"devices"}),
-}
+_PROVIDER_FIELDS = {provider: wire.FIELDS for provider, wire in WIRES.items()}
 
 #: Field names that can only mean "the credential itself". Refused by name.
 _CREDENTIAL_FIELDS = frozenset({
@@ -353,7 +357,7 @@ def _devices(where: str, table) -> tuple:
     table has no device it can be loaded on, and loading it where the server
     likes is the "any free device" answer the model schedule exists to
     refuse."""
-    from .wire_ollama import DEVICE_OPTIONS  # noqa: PLC0415 - no cycle
+    allowed = wire_ollama.DEVICE_OPTIONS
     if not isinstance(table, dict) or not table:
         raise _refuse(where, "`devices` is required for provider ollama: a "
                              "table of the placement's device names (for "
@@ -368,12 +372,12 @@ def _devices(where: str, table) -> tuple:
                                  "the placement (letters, digits and `_`)")
         if not isinstance(options, dict):
             raise _refuse(where, f"`devices.{name}` must be a table of load "
-                                 f"options ({', '.join(DEVICE_OPTIONS)})")
-        unknown = sorted(set(options) - set(DEVICE_OPTIONS))
+                                 f"options ({', '.join(allowed)})")
+        unknown = sorted(set(options) - set(allowed))
         if unknown:
             raise _refuse(where, f"`devices.{name}` has unknown option(s) "
                                  f"{', '.join(unknown)}; the load options are "
-                                 f"{', '.join(DEVICE_OPTIONS)}")
+                                 f"{', '.join(allowed)}")
         for option, value in options.items():
             _number(where, f"devices.{name}.{option}", value, int, 0)
         out.append((name, tuple(sorted(options.items()))))
