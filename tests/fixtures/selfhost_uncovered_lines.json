@@ -49,9 +49,9 @@
   ],
   "_budget": {
     "reference": {
-      "go": 3348,
+      "go": 3354,
       "java": 986,
-      "py": 667,
+      "py": 660,
       "rust": 1200,
       "ts": 542,
       "wasm": 1558
@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 91,
       "java": 175,
-      "py": 104,
+      "py": 103,
       "rust": 286,
       "ts": 97,
       "wasm": 63
@@ -276,11 +276,11 @@
         "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them.": {
           "_component_is_observable": 6
         },
-        "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py. Issue #721's Float half adds five statements to the same deferred preamble block: the `math` import and the `revlF` identity helper that keeps a Float literal out of Go's CONSTANT world (a constant fold has no signed zero and no infinity), plus the `math.Mod` arm for `%` on Float, which Go does not define on float64 at all. No PLACEMENT corpus document carries a Float, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl excludes placement entirely; the reference half is executed on all six tiers by tests/test_458_float_division_and_remainder.py. Issue #1321 split this entry point: the module half is `_emit_v3_combined` (the typed-core tier plus the live stc-go components in one package) and `_emit_v3_placement` is the three-line placement caller, so the 221 statements move to the new name and 1 stays. `emit` reaches `_emit_v3_combined` now for a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside an observable component, but no emit_go_corpus document declares a component at all, so the oracle still never runs it. Twenty more statements arrive on this same uninvoked entry point. Issue #1347 adds one, the `or _COMP_NEEDS_OVERFLOW32` disjunct, because the checked narrow can come from a component method body as well as from a top-level fn and the method renderer does not write into `ctx`. PR #1378 adds nineteen, mirroring `_emit`'s per-emit state onto this path: the items 243/247 witnessed-extern registry, without which a witnessed effect in a carried component lowered as an ordinary bracket with a nil inverse and dropped the proof inverse silently; the stream-event flag and stream iteration counter; and item 102's scan that flags the timer preamble when a lifecycle test carries only an `advance` step. All of it is live component/placement assembly that emit_go.rvl excludes and the module oracle never reaches.": {
+        "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py. Issue #721's Float half adds five statements to the same deferred preamble block: the `math` import and the `revlF` identity helper that keeps a Float literal out of Go's CONSTANT world (a constant fold has no signed zero and no infinity), plus the `math.Mod` arm for `%` on Float, which Go does not define on float64 at all. No PLACEMENT corpus document carries a Float, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl excludes placement entirely; the reference half is executed on all six tiers by tests/test_458_float_division_and_remainder.py. Issue #1321 split this entry point: the module half is `_emit_v3_combined` (the typed-core tier plus the live stc-go components in one package) and `_emit_v3_placement` is the three-line placement caller, so the 221 statements move to the new name and 1 stays. `emit` reaches `_emit_v3_combined` now for a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside an observable component, but no emit_go_corpus document declares a component at all, so the oracle still never runs it. Twenty more statements arrive on this same uninvoked entry point. Issue #1347 adds one, the `or _COMP_NEEDS_OVERFLOW32` disjunct, because the checked narrow can come from a component method body as well as from a top-level fn and the method renderer does not write into `ctx`. PR #1378 adds nineteen, mirroring `_emit`'s per-emit state onto this path: the items 243/247 witnessed-extern registry, without which a witnessed effect in a carried component lowered as an ordinary bracket with a nil inverse and dropped the proof inverse silently; the stream-event flag and stream iteration counter; and item 102's scan that flags the timer preamble when a lifecycle test carries only an `advance` step. All of it is live component/placement assembly that emit_go.rvl excludes and the module oracle never reaches. Issue #1559 adds two to `_emit_go_dispatch`: an argument the declared type cannot hold now returns an error instead of decoding to the zero value (the placement probe's `\"41\"` read as 0), on this same placement path the module oracle never enters.": {
           "_bridge_decode_expr": 16,
           "_bridge_encode_expr": 16,
           "_emit_go_bridge": 117,
-          "_emit_go_dispatch": 18,
+          "_emit_go_dispatch": 20,
           "_emit_go_dispatch_encode": 30,
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
@@ -336,6 +336,9 @@
           "_collect_host_binds": 12,
           "_stub_host_type": 4,
           "_v3_host_constructor": 13
+        },
+        "Issue #1559: `_drop_unused_time_import` removes the `\"time\"` import from a live stc-go module that never uses it (a `lifecycle test` with no `unload` step imported it unused and did not build). It runs on the finished text of `_emit` and `_emit_v3_combined`, live-component and lifecycle emission that selfhost/emit_go.rvl excludes, which no emit_go_corpus document reaches. The input family is backends/go/test_emit_go.py::test_a_lifecycle_test_without_unload_builds_and_passes.": {
+          "_drop_unused_time_import": 4
         }
       },
       "uncovered_statements": 3190
@@ -719,8 +722,8 @@
         "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run.": {
           "_ComponentEmitter._compensated_extern": 3
         },
-        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; host/spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, advance.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, so its statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds four statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. Both are threaded only when declared, so no existing corpus document can reach them, and the port has no stream arm to reach them with.": {
-          "_ComponentEmitter._expr": 88
+        "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal).": {
+          "_ComponentEmitter._expr": 81
         },
         "Declared-`Secret[Map[K, V]]` marking (item 481): `_split_type_name` splits a declared type spelling into its head and its generic arguments, and `_secret_shape_facts` walks a document's declared secret roots transitively to answer whether any shape reachable from one is a `Map` and to render the field table the runtime needs so a map's keys and values are routed through their own declared types. The python corpus reaches both, but only through the non-generic splitter path and the no-Map answers; the branches that fire for a declared `Map` reachable from a secret root are not reached, because no `emit_py_corpus` document declares one. `selfhost/emit_py.rvl` carries the declared-`Secret[T]` marking import line only, not the call-site shape (item-429(d)), so a corpus document that reached them would flip the byte-agreement oracle red rather than close this gap. The reference half is pinned by tests/test_secret_map_key_redaction.py.": {
           "_secret_shape_facts": 3,
@@ -791,7 +794,7 @@
         "Inlining template exclusions: _fn_inline_template rejects async functions (retained async boundary) and guarded returns whose return expression/condition is absent. inline.rvl covers legal guarded returns; frontend value-returning guards cannot omit either expression. Port has the same null checks.": {
           "_fn_inline_template": 2
         },
-        "Item 130 §4.5 replay rendering: backends/python/emit.py::_replay_kwarg renders the `replay=` keyword for a provider declaration or a consumer request. Only a program that declares replay reaches it, and selfhost/emit_py.rvl ports no part of the stream surface, so a corpus document here would flip the byte-agreement oracle RED rather than close the gap (item-429(d)). The reference half is pinned by tests/test_stream_reactive.py and the runtime half by backends/python/tests/test_stream_runtime.py.": {
+        "Item 130 §4.5 replay rendering: backends/python/emit.py::_replay_kwarg renders the `replay=` keyword for a provider declaration or a consumer request. selfhost/emit_py.rvl ports the component `host` call but refuses a replay-declaring `Stream.source()` by name, and no corpus document can declare replay yet: the self-host gate refuses the `replay(…)` clause with G1, a false reject the gate/reference census reports for any census-directory document. The reference half is pinned by tests/test_stream_reactive.py, the port's refusal by tests/test_selfhost_emit_py.py::test_a_declared_stream_replay_is_named_not_dropped, and the runtime half by backends/python/tests/test_stream_runtime.py.": {
           "_replay_kwarg": 3
         },
         "Lifecycle-harness boundary: _emit_lifecycle_harness installs acquire/driver source; _emit_lifecycle_test manages Context, optional clock/session owner, tracing, fibers and finally disposal; _lifecycle_step lowers load/unload/call/advance/abort/assert_no_residue/assert; detectors select abort/clock support. examples/lifecycle_wasm.rvl and tests/test_lifecycle_abort.py are representative inputs. Port has no lifecycle harness, explicitly distinguished from supported component activation.": {
@@ -886,7 +889,7 @@
           "_method_def_name": 2
         }
       },
-      "uncovered_statements": 649
+      "uncovered_statements": 642
     },
     "rust": {
       "statements": 3771,
@@ -1755,7 +1758,7 @@
       "uncovered_statements": 175
     },
     "py": {
-      "statements": 2105,
+      "statements": 2118,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
@@ -1802,8 +1805,8 @@
         "Module expr_inner residuals: bare Some identity, legacy field.sized_length branch and explicit unsupported-kind marker. Module .length currently lowers kind=len while component .length reaches field.sized_length (both in branches.rvl). Some-call construction is covered separately; no claim that all historical IR shapes are source-reachable.": {
           "expr_inner": 4
         },
-        "Module host-root discovery: emit_py_src imports Job when found; ir_uses_host_root's tests subtree is the retained test-harness boundary. Existing module corpus reaches Map/Pool while component host calls are separately deferred. Job uses the same sorted runtime-import mechanism, not a missing port implementation.. Its second uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
-          "emit_py_src": 2,
+        "Module host-root discovery: ir_uses_host_root's tests subtree is the retained test-harness boundary. All four roots reach the sorted runtime import: Map/Pool from the module corpus, Job and Stream from the component host calls in services_host.rvl. emit_py_src's one uncovered statement is the issue-#1123 deferred-test-section splice: the `<<UNSUPPORTED-TEST:...>>` marker block, which only a document carrying a test section reaches and no corpus document does": {
+          "emit_py_src": 1,
           "ir_uses_host_root": 1
         },
         "Owned Map.set computed-key order: inplace_stmts emits _revl_key then the assignment when the key is not trivial. Reference _py_inplace_stmts emits the same sequence. in_place.rvl's keys are trivial, but supported map ownership/copy/remove paths are covered; no exclusion of mutation is claimed.": {
@@ -1873,7 +1876,7 @@
           "witnessed_extern": 1
         }
       },
-      "uncovered_statements": 104
+      "uncovered_statements": 103
     },
     "rust": {
       "statements": 4092,

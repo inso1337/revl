@@ -21,19 +21,27 @@ import type { FiberState } from 'cordis'
 // v2: realm placement (docs/design-v2-realms.md)
 //
 // cordis v4 compares isolate labels with `===`, and its public type for the
-// label is `symbol`.  We therefore keep a process-wide string -> symbol
+// label is `symbol`.  We therefore keep a process-wide (realm, key) -> symbol
 // registry: equal realm strings must resolve to one shared symbol, never to
 // separately allocated `Symbol(name)` values (which would compare as distinct
 // identities even though the strings match).
+//
+// The registry is keyed by the key too, not by the realm string alone
+// (issue #1543). cordis stores a provision under its isolation label
+// (`reflect.provide` writes `store[ctx[isolate][name]]`), so one symbol for a
+// whole realm put `isolate db in realm("wa")` and `isolate api in realm("wa")`
+// in the same slot, and the second provider failed with `service "api" has
+// been registered`.
 
 const realmLabels = new Map<string, symbol>()
 
-/** Process-wide string -> label-symbol registry (equal strings share a realm). */
-export function realmLabel(name: string): symbol {
-  let label = realmLabels.get(name)
+/** Process-wide (realm, key) -> label-symbol registry (equal realm strings share a realm). */
+export function realmLabel(name: string, key: string): symbol {
+  const id = JSON.stringify([name, key])
+  let label = realmLabels.get(id)
   if (!label) {
-    label = Symbol(name)
-    realmLabels.set(name, label)
+    label = Symbol(`${name}/${key}`)
+    realmLabels.set(id, label)
   }
   return label
 }
@@ -49,14 +57,14 @@ export interface RealmComponent {
 
 /**
  * Load an emitted component honoring its realm placements: apply
- * `ctx.isolate(key, realmLabel(label))` per entry BEFORE `ctx.plugin` — the
+ * `ctx.isolate(key, realmLabel(label, key))` per entry BEFORE `ctx.plugin` — the
  * fiber's context chain is fixed at plugin time, so isolation cannot happen
  * inside `apply`.
  */
 export function plug(ctx: Context, component: RealmComponent, config?: any) {
   let scoped: Context = ctx
   for (const [key, realm] of Object.entries(component.isolate ?? {})) {
-    scoped = scoped.isolate(key, realmLabel(realm))
+    scoped = scoped.isolate(key, realmLabel(realm, key))
   }
   return scoped.plugin(component, config)
 }
