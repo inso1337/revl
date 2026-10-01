@@ -2581,7 +2581,11 @@ class _ComponentEmitter:
         the activation fails and the prefix reverts LIFO with the subscription
         bracket on it (§6, A8). Nothing here catches anything."""
         self.uses.add("Stream")
-        item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
+        # `_ident` already applies the keyword/builtin rename, exactly as it
+        # does for every name the body reads; wrapping it in `_mangle` again
+        # escaped a colliding bind twice (`len_` bound as `len___` while the
+        # body read `len__`, a NameError on the first item).
+        item = _ident(step.get("bind"), f"{where}: stream item")
         subject = self._expr(step.get("subject"), where)
         contract = step.get("event")
         gate = None

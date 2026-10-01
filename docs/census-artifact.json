@@ -5250,7 +5250,7 @@
   ],
   "pins": {
    "decides_verdicts": {
-    "backends/python/emit.py": "23d196ec75159f494660a7d19818702016a782b380d6fb3c4b00894279cdd27f",
+    "backends/python/emit.py": "4bd3e088da916285f291d8cff1ef06a278982270b7e9e585c60893d6727fb4fa",
     "tests/test_selfhost_lower.py": "775d1ca7652350d9de039facdd654a1a97f4f723c6481abefbc397c473a0743b",
     "tools/build_gate_crate.py": "9c1947aed30321deba81b5b749149a3549281e094c3d585e3c4c47f1c7ef3d13",
     "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
@@ -5298,8 +5298,8 @@
    },
    "report_inputs": {
     "crates/revl-gate/Cargo.toml": "de0fdc92fd47facfe7b962a233722285724deddca3f2a8495dd427008ff9f25c",
-    "crates/revl-gate/src/admission.rs": "9d8540c12b154c97287e4873b34768741d265caf423d494c55855b359789cd38",
-    "crates/revl-gate/src/frontier.rs": "9104014eba94030792ee01046479372edf641b53a13137d82a5bce0ece1bc01f",
+    "crates/revl-gate/src/admission.rs": "550fbcbf0049b6347026a8abfcd83fbfbabe577f030e46ef52fc246a12a69ed9",
+    "crates/revl-gate/src/frontier.rs": "951f8310ea67d7b13849c0e71e2ec6710a6ea81c1e53c406ad16915219b461c7",
     "crates/revl-gate/src/ir.rs": "0d171beeb651561811e855308c62554f44fbfca7a64bb3030abf0a3f20f9793b",
     "crates/revl-gate/src/lib.rs": "e9c5ddb7d29b757a7e08df675ae54fbaa637a7e952c3421c0ca6934016a13869",
     "crates/revl-gate/src/selfhost.rs": "8827adf53afd823a6fc37c81e25bc9b8fd8a77c6422220de4782993e471a698e",
