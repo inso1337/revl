@@ -1849,6 +1849,46 @@ def _emit_compensations(step: dict, compensated: dict | None) -> list:
     return out
 
 
+def _reaches_declared(node, compensated: dict | None) -> bool:
+    """Whether any `fn` call in *node* (an IR subtree) names an extern that
+    declares its own `compensate` (issue #1592)."""
+    if not compensated:
+        return False
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in compensated:
+            return True
+        return any(_reaches_declared(v, compensated) for v in node.values())
+    if isinstance(node, list):
+        return any(_reaches_declared(v, compensated) for v in node)
+    return False
+
+
+def _declared_call(node: dict, call: str, ctx) -> str:
+    """A call to an extern that declares its own `compensate`, anywhere in a
+    provide method other than the `emit` statement that registers it itself (a
+    `let`, a `return`, an argument, a nested operand, an `if` or loop arm;
+    issue #1592, the positions of #1511). It renders as a block expression: the
+    call runs first, then the offset is registered on the activation's
+    accumulator exactly as a method-body `emit` statement registers it, and the
+    block yields the call's value."""
+    if not ctx.declared_ctx or node is ctx.declared_skip:
+        return call
+    ext = ctx.compensated.get(node.get("name"))
+    if ext is None:
+        return call
+    offset = _render_expr(_as_fn_call(ext["compensate"]), ctx, {})
+    owner = ctx.declared_ctx
+    label = _string(ctx.declared_label)
+    return (f"{{ let _revl_dv = {call}; "
+            f"let _revl_state = revl_teardown_of(&{owner}); "
+            f"let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || {{ let _ = {offset}; }}); "
+            f"let _ = {owner}.effect({label}, move || {{ "
+            f"if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{ "
+            f"_revl_state.phase2.lock().unwrap().push("
+            f"RevlPendingCompensation {{ label: {label}.to_string(), call: _revl_call }}); }} "
+            f"Ok(()) }}); _revl_dv }}")
+
+
 def _body_has_compensation(steps: list | None, compensated: dict | None = None) -> bool:
     for step in steps or []:
         if step.get("step") == "emit" and _emit_compensations(step, compensated):
@@ -1871,6 +1911,9 @@ def _method_bodies_have_compensation(component: dict, compensated: dict | None =
             continue
         for method in step.get("methods") or []:
             if _body_has_compensation(method.get("body"), compensated):
+                return True
+            # a call to such an extern in a value position (issue #1592)
+            if _reaches_declared(method.get("body"), compensated):
                 return True
     return False
 
@@ -4408,11 +4451,16 @@ def _iter_method_steps(steps):
             yield from _iter_method_steps(step.get("body") or [])
 
 
-def _component_has_effectful_methods(component: dict) -> bool:
+def _component_has_effectful_methods(component: dict, compensated: dict | None = None) -> bool:
     for step in component.get("body") or []:
         if step.get("step") != "provide":
             continue
         for method in step.get("methods") or []:
+            # issue #1592: a call to an extern that declares its own
+            # `compensate`, in any position, registers on the activation frame
+            # through `self.ctx`, so the impl needs it.
+            if _reaches_declared(method.get("body"), compensated):
+                return True
             # `let-effect` (item 397: a method-body host CAS) is effectful
             # too — it registers a guarded inverse on the activation frame.
             if any(body_step.get("step") in _RUST_EFFECTFUL_STEPS
@@ -4668,7 +4716,9 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{param}.clone()"
             acquire_node = step.get("expr")
+            env.v3_ctx().declared_skip = acquire_node
             acquire = _expr(acquire_node, env, acquire_rename)
+            env.v3_ctx().declared_skip = None
             out.append(f"{pad}let _ = {acquire};")
             compensations = _emit_compensations(step, env.compensated)
             if not compensations:
@@ -4781,7 +4831,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     cname = _ident(name, "component")
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
-    has_effectful = _component_has_effectful_methods(component)
+    has_effectful = _component_has_effectful_methods(
+        component, _compensated_table(ir.get("externs") or []))
 
     for local, service in env.reqs.items():
         _ident(local, "requirement")
@@ -4860,6 +4911,9 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 env, key, original_mname, method.get("params") or [])
             mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
                            for p, t in secret_params)
+            if has_effectful:
+                env.v3_ctx().declared_ctx = "self.ctx"
+                env.v3_ctx().declared_label = f"{env.name}.{original_mname}.declared.compensate"
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
                 if secret_params:
@@ -4868,6 +4922,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 out.append("    }")
             else:
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {mark}{_method_body_pure_new(env, method)} }}")
+            env.v3_ctx().declared_ctx = None
         out.append("}")
         out.append("")
 
@@ -4951,7 +5006,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
 def _emit_component_auto(component: dict, services: dict, ir: dict | None = None) -> list[str]:
     if (
         not (component.get("isolate") or component.get("intercept"))
-        and not _component_has_effectful_methods(component)
+        and not _component_has_effectful_methods(
+            component, _compensated_table((ir or {}).get("externs") or []))
     ):
         return _emit_component(component, services, ir)
     return _emit_component_new(component, services, ir)
@@ -6320,6 +6376,14 @@ class _V3Ctx:
             analyses = _V3Analyses(functions, self.types)
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # issue #1592: emission externs that declare their own `compensate`, and,
+        # while a provide method renders, the context expression a call to one
+        # registers through (`self.ctx`), its label, and the one call node an
+        # `emit` statement registers itself.
+        self.compensated: dict = _compensated_table(externs or [])
+        self.declared_ctx: str | None = None
+        self.declared_label: str = ""
+        self.declared_skip = None
         # Declared return type of every free function / extern, so a `let`
         # binding to a call can be typed (`let dec = decode(..)` -> `Reply`) and
         # a later by-value use knows to clone (see `_by_value_arg`).
@@ -6704,7 +6768,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # item 277: a viewed callee takes its `&[char]` companions last.
         rendered += _char_view_args(
             node.get("name"), fn_arg_nodes, fn_arg_exprs, ctx)
-        return f"{name}({', '.join(rendered)})"
+        return _declared_call(node, f"{name}({', '.join(rendered)})", ctx)
 
     if kind == "adt":
         # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
