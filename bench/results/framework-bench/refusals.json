@@ -43,8 +43,8 @@
           ]
         },
         "ts": {
-          "residual": 15,
-          "corpus": 75,
+          "residual": 16,
+          "corpus": 76,
           "reproduced": 60,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
@@ -60,6 +60,7 @@
             "../emit_py_corpus/services_control_flow.rvl",
             "../emit_rust_corpus/comp_stream.rvl",
             "component_edges.rvl",
+            "extern_compensate.rvl",
             "ref_externs.rvl",
             "routed_timers.rvl"
           ]
@@ -71,8 +72,8 @@
           "documents": []
         }
       },
-      "total_residual": 25,
-      "total_corpus": 291,
+      "total_residual": 26,
+      "total_corpus": 292,
       "clean_tiers": [
         "java",
         "wasm"
