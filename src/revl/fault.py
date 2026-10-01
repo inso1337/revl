@@ -933,18 +933,23 @@ def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
     import io  # noqa: PLC0415
 
     buffer = io.StringIO()
+    # the runner fills this from the token-verified proof lines only, so text a
+    # program printed (its own `[run] NO-RESIDUE`) cannot reach the verdict
+    # (issue #1621); the captured output is read for diagnostics alone
+    proof: dict = {}
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-            code = runner(faulted_ir, config, files, once=True, interactive=False)
+            code = runner(faulted_ir, config, files, once=True, interactive=False,
+                          proof_out=proof)
     except Exception as error:  # noqa: BLE001 — a runner crash is a capability gap, not a leak
         return ("gap", f"the --once runner raised "
                        f"{type(error).__name__}: {error}")
     output = buffer.getvalue()
-    if "RESIDUE-LEFT" in output:
+    if proof.get("residueLeft"):
         return ("residue", "the runner's teardown proof reported RESIDUE-LEFT")
     if code == 3:
         return ("toolchain", _first_error_line(output) or "runtime not available")
-    if code == 0 and "NO-RESIDUE" in output:
+    if code == 0 and proof.get("noResidue"):
         return ("clean", "")
     return ("gap", _first_error_line(output)
             or f"the --once runner exited {code} without a residue proof")
