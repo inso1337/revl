@@ -16,7 +16,7 @@ component C provides k: K {
   }
   provide k {
     fn f() {
-      let q = zz_write("a")
+      let q = emit zz_write("a")
       return q
     }
   }

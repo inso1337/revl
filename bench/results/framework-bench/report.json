@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+    "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -2552,7 +2552,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2562,7 +2562,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2572,7 +2572,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2582,7 +2582,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2592,7 +2592,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2602,7 +2602,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2612,7 +2612,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2622,7 +2622,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "5d8d14b244a43f34fd0844e0f7404ed58cf098ef-dirty",
+        "compiler_commit": "512bbc7144cba66cad383607febdbab6fcefa9df-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }

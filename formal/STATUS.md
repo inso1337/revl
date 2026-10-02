@@ -1035,15 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**561 .rvl files -> 432 components -> 1130 statements = 308 modeled +
-224 componentless + 29 refused at parse**, and **6237 verdicts compared
-(308 files + 432 components + 108 provide methods + 20 spawn edges + 29
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1130
-confinements + 1130 surfaces + 359 teardowns + 317 provide-clause
-components + 85 config fields + 432 A2 bodies), 6237 agree, 0
+**592 .rvl files -> 463 components -> 1207 statements = 339 modeled +
+224 componentless + 29 refused at parse**, and **6542 verdicts compared
+(339 files + 463 components + 133 provide methods + 20 spawn edges + 29
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1207
+confinements + 1207 surfaces + 361 teardowns + 348 provide-clause
+components + 85 config fields + 463 A2 bodies), 6542 agree, 0
 mismatches**.
 
-Checker alignment over the 308 modeled files. Every bucket recording a
+Checker alignment over the 339 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1052,14 +1052,15 @@ not that it disagrees.
 
 An absence cannot disagree, so the two buckets aimed at a row the model
 does carry are `ratcheted` instead: `out-of-fragment-G5` and
-`out-of-fragment-G6` are held to the names in
-`formal/out_of_fragment_ledger.json`, which shrinks only. A file that
-JOINS one fails the gate, and a line no longer in its bucket fails it
-until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
-a new G6 fixture, cannot arrive while the model stays silent about it.
-`agree-*` and the generic `out-of-fragment` stay informational; that one
-collects every code the model states no row about at all, so it grows
-with corpus work that never touched this layer.
+`out-of-fragment-G6` and `out-of-fragment-approval` are held to the
+names in `formal/out_of_fragment_ledger.json`, which shrinks only. A
+file that JOINS one fails the gate, and a line no longer in its bucket
+fails it until it is deleted. So a new `undo` shape the `Prog` cannot
+resolve, or a new G6 fixture, cannot arrive while the model stays silent
+about it. `agree-*` and the generic `out-of-fragment` stay
+informational; that one collects every code the model states no row
+about at all, so it grows with corpus work that never touched this
+layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1067,7 +1068,7 @@ with corpus work that never touched this layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 48 | informational |
+| `agree-G4` | 64 | informational |
 | `agree-G5` | 2 | informational |
 | `agree-accept` | 184 | informational |
 | `formal-found-other` | 0 | **FATAL** |
@@ -1080,6 +1081,7 @@ with corpus work that never touched this layer.
 | `out-of-fragment` | 57 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
+| `out-of-fragment-approval` | 15 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1095,6 +1097,21 @@ buckets are:
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
 - `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_helper_reach.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_scoped_extern.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_value_form_method.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_guard_setup.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_if.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_while.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_braceless_if.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_multiline_if.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.
