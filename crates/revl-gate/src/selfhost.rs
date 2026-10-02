@@ -3035,7 +3035,7 @@ fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
             if (iplace != "") {
                 r = iplace.clone();
             }
-            if (((method == "indexOf") && recv_type.revl_starts_with("List[")) && ctx_.bp.contains_key(&ref_name(a.clone()))) {
+            if (((method == "indexOf") && (recv_type != "Str")) && ctx_.bp.contains_key(&ref_name(a.clone()))) {
                 r = format!("{}.to_string()", r);
             }
             let lit = borrowed_str_lit(a.clone());
