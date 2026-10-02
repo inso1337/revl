@@ -251,10 +251,8 @@ def _extern_write(ext: dict) -> str:
 
 
 def _extern_signature(ext: dict) -> str:
-    params = ", ".join(f"{p['name']}: {p['type']}"
-                       for p in ext.get("params", []))
-    ret = ext.get("returns")
-    return f"{ext['name']}({params})" + (f" -> {ret}" if ret else "")
+    """An extern's signature, rendered the same way as a method's."""
+    return _render_signature(ext["name"], ext)
 
 
 def _externs(externs: list, calls: list[dict], position: str,
