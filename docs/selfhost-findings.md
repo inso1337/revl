@@ -1739,17 +1739,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     90 |                   90 (100%) |             73 (81.1%) |
+| py   |     96 |                   96 (100%) |             73 (76.0%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
 | go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **309** | **309 (100%)** | **283 (91.6%)** |
+| **total** | **315** | **315 (100%)** | **283 (89.8%)** |
 
-Every one of the 309 documents is reproduced byte-for-byte by its
+Every one of the 315 documents is reproduced byte-for-byte by its
 self-host emitter when the emitter is fed the **reference** IR. 283 of
-them survive the **fully-native** chain, so all 26 residual documents
+them survive the **fully-native** chain, so all 32 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,7 +1779,7 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 17 residual of 90:
+`py`, 23 residual of 96:
 
 - `services_control_flow.rvl`
 - `services_host_stream.rvl`
@@ -1794,6 +1794,12 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../emit_py_test_sections.rvl`
 - `../../../examples/async_timer.rvl`
 - `../emit_py_async_shapes.rvl`
+- `streams.rvl`
+- `../../../backends/go/testdata/stream_130.rvl`
+- `../../../backends/go/testdata/stream_event_130.rvl`
+- `../../../backends/rust/scenarios/stream.rvl`
+- `../emit_rust_corpus/comp_stream.rvl`
+- `../emit_py_stream_builtin_bind.rvl`
 - `branches.rvl`
 - `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
