@@ -58,14 +58,14 @@
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
-//   * async coloring (colored fns / async externs' await-seed / awaited call
-//     sites), spawn/instances, and the ABI. A coloured fn, an `async` operation, a deferred
-//     emission, a `validated` call and a possible item-259 fan-out are each
-//     REFUSED by name (item 391), never emitted as a plausible sync body.
-//     Realm placements (`isolate`/`intercept`/`routes` and the router) are
-//     ported, and so are awaited activation-body effect/emit steps, the
-//     activation-body `await` step, and the in-file `test` / `lifecycle test`
-//     / `fault test` sections;
+//   * spawn/instances and the ABI. A deferred emission, a `validated` call and
+//     a possible item-259 fan-out are each REFUSED by name (item 391), never
+//     emitted as a plausible sync body. Ported since item 391: realm
+//     placements (`isolate`/`intercept`/`routes` and the router), async
+//     colouring (coloured fns, async operations, the await-seed, async arrows,
+//     the async timer window), awaited activation-body effect/emit steps, the
+//     activation-body `await` step, destructuring `let`, and the in-file
+//     `test` / `lifecycle test` / `fault test` sections;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
 //     yet cross-checked: admitted bound acquisitions use spawn or result-declared
 //     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
@@ -662,14 +662,206 @@ fn arm_body_mentions(node: Any, bind: Str) -> Bool {
 // a name, so neither can shadow, clobber or share a cell, which is what makes
 // them safe where a walrus is not (item 163). A bind USED INSIDE a larger body
 // keeps its one-shot lambda.
-fn bind_payload(bind: Str, body: Str, payload: Str, node: Any) -> Str {
+// ------------------------------------------------- async colouring (item 92)
+// The reference decides every `await` while rendering, from emitter state
+// (`_PY_IN_ASYNC` / `_in_async`, `_PY_IN_ARROW` / `_in_arrow`, the document's
+// coloured fns, async externs and async service operations, and a body's
+// async-typed parameters). This port renders statelessly, so it decides the
+// same things up front: `colour` rewrites a body once, before any byte of it is
+// rendered, wrapping each call the reference would await in an `__await__`
+// node, stamping an async arrow with the shape `_py_async_arrow` picks, and
+// stamping a match whose arms reach a coroutine as `__awaited__`. The caller's
+// IR is never mutated; every rebuilt node is a fresh map or list.
+type Colour = {
+  colored: List[Str], async_ext: List[Str], async_ops: List[Str],
+  reqs: Any, locals: List[Str], comp: Bool
+}
+
+// `_py_yields_coroutine`: does evaluating this node produce an awaitable?
+fn yields_co(node: Any, cx: Colour) -> Bool {
+  let k = node_kind(node)
+  if (k == "call") {
+    let tgt = value_field(node, "target")
+    if (cx.comp && node_kind(tgt) == "req") {
+      let svc = value_str(value_field(cx.reqs, value_str(value_field(tgt, "name"))))
+      if (list_contains(cx.async_ops, `${svc}.${value_str(value_field(node, "method"))}`)) { return true }
+    }
+    // (The reference also counts an async operation called off a spawn handle,
+    // an `instance-get` receiver. This port refuses `instance-get` by name, so
+    // such a body never renders and the case is left to the spawn slice.)
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "var") {
+      let nm = value_str(value_field(callee, "name"))
+      if (list_contains(cx.colored, nm) || list_contains(cx.async_ext, nm) || list_contains(cx.locals, nm)) { return true }
+    }
+  }
+  if (k == "fn") {
+    let nm = value_str(value_field(node, "name"))
+    if (list_contains(cx.colored, nm) || list_contains(cx.async_ext, nm)) { return true }
+  }
+  return false
+}
+
+// `_py_reaches_coroutine`: a coroutine anywhere in the node, except inside a
+// nested async arrow, which is a value.
+fn reaches_co(node: Any, cx: Colour) -> Bool {
+  if (node_kind(node) == "arrow" && value_bool(value_field(node, "async"))) { return false }
+  if (value_is_object(node) && yields_co(node, cx)) { return true }
+  for (c of value_children(node)) { if (reaches_co(c, cx)) { return true } }
+  return false
+}
+
+// Which calls the reference awaits in an async body (outside an arrow): in a
+// module fn, a call of a coloured fn, an async extern or an async local; in a
+// component method, any call `_py_yields_coroutine` names, and a `fn` node on a
+// coloured fn or an async extern.
+fn awaits_here(node: Any, cx: Colour) -> Bool {
+  let k = node_kind(node)
+  if (!cx.comp) {
+    if (k != "call") { return false }
+    let callee = value_field(node, "callee")
+    let nm = node_kind(callee) == "var" ? value_str(value_field(callee, "name")) : ""
+    return nm != "" && (list_contains(cx.colored, nm) || list_contains(cx.async_ext, nm) || list_contains(cx.locals, nm))
+  }
+  if (k == "call" || k == "fn") { return yields_co(node, cx) }
+  return false
+}
+
+fn colour(node: Any, cx: Colour, in_async: Bool, in_arrow: Bool) -> Any {
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(colour(item, cx, in_async, in_arrow)) }
+    return items
+  }
+  if (!value_is_object(node)) { return node }
+  let k = node_kind(node)
+  let inner_arrow = in_arrow || k == "arrow"
+  var fields: Map[Str, Any] = Map.empty()
+  for (key of value_keys(node)) { fields = fields.set(key, colour(value_field(node, key), cx, in_async, inner_arrow)) }
+  if (k == "arrow" && value_bool(value_field(node, "async"))) {
+    let body = value_field(node, "body")
+    let shape = yields_co(body, cx) ? "plain" : (reaches_co(body, cx) ? "mixed" : "wrap")
+    fields = fields.set("__async_shape__", shape)
+  }
+  // item 170: whether a component emission reaches a coroutine, which an
+  // async-coloured timer body spawns into its in-flight window instead of
+  // running inline. Read only by `timer_emit`.
+  if (cx.comp && value_str(value_field(node, "step")) == "emit" && reaches_co(value_field(node, "expr"), cx)) {
+    fields = fields.set("__reaches__", true)
+  }
+  if (k == "match" && in_async) {
+    var aw = false
+    for (arm of value_list(value_field(node, "arms"))) { if (reaches_co(value_field(arm, "body"), cx)) { aw = true } }
+    if (aw) { fields = fields.set("__awaited__", true) }
+  }
+  if (in_async && !in_arrow && awaits_here(node, cx)) { return { kind: "__await__", expr: fields } }
+  return fields
+}
+
+// The node an `__await__` wraps (or the node itself): the step-level lookups
+// (witnessed, deferred, compensated externs) read the call, not the wrapper.
+fn unwrap_await(node: Any) -> Any {
+  if (node_kind(node) == "__await__") { return value_field(node, "expr") }
+  return node
+}
+
+// The `Colour` facts for a whole document, and its async operations.
+fn doc_colour(ir: Any, reqs: Any, locals: List[Str], comp: Bool) -> Colour {
+  var colored = []
+  for (f of value_list(value_field(ir, "functions"))) {
+    if (value_bool(value_field(f, "async"))) { colored = colored.push(value_str(value_field(f, "name"))) }
+  }
+  var async_ext = []
+  for (e of value_list(value_field(ir, "externs"))) {
+    if (value_bool(value_field(e, "async"))) { async_ext = async_ext.push(value_str(value_field(e, "name"))) }
+  }
+  var ops = []
+  let services = value_field(ir, "services")
+  for (sname of value_keys(services)) {
+    let methods = value_field(value_field(services, sname), "methods")
+    for (mname of value_keys(methods)) {
+      if (value_bool(value_field(value_field(methods, mname), "async"))) { ops = ops.push(`${sname}.${mname}`) }
+    }
+  }
+  return { colored: colored, async_ext: async_ext, async_ops: ops, reqs: reqs, locals: locals, comp: comp }
+}
+
+// `_is_async_fn_type`: a function type whose declared return is `Async[...]`,
+// the item-92 spelling that colours a first-class callback parameter.
+fn is_async_fn_type(t: Str) -> Bool {
+  let f = split_fn_type(trim(t))
+  return f.ok && trim(f.ret).startsWith("Async[")
+}
+
+// A document with an async arrow whose body is statically sync renders it
+// through `_revl_as_async`, and the module then carries that wrapper.
+fn uses_as_async(n: Any) -> Bool {
+  if (value_str(value_field(n, "__async_shape__")) == "wrap") { return true }
+  for (c of value_children(n)) { if (uses_as_async(c)) { return true } }
+  return false
+}
+
+// Whether any body the document renders lifts a sync arrow into an async slot:
+// the same colouring the renderers see, asked once over the whole IR.
+fn ir_needs_as_async(ir: Any) -> Bool {
+  var found = false
+  for (f of value_list(value_field(ir, "functions"))) {
+    var locals = []
+    for (p of value_list(value_field(f, "params"))) {
+      if (is_async_fn_type(value_str(value_field(p, "type")))) { locals = locals.push(value_str(value_field(p, "name"))) }
+    }
+    found = found || uses_as_async(colour(value_field(f, "body"), doc_colour(ir, None, locals, false), value_bool(value_field(f, "async")), false))
+  }
+  found = found || uses_as_async(colour(value_field(ir, "tests"), doc_colour(ir, None, [], false), false, false))
+  for (c of value_list(value_field(ir, "components"))) {
+    found = found || uses_as_async(colour(value_field(c, "body"), doc_colour(ir, value_field(c, "requires"), [], true), false, false))
+  }
+  return found
+}
+
+fn has_async_timer(n: Any) -> Bool {
+  if (value_str(value_field(n, "step")) == "timer" && value_bool(value_field(n, "async"))) { return true }
+  for (c of value_children(n)) { if (has_async_timer(c)) { return true } }
+  return false
+}
+
+fn as_async_block() -> List[Str] {
+  let o = ["def _revl_as_async(_f):", "    async def _g(*_a, **_k):", "        _r = _f(*_a, **_k)",
+    "        if hasattr(_r, \"__await__\"):", "            return await _r", "        return _r", "    return _g", "", ""]
+  return o
+}
+
+// The emitter's own walrus temporaries (`_bi`, `_fv`, `_rc`, `_ov<N>`): an
+// awaited payload bound under one of these keeps the tuple spelling, since a
+// comprehension may not rebind a walrus target.
+fn walrus_temp(name: Str) -> Bool {
+  if (name == "_bi" || name == "_fv" || name == "_rc") { return true }
+  if (name.length() > 3 && name.slice(0, 3) == "_ov") {
+    var i = 3
+    while (i < name.length()) {
+      let ch = name.charAt(i)
+      if (ch < "0" || ch > "9") { return false }
+      i = i + 1
+    }
+    return true
+  }
+  return false
+}
+
+fn bind_payload(bind: Str, body: Str, payload: Str, node: Any, aw: Bool) -> Str {
   if (arm_body_is_bind(node, bind)) { return payload }
   if (!arm_body_mentions(node, bind)) { return body }
+  // An awaited arm cannot use the one-shot lambda (a sync frame): a
+  // one-element comprehension is a scope that still admits `await`.
+  if (aw) {
+    if (walrus_temp(bind)) { return `((${bind} := ${payload}), ${body})[1]` }
+    return `[${body} for ${bind} in (${payload},)][0]`
+  }
   return `(lambda ${bind}: ${body})(${payload})`
 }
 
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
-fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
+fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   let bnode = value_field(arm, "body")
   var body = expr(bnode)
@@ -681,9 +873,9 @@ fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   } else {
     if (pattern == "Some") {
       cond = `${head} is not None`
-      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode, aw) }
     } else {
-      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode, aw) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -708,7 +900,7 @@ fn match_folds(arms: List[Any]) -> Bool {
   return value_str(value_field(arms[0], "pattern")) != "_"
 }
 
-fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
+fn match_expr(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
   let folds = match_folds(arms)
   var result = ""
   var has = false
@@ -717,7 +909,7 @@ fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
     let arm = arms[i]
     var head = "match"
     if (folds && i == 0) { head = `(match := ${scrutinee})` }
-    result = match_branch(arm, result, has, head)
+    result = match_branch(arm, result, has, head, aw)
     has = true
     i -= 1
   }
@@ -789,7 +981,17 @@ fn render_arrow(node: Any) -> Str {
     ps = ps.push(`${cm}=${cm}`)
   }
   let lp = ps.join(", ")
-  return `lambda ${lp}: ${expr(value_field(node, "body"))}`
+  return async_arrow(value_str(value_field(node, "__async_shape__")), `lambda ${lp}: ${expr(value_field(node, "body"))}`)
+}
+
+// `_py_async_arrow`'s three shapes, decided by `colour`: a tail call of an
+// async callable stays the plain lambda (its awaiting call site settles it), a
+// statically sync body is lifted through `_revl_as_async`, and a body with an
+// internal await, which the reference refuses, is named.
+fn async_arrow(shape: Str, lam: Str) -> Str {
+  if (shape == "wrap") { return `_revl_as_async(${lam})` }
+  if (shape == "mixed") { return "<<UNSUPPORTED-ARROW:async-mixed>>" }
+  return lam
 }
 
 fn render_bin(node: Any) -> Str {
@@ -926,7 +1128,7 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "maplit") { return "{}" }
   if (kind == "arrow") { return render_arrow(node) }
   if (kind == "match") {
-    return match_expr(expr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
+    return match_expr(expr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")), value_bool(value_field(node, "__awaited__")))
   }
   if (kind == "record_update") {
     return render_record_update(expr(value_field(node, "base")), value_list(value_field(node, "updates")))
@@ -955,6 +1157,13 @@ fn expr_inner(node: Any) -> Str {
 // The implicit Int -> Float coercion marker (docs/arithmetic.md): render the
 // conversion the reference makes visible, then dispatch the un-widened node.
 fn expr(node: Any) -> Str {
+  // An awaited call (see `colour`): the reference widens the SETTLED value,
+  // so a Float widen on the call wraps the whole `(await ...)`.
+  if (node_kind(node) == "__await__") {
+    let inner = value_field(node, "expr")
+    let settled = `(await ${expr_inner(inner)})`
+    return value_str(value_field(inner, "widen")) == "Float" ? `float(${settled})` : settled
+  }
   if (value_str(value_field(node, "widen")) == "Float") {
     return `float(${expr_inner(node)})`
   }
@@ -1048,9 +1257,67 @@ fn emit_assert(e: Any, indent: Int) -> List[Str] {
 }
 
 // `_fn_stmt`: one fn-body step -> its emitted lines (already indented).
+// `_let_pattern_stmt`: a destructuring `let` evaluates its value once into a
+// temp, then binds each name. The temp is numbered by `number_patterns` in
+// emission order, per section (the reference's per-`_Lines` counter, item 179).
+fn let_pattern_stmt(node: Any, indent: Int) -> List[Str] {
+  let tmp = `__revl_destructure_${value_int(value_field(node, "__seq__"))}`
+  var out = [line(indent, `${tmp} = ${expr(value_field(node, "value"))}`)]
+  let pattern = value_str(value_field(node, "pattern"))
+  var names = []
+  for (n of value_list(value_field(node, "names"))) { names = names.push(value_str(n)) }
+  if (pattern == "record") {
+    // a record value is a dict: the read is `_field_read`, as `row.name` is
+    for (n of names) { out = out.push(line(indent, `${mangle(n)} = ${field_read(tmp, py_repr(n), true, false)}`)) }
+    return out
+  }
+  var mangled = []
+  for (n of names) { mangled = mangled.push(mangle(n)) }
+  let rest = value_field(node, "rest")
+  if (!value_is_null(rest)) {
+    out = out.push(line(indent, `${mangled.join(", ")}, *${mangle(value_str(rest))} = ${tmp}`))
+  } else if (mangled.length() == 1) {
+    out = out.push(line(indent, `${mangled[0]} = ${tmp}[0]`))
+  } else {
+    out = out.push(line(indent, `${mangled.join(", ")} = ${tmp}`))
+  }
+  return out
+}
+
+// Number every destructuring `let` in a section, in the order the statement
+// emitter reaches it (a pre-order walk of the IR), starting after `n`.
+type Numbered = { node: Any, next: Int }
+
+fn number_patterns(node: Any, n: Int) -> Numbered {
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    var c = n
+    for (item of value_list(node)) {
+      let r = number_patterns(item, c)
+      items = items.push(r.node)
+      c = r.next
+    }
+    return { node: items, next: c }
+  }
+  if (!value_is_object(node)) { return { node: node, next: n } }
+  var c = n
+  var fields: Map[Str, Any] = Map.empty()
+  if (value_str(value_field(node, "step")) == "let_pattern") {
+    c = c + 1
+    fields = fields.set("__seq__", c)
+  }
+  for (key of value_keys(node)) {
+    let r = number_patterns(value_field(node, key), c)
+    fields = fields.set(key, r.node)
+    c = r.next
+  }
+  return { node: fields, next: c }
+}
+
 fn fn_stmt(node: Any, indent: Int) -> List[Str] {
   let step = value_str(value_field(node, "step"))
   var out = []
+  if (step == "let_pattern") { return let_pattern_stmt(node, indent) }
   if (step == "let" || step == "assign") {
     let nm = value_str(value_field(node, "name"))
     let value = value_field(node, "value")
@@ -1156,10 +1423,10 @@ fn memo_source() -> List[Str] {
     "    return _REVL_NOMEMO", ""]
 }
 
-fn emit_memo_wrapper(name: Str, params: List[Any]) -> List[Str] {
+fn emit_memo_wrapper(name: Str, params: List[Any], is_async: Bool) -> List[Str] {
   let args = fn_params(params)
-  let inner = "_revl_uncached_".concat(name)
-  var out = [`def ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
+  let inner = (is_async ? "await " : "").concat("_revl_uncached_").concat(name)
+  var out = [`${is_async ? "async def" : "def"} ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
     `    _revl_k = _revl_memo_key((${py_repr(name)}${if (args == "") { "" } else { ", " }}${args},))`,
     "    if _revl_k is _REVL_NOMEMO:", `        return ${inner}(${args})`,
     "    _revl_v = _REVL_MEMO.get(_revl_k, _REVL_MISS)", "    if _revl_v is _REVL_MISS:",
@@ -1168,26 +1435,30 @@ fn emit_memo_wrapper(name: Str, params: List[Any]) -> List[Str] {
 }
 
 // `_emit_functions`: each module fn as a Python `def`, blank-line separated.
-fn emit_functions(functions: List[Any]) -> List[Str] {
+fn emit_functions(source_functions: List[Any], ir: Any) -> List[Str] {
   var out = []
+  // one destructure counter for the whole functions section
+  let functions = value_list(number_patterns(source_functions, 0).node)
   for (fnode of functions) {
     let name = mangle(value_str(value_field(fnode, "name")))
     let params = fn_params(value_list(value_field(fnode, "params")))
     let memoized = is_cache_pure_fn(fnode)
     let body_name = memoized ? "_revl_uncached_".concat(name) : name
-    // A coloured (`async`) fn is an `async def` whose coloured calls are
-    // awaited; without the colouring this port would emit a sync body, so it
-    // names the fn instead.
-    if (value_bool(value_field(fnode, "async"))) {
-      out = out.concat([`<<UNSUPPORTED-FN:async ${name}>>`, ""])
-    } else {
-      out = out.push(`def ${body_name}(${params}):`)
-      let body = value_list(value_field(fnode, "body"))
-      if (body.length() == 0) { out = out.push(line(1, "pass")) }
-      for (s of body) { out = out.concat(fn_stmt(s, 1)) }
-      out = out.push("")
+    // item 92: a coloured fn is an `async def`; its body renders in an async
+    // context, with its async-typed parameters as the await-locals. An
+    // async-typed parameter is an async local of a sync fn too: the `def`
+    // never awaits it, but an arrow re-passing it is still a coroutine tail.
+    let is_async = value_bool(value_field(fnode, "async"))
+    var locals = []
+    for (p of value_list(value_field(fnode, "params"))) {
+      if (is_async_fn_type(value_str(value_field(p, "type")))) { locals = locals.push(value_str(value_field(p, "name"))) }
     }
-    if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")))) }
+    let body = value_list(colour(value_field(fnode, "body"), doc_colour(ir, None, locals, false), is_async, false))
+    out = out.push(`${is_async ? "async def" : "def"} ${body_name}(${params}):`)
+    if (body.length() == 0) { out = out.push(line(1, "pass")) }
+    for (s of body) { out = out.concat(fn_stmt(s, 1)) }
+    out = out.push("")
+    if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")), is_async)) }
   }
   return out
 }
@@ -1236,8 +1507,7 @@ fn splitlines(s: Str) -> List[Str] {
 
 // `_emit_externs`: each extern as a Python `def`, its verbatim `@py` body
 // dedented + split into indented lines. An async extern's `async def` header is
-// reproduced faithfully; the await-seed / awaited call sites it needs are
-// DEFERRED to slice 5 (so an async extern is excluded from the cross-check).
+// reproduced faithfully, and its call sites are awaited through `colour`.
 // item 256 Slice 1: the composition secrets map and its FAIL-LOUD lookup,
 // emitted only when some emission extern carries a bound secret.
 fn secrets_block() -> List[Str] {
@@ -1608,10 +1878,10 @@ fn comp_names(ir: Any) -> Str {
 // Slice 4 (item 206) added the `config` cexpr, config (`ConfigSchema`), and the
 // method-body `effect`/`let-effect`/compensated-`emit` accumulator (the
 // `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
-// threaded through provides/methods). STILL DEFERRED: async coloring (async
-// methods and the await-seed), spawn/instances, and the `spawn`/`instance-get`
-// cexpr kinds. The activation-body `await` step and the lifecycle-test driver
-// are ported (item 391). The
+// threaded through provides/methods). STILL DEFERRED: spawn/instances and the
+// `spawn`/`instance-get` cexpr kinds. Async operations and the await-seed, the
+// activation-body `await` step and the lifecycle-test driver are ported (item
+// 391). The
 // component-body `${…}` template (the `format` cexpr, `_revl_fmt` + the `fmt`
 // runtime import) is ported — a fn body lowers `${…}` to `interp` instead, so
 // `format` is the component/method-body twin of the fn-body f-string concat.
@@ -1682,7 +1952,7 @@ fn carrow(node: Any) -> Str {
   var ps = []
   for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
   let lp = ps.join(", ")
-  return `lambda ${lp}: ${cexpr(value_field(node, "body"))}`
+  return async_arrow(value_str(value_field(node, "__async_shape__")), `lambda ${lp}: ${cexpr(value_field(node, "body"))}`)
 }
 
 // component `bin`: NO arithmetic specialization (the reference difference).
@@ -1707,7 +1977,7 @@ fn cun(node: Any) -> Str {
   return `<<UNSUPPORTED-UN:${op}>>`
 }
 
-fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
+fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   let bnode = value_field(arm, "body")
   var body = cexpr(bnode)
@@ -1719,9 +1989,9 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   } else {
     if (pattern == "Some") {
       cond = `${head} is not None`
-      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode, aw) }
     } else {
-      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode, aw) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -1731,7 +2001,7 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   return `(${body} if ${cond} else ${rest})`
 }
 
-fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
+fn cmatch(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
   let folds = match_folds(arms)
   var result = ""
   var has = false
@@ -1739,7 +2009,7 @@ fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
   while (i >= 0) {
     var head = "match"
     if (folds && i == 0) { head = `(match := ${scrutinee})` }
-    result = cmatch_branch(arms[i], result, has, head)
+    result = cmatch_branch(arms[i], result, has, head, aw)
     has = true
     i -= 1
   }
@@ -1753,6 +2023,7 @@ fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
 // The component/method-body expression dispatcher (`_ComponentEmitter._expr`).
 fn cexpr(node: Any) -> Str {
   let kind = node_kind(node)
+  if (kind == "__await__") { return `(await ${cexpr(value_field(node, "expr"))})` }
   if (kind == "do") {
     var binds = []
     for (s of value_list(value_field(node, "stmts"))) {
@@ -1818,7 +2089,7 @@ fn cexpr(node: Any) -> Str {
   if (kind == "list") { return clist(value_list(value_field(node, "items"))) }
   if (kind == "arrow") { return carrow(node) }
   if (kind == "match") {
-    return cmatch(cexpr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
+    return cmatch(cexpr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")), value_bool(value_field(node, "__awaited__")))
   }
   if (kind == "builtin") {
     var args = []
@@ -1903,6 +2174,11 @@ fn extern_emit_fire(expr: Any) -> Str {
 // reference's "req"/"spawn" shapes keep their receiver-driven spelling.
 fn emission_fire(expr: Any) -> Str {
   if (node_kind(expr) == "fn") { return extern_emit_fire(expr) }
+  // An awaited host-extern emission: the `await` stays OUTSIDE the recording
+  // seam, exactly where the reference's `_extern_emit_fire` puts it.
+  if (node_kind(expr) == "__await__" && node_kind(value_field(expr, "expr")) == "fn") {
+    return `(await ${extern_emit_fire(value_field(expr, "expr"))})`
+  }
   return cexpr(expr)
 }
 
@@ -2002,6 +2278,8 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     var out = [line(indent, emission_fire(value_field(step, "expr")))]
     return { lines: out, counter: counter }
   }
+  // services 2.0 (§5): an `await` in an async provide method body.
+  if (kind == "await") { return { lines: [line(indent, `await ${cexpr(value_field(step, "expr"))}`)], counter: counter } }
   if (kind == "return") {
     if (value_is_null(value_field(step, "expr"))) { return { lines: [line(indent, "return")], counter: counter } }
     return { lines: [line(indent, `return ${cexpr(value_field(step, "expr"))}`)], counter: counter }
@@ -2092,14 +2370,10 @@ fn method_secret_params(m: Any, specs: Any) -> List[Str] {
 // threading the shared timer/effect counter across its body steps.
 fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> EmitLines {
   let name = mangle_kw(value_str(value_field(m, "name")))
-  // An `async` operation lowers to an `async def` whose calls to async ops and
-  // coloured fns are awaited (the reference's `_in_async` await-seed). This
-  // port carries no async colouring, so it names the method rather than emit a
-  // sync body that would hand its caller an un-awaited result.
-  if (value_bool(value_field(value_field(specs, value_str(value_field(m, "name"))), "async"))) {
-    return { lines: [line(indent, `<<UNSUPPORTED-METHOD:async ${name}>>`)], counter: counter }
-  }
-  var head = `def ${name}(self`
+  // An `async` operation lowers to an `async def`; `colour_component` already
+  // wrapped every call its body awaits.
+  let is_async = value_bool(value_field(value_field(specs, value_str(value_field(m, "name"))), "async"))
+  var head = `${is_async ? "async def" : "def"} ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
   head = head.concat("):")
   var out = []
@@ -2168,13 +2442,39 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
   let fname = `_timer_${c}`
   let handle = fname.concat("_h")
   var out = []
-  out = out.push(line(indent, `def ${fname}():`))
   let emissions = value_list(value_field(step, "body"))
-  if (emissions.length() == 0) { out = out.push(line(indent + 1, "pass")) }
-  for (em of emissions) { out = out.push(line(indent + 1, emission_fire(value_field(em, "expr")))) }
   let interval = value_int(value_field(step, "interval_ms"))
+  // item 170: a timer body coloured `async` fires into an in-flight window.
+  // Each emission that reaches a coroutine is spawned as a tracked task (a sync
+  // one in a mixed body still runs inline), and the inverse cancels the
+  // schedule and every task still in flight, so teardown leaves no orphaned
+  // async work. A sync timer keeps the plain closure and `.cancel()` inverse.
+  let is_async = value_bool(value_field(step, "async"))
+  let inflight = fname.concat("_inflight")
+  if (is_async) { out = out.push(line(indent, `${inflight} = set()`)) }
+  out = out.push(line(indent, `def ${fname}():`))
+  if (emissions.length() == 0) { out = out.push(line(indent + 1, "pass")) }
+  for (em of emissions) {
+    let rendered = emission_fire(value_field(em, "expr"))
+    if (is_async && value_bool(value_field(em, "__reaches__"))) {
+      out = out.push(line(indent + 1, `_revl_task = _revl_asyncio.ensure_future(${rendered})`))
+      out = out.push(line(indent + 1, `${inflight}.add(_revl_task)`))
+      out = out.push(line(indent + 1, `_revl_task.add_done_callback(${inflight}.discard)`))
+    } else {
+      out = out.push(line(indent + 1, rendered))
+    }
+  }
   out = out.push(line(indent, `${handle} = ${runtime_ref(sched)}(${interval}, ${fname})`))
-  out = out.push(line(indent, `yield lambda: ${handle}.cancel()`))
+  if (!is_async) {
+    out = out.push(line(indent, `yield lambda: ${handle}.cancel()`))
+    return { lines: out, counter: c }
+  }
+  let cancel = fname.concat("_cancel")
+  out = out.push(line(indent, `def ${cancel}():`))
+  out = out.push(line(indent + 1, `${handle}.cancel()`))
+  out = out.push(line(indent + 1, `for _revl_task in list(${inflight}):`))
+  out = out.push(line(indent + 2, "_revl_task.cancel()"))
+  out = out.push(line(indent, `yield ${cancel}`))
   return { lines: out, counter: c }
 }
 
@@ -2322,8 +2622,9 @@ fn router_source() -> List[Str] {
 // reversal, so the site spells no `compensate` and the port must read it off the
 // declaration; missing it would fire the emission with nothing to offset it.
 fn compensated_extern(expr: Any, externs: List[Any]) -> Any {
-  if (node_kind(expr) != "fn") { return None }
-  let name = value_str(value_field(expr, "name"))
+  let call = unwrap_await(expr)
+  if (node_kind(call) != "fn") { return None }
+  let name = value_str(value_field(call, "name"))
   for (ext of externs) {
     if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "emission"
         && !value_is_null(value_field(ext, "compensate"))) { return ext }
@@ -2336,8 +2637,9 @@ fn compensated_extern(expr: Any, externs: List[Any]) -> Any {
 // queue, so it names the step instead of firing the host body directly, which
 // would run a deferred emission immediately and outside the commit manifest.
 fn is_deferred_extern(expr: Any, externs: List[Any]) -> Bool {
-  if (node_kind(expr) != "fn") { return false }
-  let name = value_str(value_field(expr, "name"))
+  let call = unwrap_await(expr)
+  if (node_kind(call) != "fn") { return false }
+  let name = value_str(value_field(call, "name"))
   for (ext of externs) {
     if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "emission"
         && value_bool(value_field(ext, "deferred"))) { return true }
@@ -2647,7 +2949,36 @@ fn method_body_has_receiver_secret_witness(steps: List[Any], externs: List[Any])
 }
 
 // One component: the `_<snake>_apply` closure and its plugin dict.
-fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
+// The colouring of a component body: the activation body is not an async
+// context (only its flagged steps suspend), and each provide method is one
+// exactly when its service operation is `async`.
+fn colour_component(steps: Any, cx: Colour, services: Any) -> Any {
+  var out: List[Any] = []
+  for (st of value_list(steps)) {
+    if (value_str(value_field(st, "step")) == "provide") {
+      let specs = value_field(value_field(services, value_str(value_field(st, "service"))), "methods")
+      var methods: List[Any] = []
+      for (m of value_list(value_field(st, "methods"))) {
+        let is_async = value_bool(value_field(value_field(specs, value_str(value_field(m, "name"))), "async"))
+        var mf: Map[Str, Any] = Map.empty()
+        for (key of value_keys(m)) {
+          if (key == "body") { mf = mf.set(key, colour(value_field(m, key), cx, is_async, false)) } else { mf = mf.set(key, value_field(m, key)) }
+        }
+        methods = methods.push(mf)
+      }
+      var pf: Map[Str, Any] = Map.empty()
+      for (key of value_keys(st)) {
+        if (key == "methods") { pf = pf.set(key, methods) } else { pf = pf.set(key, colour(value_field(st, key), cx, false, false)) }
+      }
+      out = out.push(pf)
+    } else {
+      out = out.push(colour(st, cx, false, false))
+    }
+  }
+  return out
+}
+
+fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List[Str] {
   let name = mangle(value_str(value_field(comp, "name")))
   let sn = snake(name)
   var out = []
@@ -2702,7 +3033,10 @@ fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
     out = out.push(line(1, `_revl_route_${key} = _revl_router(_revl_ctx, ${py_repr(key)}, ${py_repr(value_list(value_field(route, "realms")))}, ${py_repr(value_field(route, "strategy"))})`))
   }
   out = out.push("")
-  let body_steps = routed.length() > 0 ? route_reqs(value_field(comp, "body"), routed) : value_field(comp, "body")
+  // Colour first, on the IR the reference reads (a routed require is still a
+  // `req` there, so an async operation through it is awaited), then route.
+  let coloured = colour_component(value_field(comp, "body"), doc_colour(ir, value_field(comp, "requires"), [], true), services)
+  let body_steps = routed.length() > 0 ? route_reqs(coloured, routed) : coloured
   out = out.push(line(1, body_is_async(value_list(body_steps)) ? "async def _body():" : "def _body():"))
   // item 247 second-pass (F1): `begin` yielded FIRST -> disposed LAST (cordis
   // LIFO), the Phase-2 post-unwind hook at the bottom of the unwind stack, so a
@@ -2810,7 +3144,7 @@ fn emit_services_table(services: Any) -> List[Str] {
 // body via stdlib/str.rvl::dedent + local `splitlines`), component `config`/
 // `ConfigSchema`, and method-body `effect`/`let-effect`/compensated-`emit` (the
 // `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED:
-// async coloring, spawn/instances, and the canonical ABI.
+// spawn/instances and the canonical ABI.
 
 // -------------------------------------------------------------- string utils
 // `trim` / `lstrip` / `last_index_of` / `ident_tokens` now come from
@@ -3626,8 +3960,10 @@ fn emit_lifecycle_test(t: Any, fname: Str) -> List[Str] {
 // block's name. A plain block's body goes through the module statement
 // emitter; a lifecycle block becomes its async driver, after the harness.
 // Emitted after the externs and before the SERVICES table.
-fn emit_tests(ir: Any, tests: List[Any]) -> List[Str] {
+fn emit_tests(ir: Any, source_tests: List[Any]) -> List[Str] {
   var out = ["REVL_TESTS = []", ""]
+  // the test section has its own destructure counter
+  let tests = value_list(number_patterns(source_tests, 0).node)
   if (has_lifecycle_test(ir)) { out = out.concat(lifecycle_harness()) }
   var i = 0
   for (t of tests) {
@@ -3638,7 +3974,7 @@ fn emit_tests(ir: Any, tests: List[Any]) -> List[Str] {
       out = out.push(`def ${fname}():`)
       let body = value_list(value_field(t, "body"))
       if (body.length() == 0) { out = out.push(line(1, "pass")) }
-      for (st of body) { out = out.concat(fn_stmt(st, 1)) }
+      for (st of value_list(colour(value_field(t, "body"), doc_colour(ir, None, [], false), false, false))) { out = out.concat(fn_stmt(st, 1)) }
       out = out.push("")
     }
     out = out.push(`REVL_TESTS.append((${py_repr(value_field(t, "name"))}, ${fname}))`)
@@ -3774,9 +4110,12 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     out = out.push("_REVL_REFS = {}")
     out = out.push("")
   }
-  // The lifecycle driver runs under `asyncio.run`, and consults the retry map.
+  // The lifecycle driver runs under `asyncio.run` and consults the retry map;
+  // an async-coloured timer (item 170) spawns its firing onto the running loop.
+  let async_timer = has_async_timer(value_field(ir, "components"))
+  if (has_lifecycle_test(ir) || async_timer) { out = out.push("import asyncio as _revl_asyncio") }
+  if (async_timer && !has_lifecycle_test(ir)) { out = out.push("") }
   if (has_lifecycle_test(ir)) {
-    out = out.push("import asyncio as _revl_asyncio")
     out = out.push(idempotent_map_line(ir))
     out = out.push("")
   }
@@ -3831,7 +4170,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     out = out.concat(emit_types(types))
   }
   let functions = value_list(value_field(ir, "functions"))
-  if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
+  if (functions.length() > 0) { out = out.concat(emit_functions(functions, ir)) }
   // Externs (slice 4): `def <name>(...)` + dedented verbatim body, gated on a
   // non-empty extern list, between the functions and the SERVICES table.
   let externs = value_list(value_field(ir, "externs"))
@@ -3843,13 +4182,14 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   out = out.concat(emit_services_table(value_field(ir, "services")))
   out = out.push("")
   out = out.push("")
+  if (ir_needs_as_async(ir)) { out = out.concat(as_async_block()) }
   if (ir_uses_routes(ir)) {
     out = out.concat(router_source())
     out = out.push("")
     out = out.push("")
   }
   for (c of components) {
-    out = out.concat(component_body(c, value_field(ir, "services"), externs))
+    out = out.concat(component_body(c, value_field(ir, "services"), externs, ir))
     out = out.push("")
     out = out.push("")
   }
@@ -3902,7 +4242,7 @@ test "builtin surface renders portable python" {
 
 test "empty match is the non-exhaustive throw" {
   let empty = []
-  assert match_expr("o", empty) == "((match := o), (_ for _ in ()).throw(TypeError('non-exhaustive match')))[1]"
+  assert match_expr("o", empty, false) == "((match := o), (_ for _ in ()).throw(TypeError('non-exhaustive match')))[1]"
 }
 
 test "py_type maps the surface types" {

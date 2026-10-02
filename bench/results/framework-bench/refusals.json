@@ -22,19 +22,21 @@
           "documents": []
         },
         "py": {
-          "residual": 15,
-          "corpus": 76,
-          "reproduced": 61,
+          "residual": 17,
+          "corpus": 85,
+          "reproduced": 68,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
             "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+            "../../../examples/async_timer.rvl",
             "../../../examples/model_store_sqlite.rvl",
             "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
             "../../../examples/uxprobe2_fault.rvl",
             "../../../examples/uxprobe2_jobs.rvl",
             "../../../src/revl/truc/components/cli.rvl",
             "../../../stdlib/fs.rvl",
+            "../emit_py_async_shapes.rvl",
             "../emit_py_builtin_shadow.rvl",
             "../emit_py_placement.rvl",
             "../emit_py_test_sections.rvl",
@@ -70,8 +72,8 @@
           "documents": []
         }
       },
-      "total_residual": 24,
-      "total_corpus": 295,
+      "total_residual": 26,
+      "total_corpus": 304,
       "clean_tiers": [
         "java",
         "wasm"
@@ -223,8 +225,8 @@
           }
         },
         "py": {
-          "unported_constructs": 16,
-          "unported_reasons": 7,
+          "unported_constructs": 13,
+          "unported_reasons": 6,
           "blind_constructs": 1,
           "reasons": {
             "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
@@ -238,11 +240,6 @@
               "kind=lease-acquire",
               "kind=lease-revoke",
               "step=approval"
-            ],
-            "Existing deterministic-destructuring boundary: emit.py::_let_pattern_stmt emits record bindings and exact/rest list unpacking using _Lines.next_destructure_seq. emit_py.rvl::fn_stmt has no let_pattern arm. Representative let {a} = record and let [a, ...rest] = list forms are in tests/test_v2_language.py. Item 179 removed id-based naming, not this port omission.": [
-              "pattern=list",
-              "pattern=record",
-              "step=let_pattern"
             ],
             "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
               "kind=hole"
@@ -415,7 +412,7 @@
           }
         }
       },
-      "total_unported": 176
+      "total_unported": 173
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -425,14 +422,14 @@
         "compile": 1,
         "emit_go": 49,
         "emit_java": 36,
-        "emit_py": 17,
+        "emit_py": 14,
         "emit_rust": 34,
         "emit_ts": 20,
         "emit_wasm": 50,
         "gate_census": 5,
         "lower_ir": 5
       },
-      "total_unreached": 217
+      "total_unreached": 214
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

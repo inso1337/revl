@@ -131,11 +131,8 @@
     "kind=spawn",
     "kind=stream-merge",
     "kind=subscribe",
-    "pattern=list",
-    "pattern=record",
     "stage=take",
     "step=approval",
-    "step=let_pattern",
     "step=stream-iter",
     "subscribe=<true>",
     "validated=<true>"
