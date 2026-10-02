@@ -54,6 +54,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ._once_proof import SPEC_FLAG, OnceProof
 from ._paths import backends_root
 from .errors import RevlError
 from .refusal import refusals
@@ -129,15 +130,21 @@ def write_wal_record(handle, record: dict) -> None:
         pass
 
 
-def drain_wal_frame(handle, line: str) -> int | None:
-    """If ``line`` is a ``[wal] {…}`` frame, assemble its discharge-descriptor
+def drain_wal_frame(handle, line: str,
+                    prefix: str = _WAL_FRAME_PREFIX) -> int | None:
+    """If ``line`` is a ``<prefix>{…}`` frame, assemble its discharge-descriptor
     and write+fsync it to the open WAL ``handle``; return its seq. Otherwise
     return ``None``. This is the host-side drain that makes a wasm module's
-    framed residue durable."""
+    framed residue durable.
+
+    :func:`run_wasm` passes the run's token-tagged prefix (``[wal#<token>] ``,
+    issue #1621), so only the harness's own record channel reaches the WAL. A
+    bare ``[wal] …`` line is then ordinary output: the frames share stdout with
+    the program, and an undischarged descriptor is what recover replays."""
     text = line.strip()
-    if not text.startswith(_WAL_FRAME_PREFIX):
+    if not text.startswith(prefix):
         return None
-    frame = json.loads(text[len(_WAL_FRAME_PREFIX):])
+    frame = json.loads(text[len(prefix):])
     seq = frame["seq"]
     write_wal_record(handle, wal_descriptor(
         seq, frame["receiver"], frame["method"], frame["witness"]))
@@ -213,7 +220,8 @@ def _emit_modules(ir: dict, record: bool = False, emit_module=None) -> dict[str,
 
 
 def run_wasm(ir: dict, config: dict, files, once: bool = False,
-             interactive: bool = False, policy=None) -> int:
+             interactive: bool = False, policy=None,
+             proof_out: dict | None = None) -> int:
     """Emit -> boot the composition on the cordis-wasm runtime as a process,
     then run the once round-trip (LIFO teardown + no-residue proof) and exit.
     Returns 0 on a clean ``UP`` -> ``NO-RESIDUE`` -> ``DOWN``; nonzero otherwise.
@@ -281,10 +289,12 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
     wal_handle = None
     drained_seqs: list[int] = []
     try:
+        proof = OnceProof("run")
         spec_file = tmp / "run.spec.json"
         spec_file.write_text(json.dumps({
             "name": "run",
             "once": True,
+            SPEC_FLAG: True,
             "record": record,
             "order": order,
             "modules": {name: modules[name] for name in order},
@@ -304,37 +314,30 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, env=env,
         )
-        if proc.stdin is not None:
-            proc.stdin.close()
+        # the proof token is stdin's only line; then stdin closes, as before,
+        # so the runner never blocks on it (issue #1621)
+        proof.send(proc.stdin)
 
-        saw_up = saw_down = saw_no_residue = saw_residue_left = False
         assert proc.stdout is not None
         for line in proc.stdout:
             # drain a `[wal] {…}` frame into the durable WAL (item 322 Slice 2);
             # every other line is the harness's own `[run] …`/`_log` output.
             if wal_handle is not None:
-                seq = drain_wal_frame(wal_handle, line)
+                seq = drain_wal_frame(wal_handle, line, proof.tag("wal"))
                 if seq is not None:
                     drained_seqs.append(seq)
                     continue
-            sys.stdout.write(line)
+            # only a token-tagged line is the runtime's proof; anything else,
+            # a program's own `[run] NO-RESIDUE` included, is output (#1621)
+            sys.stdout.write(proof.line(line))
             sys.stdout.flush()
-            text = line.strip()
-            if text == "[run] UP":
-                saw_up = True
-            elif text.startswith("[run] NO-RESIDUE"):
-                saw_no_residue = True
-            elif text.startswith("[run] RESIDUE-LEFT"):
-                saw_residue_left = True
-            elif text == "[run] DOWN":
-                saw_down = True
         rc = proc.wait()
 
         # a clean unload commits: stamp the discharge (recover then SKIPS those
         # seqs — a committed transaction is never rolled back) and the terminal
         # marker (its presence rolls forward). A nonzero exit / residue leaves
         # the descriptors on disk with no marker — the roll-back state.
-        if wal_handle is not None and rc == 0 and saw_down and saw_no_residue:
+        if wal_handle is not None and rc == 0 and proof.down and proof.no_residue:
             write_wal_record(wal_handle, wal_discharge(drained_seqs))
             write_wal_record(wal_handle, wal_activation_complete())
     finally:
@@ -342,14 +345,15 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             wal_handle.close()
         shutil.rmtree(tmp, ignore_errors=True)
 
+    proof.record(proof_out)
     if rc != 0:
         print(f"error: the wasm composition process exited {rc}", file=sys.stderr)
         return 1
-    if not (saw_up and saw_down):
+    if not (proof.up and proof.down):
         print("error: the wasm composition did not complete the boot/teardown "
               "round-trip (no UP/DOWN)", file=sys.stderr)
         return 1
-    if saw_residue_left or not saw_no_residue:
+    if proof.residue_left or not proof.no_residue:
         print("error: the wasm composition left residue after teardown",
               file=sys.stderr)
         return 1

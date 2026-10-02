@@ -232,9 +232,12 @@ The `revl_check` MCP result enriches every open hole with one:
   "file": "draft.rvl", "line": 8, "expected": "Str",
   "message": "look it up", "guarantee": "…",
   "fillSpec": {
+    "version": 2,
     "expected": "Str",
-    "capability": {"mayEmit": false, "bound": [],
+    "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                    "reason": "a non-emission provide-method — pure"},
+    "crossing": {"permitted": false, "required": false, "form": null,
+                 "calls": [], "rule": "A crossing is a PERMISSION, never an obligation: …"},
     "bindings": [
       {"name": "ttl", "type": "Int"},
       {"name": "key", "type": "Str"},
@@ -242,7 +245,7 @@ The `revl_check` MCP result enriches every open hole with one:
     ],
     "reachableServices": [
       {"service": "Db", "method": "q", "signature": "q(sql: Str) -> Str",
-       "instance": "db", "emission": false}
+       "instance": "db", "emission": false, "callableHere": true}
     ]
   }
 }
@@ -263,7 +266,20 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   empty list with `mayEmit: false` for every other position — a plain `fn`, a
   non-emission method, a `test`, or component setup. A fill that reaches for an
   emitting call where `mayEmit` is false is refused by the same G4 check that
-  guards a hand-written body.
+  guards a hand-written body. `permitsCrossing` is the same bool under its
+  version-2 name; `mayEmit` stays for version-1 readers.
+* **`crossing`** (version 2): the boundary question answered as a fill needs
+  it. `permitted` is the permission above; `required` is always `false`,
+  because a declared `emission` operation is an UPPER bound on its provider
+  and a provider may always be purer than declared, so a pure fill is never
+  wrong for being pure. `form` says how a crossing is written (`emit
+  <key>.<operation>(<args>)` through an injected service, `emit
+  <extern>(<args>)` through a declared emission extern, `let r = emit …` to
+  keep the value), and `calls` lists every crossing available at this
+  position already in that form, filtered to the method's bound: `emit
+  db.put(<k: Str>, <v: Str>)`. A crossing not in `calls` is the G4 refusal.
+  Version 1 had only `mayEmit`, which reads as a property of the hole ("an
+  emission position") and was taken as an obligation to emit.
 * **`bindings`** — every name in scope at the hole, with its type: the
   component's `config` fields, the enclosing method's parameters (typed from
   the service's declaration), and the `let` bindings that *precede* the hole
@@ -273,7 +289,12 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
 * **`reachableServices`** — the component's injected dependencies (`requires`),
   each expanded to its full method table with rendered signatures, so a fill
   knows exactly what it may call and with what. `emission` flags the methods
-  that themselves cross the boundary.
+  that themselves cross the boundary, and `callableHere` (version 2) says
+  whether this position may call the method at all: a plain method always, an
+  emission method only where it is one of the `crossing.calls`.
+
+`version` is `2`. A version-1 spec had no `version` key; every version-1 field
+is unchanged, so a reader of version 1 keeps working.
 
 None of this is new inference. Each field is read off the compiled IR — the
 services table, the component's `requires`/`config`, the enclosing method's
