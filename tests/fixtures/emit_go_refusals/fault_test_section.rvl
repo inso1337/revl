@@ -1,0 +1,18 @@
+// A `fault test` section. The frontend admits it, and the go reference REFUSES
+// the whole document by name: fault tests run on the python reference tier only
+// (docs/fault-tests.md).
+//
+// This is not a byte-agreement case, so it cannot live in the tier's CORPUS.
+// The line-coverage gate drives both halves over it here: the reference's
+// `_refuse_fault_tests`, and the port's `deferred_test_markers`, which names
+// the section with an `<<UNSUPPORTED-FAULT-TEST:...>>` marker because a pure
+// self-host emitter function has no refusal channel.
+service Ping { fn ping() -> Int }
+component P provides p: Ping {
+  let scratch = effect Map.new() undo scratch.drop()
+  provide p { fn ping() = 1 }
+}
+fault test "probe" for P {
+  fail at step 1
+  assert no residue
+}
