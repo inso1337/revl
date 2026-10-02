@@ -66,6 +66,17 @@ operation has a `system` parameter, and `generationConfig` with `temperature`,
   `thoughtsTokenCount` are the token counts; `finishReason` is the finish
   reason; `modelVersion` is the model.
 
+## Structured output
+
+`structured_output` is `response-schema` (default) or `none`. For a `validated`
+operation the adapter sets `responseMimeType: application/json` and a
+`responseSchema` translated from the wire schema: `Opt` becomes `nullable`, a
+variant tag a one-value `enum`, a tagged variant `anyOf`, and member order is
+pinned with `propertyOrdering`. `additionalProperties: false` has no form, and a
+type containing `Map[Str, V]` gets the MIME type only. The adapter claims
+nothing; the value is validated on return. See
+[model-providers.md](model-providers.md#structured-output-constrained-decoding-issue-1462).
+
 ## What is checked, and what is not
 
 Checked: the credential comes from the environment only and never enters the

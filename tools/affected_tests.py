@@ -86,6 +86,9 @@ BENCH_DEPENDENT_TESTS = (
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",
     "tests/test_admission_latency.py",
+    # Issue #1462: runs `bench/structured_output_bench.py` against a fake
+    # server.
+    "tests/test_constrained_decoding_1462.py",
     "tests/test_demand_ranking.py",
     # FRAMEWORK-BENCH-1. It reads `bench/hosts.json` and the committed report,
     # survey and injection artifacts, and it is the gate that catches a
