@@ -51,6 +51,11 @@ def build(binding, request: CompletionRequest, credential: str | None):
         config["topP"] = request.top_p
     if request.seed is not None:
         config["seed"] = request.seed
+    structured = request.structured
+    if structured is not None and structured.mode == "response-schema":
+        config["responseMimeType"] = "application/json"
+        if structured.artifact is not None:
+            config["responseSchema"] = structured.artifact
     body = {
         "contents": [{"role": "user", "parts": [{"text": request.prompt}]}],
         "generationConfig": config,
@@ -60,7 +65,7 @@ def build(binding, request: CompletionRequest, credential: str | None):
     return _url(binding), headers, body
 
 
-def parse(raw: dict) -> Completion:
+def parse(raw: dict, request: CompletionRequest | None = None) -> Completion:
     candidate = raw["candidates"][0]
     parts = (candidate.get("content") or {}).get("parts") or []
     text = "".join(p.get("text", "") for p in parts

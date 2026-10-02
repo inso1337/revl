@@ -92,4 +92,24 @@ def describe_hosts(hosts) -> list:
             lines.append(f"  {key}.{method} -> role {op.role}: {b.provider} "
                          f"{b.model} at {b.base_url} ({b.residence}{cred}"
                          f"{load})")
+            if op.validated:
+                lines.append("    " + structured_line(op, b))
     return lines
+
+
+def structured_line(op, binding) -> str:
+    """How a `validated` operation's grammar reaches its provider, and every
+    way the provider's representation falls short of the revl type."""
+    from ..decode_grammar import json_schema_grammar_for  # noqa: PLC0415
+    from .structured import CLAIMING, representation  # noqa: PLC0415
+    mode = binding.structured_output
+    if mode == "none":
+        return ("structured output: none (the completion is validated on "
+                "return only)")
+    spec = op.response_schema
+    wire = json_schema_grammar_for(spec)["schema"] if spec else None
+    gaps = representation(binding.provider, mode,
+                          wire if mode != "gbnf" else None)
+    claim = "claims the decode" if mode in CLAIMING else "no claim"
+    verdict = "exact" if not gaps else "approximates: " + "; ".join(gaps)
+    return f"structured output: {mode} ({claim}), {verdict}"

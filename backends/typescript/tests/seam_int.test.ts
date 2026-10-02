@@ -59,7 +59,8 @@ describe('decodeAs: a wire value by its declared type', () => {
     expect(decodeAs({ $kind: 'Err', $value: 'no' }, 'Result[Int, Str]', TYPES))
       .toEqual({ kind: 'Err', value: 'no' })
     expect(decodeAs(7, 'Opt[Int]', TYPES)).toBe(7n)
-    expect(decodeAs(null, 'Opt[Int]', TYPES)).toBe(null)
+    // issue #1619: None is `undefined` on this tier, not the wire's `null`
+    expect(decodeAs(null, 'Opt[Int]', TYPES)).toBeUndefined()
   })
 
   it('an undeclared type decodes exactly as before', () => {

@@ -30,6 +30,7 @@ sits and for how long.
 | `devices` | Required, non-empty. Each key is a device `name` from the placement's `[[processes.<p>.devices]]`; each value is the load options that put the model on that device. |
 | `api_key_env` | Optional, sent as `Authorization: Bearer ...` (a proxy in front of Ollama). |
 | `residence` | Derived as for `openai-compatible`: `on_device` on a loopback host, otherwise `off_device`. |
+| `structured_output` | `none`, the only value. This adapter sends no constrained format, so a `validated` operation's completion is unconstrained and checked on return. |
 
 The load options are a closed set:
 

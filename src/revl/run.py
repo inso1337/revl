@@ -2703,6 +2703,10 @@ def run_command(args, hold_once: bool = False) -> int:
         # the model hosts are ambient provisions: provided before any component
         # loads and withdrawn by the driver at teardown, like `revl dev`'s host
         ambient = {**(ambient or {}), **model_hosts}
+        # issue #1462: the runtime's grammar registry and claim seam are what
+        # structured output attaches a `validated` crossing's grammar through
+        for host in model_hosts.values():
+            host._revl_attach_runtime(runtime_mod)
     try:
         driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
                          record=bool(getattr(args, "record", False)),

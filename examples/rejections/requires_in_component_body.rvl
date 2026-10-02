@@ -1,0 +1,18 @@
+// REJECTED — `requires` written as a statement inside a component body.
+// `requires` and `provides` are clauses of the component HEADER, the line
+// that opens the component; a body holds statements. The refusal names the
+// mistake and gives the corrected header, built from the header that was
+// written plus the clause found in the body:
+//
+//   component Front requires store: Store provides front: Show {
+//
+// expected error:
+//   `requires` is part of the component header, not a statement in the body of Front
+
+service Store { fn get(k: Str) -> Str }
+service Show { fn show(k: Str) -> Str }
+
+component Front provides front: Show {
+  requires store: Store
+  provide front { fn show(k) = store.get(k) }
+}

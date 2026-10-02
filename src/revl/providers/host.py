@@ -34,6 +34,17 @@ seam then checks against the declared type; text that is not JSON is returned
 as text, so the seam refuses it as the wrong shape (and retries under a
 declared `retry N`). Nothing here strips code fences or otherwise helps a
 reply look valid: that judgement belongs to the validator.
+
+CONSTRAINED DECODING (issue #1462)
+----------------------------------
+Once the py runtime is attached (`attach_runtime`, which `revl run` does after
+importing it), a `validated` operation's registered grammar is attached to the
+request in the binding's `structured_output` mode (`revl.providers.structured`).
+A claiming mode takes the artifact with `revl_constrain` in the CALLER's
+context, before an `async` operation moves to a worker thread, because the
+claim is a context variable that `validate_response` reads in that same
+context. With llguidance installed, a completion made under a `gbnf` claim is
+matched byte for byte and a miss raises `GrammarNotHonouredError`.
 """
 
 from __future__ import annotations
@@ -41,11 +52,16 @@ from __future__ import annotations
 import asyncio
 import json
 
+from dataclasses import replace
+
 from .adapter import Adapter
 from .completion import Completion, CompletionRequest
 from .. import model_placement
-from .placement import check_bindings, model_operations
+from .placement import Refusal, check_bindings, model_operations
 from .provision import Provisions
+from .structured import (CLAIMING, GrammarEngineError, Structured,
+                         gemini_response_schema, recogniser_for,
+                         representation, tool_input_schema)
 from .transport import ProviderError
 
 
@@ -83,14 +99,49 @@ def request_for(op, args) -> CompletionRequest:
     return CompletionRequest(prompt=prompt, system=system)
 
 
-def value_of(op, completion: Completion):
-    """The value a completion becomes, by the operation's declared return."""
-    if op.returns in (None, "Str"):
+def value_of(op, completion: Completion, structured=None):
+    """The value a completion becomes, by the operation's declared return.
+
+    A value the provider returned already decoded (a forced tool's input) is
+    used as it is. Under structured output the answer is JSON even for a `Str`
+    return, so it is decoded; otherwise a `Str` return gets the text."""
+    if completion.has_value:
+        return completion.value
+    if op.returns in (None, "Str") and structured is None:
         return completion.text
     try:
         return json.loads(completion.text)
     except (json.JSONDecodeError, TypeError):
         return completion.text
+
+
+def structured_for(op, binding, runtime) -> Structured | None:
+    """The constraint to attach to one call of `op`, taking (claiming) it
+    where the mode claims. Must run in the caller's context."""
+    mode = binding.structured_output
+    if runtime is None or not op.validated or mode in ("", "none"):
+        return None
+    key = op.crossing
+    if mode in CLAIMING:
+        taken = runtime.revl_constrain(key, (CLAIMING[mode],))
+        if not taken:
+            return None
+        dialect, artifact, digest = taken
+        wire = artifact if dialect == "json-schema" else None
+        return Structured(mode, dialect, artifact, digest, claimed=True,
+                          gaps=representation(binding.provider, mode, wire))
+    grammar = runtime.revl_decode_grammar(key) or {}
+    wire = grammar.get("wire_schema") or {}
+    if not wire.get("schema"):
+        return None
+    schema = wire["schema"]
+    if mode == "tool":
+        artifact = tool_input_schema(schema)
+    else:
+        artifact = gemini_response_schema(schema)[0]
+    return Structured(mode, "json-schema", artifact, wire.get("digest"),
+                      claimed=False,
+                      gaps=representation(binding.provider, mode, schema))
 
 
 class ModelHost:
@@ -106,6 +157,7 @@ class ModelHost:
         self._revl_last = None
         self._revl_provisions = provisions or Provisions({})
         self._revl_held: tuple = ()
+        self._revl_runtime = None
 
     def _revl_roles(self) -> set:
         return {op.role for op, _ in self._revl_routes.values()}
@@ -130,7 +182,13 @@ class ModelHost:
         latency; never a credential."""
         return self._revl_last
 
-    def _revl_serve(self, method: str, args: tuple):
+    def _revl_attach_runtime(self, runtime) -> None:
+        """Give the host the py runtime module, whose grammar registry and
+        claim seam structured output uses. Without it, calls are
+        unconstrained."""
+        self._revl_runtime = runtime
+
+    def _revl_prepare(self, method: str, args: tuple):
         op, adapter = self._revl_routes[method]
         if adapter.managed:
             # the schedule is asked on every call, not only at the load: a
@@ -138,9 +196,58 @@ class ModelHost:
             # device the member is loaded on must be the scheduled one
             model_placement.claim(op.role, adapter.loaded_on
                                   or model_placement.device_for(op.role))
-        completion = adapter.complete(request_for(op, args))
+        structured = structured_for(op, adapter.binding, self._revl_runtime)
+        return op, adapter, replace(request_for(op, args),
+                                    structured=structured)
+
+    def _revl_drop_claim(self) -> None:
+        """Spend an in-flight claim that no `validate_response` will read,
+        so it cannot be judged against the next crossing's completion."""
+        take = getattr(self._revl_runtime, "_take_grammar_claim", None)
+        if take is not None:
+            take()
+
+    def _revl_finish(self, op, request, completion):
+        """Runs in the caller's context, after the request returned."""
         self._revl_last = completion
-        return value_of(op, completion)
+        structured = request.structured
+        if structured is not None and structured.claimed \
+                and structured.dialect == "gbnf":
+            self._revl_check_bytes(op, structured, completion)
+        return value_of(op, completion, structured)
+
+    def _revl_check_bytes(self, op, structured, completion) -> None:
+        recogniser = recogniser_for(structured.artifact, structured.digest)
+        if recogniser is None:
+            return
+        error = recogniser.error(completion.text)
+        if error is not None:
+            self._revl_drop_claim()
+            raise self._revl_runtime.GrammarNotHonouredError(
+                f"{op.crossing}: the provider claimed the gbnf grammar and the "
+                f"completion is outside it (checked byte for byte by "
+                f"llguidance): {error}", where=op.crossing,
+                value=completion.text)
+
+    def _revl_serve(self, method: str, args: tuple):
+        op, adapter, request = self._revl_prepare(method, args)
+        try:
+            completion = adapter.complete(request)
+        except BaseException:
+            self._revl_drop_claim()
+            raise
+        return self._revl_finish(op, request, completion)
+
+    async def _revl_serve_async(self, method: str, args: tuple):
+        # prepare and finish HERE, in the awaiting context: a claim is a
+        # context variable, and to_thread runs the request in a copy of it
+        op, adapter, request = self._revl_prepare(method, args)
+        try:
+            completion = await asyncio.to_thread(adapter.complete, request)
+        except BaseException:
+            self._revl_drop_claim()
+            raise
+        return self._revl_finish(op, request, completion)
 
     def __repr__(self) -> str:
         roles = ", ".join(f"{m}->{op.role}"
@@ -152,7 +259,7 @@ class ModelHost:
 def _method(name: str, is_async: bool):
     if is_async:
         async def call(self, *args):
-            return await asyncio.to_thread(self._revl_serve, name, args)
+            return await self._revl_serve_async(name, args)
     else:
         def call(self, *args):
             return self._revl_serve(name, args)
@@ -169,6 +276,7 @@ def build_hosts(ir, placement, config, *, environ=None) -> dict:
     """
     ops = model_operations(ir, placement.roles)
     refusals = check_bindings(placement, config, ops)
+    refusals += grammar_refusals(config, ops)
     if refusals:
         raise PlacementRefused(refusals)
     adapters: dict = {}
@@ -252,6 +360,28 @@ def _provision_sets(hosts) -> list:
         if not any(host._revl_provisions is p for p in seen):
             seen.append(host._revl_provisions)
     return seen
+
+
+def grammar_refusals(config, ops) -> list:
+    """A `gbnf` binding may not claim a grammar the local engine refuses.
+    Empty when llguidance is not installed (nothing to check with)."""
+    out = []
+    for op in ops:
+        binding = config.binding(op.role) if op.role else None
+        if binding is None or binding.structured_output != "gbnf" \
+                or not op.grammar or op.grammar.get("format") != "gbnf":
+            continue
+        try:
+            recogniser_for(op.grammar.get("text", ""), op.grammar.get("digest"))
+        except GrammarEngineError as exc:
+            out.append(Refusal(
+                f"`{op.crossing}` is bound in `gbnf` mode, and the grammar its "
+                f"return type derives is refused by the local grammar engine: "
+                f"{exc}",
+                "an adapter will not claim a grammar a real engine cannot "
+                "compile. Use `structured_output = \"json-schema\"` for this "
+                "role, or report the grammar as a revl defect", op.role))
+    return out
 
 
 def missing_credentials(config, environ, roles) -> list:

@@ -64,6 +64,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import wire_anthropic, wire_gemini, wire_ollama, wire_openai
+from .structured import MODES as STRUCTURED_MODES
 
 #: `{provider: wire module}`, in the order a refusal lists them. Each wire
 #: module names its own `PROVIDER` and `FIELDS`, so this is the one place the
@@ -85,7 +86,7 @@ RESIDENCES = ("on_device", "off_device")
 
 _COMMON_FIELDS = frozenset({
     "provider", "model", "base_url", "api_key_env", "max_tokens",
-    "temperature", "timeout", "residence", "reaches",
+    "temperature", "timeout", "residence", "reaches", "structured_output",
 })
 _PROVIDER_FIELDS = {provider: wire.FIELDS for provider, wire in WIRES.items()}
 
@@ -141,6 +142,9 @@ class Binding:
     #: options per device the provision may load this role on. Empty for
     #: every other provider, whose endpoint manages its own residency.
     devices: tuple = ()
+    #: how a `validated` crossing's grammar is attached (issue #1462);
+    #: `revl.providers.structured.MODES` lists the values per provider
+    structured_output: str = ""
 
     @property
     def endpoint(self) -> str:
@@ -328,6 +332,12 @@ def _binding(role: str, entry, source: str) -> Binding:
                              f"device. The residence of an endpoint can be "
                              f"narrowed by configuration, never widened")
 
+    structured = entry.get("structured_output",
+                           STRUCTURED_MODES[provider][0])
+    if structured not in STRUCTURED_MODES[provider]:
+        raise _refuse(where, f"`structured_output` for {provider} must be one "
+                             f"of {', '.join(STRUCTURED_MODES[provider])}")
+
     reaches = entry.get("reaches", [])
     if not isinstance(reaches, list) or not all(
             isinstance(t, str) and t for t in reaches):
@@ -348,6 +358,7 @@ def _binding(role: str, entry, source: str) -> Binding:
                                     DEFAULT_ANTHROPIC_VERSION),
         devices=(_devices(where, entry.get("devices"))
                  if provider == "ollama" else ()),
+        structured_output=structured,
     )
 
 
