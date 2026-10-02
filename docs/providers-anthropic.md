@@ -41,6 +41,16 @@ Messages API has no sampling seed, so a seed is never sent.
 - `usage.input_tokens` and `usage.output_tokens` are the token counts;
   `stop_reason` is the finish reason.
 
+## Structured output
+
+`structured_output` is `tool` (default) or `none`. For a `validated` operation
+the adapter sends one tool, `respond`, whose `input_schema` is the wire schema
+(wrapped as `{"value": ...}` when the root is not an object), and forces it with
+`tool_choice`. The `tool_use` block's input is the value. Tool input is
+schema-guided rather than grammar-constrained, so the adapter claims nothing and
+every type counts as approximated; the value is validated on return. See
+[model-providers.md](model-providers.md#structured-output-constrained-decoding-issue-1462).
+
 ## What is checked, and what is not
 
 Checked: the key comes from the environment only; the role is `off_device`;

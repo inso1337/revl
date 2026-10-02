@@ -69,7 +69,7 @@ def test_each_obligation_carries_its_fill_spec():
     # the emission method's fill may cross exactly the injected boundary
     run = by_type["Str"]["fillSpec"]
     assert run["capability"] == {
-        "mayEmit": True, "bound": ["filesystem"],
+        "permitsCrossing": True, "mayEmit": True, "bound": ["filesystem"],
         "reason": "an emission-declared provide-method scoped to filesystem"}
     assert {"name": "input", "type": "Str"} in run["bindings"]
     # the effect-setup hole is a pure position
