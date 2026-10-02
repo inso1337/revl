@@ -1996,7 +1996,23 @@ class _ComponentEmitter:
             # never runs). The compensation registers AFTER, exactly as the sync
             # spelling registers after the fire (design §4 clause 1).
             aw = "await " if step.get("async") else ""
-            out.add(indent, f"{aw}{self._emit_fire(step, where)}")
+            if (step.get("async") and step.get("approval") is None
+                    and self._validated_call(step.get("expr")) is not None):
+                # A `validated` async operation checks the SETTLED response
+                # (item 257), so the await belongs inside the seam:
+                # `_revl_validate((await <call>), ..)`. Awaiting the whole
+                # expression validated the coroutine object instead. Rendering
+                # the fire in async mode gives exactly the form a validated
+                # call takes in an async provide method.
+                prev_async = self._in_async
+                self._in_async = True
+                try:
+                    fire = self._emit_fire(step, where)
+                finally:
+                    self._in_async = prev_async
+                out.add(indent, fire)
+            else:
+                out.add(indent, f"{aw}{self._emit_fire(step, where)}")
             if step.get("compensate") is not None:
                 # item 247 (docs/design/teardown-contract.md): a compensation
                 # is a first-class COMPENSATION entry on the frame's shared
@@ -2581,7 +2597,11 @@ class _ComponentEmitter:
         the activation fails and the prefix reverts LIFO with the subscription
         bracket on it (§6, A8). Nothing here catches anything."""
         self.uses.add("Stream")
-        item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
+        # `_ident` already applies the keyword/builtin rename, exactly as it
+        # does for every name the body reads; wrapping it in `_mangle` again
+        # escaped a colliding bind twice (`len_` bound as `len___` while the
+        # body read `len__`, a NameError on the first item).
+        item = _ident(step.get("bind"), f"{where}: stream item")
         subject = self._expr(step.get("subject"), where)
         contract = step.get("event")
         gate = None
