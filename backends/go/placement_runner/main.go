@@ -76,6 +76,34 @@ type spec struct {
 	// travels in the spec and the runner publishes it to the ambient variable the
 	// seams already read. Empty when the placement was never armed.
 	EstopLatch string `json:"estopLatch"`
+	// ProofOnStdin (issue #1621): the `--once` runner hands this process a
+	// per-run token as the first line of stdin, and the four proof lines
+	// (`UP`, `NO-RESIDUE`, `RESIDUE-LEFT`, `DOWN`) carry it, so a program's own
+	// output cannot forge them. A flag here, never the token: the spec is a
+	// file the program could read.
+	ProofOnStdin bool `json:"proofOnStdin"`
+}
+
+// readProofToken reads the first line of stdin one byte at a time, so nothing
+// past it is buffered away from the stop-on-EOF reader below. It runs before
+// any component loads, so no host code has run yet, and the token lives only
+// in main's locals: the emitted package cannot name it (issue #1621).
+func readProofToken() string {
+	var token []byte
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n == 1 {
+			if buf[0] == '\n' {
+				break
+			}
+			token = append(token, buf[0])
+		}
+		if err != nil {
+			break
+		}
+	}
+	return strings.TrimSpace(string(token))
 }
 
 type labeledFiber struct {
@@ -164,6 +192,12 @@ func main() {
 	}
 	if s.Name != "" {
 		name = s.Name
+	}
+	// the proof lines' prefix: `[name#token]` when the runner sent a token,
+	// which it rewrites to `[name]` for people (issue #1621)
+	proofName := name
+	if s.ProofOnStdin {
+		proofName = name + "#" + readProofToken()
 	}
 	log := func(channel, subject, detail string) {
 		// item 421 F5 — the runner's single log choke point. Probe results,
@@ -300,7 +334,7 @@ func main() {
 	go func() { <-sig; stop <- struct{}{} }()
 	go func() { io.Copy(io.Discard, os.Stdin); stop <- struct{}{} }()
 
-	fmt.Printf("[%s] UP\n", name)
+	fmt.Printf("[%s] UP\n", proofName)
 
 	// 5a. item 443 / issue #122 — the idle watcher. The seams refuse lazily, at
 	//     the NEXT crossing, which is useless for a process parked in the select
@@ -398,10 +432,10 @@ func main() {
 		}
 		log("residue", "provisions", fmt.Sprintf("%d service(s) still provided", still))
 		if live == 0 && still == 0 {
-			fmt.Printf("[%s] NO-RESIDUE — the composition left nothing behind\n", name)
+			fmt.Printf("[%s] NO-RESIDUE — the composition left nothing behind\n", proofName)
 		} else {
-			fmt.Printf("[%s] RESIDUE-LEFT — see the residue lines above\n", name)
+			fmt.Printf("[%s] RESIDUE-LEFT — see the residue lines above\n", proofName)
 		}
 	}
-	fmt.Printf("[%s] DOWN\n", name)
+	fmt.Printf("[%s] DOWN\n", proofName)
 }
