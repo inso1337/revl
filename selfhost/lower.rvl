@@ -2202,8 +2202,8 @@ fn fn_params_i(ts: List[Token], i: Int) -> Int {
   return j + 1
 }
 
-// `extern <class>[caps] [(confined: p)] [async|deferred] fn name(params)
-//  -> T [= @host {..}]*`, where `<class>` is `emission`/`acquire`/`pure`
+// `extern <class>[caps] [(confined: p)] [async|deferred|idempotent[(key: p)]]
+//  fn name(params) -> T [= @host {..}]*`, where `<class>` is `emission`/`acquire`/`pure`
 // (reserved keywords) or `witnessed` (item 243, a CONTEXTUAL keyword the lexer
 // does not reserve — recognised here as an ident, so no KEYWORDS sync, exactly
 // as `src/revl/parser.py::extern_decl` recognises it). Modifiers are consumed in
@@ -2240,9 +2240,12 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   var isWit = false
   var caps: List[Str] = []
   var sawCaps = false
+  // item 309: `idempotent` (a reserved keyword) and its `idempotent(key: p)`
+  // keyed form join the modifier slot; the key bracket is stepped over by the
+  // `(` arm below, as the reach clause is.
   while (atw(ts, j, "emission") || atw(ts, j, "acquire") || atw(ts, j, "pure")
          || atw(ts, j, "async") || ati(ts, j, "witnessed") || ati(ts, j, "deferred")
-         || atk(ts, j, "[") || atk(ts, j, "(")) {
+         || atw(ts, j, "idempotent") || atk(ts, j, "[") || atk(ts, j, "(")) {
     if (atw(ts, j, "emission")) { isEm = true }
     if (ati(ts, j, "witnessed")) { isWit = true }
     if (atw(ts, j, "async")) { isAsync = true }
@@ -10228,6 +10231,104 @@ fn ext_slot_verd(ts: List[Token], e: Expr, start: Int, nm: Str, slot: Str,
   return no_verd()
 }
 
+// The modifier slot of one `extern`, read from just past its class. `lead`
+// says this phase does not judge the declaration at all: a reach clause, a
+// malformed key role, or a capability scope on a declaration that is not
+// `idempotent` (those keep the skip they always had). `caps` is a capability
+// scope that WAS stepped over, so an `emission[net] idempotent(key: p)` is
+// judged. `idem`/`key` are item 309's modifier and its keyed role; `other` is
+// any other modifier (`async`, `deferred`, `validated`, `retry`), whose
+// validity blocks this phase does not judge. `j` is where the slot ends, the
+// `fn` of a well-formed declaration.
+type ExtMods = { j: Int, lead: Bool, caps: Bool, idem: Bool, key: Str, other: Bool }
+
+fn ext_mods_lead(j: Int) -> ExtMods {
+  return { j: j, lead: true, caps: false, idem: false, key: "", other: false }
+}
+
+fn ext_mods(ts: List[Token], start: Int) -> ExtMods {
+  if (atk(ts, start, "(")) { return ext_mods_lead(start) }
+  var j = start
+  var caps = false
+  if (atk(ts, j, "[")) {
+    caps = true
+    while (j < ts.length() && !atk(ts, j, "]")) { j += 1 }
+    j += 1
+    if (atk(ts, j, "(")) { return ext_mods_lead(start) }
+  }
+  var idem = false
+  var key = ""
+  var other = false
+  // `deferred`, `validated` and `retry` are CONTEXTUAL words (idents);
+  // `async` and `idempotent` are reserved keywords.
+  while (atw(ts, j, "async") || ati(ts, j, "deferred") || atw(ts, j, "idempotent")
+         || ati(ts, j, "validated") || ati(ts, j, "retry")) {
+    if (atw(ts, j, "idempotent")) {
+      idem = true
+      j += 1
+      if (atk(ts, j, "(")) {
+        // `(key: <param>)`: the reference's `_idempotency_key_clause`
+        if (ati(ts, j + 1, "key") && atk(ts, j + 2, ":") && atk(ts, j + 3, "ident")
+            && atk(ts, j + 4, ")")) {
+          key = tkc(ts, j + 3).text
+          j += 5
+        } else {
+          return ext_mods_lead(j)
+        }
+      }
+    } else if (ati(ts, j, "retry")) {
+      other = true
+      j += 2
+    } else {
+      other = true
+      j += 1
+    }
+  }
+  if (caps && !idem) { return ext_mods_lead(start) }
+  return { j: j, lead: false, caps: caps, idem: idem, key: key, other: other }
+}
+
+// item 309's two rules, in `_lower_externs`'s order and with its sentences:
+// `idempotent` is emission-only, and a keyed form names a declared parameter
+// whose type is a serializable scalar (`Str` or `Int`). The parameter type is
+// read as the reference reads it: past the `Secret[...]` qualifier `taint.py`
+// strips, and through any type alias, which the reference resolves before
+// this check.
+fn ext_idem_verdict(cls: Str, nm: Str, mods: ExtMods, ps: List[ParamN],
+                    line: Int, al: Map[Str, Str]) -> Verd {
+  if (cls != "emission") {
+    return mk_verd(tagged("G4", "`".concat(cls).concat("` extern `").concat(nm)
+      .concat("` cannot be declared `idempotent`")), line)
+  }
+  if (mods.key == "") { return no_verd() }
+  var names: List[Str] = []
+  var keyTy = ""
+  var found = false
+  var p = 0
+  while (p < ps.length()) {
+    names = names.push(ps[p].name)
+    if (ps[p].name == mods.key) {
+      found = true
+      keyTy = alias_subst(taint_strip(ps[p].ty), al)
+    }
+    p += 1
+  }
+  if (!found) {
+    let listed = names.length() == 0 ? "(none)" : join_comma(sort_strs(names), 0, "")
+    return mk_verd(tagged("G4", "emission `".concat(nm)
+      .concat("` declares `idempotent(key: ").concat(mods.key)
+      .concat(")`, but `").concat(mods.key)
+      .concat("` is not one of its parameters (").concat(listed).concat(")")),
+      line)
+  }
+  if (keyTy != "Str" && keyTy != "Int") {
+    return mk_verd(tagged("G4", "emission `".concat(nm)
+      .concat("` idempotency key `").concat(mods.key).concat("` has type `")
+      .concat(keyTy).concat("`, which is not scalar-serializable")), line)
+  }
+  return no_verd()
+}
+
 // The first verdict one `extern` declaration raises, `no_verd()` when it
 // raises none. `undo` precedes `compensate` because the reference checks them
 // in that order.
@@ -10237,7 +10338,7 @@ fn ext_slot_verd(ts: List[Token], e: Expr, start: Int, nm: Str, slot: Str,
 // `emission` may not declare `undo`. Each is the reference's FIRST refusal for
 // its declaration, so returning it directly is the fail-fast shape.
 fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
-                    gtys: List[Bind]) -> Verd {
+                    gtys: List[Bind], al: Map[Str, Str]) -> Verd {
   let line = tkc(ts, i).line
   let cls = ext_class_at(ts, i + 1)
   if (cls == "") {
@@ -10253,15 +10354,20 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
   // reference's first. Those rules are this slice's named LEFT OUTs; the
   // corpus contains no program that reaches one of them with an ill-formed
   // inverse (measured), so skipping them is also what keeps the census still.
-  var j = i + 2
-  if (atk(ts, j, "[")) { return no_verd() }
-  if (atk(ts, j, "(")) { return no_verd() }
-  if (atw(ts, j, "async") || atw(ts, j, "deferred") || atw(ts, j, "idempotent")
-      || atw(ts, j, "validated") || ati(ts, j, "retry")) {
-    return no_verd()
-  }
+  //
+  // `idempotent` is the one modifier JUDGED here (item 309): its validity
+  // block sits right after the class rules in `_lower_externs`, ahead of the
+  // `validated`/`retry`/`async`/`deferred` blocks and the inverse slots, so
+  // the class rules below and then `ext_idem_verdict` are the reference's
+  // first refusals in order. A declaration that carries any OTHER modifier is
+  // still not walked past that point.
+  let mods = ext_mods(ts, i + 2)
+  if (mods.lead) { return no_verd() }
+  // a scope on a class that takes none is the reference's parse refusal
+  if (mods.caps && cls != "emission" && cls != "witnessed") { return no_verd() }
+  var j = mods.j
   if (!atw(ts, j, "fn")) { return no_verd() }
-  if (cls == "witnessed") { return no_verd() }
+  if (cls == "witnessed" && !mods.idem) { return no_verd() }
   let nm = tkc(ts, j + 1).text
   let ps = params_at(ts, j + 3)
   if (!ps.ok) { return no_verd() }
@@ -10283,6 +10389,11 @@ fn ext_decl_verdict(ts: List[Token], i: Int, declared: List[Str],
   if (cls == "emission" && atw(ts, k, "undo")) {
     return mk_verd(tagged("G4", ext_emission_undo_msg(nm)), line)
   }
+  if (mods.idem) {
+    let iv = ext_idem_verdict(cls, nm, mods, ps.ps, line, al)
+    if (iv.v != "") { return iv }
+  }
+  if (mods.other || mods.idem) { return no_verd() }
   if (atw(ts, k, "undo")) {
     var u = k + 1
     while (atw(ts, u, "idempotent") || atw(ts, u, "pure")) { u += 1 }
@@ -10323,7 +10434,7 @@ fn extern_decl_refusal(ts: List[Token], pg: Prog) -> Verd {
     } else if (d == 0 && atw(ts, i, "extern")) {
       let nm = ext_decl_name(ts, i)
       if (nm == "" || !contains(seen, nm)) {
-        let v = ext_decl_verdict(ts, i, declared, gtys)
+        let v = ext_decl_verdict(ts, i, declared, gtys, al)
         if (v.v != "") { return v }
       }
       if (nm != "") { seen = seen.push(nm) }
@@ -11663,7 +11774,8 @@ fn ext_head(ts: List[Token], i: Int) -> ExtH {
   var wit = false
   while (atw(ts, j, "emission") || atw(ts, j, "acquire") || atw(ts, j, "pure")
          || atw(ts, j, "async") || ati(ts, j, "witnessed")
-         || ati(ts, j, "deferred") || atk(ts, j, "[") || atk(ts, j, "(")) {
+         || ati(ts, j, "deferred") || atw(ts, j, "idempotent")
+         || atk(ts, j, "[") || atk(ts, j, "(")) {
     if (ati(ts, j, "witnessed")) { wit = true }
     if (atk(ts, j, "[")) {
       var k = j + 1
@@ -21723,8 +21835,30 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str])
     hasCaps = true
     j = cp.i
   }
+  // The modifier slot, in any order as the reference's `extern_decl` reads
+  // it: `async`, `deferred` (item 245) and `idempotent` with its optional
+  // `(key: p)` role (item 309). `validated`/`retry` and the reach clause stay
+  // outside the covered surface.
   var isAsync = false
-  if (atw(ts, j, "async")) { isAsync = true  j += 1 }
+  var isDeferred = false
+  var isIdem = false
+  var idemKey = ""
+  while (atw(ts, j, "async") || ati(ts, j, "deferred") || atw(ts, j, "idempotent")) {
+    if (atw(ts, j, "async")) { isAsync = true  j += 1 }
+    else if (ati(ts, j, "deferred")) { isDeferred = true  j += 1 }
+    else {
+      isIdem = true
+      j += 1
+      if (atk(ts, j, "(")) {
+        if (!(ati(ts, j + 1, "key") && atk(ts, j + 2, ":")
+              && atk(ts, j + 3, "ident") && atk(ts, j + 4, ")"))) {
+          return mk_irres(false, "")
+        }
+        idemKey = tkc(ts, j + 3).text
+        j += 5
+      }
+    }
+  }
   if (!atw(ts, j, "fn")) { return mk_irres(false, "") }
   let nm = tkc(ts, j + 1).text
   var np = j + 2
@@ -21835,10 +21969,16 @@ fn ir_extern(ts: List[Token], i: Int, decls: List[TaintDecl], al: Map[Str, Str])
   // `declared` (a keyed emission is out of the covered extern surface).
   if (undoIdem) { js = js.concat(", \"undo_idempotent\": true") }
   if (undoRead) { js = js.concat(", \"undo_read\": true") }
-  if (undoIdem || undoRead) {
-    js = js.concat(", \"register\": ").concat(jstr(undoRead ? "read" : "declared"))
+  // item 309: the emission-side claim. `register` is `_idempotent_register`:
+  // `read` outranks `keyed`, which outranks `declared`.
+  if (isIdem) { js = js.concat(", \"idempotent\": true") }
+  if (idemKey != "") { js = js.concat(", \"idempotency_key\": ").concat(jstr(idemKey)) }
+  if (undoIdem || undoRead || isIdem) {
+    let reg = undoRead ? "read" : (idemKey != "" ? "keyed" : "declared")
+    js = js.concat(", \"register\": ").concat(jstr(reg))
   }
   if (isAsync) { js = js.concat(", \"async\": true") }
+  if (isDeferred) { js = js.concat(", \"deferred\": true") }
   // item 243: the witnessed transactional descriptor. The witness is the `Ok`
   // payload of the declared `Result[Witness, Error]` return, WAL-serializable
   // data the auto-registered inverse is rebuilt from. `retDecl` is the RAW

@@ -926,41 +926,44 @@ def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
     """Run one faulted composition on a tier's `--once` runner, capture its
     output, and classify the result.  Returns ``(kind, detail)`` where *kind*
     is one of ``clean`` (proved no residue), ``residue`` (a real leak — the
-    runner printed ``RESIDUE-LEFT``), ``toolchain`` (the runtime is absent),
+    runner verified a ``RESIDUE-LEFT``), ``toolchain`` (the runtime is absent),
     or ``gap`` (the runner could not drive a faulting activation to a residue
     proof — a named capability gap, never a pass and never counted as a leak).
     """
-    code, output, crash = _run_once(runner, faulted_ir, config, files)
-    return _classify_once(code, output, crash)
+    return _classify_once(*_run_once(runner, faulted_ir, config, files))
 
 
 def _run_once(runner, faulted_ir: dict, config: dict, files) -> tuple:
     """Run the `--once` runner with its output captured.  Returns ``(code,
-    output, crash)``; *crash* is the reason the runner raised, else ``None``.
-    The capture is what the verdict reads; :func:`_host_lines` recovers the
+    output, crash, proof)``; *crash* is the reason the runner raised, else
+    ``None``, and *proof* is what the runner VERIFIED against its per-run token
+    (issue #1621).  The verdict reads *proof*, never the text a program could
+    print; the text is for diagnostics, and :func:`_host_lines` recovers the
     program's own output from it (issue #1614)."""
     import contextlib  # noqa: PLC0415
     import io  # noqa: PLC0415
 
     buffer = io.StringIO()
+    proof: dict = {}
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-            code = runner(faulted_ir, config, files, once=True, interactive=False)
+            code = runner(faulted_ir, config, files, once=True, interactive=False,
+                          proof_out=proof)
     except Exception as error:  # noqa: BLE001 — a runner crash is a capability gap, not a leak
         return (None, buffer.getvalue(),
-                f"the --once runner raised {type(error).__name__}: {error}")
-    return (code, buffer.getvalue(), None)
+                f"the --once runner raised {type(error).__name__}: {error}", proof)
+    return (code, buffer.getvalue(), None, proof)
 
 
-def _classify_once(code, output: str, crash: str | None) -> tuple:
+def _classify_once(code, output: str, crash: str | None, proof: dict) -> tuple:
     """The verdict over one captured `--once` run: see :func:`_once_verdict`."""
     if crash is not None:
         return ("gap", crash)
-    if "RESIDUE-LEFT" in output:
+    if proof.get("residueLeft"):
         return ("residue", "the runner's teardown proof reported RESIDUE-LEFT")
     if code == 3:
         return ("toolchain", _first_error_line(output) or "runtime not available")
-    if code == 0 and "NO-RESIDUE" in output:
+    if code == 0 and proof.get("noResidue"):
         return ("clean", "")
     return ("gap", _first_error_line(output)
             or f"the --once runner exited {code} without a residue proof")
@@ -1049,8 +1052,8 @@ def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
     points: list = []
     for unit in corpus:
         faulted = _prune_dependents(_inject(ir, unit), unit["component"])
-        code, output, crash = _run_once(runner, faulted, config, files)
-        kind, detail = _classify_once(code, output, crash)
+        code, output, crash, proof = _run_once(runner, faulted, config, files)
+        kind, detail = _classify_once(code, output, crash, proof)
         host = _host_lines(output)
         if kind == "clean":
             points.append({"where": unit["where"], "component": unit["component"],
