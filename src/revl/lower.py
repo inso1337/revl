@@ -8477,9 +8477,15 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # capability set must be a checked subset of its spawner's held authority,
     # so lineage narrows monotonically and a supervisor cannot amplify. Returns
     # the per-instance attenuation chain for the G8 audit surface.
+    # every crossing a child reaches counts, in every position (issue #1562):
+    # a named call to an emission extern or a fn reaching one, by name, as
+    # `_is_emission_call` reads it. A witnessed extern is marked by `effect`
+    # and stays out, as it does for the marker rule.
     attenuation_chain = _collect(_check_spawn_attenuation,
                                  live_components, services, spawn_reg,
-                                 program.filename, untrusted=untrusted)
+                                 program.filename, untrusted=untrusted,
+                                 emitting=frozenset(emitting_fns
+                                                    - witnessed_externs))
 
     # The MODEL ROLE in that same product (item 519): a component's effective
     # ceiling is the union of what it holds and what the model role it routes
@@ -14488,7 +14494,22 @@ def _instance_get_call(node: dict, env: Env):
     recv = callee.get("target")
     if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
         return None
-    svc = env.services.get(recv.get("service"))
+    return _instance_get_decl(node, env.services)
+
+
+def _instance_get_decl(node: dict, services: dict):
+    """`_instance_get_call` over a lowered node and a service table alone, so a
+    pass that runs on the lowered IR (the spawn attenuation reach) resolves a
+    spawn-handle crossing with the same rule the marker uses."""
+    if node.get("kind") != "call":
+        return None
+    callee = node.get("callee")
+    if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+        return None
+    recv = callee.get("target")
+    if not (isinstance(recv, dict) and recv.get("kind") == "instance-get"):
+        return None
+    svc = services.get(recv.get("service"))
     if svc is None:
         return None
     decl = svc.methods.get(callee.get("name"))
@@ -15461,25 +15482,66 @@ def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> lis
 
 
 def _collect_emit_caps_pairs(node, caps: set, requires_map: dict,
-                             services: dict) -> None:
+                             services: dict,
+                             emitting: "frozenset | None" = None) -> None:
     """`_collect_emit_caps`, resolved to structured `Cap`s through the bridge.
-    Same traversal (emit STEPS only), so a parameter-free body yields the same
-    set of elements as today, spelled as bare `Cap`s."""
+
+    Every emission crossing the body makes, in every position (issue #1562):
+    an `emit` STEP, and a crossing call node anywhere else, the value form
+    (`let r = emit …`, `return emit …`, an expression-bodied method), an
+    argument, an `if`/`match` arm, a compensate slot. The lowered value form
+    is the bare call node (the `emit` marker leaves no trace in the IR), so a
+    walk that read steps alone let a child cross a boundary its spawner does
+    not hold by writing the crossing as a value. A call node crosses when it is
+    a `req` call to an `emission` method, a provision call off a spawn handle
+    to one (`_instance_get_decl`, the marker rule's resolver), or a named call
+    to an `emission` extern or a `fn` reaching one (`emitting`); each resolves
+    through `_emit_step_caps_pairs`, the per-crossing resolver the step uses.
+    `emitting` None reads steps alone, the behaviour before the fix."""
     if isinstance(node, dict):
         if node.get("step") == "emit":
             caps.update(_emit_step_caps_pairs(node, requires_map, services))
+        elif _is_value_crossing(node, requires_map, services, emitting):
+            caps.update(_emit_step_caps_pairs({"expr": node}, requires_map,
+                                              services))
         for value in node.values():
-            _collect_emit_caps_pairs(value, caps, requires_map, services)
+            _collect_emit_caps_pairs(value, caps, requires_map, services,
+                                     emitting)
     elif isinstance(node, list):
         for value in node:
-            _collect_emit_caps_pairs(value, caps, requires_map, services)
+            _collect_emit_caps_pairs(value, caps, requires_map, services,
+                                     emitting)
+
+
+def _is_value_crossing(node: dict, requires_map: dict, services: dict,
+                       emitting: "frozenset | None") -> bool:
+    """Whether a lowered call node is an emission crossing (the IR twin of
+    `_is_emission_call`). Inert when `emitting` is None, so a caller that
+    does not pass it keeps reading `emit` steps alone."""
+    if emitting is None:
+        return False
+    kind = node.get("kind")
+    if kind == "fn":
+        return node.get("name") in emitting
+    if kind != "call":
+        return False
+    target = node.get("target")
+    if isinstance(target, dict) and target.get("kind") == "req":
+        svc = services.get((requires_map or {}).get(target.get("name")))
+        decl = svc.methods.get(node.get("method")) if svc is not None else None
+        return bool(decl is not None and decl.emission)
+    inst = _instance_get_decl(node, services)
+    return bool(inst is not None and inst[1].emission)
 
 
 def _spawn_reached_surface_pairs(components: list[dict],
-                                 services: dict) -> dict[str, set]:
+                                 services: dict,
+                                 emitting: "frozenset | None" = None
+                                 ) -> dict[str, set]:
     """Per-component actual capability reach as structured `(T, P)` pairs,
     resolved through the bridge: the boundaries a component's own code crosses
-    (the key-and-valuation of every `emit` step, `*` for a host emission), so a
+    (the key-and-valuation of every `emit` step, and with `emitting` of every
+    crossing in value position too, `*` for a host emission), so a
     parameterized crossing survives into the attenuation fold as its valuation
     rather than degrading to a bare wiring key."""
     surface: dict[str, set] = {}
@@ -15487,7 +15549,7 @@ def _spawn_reached_surface_pairs(components: list[dict],
         requires_map = comp.get("requires") or {}
         caps: set = set()
         _collect_emit_caps_pairs(comp.get("body") or [], caps, requires_map,
-                                 services)
+                                 services, emitting)
         surface[comp["name"]] = caps
     return surface
 
@@ -16155,7 +16217,8 @@ def _check_model_attenuation(components: list[dict], services: dict,
 
 def _check_spawn_attenuation(components: list[dict], services: dict,
                              spawn_reg: dict, filename: str,
-                             untrusted: bool = False) -> list[dict]:
+                             untrusted: bool = False,
+                             emitting: "frozenset | None" = None) -> list[dict]:
     """Capability attenuation on spawn (item 66, extended by item 294): a
     spawned child's capability set must be a **checked subset** of its
     spawner's (monotone shrinkage, the direction §5 admits for purity). A spawn
@@ -16204,7 +16267,7 @@ def _check_spawn_attenuation(components: list[dict], services: dict,
     if not edges:
         return []
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    base = _spawn_reached_surface_pairs(components, services)
+    base = _spawn_reached_surface_pairs(components, services, emitting)
     reachable = _spawn_surface_closure(base, edges)
 
     chain: list[dict] = []

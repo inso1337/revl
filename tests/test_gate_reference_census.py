@@ -274,6 +274,31 @@ def test_every_authority_rule_after_a_block_is_refused_by_both(measured):
     assert not wrong, "\n  ".join(["block-nesting documents moved:"] + wrong)
 
 
+# --- spawn attenuation over value-position crossings (issue #1562) ------------
+#
+# A child that crossed a boundary as a value (`let`, `return`, an expression
+# body, an `if` arm, an argument, a compensation, a host extern, its own spawn
+# handle) was spawned by a parent that does not hold it. On the base the
+# reference admitted all eight and the gate refused four of them, a split no
+# corpus document exposed. Held by name like the block-nesting corpus: `g4_`
+# both refuse under G4, `ok_` both admit.
+SPAWN_ATTENUATION_VALUE = ROOT / "tests" / "fixtures" / "spawn_attenuation_value"
+
+
+def test_every_value_crossing_bounds_a_spawned_child_in_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(SPAWN_ATTENUATION_VALUE.glob("*.rvl"))
+    assert len(docs) == 16, f"the value-crossing corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["value-crossing documents moved:"] + wrong)
+
+
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
     """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
     calls its reference set is read STATICALLY out of `_classify`, so that the

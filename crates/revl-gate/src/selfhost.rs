@@ -12164,10 +12164,83 @@ fn emit_pairs_in(ss: Vec<Stmt>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<Strin
     }
     let s = (ss)[(i) as usize].clone();
     let a2 = if (s.kind == "emit") { union_into(acc.clone(), emit_caps_pairs(s.e.clone(), comp.clone(), cx.clone())) } else { acc.clone() };
-    return emit_pairs_in(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), a2);
+    return emit_pairs_in(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in(s.e.clone(), comp.clone(), cx.clone(), a2));
 }
 
-fn own_emit_pairs(comp: CompD, cx: Ctx__m2) -> Vec<String> {
+fn cross_pairs_in(e: Expr, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+    return match e.clone() {
+    Expr::Call(c) => { let c = *c; cross_pairs_list(c.args.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(c.target.clone(), comp.clone(), cx.clone(), if is_cross_call(c.clone(), comp.clone(), cx.clone()) { union_into(acc.clone(), emit_caps_pairs(e.clone(), comp.clone(), cx.clone())) } else { acc.clone() })) },
+    Expr::Field(f) => { let f = *f; cross_pairs_in(f.target.clone(), comp.clone(), cx.clone(), acc.clone()) },
+    Expr::OptField(f) => { let f = *f; cross_pairs_in(f.target.clone(), comp.clone(), cx.clone(), acc.clone()) },
+    Expr::OptCall(c) => { let c = *c; cross_pairs_list(c.args.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(c.target.clone(), comp.clone(), cx.clone(), acc.clone())) },
+    Expr::Bin(b) => { let b = *b; cross_pairs_in(b.r.clone(), comp.clone(), cx.clone(), cross_pairs_in(b.l.clone(), comp.clone(), cx.clone(), acc.clone())) },
+    Expr::Un(u) => { let u = *u; cross_pairs_in(u.e.clone(), comp.clone(), cx.clone(), acc.clone()) },
+    Expr::Emit(u) => { let u = *u; cross_pairs_in(u.e.clone(), comp.clone(), cx.clone(), acc.clone()) },
+    Expr::Index(x) => { let x = *x; cross_pairs_in(x.idx.clone(), comp.clone(), cx.clone(), cross_pairs_in(x.target.clone(), comp.clone(), cx.clone(), acc.clone())) },
+    Expr::If(x) => { let x = *x; cross_pairs_in(x.els.clone(), comp.clone(), cx.clone(), cross_pairs_in(x.then_.clone(), comp.clone(), cx.clone(), cross_pairs_in(x.cond.clone(), comp.clone(), cx.clone(), acc.clone()))) },
+    Expr::Lst(l) => cross_pairs_list(l.items, 0i64, comp.clone(), cx.clone(), acc.clone()),
+    Expr::Rec(r) => cross_pairs_inits(r.fields.clone(), 0i64, comp.clone(), cx.clone(), acc.clone()),
+    Expr::Arrow(ar) => { let ar = *ar; cross_pairs_in(ar.body, comp.clone(), cx.clone(), acc.clone()) },
+    Expr::Match(m) => { let m = *m; cross_pairs_arms(m.arms.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(m.scrut.clone(), comp.clone(), cx.clone(), acc.clone())) },
+    Expr::Templ(t) => cross_pairs_parts(t.parts, 0i64, comp.clone(), cx.clone(), acc.clone()),
+    Expr::RecUpd(r) => { let r = *r; cross_pairs_inits(r.upds.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(r.base.clone(), comp.clone(), cx.clone(), acc.clone())) },
+    _ => acc,
+};
+}
+
+fn cross_pairs_parts(xs: Vec<PartN>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return cross_pairs_parts(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].e.clone(), comp.clone(), cx.clone(), acc.clone()));
+}
+
+fn cross_pairs_list(xs: Vec<Expr>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return cross_pairs_list(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].clone(), comp.clone(), cx.clone(), acc.clone()));
+}
+
+fn cross_pairs_inits(xs: Vec<InitN>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return cross_pairs_inits(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].value.clone(), comp.clone(), cx.clone(), acc.clone()));
+}
+
+fn cross_pairs_arms(xs: Vec<ArmN>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return cross_pairs_arms(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].body.clone(), comp.clone(), cx.clone(), acc.clone()));
+}
+
+fn is_cross_call(c: CallN, comp: CompD, cx: Ctx__m2) -> bool {
+    return match c.target {
+    Expr::Var(n) => (contains__m2(&cx.emittingNames, &n) && (!contains__m2(&cx.appr.wit, &n))),
+    Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
+    Expr::Var(v) => req_op_is_em(&v, &fl.name, comp.clone(), cx.clone()),
+    Expr::Field(inner) => { let inner = *inner; match inner.target.clone() {
+    Expr::Var(h) => (cx.handles.contains_key(&h) && handle_msig(h.clone(), &inner.name, &fl.name, cx.clone()).isEm),
+    _ => false,
+} },
+    _ => false,
+} },
+    _ => false,
+};
+}
+
+fn req_op_is_em(key: &str, meth: &str, comp: CompD, cx: Ctx__m2) -> bool {
+    let sv = req_svc_of(&comp.reqMap, key, 0i64);
+    if (sv == "") {
+        return false;
+    }
+    return find_msig(svc_of(cx.clone(), sv.clone()), meth, 0i64).isEm;
+}
+
+fn own_emit_pairs(comp: CompD, base: Ctx__m2) -> Vec<String> {
+    let cx = ctx_for(base.clone(), comp.clone());
     let mut out = emit_pairs_in(comp.setup.clone(), 0i64, comp.clone(), cx.clone(), vec![]);
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
