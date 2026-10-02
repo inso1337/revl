@@ -436,7 +436,8 @@ func invokeIn(root *stc.Context, placements map[string][]placement, key, method 
 	if len(at) == 1 {
 		ctx, ok := emitted.RevlRealmContext(root, key, *at[0].Realm)
 		if !ok {
-			return nil, fmt.Errorf("key %q: no realm context for realm %q", key, *at[0].Realm)
+			return nil, fmt.Errorf("key '%s' is provided in realm `%s` by `%s`, and this "+
+				"runner has no context for that realm", key, *at[0].Realm, at[0].Component)
 		}
 		return emitted.RevlInvoke(ctx, key, method, args)
 	}

@@ -256,7 +256,8 @@ function resolveKey(key: string): unknown {
   const at = placements[key] || []
   if (at.length === 0 || at.some((p) => p.realm == null)) return (ctx as any)[key]
   if (at.length === 1) {
-    return (ctx as any).isolate(key, realmLabel(at[0].realm as string)).reflect.get(key)
+    // labels are per (realm, key) since issue #1543, as `plug` mints them
+    return (ctx as any).isolate(key, realmLabel(at[0].realm as string, key)).reflect.get(key)
   }
   const where = at.map((p) => `\`${p.component}\` in realm \`${p.realm}\``).join(', ')
   throw new Error(
