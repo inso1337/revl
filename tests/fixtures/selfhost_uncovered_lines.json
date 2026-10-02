@@ -50,7 +50,7 @@
   "_budget": {
     "reference": {
       "go": 2822,
-      "java": 986,
+      "java": 1015,
       "py": 661,
       "rust": 1200,
       "ts": 580,
@@ -58,7 +58,7 @@
     },
     "selfhost": {
       "go": 104,
-      "java": 175,
+      "java": 182,
       "py": 103,
       "rust": 286,
       "ts": 97,
@@ -367,8 +367,8 @@
         "backends/java/emit.py::_component_needs_frame.step_needs: The remaining true branch detects witnessed extern acquire calls, explicitly deferred; compensation, abort/fail and ordinary bracket frames are covered.": {
           "_component_needs_frame.step_needs": 1
         },
-        "backends/java/emit.py::_component_needs_modern: The remaining true returns are routes and step setup. Routers and setup are explicitly outside the admitted component subset, unlike config, requirements and realm placement.": {
-          "_component_needs_modern": 3
+        "backends/java/emit.py::_component_needs_modern: The remaining true returns are routes and step setup. Routers and setup are explicitly outside the admitted component subset, unlike config, requirements and realm placement. Issue #1511 (declared compensations, java tier) adds one: the branch that sends a component crossing an extern that declares `compensate` to the modern path. selfhost/emit_java.rvl does not port that registration and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge.": {
+          "_component_needs_modern": 4
         },
         "backends/java/emit.py::_contains_expr: The remaining true return detects call with callee in a component expression. Component direct calls lower to kind=fn or target/method; callee calls require the explicitly deferred local-arrow/first-class/value-builtin path. Non-v1 kind detection and ordinary traversal are covered.": {
           "_contains_expr": 1
@@ -469,8 +469,8 @@
         "backends/java/emit.py::_empty_map_decl_type: Remaining branches read writer-inferred pins for an unannotated VALUE Map.empty local or use raw java.util.Map when unpinned. The port explicitly defers unannotated value-Map inference, distinct from covered host Map.new inference.": {
           "_empty_map_decl_type": 2
         },
-        "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered, and so, since item 429's java blind-spot closure, are the builtin/len and sized-length arms (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower.": {
-          "_expr": 28
+        "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered, and so, since item 429's java blind-spot closure, are the builtin/len and sized-length arms (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1511 (declared compensations, java tier) adds one: the branch that sends a component crossing an extern that declares `compensate` through `RevlDeclared` from the `fn` arm. selfhost/emit_java.rvl does not port that registration and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge.": {
+          "_expr": 29
         },
         "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value.": {
           "_finite_float": 1
@@ -511,8 +511,8 @@
         "backends/java/emit.py::_java_test_method_name: Test-name sanitization/hash fallback is called only for in-file unit test methods, explicitly deferred.": {
           "_java_test_method_name": 11
         },
-        "backends/java/emit.py::_java_type: Residual legacy Map generic splitting/boxing lies beyond the declared scalar v1/v2 signature slice. Null/missing type returns Object for hand-built IR; frontend signatures are typed. Modern generic boxing is covered by java_v3_type.": {
-          "_java_type": 4
+        "backends/java/emit.py::_java_type: Residual legacy Map generic splitting/boxing lies beyond the declared scalar v1/v2 signature slice. Null/missing type returns Object for hand-built IR; frontend signatures are typed. Modern generic boxing is covered by java_v3_type. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the `Object` fallback here, through `_param_type`. Its method now renders with its declared `long` signature.": {
+          "_java_type": 5
         },
         "backends/java/emit.py::_java_v3_type: Residual Result boxing and undeclared host Pool Row-to-Object typing belong to the explicit Result/Pool boundaries. Unknown generic heads (user generics are monomorphized) and missing/non-string types are hand-built or invalid IR.": {
           "_java_v3_type": 5
@@ -538,8 +538,8 @@
         "backends/java/emit.py::_method_body: Residual empty/multistep effectful-body traps and nonvoid bare-return refusal are outside the simple legacy method gate; a value expression discarded by a void method requires the nonsimple legacy effect/call path. Void bare returns and scalar/name returns are covered.": {
           "_method_body": 4
         },
-        "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms.": {
-          "_method_body_lines.render": 54
+        "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the two `void` return statements here: its return type lookup failed too, so `x + x` was emitted as a statement followed by `return;`. Its method now renders with its declared `long` signature.": {
+          "_method_body_lines.render": 56
         },
         "backends/java/emit.py::_name_uses: Recursive parameter-use counting is only called by _inline_arrow for pinning multiply-used arguments; local-arrow beta reduction is explicitly deferred.": {
           "_name_uses": 4
@@ -643,6 +643,16 @@
         },
         "backends/java/emit.py::emit: The two missing branches reject a non-object document and an unsupported IR version. compile_files always supplies a supported versioned dict; successful API output cannot enter either.": {
           "emit": 2
+        },
+        "Issue #1511, the java tier: an extern that declares `compensate` was registered in no position. `_reaches_declared` finds a component that crosses one, `_component_needs_frame` gives it the frame, `_declared_crossing` renders every crossing through `RevlDeclared.crossed`, and `_emit_revl_frame_runtime` appends `RevlDeclared`. selfhost/emit_java.rvl does not port it, and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge; the self-host port is the work that retires this entry. The input family is backends/java/test_declared_compensate_java.py.": {
+          "_component_needs_frame": 1,
+          "_declared_crossing": 13,
+          "_emit_revl_frame_runtime": 1,
+          "_reaches_declared": 7
+        },
+        "Issue #1512: `_param_type`'s `Object` fallback is no longer reached. The one corpus document that reached it (double_tool.rvl) did so because the provider looked its renamed method `double_` up in the service table; `_method_name` keeps the lookup on the contract name, and the frontend admits no provider method or parameter the service does not declare. `_method_name`'s extra rung for a method named with underscores alone (`_` is a Java keyword) is reached by no corpus document; backends/java/test_keyword_method_names_java.py runs `_` end to end.": {
+          "_method_name": 1,
+          "_param_type": 1
         }
       },
       "uncovered_statements": 976
@@ -1652,8 +1662,8 @@
         "selfhost/emit_java.rvl::method_body: Residual effectful/multistep trap and nonvoid bare-return marker are outside method_simple_ok; the void value-expression branch requires nonsimple legacy calls. Scalar/name and bare void return cases are covered.": {
           "method_body": 4
         },
-        "selfhost/emit_java.rvl::method_body_lines: Only flat fx.track compensation remains. A provided-method compensation makes component_needs_frame true, so admitted emission necessarily selects the frame compensation branch.": {
-          "method_body_lines": 1
+        "selfhost/emit_java.rvl::method_body_lines: Only flat fx.track compensation remains. A provided-method compensation makes component_needs_frame true, so admitted emission necessarily selects the frame compensation branch. Issue #1512 re-records it 1 to 5: double_tool.rvl's provider method `double` was the corpus document that reached the `void`-return statements here, because its return type was looked up under the renamed `double_`. It renders with its declared `long` return now, as the reference does.": {
+          "method_body_lines": 5
         },
         "selfhost/emit_java.rvl::method_simple_ok: the residual `return false` rejects a multi-step legacy method, the documented simple-method admission boundary. The single-step non-return arm is reached by tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), whose provide method is one `emit` step; valid bare void returns are accepted and covered.": {
           "method_simple_ok": 1
@@ -1733,6 +1743,10 @@
         },
         "selfhost/emit_java.rvl::witnessed_names: the remaining statement inserts the name of a `witnessed`-class extern. The class filter runs now, over the extern in tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), which is `emission`-class. Java corpus externs are explicitly deferred; the insertion is reproduced by method_witnessed.rvl.": {
           "witnessed_names": 1
+        },
+        "Issue #1512, the port of the reference `_method_name`: `service_param_type`'s `Object` fallback is no longer reached (the one corpus document that reached it, double_tool.rvl, looked its renamed method up in the service table), and `method_name`'s rung for a method named with underscores alone is reached by no corpus document, as on the reference side.": {
+          "method_name": 2,
+          "service_param_type": 1
         }
       },
       "uncovered_statements": 175

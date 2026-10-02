@@ -93,9 +93,6 @@
       "parser._CANONICAL_OPS rewrites source ===/!== to ==/!= before typed IR; ordinary equality is covered, while these compatibility aliases cannot be selected by a source corpus document.": [
         "op=!==",
         "op===="
-      ],
-      "Issue #1511: an extern of `class=emission` that declares `compensate` is registered at every crossing in a component (`revlDeclaredCrossing` in a provide method, the activation's compensation entry for an `emit` step). It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/declared_compensate.rvl under `go test`.": [
-        "class=emission"
       ]
     }
   },
