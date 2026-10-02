@@ -1388,3 +1388,40 @@ def test_the_prelude_oracle_is_not_vacuous(lower_to_ir):
     # time there, so the producer never has to guess at one
     with pytest.raises(Exception):
         compile_source(_REALM_SOURCE.replace("level: 3", "level: tag"))
+
+
+IDEMPOTENT_FIXTURE = ROOT / "tests" / "fixtures" / "extern_idempotent_deferred.rvl"
+
+
+@pytest.mark.parametrize("mods", [
+    "idempotent", "idempotent(key: id)", "deferred", "deferred idempotent",
+    "deferred idempotent(key: id)", "idempotent(key: id) deferred",
+])
+def test_idempotent_and_deferred_externs_lower_to_the_reference(lower_to_ir,
+                                                                mods):
+    """Item 309's `idempotent` modifier, its `idempotent(key: p)` role and item
+    245's `deferred` sit in the extern modifier slot, in either order. The
+    reference writes `deferred`, `idempotent`, `idempotency_key` and the
+    `register` (`keyed` for a keyed claim, `declared` for a bare one). The
+    self-host producer read only `async` there, so every one of these left the
+    covered surface and the whole `externs` section was dropped."""
+    source = (
+        f"extern emission {mods} fn deliver(id: Str, body: Str) = @py {{ return }}\n"
+        "service Ops { fn ping() -> Int }\n"
+        "component Mailer provides ops: Ops {\n"
+        '  emit deliver("k1", "hi")\n'
+        "  provide ops { fn ping() = 1 }\n"
+        "}\n")
+    reference = compile_source(source)
+    native = json.loads(lower_to_ir(source))
+    assert "externs" in native, "the externs section was dropped"
+    assert native["externs"] == reference["externs"]
+
+
+def test_the_idempotent_fixture_lowers_to_the_reference(lower_to_ir):
+    source = IDEMPOTENT_FIXTURE.read_text(encoding="utf-8")
+    reference = compile_files([str(IDEMPOTENT_FIXTURE)])
+    native = json.loads(lower_to_ir(source))
+    assert [e.get("register") for e in reference["externs"]] == ["declared",
+                                                                 "keyed"]
+    assert native["externs"] == reference["externs"]

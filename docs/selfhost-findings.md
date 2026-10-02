@@ -1739,17 +1739,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     98 |                   98 (100%) |             72 (73.5%) |
+| py   |    101 |                  101 (100%) |             76 (75.2%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
-| go   |     23 |                   23 (100%) |            23 (100.0%) |
+| go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **302** | **302 (100%)** | **270 (89.4%)** |
+| **total** | **320** | **320 (100%)** | **286 (89.4%)** |
 
-Every one of the 302 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 270 of
-them survive the **fully-native** chain, so all 32 residual documents
+Every one of the 320 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 286 of
+them survive the **fully-native** chain, so all 34 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,7 +1779,7 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 26 residual of 98:
+`py`, 25 residual of 101:
 
 - `services_control_flow.rvl`
 - `services_host_stream.rvl`
@@ -1799,8 +1799,7 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `../../../backends/go/testdata/stream_event_130.rvl`
 - `../../../backends/rust/scenarios/stream.rvl`
 - `../emit_rust_corpus/comp_stream.rvl`
-- `../emit_ts_refusals/deferred_emission_call.rvl`
-- `../emit_py_deferred_shapes.rvl`
+- `../emit_py_stream_builtin_bind.rvl`
 - `../emit_ts_refusals/validated_emission_operation.rvl`
 - `../emit_py_validated_shapes.rvl`
 - `branches.rvl`
@@ -1815,9 +1814,11 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `component_edges.rvl`
 - `../emit_py_corpus/services_control_flow.rvl`
 
-`go`, 0 residual of 23:
+`go`, 3 residual of 38:
 
-- none; the fully-native chain reproduces the whole corpus.
+- `in_file_tests.rvl`
+- `../../../backends/go/testdata/opt_gaps_280.rvl`
+- `../../../backends/go/testdata/result_erased_1631.rvl`
 
 `java`, 0 residual of 59:
 
