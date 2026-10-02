@@ -13,7 +13,8 @@ class RevlError(Exception):
     def __init__(self, filename: str, line: int, message: str, hint: str | None = None,
                  code: str | None = None, category: str | None = None,
                  expected: str | None = None, actual: str | None = None,
-                 why: WhyTrace | None = None, navigate: dict | None = None):
+                 why: WhyTrace | None = None, navigate: dict | None = None,
+                 fix: str | None = None):
         self.filename = filename
         self.line = line
         self.message = message
@@ -30,6 +31,10 @@ class RevlError(Exception):
         # and is DELIBERATELY not rendered into the text below, so the first line
         # and the multi-error census render stay byte-identical (design §5/§7).
         self.navigate = navigate
+        # The rewrite for THIS rejection, when it is more specific than the
+        # per-code `diagnostics.FIXES` entry (a corrected line, say). A
+        # structured field only, like `navigate`: not rendered below.
+        self.fix = fix
         # the derivation behind the verdict, where the check ran a search
         # (G4's fixed point, G3's cycle, G2's provider table) — see why.py.
         # It is appended *after* the message and hint so the first line of
