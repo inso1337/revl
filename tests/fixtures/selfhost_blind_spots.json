@@ -176,8 +176,8 @@
   },
   "py": {
     "blind": {
-      "Retained Path B async boundary (items 146/391): emit_py.rvl::emit_externs can spell async def but does not reproduce emit.py::_py_yields_coroutine/_py_async_arrow or await insertion. emit_ts_corpus/async_module_local.rvl and services_async.rvl reproduce missing async def/metadata; test_named_runtime_and_harness_boundaries pins both. An async extern declaration alone would falsely imply complete async support.": [
-        "async=<true>"
+      "Deferred delivery is REFUSED by name, not mirrored: emit.py::_deferred_step enqueues the call on the session (`_revl_frame.enqueue_deferred`) with argument-position idempotency keys, and selfhost/emit_py.rvl reads the `deferred` stamp only to answer `<<UNSUPPORTED-BODYSTEP:deferred-emit>>` / `<<UNSUPPORTED-METHODSTEP:deferred-emit>>` instead of firing the host body directly, which it used to do. No agreeing corpus document can hold a refusal, so the construct stays blind until the session queue is ported. tests/test_selfhost_emit_py.py pins both refusals (the method half on emit_ts_refusals/deferred_emission_call.rvl, the body half inline).": [
+        "deferred=<true>"
       ]
     },
     "unported": {
@@ -189,17 +189,10 @@
         "step=stream-iter",
         "subscribe=<true>"
       ],
-      "Async-runtime planner boundary: emit.py::_group_eligible requires idempotent emissions with safe compensation; _emit_parallel_group emits await/flush/raise ordering and emit adds service metadata. emit_py.rvl::emit_services_table/body_step has sequential dispatch only. tests/test_parallel_259.py::HDR and its commutative/disjoint cases reproduce the family. Witnessed undo_idempotent registration is separately supported.": [
-        "commutative=<true>",
-        "idempotent=<true>"
-      ],
       "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
         "kind=lease-acquire",
         "kind=lease-revoke",
         "step=approval"
-      ],
-      "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
-        "deferred=<true>"
       ],
       "Existing deterministic-destructuring boundary: emit.py::_let_pattern_stmt emits record bindings and exact/rest list unpacking using _Lines.next_destructure_seq. emit_py.rvl::fn_stmt has no let_pattern arm. Representative let {a} = record and let [a, ...rest] = list forms are in tests/test_v2_language.py. Item 179 removed id-based naming, not this port omission.": [
         "pattern=list",
