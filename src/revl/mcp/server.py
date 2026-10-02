@@ -1769,9 +1769,23 @@ def _tool_check(arguments: dict) -> dict:
     # `fillSpec` — the expected type, the emission upper bound, the in-scope
     # bindings and the reachable service signatures the checker already knew at
     # that position — so the hole can be filled directly (docs/holes.md §8).
-    holes = fillspec.enrich(ir) if ir.get("holes") else []
+    source, _files, modules = _candidate_of(arguments)
+    inline = source is not None or bool(modules)
+    holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
+             if ir.get("holes") else [])
     return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
             "holes": holes}
+
+
+def _untrusted_author() -> bool:
+    """Whether text the agent on this transport writes compiles under the
+    untrusted-author profile, so a fillSpec offers it no extern
+    (`fillspec.enrich`). Text the agent carries is what the profile governs:
+    `compile_under_authoring` compiles a jailed `files` candidate with no
+    transport-carried text as operator-authored, so `_tool_check` asks only
+    for an inline candidate. A hole's FILL is always text the agent writes,
+    which is why `revl_scaffold` and `revl_edit` ask unconditionally."""
+    return AUTHORING.profile() is not None
 
 
 def _tool_admit(arguments: dict) -> dict:
@@ -2117,7 +2131,7 @@ def _tool_scaffold(arguments: dict) -> dict:
     except ScaffoldError as error:
         return _session_error(str(error))
     filename = arguments.get("filename") or f"{spec.component}.rvl"
-    return scaffold_document(spec, filename)
+    return scaffold_document(spec, filename, untrusted=_untrusted_author())
 
 
 def _tool_fmt(arguments: dict) -> dict:

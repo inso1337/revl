@@ -34,7 +34,13 @@ The shape added to every obligation in `revl_check` is::
       "reachableServices": [
         {"service": "Db", "method": "q", "signature": "q(sql: Str) -> Str",
          "instance": "db", "emission": false, "callableHere": true}
-      ]
+      ],
+      "externs": {"mayDeclare": true, "placement": "...", "template": "...",
+                  "declared": [{"name": "sha", "class": "pure",
+                                "signature": "sha(text: Str) -> Str",
+                                "write": "sha(<text: Str>)",
+                                "callableHere": true}],
+                  "reason": "..."}
     }
 
 VERSION 2 (this shape). Version 1 had no `version`, no `crossing`, no
@@ -48,6 +54,16 @@ declared (G4). Version 2 states the permission under a name that cannot be
 read as an obligation (`permitsCrossing`), says outright that a crossing is
 never `required`, and gives the call-site FORM a crossing is written in, with
 the exact crossings available at this position.
+
+`externs` (additive, so still version 2: the version moves only when a
+field's MEANING changes) answers where an extern goes, which an agent that
+knows extern SYNTAX could not tell from the spec: an extern is a top-level
+declaration, never written inside a component or a method; which externs the
+program already declares and whether a fill here may call each; and whether
+this author may declare one at all. An untrusted author (the MCP server's
+default) may neither declare nor reach an extern (`AdmissionProfile.
+untrusted_author`, G8), and the spec says so instead of offering a call the
+compile would refuse.
 """
 
 from __future__ import annotations
@@ -158,7 +174,8 @@ def _within(tokens: set, bound) -> bool:
 
 
 def _crossing_calls(requires: dict, services: dict, externs: list,
-                    capability: dict, carry: dict) -> list[dict]:
+                    capability: dict, carry: dict,
+                    untrusted: bool = False) -> list[dict]:
     """Every crossing a fill at this position may write, already in its
     call-site form: each injected service's emission operations and each
     declared emission extern whose tokens sit inside the bound."""
@@ -183,6 +200,9 @@ def _crossing_calls(requires: dict, services: dict, externs: list,
     for ext in externs or []:
         if ext.get("class") != "emission":
             continue
+        if untrusted:
+            # an untrusted author may not reach an extern (G8)
+            continue
         tokens = set(ext.get("capabilities") or [ext["name"]])
         if not _within(tokens, bound):
             continue
@@ -193,6 +213,79 @@ def _crossing_calls(requires: dict, services: dict, externs: list,
                       "carrier": "extern",
                       "capabilities": sorted(tokens)})
     return calls
+
+
+#: Where an `extern` is declared, said once, in the spec itself.
+EXTERN_PLACEMENT = (
+    "An extern is a TOP-LEVEL declaration: write it at the top level of the "
+    "file, beside `service` and `component` declarations, never inside a "
+    "component body or a provide method. Its class says what its host body "
+    "does: `pure` computes and touches nothing (callable anywhere), "
+    "`acquire` takes a resource and declares its inverse (`undo "
+    "<inverse>(result)`, called as `effect <name>(...)` in a component "
+    "body), `emission` crosses irreversibly (called as `emit <name>(...)` "
+    "where a crossing is permitted).")
+
+#: The declaration's shape, for the commonest case a fill needs (a
+#: computation the language does not have).
+EXTERN_TEMPLATE = "extern pure fn <name>(<param>: <Type>) -> <Type> = @py { ... }"
+
+#: Why an untrusted author is offered no extern.
+UNTRUSTED_EXTERNS = (
+    "this author compiles under the untrusted-author profile, which refuses "
+    "declaring an extern and refuses reaching one (G8); a fill here may use "
+    "only the bindings and the services listed, so a completion that needs "
+    "new host code cannot be written by this author")
+
+
+def _extern_write(ext: dict) -> str:
+    args = ", ".join(f"<{p['name']}: {p['type']}>"
+                     for p in ext.get("params", []))
+    call = f"{ext['name']}({args})"
+    cls = ext.get("class")
+    if cls == "emission":
+        return f"emit {call}"
+    if cls in ("acquire", "witnessed"):
+        return f"effect {call}"
+    return call
+
+
+def _extern_signature(ext: dict) -> str:
+    """An extern's signature, rendered the same way as a method's."""
+    return _render_signature(ext["name"], ext)
+
+
+def _externs(externs: list, calls: list[dict], position: str,
+             untrusted: bool) -> dict:
+    """The `externs` block: where an extern is declared, which ones exist,
+    whether a fill at this POSITION may call each, and whether this author may
+    declare one."""
+    crossing = {c["write"].split("(", 1)[0] for c in calls}
+    declared = []
+    for ext in externs or []:
+        cls = ext.get("class")
+        write = _extern_write(ext)
+        if untrusted:
+            here = False
+        elif cls == "pure":
+            here = True
+        elif cls == "emission":
+            here = write.split("(", 1)[0] in crossing
+        else:
+            # acquire/witnessed: only the acquisition slot of an `effect`
+            here = position == "effect-acquire"
+        declared.append({"name": ext["name"], "class": cls,
+                         "signature": _extern_signature(ext),
+                         "write": write, "callableHere": here})
+    return {
+        "mayDeclare": not untrusted,
+        "placement": EXTERN_PLACEMENT,
+        "template": EXTERN_TEMPLATE,
+        "declared": declared,
+        "reason": UNTRUSTED_EXTERNS if untrusted else (
+            "a trusted author may declare an extern; the declaration goes at "
+            "the top level of the file, not at this hole"),
+    }
 
 
 def _crossing(capability: dict, calls: list[dict]) -> dict:
@@ -325,10 +418,11 @@ def _collect_exprs(node, services, functions, bindings, capability,
                 for name, typ in bindings.items()
                 if not name.startswith("@")  # `@service:`/`@reachable`/... internals
             ]
+            untrusted = bool(bindings.get("@untrusted"))
+            externs = bindings.get("@externs") or []
             calls = _crossing_calls(
-                bindings.get("@requires") or {}, services,
-                bindings.get("@externs") or [], capability,
-                bindings.get("@carry") or {})
+                bindings.get("@requires") or {}, services, externs,
+                capability, bindings.get("@carry") or {}, untrusted)
             collected.append((node, {
                 "version": FILL_SPEC_VERSION,
                 "expected": node.get("type"),
@@ -337,6 +431,9 @@ def _collect_exprs(node, services, functions, bindings, capability,
                 "bindings": visible,
                 "reachableServices": _callable_here(
                     bindings.get("@reachable", []), calls),
+                "externs": _externs(externs, calls,
+                                    bindings.get("@position") or "pure",
+                                    untrusted),
             }))
             return
         # `step` bodies nested in an expression are rare, but a statement dict
@@ -357,7 +454,8 @@ def _collect_exprs(node, services, functions, bindings, capability,
                            collected)
 
 
-def _position_context(component, services, externs) -> dict:
+def _position_context(component, services, externs,
+                      untrusted: bool = False) -> dict:
     """The internal (`@`-prefixed) entries every scope inside `component`
     carries: its reachable service table, its `requires` and `carrying(...)`
     maps, and the program's externs, which the crossing calls are read off."""
@@ -366,14 +464,16 @@ def _position_context(component, services, externs) -> dict:
         "@requires": component.get("requires") or {},
         "@carry": component.get("carry") or {},
         "@externs": externs,
+        "@untrusted": untrusted,
     }
 
 
 def _method_scope(component, method, service_decl, services, functions,
-                  externs):
+                  externs, untrusted: bool = False):
     """The binding scope a provide-method's body opens with: the component's
     config fields and the method's parameters, each with a declared type."""
-    bindings: dict = _position_context(component, services, externs)
+    bindings: dict = _position_context(component, services, externs, untrusted)
+    bindings["@position"] = "method"
     for field in component.get("config", []) or []:
         bindings[field["name"]] = field.get("type")
     # record each injected dependency so a call on it resolves to its service.
@@ -387,8 +487,12 @@ def _method_scope(component, method, service_decl, services, functions,
     return bindings
 
 
-def enrich(ir: dict) -> list[dict]:
+def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     """Every open hole in `ir`, as an obligation carrying its fill spec.
+
+    `untrusted` says the AUTHOR filling the holes compiles under the
+    untrusted-author profile (the MCP server's default): the spec then offers
+    no extern to declare or call, because the compile would refuse both.
 
     Sorted by (file, line) to match `holes.collect`, so this is a drop-in
     replacement for `diagnostics.obligations(ir["holes"])` in `revl_check`.
@@ -401,7 +505,9 @@ def enrich(ir: dict) -> list[dict]:
     # Components: provide-methods (may be emission positions) and component-level
     # setup `let`/effect (always a pure position).
     for component in ir.get("components") or []:
-        setup_scope: dict = _position_context(component, services, externs)
+        setup_scope: dict = _position_context(component, services, externs,
+                                              untrusted)
+        setup_scope["@position"] = "setup"
         for field in component.get("config", []) or []:
             setup_scope[field["name"]] = field.get("type")
         for instance, service in (component.get("requires") or {}).items():
@@ -420,7 +526,8 @@ def enrich(ir: dict) -> list[dict]:
                         reason="a non-emission provide-method — pure"
                         if not decl.get("emission") else "")
                     scope = _method_scope(
-                        component, method, decl, services, functions, externs)
+                        component, method, decl, services, functions, externs,
+                        untrusted)
                     _walk_body(method.get("body"), services, functions,
                                scope, capability, collected)
             elif stmt.get("step") == "let":
@@ -428,6 +535,15 @@ def enrich(ir: dict) -> list[dict]:
                                dict(setup_scope), pure, collected)
                 setup_scope[stmt["name"]] = _expr_type(
                     stmt.get("value"), services, functions, setup_scope)
+            elif "acquire" in stmt:
+                # `effect <acquire> undo <inverse>`: the acquisition slot is
+                # where an `acquire`/`witnessed` extern is called
+                acquire_scope = {**setup_scope, "@position": "effect-acquire"}
+                _collect_exprs(stmt.get("acquire"), services, functions,
+                               acquire_scope, pure, collected)
+                rest = {k: v for k, v in stmt.items() if k != "acquire"}
+                _collect_exprs(rest, services, functions, dict(setup_scope),
+                               pure, collected)
             else:
                 _collect_exprs(stmt, services, functions, dict(setup_scope),
                                pure, collected)
@@ -437,7 +553,8 @@ def enrich(ir: dict) -> list[dict]:
     pure_fn = _capability(False, None, in_method=False,
                           reason="a function body — pure, no emission")
     for fn in ir.get("functions") or []:
-        scope = {"@reachable": []}
+        scope = {"@reachable": [], "@externs": externs,
+                 "@untrusted": untrusted, "@position": "function"}
         for p in fn.get("params", []):
             scope[p["name"]] = p.get("type")
         _walk_body(fn.get("body"), services, functions, scope, pure_fn,
@@ -445,11 +562,14 @@ def enrich(ir: dict) -> list[dict]:
     for section in ("tests",):
         for item in ir.get(section) or []:
             _walk_body(item.get("body"), services, functions,
-                       {"@reachable": []}, pure_fn, collected)
+                       {"@reachable": [], "@externs": externs,
+                        "@untrusted": untrusted, "@position": "test"},
+                       pure_fn, collected)
 
     collected.sort(key=lambda c: (str(c[0].get("file")), c[0].get("line") or 0))
     return [_obligation(hole, spec) for hole, spec in collected]
 
 
 __all__ = ["enrich", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
-           "CROSSING_FORM", "CROSSING_RULE"]
+           "CROSSING_FORM", "CROSSING_RULE", "EXTERN_PLACEMENT",
+           "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS"]
