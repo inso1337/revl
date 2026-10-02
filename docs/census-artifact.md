@@ -16,7 +16,7 @@ TAG and the same MESSAGE, not merely the same verdict.
 Distinct programs: **1029**. Programs run: **1035**.
 Checker version: `GATE-CENSUS-1+6feced95a60e`.
 Engine: `selfhost`.
-Run: `census-selfhost-aede64ff155a`.
+Run: `census-selfhost-8417e0fe1fc4`.
 
 The two numbers differ because 6 case ids reach
 the corpus twice, from two entries that spell the same
@@ -222,9 +222,9 @@ below are the values you should get.
 |---|---|
 | distinct programs, 1029 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
 | programs run, 1035 | the length of the same list, repeats included |
-| run `census-selfhost-aede64ff155a` | sha256 over every `(case id, source)` the run read, ids repo-relative |
+| run `census-selfhost-8417e0fe1fc4` | sha256 over every `(case id, source)` the run read, ids repo-relative |
 | checker version `GATE-CENSUS-1+6feced95a60e` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
-| `src/revl@sha256:eb399b5f334c` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
+| `src/revl@sha256:822b4e326a5d` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
 | every bucket count | `tools/gate_reference_census.py --json out.json` |
 | the false-admit allowance | `tools/gate_reference_census_baseline.json`, which is in the tree |
 | the provenance columns | `tools/corpus_provenance.py` over `tests/fixtures/corpus_provenance.json` |
@@ -263,7 +263,7 @@ source is byte-identical in your clone is recomputed and compared.
 The files that decide a verdict are MEASURED rather than listed. The
 generator records, through a Python audit hook, every file under the
 checkout the census run opens, and pins each one. For this run that is
-the corpus (per row), the `src/revl/**/*.py` modules it opened (38 files), and:
+the corpus (per row), the `src/revl/**/*.py` modules it opened (39 files), and:
 
 - `backends/python/emit.py`
 - `tests/test_selfhost_lower.py`

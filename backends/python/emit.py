@@ -92,6 +92,7 @@ _IMPORT_ALIAS = {
     "secret_result": "_revl_secret_result",
     "estop_gated": "_revl_estop_gated",
     "declare_secret_types": "_revl_declare_secret_types",
+    "ui_crossing": "_revl_ui_crossing",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
 
@@ -1226,9 +1227,14 @@ def _is_map_cas(acquire: Any) -> bool:
 
 class _ComponentEmitter:
     def __init__(self, component: dict, services: dict, externs: list | None = None,
-                 plan_groups: list | None = None) -> None:
+                 plan_groups: list | None = None,
+                 ui_units: set | None = None) -> None:
         self.ir = component
         self.services = services
+        # item 522 slice 3 (issue #1369): the `(provide key, method)` pairs of
+        # this component that are UI transaction units (`_ui_transaction_facts`).
+        self.ui_units: set = {(_ident(key, "provides key"), method)
+                              for key, method in (ui_units or ())}
         # item 259 slice 2: every declared extern by name, so an `emit` step's
         # forward-delivery idempotence (the fan-out eligibility gate) is readable
         # off a host-extern emission the same way a req-target emission reads it
@@ -2814,9 +2820,19 @@ class _ComponentEmitter:
         self.analyze_model_flow(body, mwhere)
         prev_async = self._in_async
         self._in_async = method_is_async
+        # item 522 slice 3 (issue #1369): a method that crosses a computer-use
+        # verb is one UI transaction unit, the unit `ui_transaction.method_plan`
+        # reads statically. Its body runs inside `Frame.ui_transaction`, which
+        # runs the call's own compensations LIFO if the call fails. Every other
+        # method is byte-identical.
+        body_indent = indent + 1
+        if (provide_name, method.get("name")) in self.ui_units:
+            out.add(indent + 1, "with _revl_frame.ui_transaction("
+                                f"{provide_name + '.' + name!r}):")
+            body_indent = indent + 2
         try:
             for step in body:
-                self._method_step(out, indent + 1, provide_name, name, step, mwhere, method_is_async)
+                self._method_step(out, body_indent, provide_name, name, step, mwhere, method_is_async)
         finally:
             self._in_async = prev_async
 
@@ -4289,7 +4305,8 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
 _GATED_EXTERN_CLASSES = frozenset({"emission", "witnessed", "acquire"})
 
 
-def _emit_externs(externs: list, gated: bool = True) -> "_Lines":
+def _emit_externs(externs: list, ui_externs: set = frozenset(),
+                  gated: bool = True) -> "_Lines":
     out = _Lines()
     # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
     # FAIL-LOUD lookup. The driver (src/revl/run.py) resolves each bound secret's
@@ -4384,6 +4401,18 @@ def _emit_externs(externs: list, gated: bool = True) -> "_Lines":
         # top import would run the referenced module at artifact LOAD, outside
         # every classification/approval/witness gate; the thunk keeps host
         # execution where an inline body's execution is (design §"Emit, py").
+        # item 522 slice 3 (issue #1369): a computer-use extern is decorated so
+        # the UI transaction unit its call runs inside can see the crossing, and
+        # can register the extern's DECLARED `compensate` wherever the crossing
+        # is written (a `let`, a `return`, an argument), not only at a bare
+        # `emit` statement. The slot runs with no variables in scope (lower
+        # refuses one that names a parameter), so it is a closed thunk here.
+        # Emitted only for a computer-use extern, so every other `def` is
+        # byte-identical.
+        if ext["name"] in ui_externs:
+            comp = ext.get("compensate")
+            thunk = "None" if comp is None else f"lambda: {_expr(comp)}"
+            out.add(0, f"@{_runtime_ref('ui_crossing')}({ext['name']!r}, {thunk})")
         if "py" in refs and "py" not in bodies:
             out.extend(_emit_py_ref_thunk(name, params, ext, refs["py"]))
             continue
@@ -5201,6 +5230,39 @@ def _inline_pure_fns(ir: dict) -> dict:
     return ir
 
 
+def _ui_transaction_facts(ir: dict) -> tuple[set, dict]:
+    """Item 522 slice 3 (issue #1369): the computer-use externs of the document,
+    by name, and the UI transaction units, as `{component: {(key, method)}}`.
+
+    Derived from `revl.ui_transaction`, the module `revl erase-report` prints
+    the static run from, so the unit the runtime settles is the unit the report
+    describes. Unlike the fan-out plan this is a correctness dependency, so it
+    is FAIL-CLOSED: without the frontend a document that declares a computer-use
+    capability is refused rather than emitted with no unit."""
+    try:
+        from revl import ui_family, ui_transaction  # noqa: PLC0415
+    except Exception as error:  # noqa: BLE001 - frontend absent
+        roots = {str(cap).split(".", 1)[0]
+                 for ext in ir.get("externs") or []
+                 for cap in ext.get("capabilities") or []}
+        if roots & {"ui", "screen"}:
+            raise EmitError(
+                "a computer-use extern needs the revl frontend to find its "
+                "transaction unit (item 522), and it is not importable here: "
+                f"{error}") from error
+        return set(), {}
+    index = ui_transaction._extern_index(ir)
+    ui_externs = {name for name, entry in index.items()
+                  if ui_family.reversibility(entry["token"]) is not None}
+    units: dict = {}
+    for plan in ui_transaction.plans(ir):
+        if plan["key"] == "<activation>":
+            continue
+        units.setdefault(plan["component"], set()).add(
+            (plan["key"], plan["method"]))
+    return ui_externs, units
+
+
 def _parallel_step_groups(ir: dict) -> dict:
     """Per-component fan-out plan (item 259 slice 2): each component name maps to a
     list of groups, each group a list of `emit` step dicts the checker proved
@@ -5397,9 +5459,11 @@ def emit(ir: dict) -> str:
     # body has a provable parallel group - either way the emission is sequential
     # and byte-identical to before).
     plan_groups = _parallel_step_groups(ir)
+    ui_externs, ui_units = _ui_transaction_facts(ir)
     emitters = [
         _ComponentEmitter(component, services, externs,
-                          plan_groups.get(component.get("name")))
+                          plan_groups.get(component.get("name")),
+                          ui_units.get(component.get("name")))
         for component in components
     ]
     bodies = [emitter.emit() for emitter in emitters]
@@ -5465,6 +5529,10 @@ def emit(ir: dict) -> str:
         # through `emitter.uses`.
         | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
            else set())
+        # item 522 slice 3: a computer-use extern is decorated so a UI
+        # transaction unit can see the crossing (`_emit_externs`). A document
+        # with no computer-use extern is byte-identical.
+        | ({"ui_crossing"} if ui_externs else set())
         # issue #1504: the E-Stop gate on every boundary-crossing extern
         # issue #1504: the E-Stop gate on every boundary-crossing extern, in a
         # document with components (the runtime is loaded to run them). A
@@ -5818,7 +5886,7 @@ def emit(ir: dict) -> str:
     if functions:
         out.extend(_emit_functions(functions))
     if externs:
-        out.extend(_emit_externs(externs, gated=bool(components)))
+        out.extend(_emit_externs(externs, ui_externs, gated=bool(components)))
     if tests:
         out.extend(_emit_tests(tests))
     if fault_tests:

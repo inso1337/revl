@@ -2202,9 +2202,16 @@ class _Transactional:
             self._undo = None
             self.witness = None
             return None
+        return self._replay()
+
+    def _replay(self) -> Any:
+        """The abort branch: replay the declared inverse. Also called directly
+        by a failed UI transaction unit (`Frame._unwind_ui_unit`), which settles
+        its own entries before the activation's commit-vs-abort bit exists."""
         # issue #1504: an inverse is a crossing too. Under a halt it is
         # stranded, never run, whichever path reached it (a cordis unwind, a
-        # method entry's drain, the session escrow).
+        # method entry's drain, the session escrow, a failed UI transaction
+        # unit's own unwind).
         if _estop_poll():
             self.frame._record_estop_stranded(self)
             return None
@@ -2433,6 +2440,142 @@ class _Compensation:
         except BaseException as error:  # noqa: BLE001 — anticipated, best-effort
             self.failed = True
             self.error = error
+
+
+# ---------------------------------------------------------------------------
+# item 522 slice 3 (issue #1369): the UI transaction unit
+# ---------------------------------------------------------------------------
+#
+# docs/design/538-ui-transactions.md §10. A provide method that crosses a
+# computer-use verb is one transaction: the unit `revl.ui_transaction.
+# method_plan` reads off the same method body. The emitter wraps that body in
+# `Frame.ui_transaction(...)` and decorates every computer-use extern with
+# `ui_crossing(...)`.
+#
+# On a clean return nothing changes: every entry the call registered stays
+# parked on the activation frame exactly as any provide-method entry does, and
+# the session or the activation settles it (discharged on commit, run on abort).
+#
+# On a failure, the unit settles its OWN entries at once, with the teardown
+# contract's two phases scoped to the entries this call registered: every
+# witnessed inverse, newest first, then every compensation, newest first. The
+# failure then propagates unchanged. Before this, the entries were parked and a
+# later clean commit DISCHARGED them, so a transaction that stopped half way
+# kept its typed fields and no compensation ever ran.
+#
+# The substrate still performs every crossing, compensations included: they are
+# the `@py` bodies of the declared inverses. What revl owns, and what runs here,
+# is the order and the membership (538 §3: `compensate` is the phase revl owns).
+
+#: The unit the current task is inside, or None. A context variable and not a
+#: module global, so two concurrent tool calls on one frame each see their own
+#: unit, and `_UiUnit.__exit__` restores the previous value on every path.
+_UI_UNIT: "contextvars.ContextVar[Optional[_UiUnit]]" = contextvars.ContextVar(
+    "revl_ui_unit", default=None)
+
+
+class _UiUnit:
+    """One UI transaction unit: the context manager `Frame.ui_transaction`
+    returns. It records which computer-use crossings started, which one raised,
+    and which witnessed and compensation entries this call registered."""
+
+    __slots__ = ("frame", "name", "crossed", "failed_step", "transactional",
+                 "compensations", "labels", "_token")
+
+    def __init__(self, frame: "Frame", name: str) -> None:
+        self.frame = frame
+        self.name = name
+        self.crossed: list = []          # computer-use crossings started, in order
+        self.failed_step: Optional[str] = None
+        self.transactional: list = []    # `_Transactional` entries this call registered
+        self.compensations: list = []    # `_Compensation` entries this call registered
+        self.labels: dict = {}           # id(entry) -> the crossing it offsets
+        self._token = None
+
+    def __enter__(self) -> "_UiUnit":
+        self._token = _UI_UNIT.set(self)
+        return self
+
+    def __exit__(self, exc_type, error, _tb) -> bool:
+        _UI_UNIT.reset(self._token)
+        if exc_type is not None:
+            self.frame._unwind_ui_unit(self, error)
+        return False   # the failure always propagates
+
+    def _register(self, label: str, compensate: Optional[Callable[[], Any]]) -> None:
+        """Register the crossing's DECLARED compensation on the frame, the same
+        first-class entry a provide-method `emit ... compensate ...` gets."""
+        if compensate is None or self.frame._halted:
+            return
+        entry = self.frame.compensation_method(compensate)
+        self.labels[id(entry)] = label
+
+
+def _ui_unit_for(frame: "Frame") -> "Optional[_UiUnit]":
+    unit = _UI_UNIT.get()
+    return unit if unit is not None and unit.frame is frame else None
+
+
+def ui_crossing(label: str, compensate: Optional[Callable[[], Any]] = None):
+    """Decorator on an extern that declares a computer-use capability.
+
+    Outside a unit it is a pass-through, so an activation-body crossing and an
+    ordinary call behave exactly as before. Inside one it notes the crossing,
+    registers the extern's declared `compensate` AFTER the host body returns
+    (item 247's register-after-fire order), and on a raise marks this crossing
+    as the step the transaction failed at.
+
+    A crossing that RAISES still registers its own compensation. That is 538
+    §10's rule for the failing step, applied to the runtime: a raise says the
+    substrate could not confirm the effect, which is not knowing it did not
+    land, and a declared inverse that clears a field is correct either way.
+    `revl.ui_transaction.compensation_run` states the same rule statically."""
+    def _wrap(fn):
+        def _enter():
+            unit = _UI_UNIT.get()
+            if unit is not None:
+                unit.crossed.append(label)
+            return unit
+
+        def _failed(unit):
+            if unit.failed_step is None:
+                unit.failed_step = label
+            try:
+                unit._register(label, compensate)
+            except EstopRefused:
+                pass   # a halt runs no compensation; the crossing's own raise propagates
+
+        if inspect.iscoroutinefunction(fn):
+            async def _ui_crossing_async(*args, **kwargs):
+                unit = _enter()
+                if unit is None:
+                    return await fn(*args, **kwargs)
+                try:
+                    value = await fn(*args, **kwargs)
+                except BaseException:
+                    _failed(unit)
+                    raise
+                unit._register(label, compensate)
+                return value
+            wrapped = _ui_crossing_async
+        else:
+            def _ui_crossing_sync(*args, **kwargs):
+                unit = _enter()
+                if unit is None:
+                    return fn(*args, **kwargs)
+                try:
+                    value = fn(*args, **kwargs)
+                except BaseException:
+                    _failed(unit)
+                    raise
+                unit._register(label, compensate)
+                return value
+            wrapped = _ui_crossing_sync
+        wrapped.__name__ = fn.__name__
+        wrapped.__qualname__ = fn.__qualname__
+        wrapped.__doc__ = fn.__doc__
+        return wrapped
+    return _wrap
 
 
 # ---------------------------------------------------------------------------
@@ -2993,6 +3136,10 @@ class Frame:
         # residue introspection cover it uniformly.
         self._deferred_compensations: list = []
         self._pending_compensations: list = []
+        # item 522 slice 3 (issue #1369): one record per UI transaction unit
+        # that failed on this activation, in the order they failed. Written by
+        # `_unwind_ui_unit`; a unit that returned cleanly writes nothing.
+        self.ui_transaction_runs: list = []
         # Phase-2 residue (teardown-contract.md's `compensation-residue`):
         # one record per compensation that raised or was skipped past the
         # budget. Best-effort introspection for this activation; the merged
@@ -3132,6 +3279,12 @@ class Frame:
         transactional failures, `compensation-residue` severity. Every skip
         or failure is recorded, never silently dropped."""
         pending, self._pending_compensations = self._pending_compensations, []
+        self._run_compensations(pending)
+
+    def _run_compensations(self, pending: list) -> None:
+        """Run `pending` in the order given, under the Phase-2 rules: stranded
+        under an E-Stop, bounded by the budget, continue-and-record. Shared by
+        the activation's Phase 2 and a failed UI transaction unit."""
         if not pending:
             return
         _estop_poll()   # issue #1504: an armed latch halts this frame first
@@ -3528,6 +3681,9 @@ class Frame:
                                undo_idempotent=undo_idempotent, scope=scope)
         self._transactional.append(entry)
         self._deferred_transactional.append(entry)
+        unit = _ui_unit_for(self)   # item 522 slice 3: settled by the unit on failure
+        if unit is not None:
+            unit.transactional.append(entry)
         wal = self._wal()
         if wal is not None:
             record = wal.record_discharge_descriptor(
@@ -3652,6 +3808,9 @@ class Frame:
         entry = _Compensation(self, fn, method=method_name)
         self._compensations.append(entry)
         self._deferred_compensations.append(entry)
+        unit = _ui_unit_for(self)   # item 522 slice 3: settled by the unit on failure
+        if unit is not None:
+            unit.compensations.append(entry)
         wal = self._wal()
         if wal is not None:
             record = wal.record_discharge_descriptor(
@@ -3664,6 +3823,67 @@ class Frame:
             )
             entry.seq = record["seq"]
         return entry
+
+    def ui_transaction(self, name: str) -> "_UiUnit":
+        """The UI transaction unit for one provide-method call (item 522 slice
+        3, issue #1369). The emitter wraps a method body that crosses a
+        computer-use verb in `with _revl_frame.ui_transaction("key.method"):`.
+        See `_UiUnit` and `ui_crossing` for what it records."""
+        return _UiUnit(self, name)
+
+    def _unwind_ui_unit(self, unit: "_UiUnit", error: BaseException) -> None:
+        """Settle the entries a FAILED unit registered, and record the run.
+
+        The teardown contract's abort, scoped to this call: Phase 1 replays the
+        call's witnessed inverses newest first, Phase 2 runs its compensations
+        newest first, each continue-and-record. The entries leave the frame's
+        deferred lists first, so neither a later commit (which would discharge
+        them) nor a later abort (which would run them again) reaches them. They
+        stay in `_transactional` / `_compensations`, so introspection and the
+        commit's WAL discharge record still name them.
+
+        Under an E-Stop nothing runs: the entries stay where they are and the
+        halt strands them, which is item 443's rule for every other unwind."""
+        run: dict = {
+            "unit": unit.name,
+            "failedStep": unit.failed_step,
+            "crossed": list(unit.crossed),
+            "error": {"type": type(error).__name__, "message": str(error)},
+        }
+        if self._halted:
+            run.update(ran=[], replayed=[], residue=[], halted=True)
+            self.ui_transaction_runs.append(run)
+            return
+        transactional = [e for e in unit.transactional
+                         if any(e is d for d in self._deferred_transactional)]
+        compensations = [e for e in unit.compensations
+                         if any(e is d for d in self._deferred_compensations)]
+        self._deferred_transactional = [
+            d for d in self._deferred_transactional
+            if not any(d is e for e in transactional)]
+        self._deferred_compensations = [
+            d for d in self._deferred_compensations
+            if not any(d is e for e in compensations)]
+        residue_before = len(self.compensation_residue)
+        replayed: list = []
+        for entry in reversed(transactional):
+            try:
+                entry._replay()
+            except BaseException as failure:  # noqa: BLE001 — recorded, never re-raised
+                self._record_phase1_residue(entry, failure)
+            replayed.append(entry.method)
+        lifo = list(reversed(compensations))
+        self._run_compensations(lifo)
+        run.update(
+            ran=[{"step": unit.labels.get(id(entry)),
+                  "compensation": entry.method,
+                  "failed": entry.failed}
+                 for entry in lifo if entry.ran],
+            replayed=replayed,
+            residue=self.compensation_residue[residue_before:],
+            halted=False,
+        )
+        self.ui_transaction_runs.append(run)
 
     def enqueue_deferred(self, receiver: str, method: str, args: list,
                          fire: Callable[[], Any], *,

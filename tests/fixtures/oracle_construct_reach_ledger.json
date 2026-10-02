@@ -126,6 +126,7 @@
     "commutative=<true>",
     "deferred=<true>",
     "idempotent=<true>",
+    "key=<activation>",
     "kind=__rendered__",
     "kind=hole",
     "kind=instance-get",

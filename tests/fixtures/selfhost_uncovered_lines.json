@@ -51,7 +51,7 @@
     "reference": {
       "go": 2824,
       "java": 986,
-      "py": 667,
+      "py": 680,
       "rust": 1200,
       "ts": 552,
       "wasm": 1558
@@ -722,8 +722,8 @@
           "_emit_py_ref_thunk": 26,
           "_ref_dotted": 2
         },
-        "Extern residual ABI/configuration boundary: _emit_externs emits capability-bound secret lookup/store and extern plug-time config required/default merging; dispatches @py refs; rejects missing target bodies and emits pass for empty bodies. Port supports verbatim bodies and declared Secret[T] marking, not capability-secret/config installation. Representative sources: stdlib/fs.rvl, tests/test_extern_config_cross_tier_378.py and tests/test_secret_bound.py. Empty-body pass is equivalent on both sides. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481), so one statement arrives with it and this is re-recorded 40 to 41 under the same reason. `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap.": {
-          "_emit_externs": 41
+        "Extern residual ABI/configuration boundary: _emit_externs emits capability-bound secret lookup/store and extern plug-time config required/default merging; dispatches @py refs; rejects missing target bodies and emits pass for empty bodies. Port supports verbatim bodies and declared Secret[T] marking, not capability-secret/config installation. Representative sources: stdlib/fs.rvl, tests/test_extern_config_cross_tier_378.py and tests/test_secret_bound.py. Empty-body pass is equivalent on both sides. The declared-`Secret[Map[K, V]]` marking adds a `_declared=` argument at the extern site (item 481), so one statement arrives with it and this is re-recorded 40 to 41 under the same reason. `selfhost/emit_py.rvl` carries the marking import line only, not the call-site shape (item-429(d)): a corpus document that reached it would flip the byte-agreement oracle red rather than close this gap. Item 522 slice 3 (issue #1369) adds three: the `ui_crossing` decorator a computer-use extern gets, which no corpus document declares (see the item 522 entry).": {
+          "_emit_externs": 44
         },
         "Fault-harness boundary: _emit_fault_tests validates target component and serializes injection/assertion metadata into REVL_FAULT_TESTS. tests/test_fault_tests.py::SOURCE and test_python_tier_lowers_the_section_into_the_module reproduce this unported trailer.": {
           "_emit_fault_tests": 11
@@ -781,8 +781,8 @@
         "Match-binder short-circuit made unreachable by #320: _arm_body_is_bind's `bind in (\"Some\", \"None\")` guard returns False for a payload bound to a constructor spelling, but the frontend now mangles a predeclared binder in lower.py `_predeclared_mangle` (`Some` -> `Some_`) BEFORE the emitter reads the IR, and `None` carries no payload so it is never a binder. So `bind` is never literally `Some`/`None` at this emitter and the guard's early `return False` is unreachable through the byte-agreement oracle. match_binder_scan.rvl's some_binder still drives the arm (`Some(Some) => 0`), but now through the mangled `Some_` binder, which the arm body never reads.": {
           "_arm_body_is_bind": 1
         },
-        "Method declaration rejection only: _method rejects a method absent from its service or wrong arity. Frontend checking supplies matching names/arity; services_methods.rvl covers ordinary rendering. The declared-`Secret[Map[K, V]]` marking adds the same `_declared=` argument at the provide-method site (item 481), so two statements arrive with it and this is re-recorded 2 to 4 under the same reason, on the extern-site entry's grounds.": {
-          "_ComponentEmitter._method": 4
+        "Method declaration rejection only: _method rejects a method absent from its service or wrong arity. Frontend checking supplies matching names/arity; services_methods.rvl covers ordinary rendering. The declared-`Secret[Map[K, V]]` marking adds the same `_declared=` argument at the provide-method site (item 481), so two statements arrive with it and this is re-recorded 2 to 4 under the same reason, on the extern-site entry's grounds. Item 522 slice 3 (issue #1369) adds two: the `Frame.ui_transaction` wrapper a UI transaction unit's body gets, re-recorded 4 to 6 (see the item 522 entry).": {
+          "_ComponentEmitter._method": 6
         },
         "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
           "_ComponentEmitter._method_step": 22
@@ -848,6 +848,9 @@
         "Issue #1474, a provided method named after a Python keyword, soft keyword or `self`: `_method_def_name` is the one rename for the method's `def`, `_ComponentEmitter._provide` registers the contract name back on the provided class with `setattr`, and `_method_access` reaches it by `getattr(target, 'class')` at a static call site. No emit_py corpus document names a provided method after a Python keyword, and selfhost/emit_py.rvl does not port the rename, so a corpus document here would make the byte-agreement oracle diverge; the self-host port plus that document is the work that retires this entry. Not reached besides: the two refusals `_method_def_name` makes (a non-identifier, a `_revl` scaffolding name), which the frontend stops first. The input family is tests/test_keyword_method_names_1474.py.": {
           "_method_access": 1,
           "_method_def_name": 2
+        },
+        "Item 522 slice 3 (issue #1369), the UI transaction unit on the python tier: `_ui_transaction_facts` finds the computer-use externs and the provide methods `revl.ui_transaction.plans` reads as units, `_emit_externs` decorates a computer-use extern with `ui_crossing`, and `_ComponentEmitter._method` wraps a unit's body in `Frame.ui_transaction`. selfhost/emit_py.rvl does not port the unit, so no corpus document can declare a computer-use capability without the byte-agreement oracle diverging; the self-host port is the work that retires this entry. The input family is tests/test_ui_transaction_runtime_1369.py::FIVE_STEPS.": {
+          "_ui_transaction_facts": 8
         }
       },
       "uncovered_statements": 642
