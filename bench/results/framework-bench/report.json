@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+    "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -750,8 +750,8 @@
               },
               "py": {
                 "residual": 6,
-                "corpus": 59,
-                "reproduced": 53,
+                "corpus": 60,
+                "reproduced": 54,
                 "documents": [
                   "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
                   "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
@@ -789,7 +789,7 @@
               }
             },
             "total_residual": 14,
-            "total_corpus": 277,
+            "total_corpus": 278,
             "clean_tiers": [
               "java",
               "wasm"
@@ -1183,8 +1183,8 @@
       },
       "headline": {
         "documents_refused": 14,
-        "corpus": 277,
-        "n": 277,
+        "corpus": 278,
+        "n": 278,
         "per_tier": {
           "go": 2,
           "java": 0,
@@ -2562,11 +2562,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 14 of 277 corpus documents that the reference compiler accepts (n=277)",
+      "text": "the fully-native revl chain does not reproduce 14 of 278 corpus documents that the reference compiler accepts (n=278)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2576,7 +2576,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2586,7 +2586,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2596,7 +2596,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2606,7 +2606,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2616,7 +2616,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2626,7 +2626,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2636,7 +2636,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c6de6cdd12460f2c20fe47f523f308a561744682",
+        "compiler_commit": "ef4253d1653d5d430e0237d981ea653b99219c37",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
