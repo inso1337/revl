@@ -37,6 +37,7 @@ import ipaddress
 import socket
 import ssl
 import threading
+import time
 from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
@@ -180,6 +181,43 @@ def server_tls_context(exposure: Exposure) -> ssl.SSLContext | None:
 #: worker thread forever.
 CONNECTION_TIMEOUT = 30.0
 
+#: How long, and for how many bytes, a closing connection is drained of what the
+#: client is still sending (see `close_after_draining`).
+LINGER_SECONDS = 2.0
+LINGER_BYTES = 1 << 20
+
+
+def close_after_draining(sock) -> None:
+    """Close a connection without destroying the answer just written to it.
+
+    A refusal is answered before the request body is read, so the body can
+    still sit unread on the socket when the server closes it. Closing a socket
+    with unread input makes the kernel reset the connection, and the reset can
+    reach the client before it has read the answer, which then loses the answer
+    (issue #1564). So close in stages, as RFC 9112 section 9.6 asks: stop
+    sending, read and discard whatever the client still sends until it closes
+    its side, bounded in time and size, and only then close."""
+    try:
+        sock.shutdown(socket.SHUT_WR)
+        deadline = time.monotonic() + LINGER_SECONDS
+        drained = 0
+        while drained < LINGER_BYTES:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            sock.settimeout(remaining)
+            chunk = sock.recv(65536)
+            if not chunk:
+                break
+            drained += len(chunk)
+    except OSError:
+        pass
+    finally:
+        try:
+            sock.close()
+        except OSError:
+            pass
+
 
 class Listener(ThreadingHTTPServer):
     """A threaded HTTP listener that applies `Exposure`: TLS (and mutual TLS)
@@ -209,10 +247,12 @@ class Listener(ThreadingHTTPServer):
         try:
             super().finish_request(wrapped, client_address)
         finally:
-            try:
-                wrapped.close()
-            except OSError:
-                pass
+            close_after_draining(wrapped)
+
+    def shutdown_request(self, request) -> None:
+        # the clear-text path; a TLS request was detached by `wrap_socket` and
+        # is already closed above, so this is a no-op for it
+        close_after_draining(request)
 
 
 class DispatchLock:
