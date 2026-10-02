@@ -74,6 +74,10 @@ class ModelOp:
     returns: str | None
     validated: bool
     is_async: bool
+    #: the IR's `response_grammar` for a `validated` operation (item 513)
+    grammar: dict | None = None
+    #: the IR's `response_schema` for a `validated` operation (item 257)
+    response_schema: dict | None = None
 
     @property
     def crossing(self) -> str:
@@ -174,6 +178,8 @@ def model_operations(ir, roles) -> tuple:
                 returns=spec.get("returns"),
                 validated=bool(spec.get("validated")),
                 is_async=bool(spec.get("async")),
+                grammar=spec.get("response_grammar"),
+                response_schema=spec.get("response_schema"),
             ))
     return tuple(ops)
 
