@@ -78,6 +78,9 @@ MODES = {
     "openai-compatible": ("json-schema", "gbnf", "none"),
     "anthropic": ("tool", "none"),
     "gemini": ("response-schema", "none"),
+    # the ollama wire sends no constrained format yet, so a `validated`
+    # crossing on it is unconstrained and checked on return
+    "ollama": ("none",),
 }
 
 #: The modes that claim (take the artifact), and the dialect each takes.

@@ -9,8 +9,11 @@ the standard library's HTTP client.
 * `placement`  - the program decides which adapter a crossing may use; this
                  checks the configuration against that decision;
 * `host`       - the object a model `requires` key resolves to at run time;
-* `adapter`    - one role's client; `wire_openai`, `wire_anthropic` and
-                 `wire_gemini` are the three wire formats;
+* `adapter`    - one role's client; `wire_openai`, `wire_anthropic`,
+                 `wire_gemini` and `wire_ollama` are the wire formats;
+* `provision`  - a managed role's one load and one unload, shared by every
+                 host that routes to it, on the device the model schedule
+                 chose (item 515, slice S2);
 * `transport`  - the one HTTP client, shared with `bench/`.
 
 `revl run --providers FILE` is the entry point (`bind_for_run`). The design and
@@ -26,19 +29,25 @@ from .adapter import Adapter, read_credential
 from .completion import Completion, CompletionRequest
 from .config import (Binding, ProviderConfig, ProviderConfigError,
                      endpoint_residence, load_config, parse_config)
-from .host import ModelHost, PlacementRefused, build_hosts, missing_credentials
+from .host import (ModelHost, PlacementRefused, build_hosts, close_hosts,
+                   has_provisions, missing_credentials, open_hosts,
+                   provision_residue, provision_summaries)
 from .placement import (Placement, Refusal, check_bindings, model_keys,
                         model_operations, placement_of_files,
                         placement_of_program)
+from .provision import ProvisionRefused, Provisions, RoleProvision
 from .transport import ProviderError, redact, request_json
 
 __all__ = [
     "Adapter", "Binding", "Completion", "CompletionRequest", "ModelHost",
     "Placement", "PlacementRefused", "ProviderConfig", "ProviderConfigError",
-    "ProviderError", "Refusal", "bind_for_run", "build_hosts",
-    "check_bindings", "describe_hosts", "endpoint_residence", "load_config",
-    "missing_credentials", "model_keys", "model_operations", "parse_config",
-    "placement_of_files", "placement_of_program", "read_credential", "redact",
+    "ProviderError", "ProvisionRefused", "Provisions", "Refusal",
+    "RoleProvision", "bind_for_run", "build_hosts", "check_bindings",
+    "close_hosts", "describe_hosts", "endpoint_residence", "has_provisions",
+    "load_config",
+    "missing_credentials", "model_keys", "model_operations", "open_hosts",
+    "parse_config", "placement_of_files", "placement_of_program",
+    "provision_residue", "provision_summaries", "read_credential", "redact",
     "request_json",
 ]
 
@@ -48,7 +57,9 @@ def bind_for_run(ir, files, config_path, environ=None) -> dict:
 
     Refuses (raises) on a malformed file, on any placement refusal, and on a
     credential variable that is not set, so a run whose model crossings cannot
-    be served does not boot. The check needs no runtime and makes no request.
+    be served does not boot. The check needs no runtime and makes no request:
+    a managed role is loaded later, by `open_hosts`, when the hosts are
+    provided.
     """
     config = load_config(config_path)
     placement = placement_of_files(files)
@@ -76,8 +87,11 @@ def describe_hosts(hosts) -> list:
             b = adapter.binding
             cred = (f", credential from ${b.api_key_env}" if b.api_key_env
                     else "")
+            load = (f", loaded by revl on the scheduled device of "
+                    f"{', '.join(b.device_names())}" if b.managed else "")
             lines.append(f"  {key}.{method} -> role {op.role}: {b.provider} "
-                         f"{b.model} at {b.base_url} ({b.residence}{cred})")
+                         f"{b.model} at {b.base_url} ({b.residence}{cred}"
+                         f"{load})")
             if op.validated:
                 lines.append("    " + structured_line(op, b))
     return lines
