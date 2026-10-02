@@ -1,0 +1,257 @@
+// The loop rewrites of the go pure tier, and the near misses that must NOT be
+// rewritten (issue #106). A `while (i < s.length())` loop lowers to
+// `for _, r := range s` only when the rewrite is unconditionally equivalent
+// (item 434 (c) stage two); each function below breaks exactly one of those
+// conditions, so the port and the reference have to agree on every refusal as
+// well as on the rewrite. Then the string-builder accumulator (item 434 (e))
+// through `.concat`, and the destructive rebinds of a uniquely owned Map
+// (item 445) beside a shared one that must stay persistent.
+
+// The rewrite, through a bound local, with a `charAt` answered from the rune
+// and the reads it must leave alone: another index, an index expression, a
+// receiver that is not a plain local, and a method that is not a code-point
+// read.
+fn scan_bound(s: Str, xs: List[Str]) -> Str {
+  let n = s.length()
+  var i = 0
+  var j = 0
+  var out = ""
+  while (i < n) {
+    out = out.concat(s.charAt(i)).concat("|")
+    let other = s.charCodeAt(j)
+    let ahead = s.charCodeAt(i + 0)
+    let first = xs[0].charCodeAt(i)
+    let size = s.length()
+    i = i + 1
+  }
+  return out
+}
+
+// The comparison's left side is not a plain local.
+fn left_not_var(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (0 + i < s.length()) {
+    t = t + s.charCodeAt(i)
+    i = i + 1
+  }
+  return t
+}
+
+// `<=` is not the scan comparison.
+fn not_less(s: Str) -> Int {
+  var i = 0
+  var n = 0
+  while (i <= s.length()) {
+    if (i < s.length()) { n = n + s.charCodeAt(i) }
+    i = i + 1
+  }
+  return n
+}
+
+// The bound local is written twice.
+fn bound_rewritten(s: Str) -> Int {
+  var n = s.length()
+  n = n - 1
+  var i = 0
+  var t = 0
+  while (i < n) {
+    t = t + s.charCodeAt(i)
+    i = i + 1
+  }
+  return t
+}
+
+// The scanned text itself is reassigned.
+fn text_rewritten(s: Str) -> Int {
+  var text = s
+  text = text.concat("!")
+  var i = 0
+  var t = 0
+  while (i < text.length()) {
+    t = t + text.charCodeAt(i)
+    i = i + 1
+  }
+  return t
+}
+
+// The index does not start at 0.
+fn starts_at_one(s: Str) -> Int {
+  var i = 1
+  var t = 0
+  while (i < s.length()) {
+    t = t + s.charCodeAt(i)
+    i = i + 1
+  }
+  return t
+}
+
+// The index is written inside a nested block before the loop.
+fn nested_reset(s: Str, flag: Bool) -> Int {
+  var i = 0
+  if (flag) { i = 0 }
+  var t = 0
+  while (i < s.length()) {
+    t = t + s.charCodeAt(i)
+    i = i + 1
+  }
+  return t
+}
+
+// The index is a parameter, never written before the loop.
+fn from_param(s: Str, i0: Int) -> Int {
+  var t = 0
+  var k = i0
+  while (k < s.length()) {
+    t = t + s.charCodeAt(k)
+    k = k + 1
+  }
+  return t
+}
+
+// The step is not the trailing statement.
+fn early_step(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    i = i + 1
+    t = t + s.charCodeAt(i - 1)
+  }
+  return t
+}
+
+// The index is written twice inside the loop.
+fn two_steps(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    t = t + s.charCodeAt(i)
+    if (t > 100) { i = i + 1 }
+    i = i + 1
+  }
+  return t
+}
+
+// The step is by two.
+fn step_two(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    t = t + s.charCodeAt(i)
+    i = i + 2
+  }
+  return t
+}
+
+// The step reads `1 + i`.
+fn step_flipped(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    t = t + s.charCodeAt(i)
+    i = 1 + i
+  }
+  return t
+}
+
+// The step is not an addition at the top, or adds to something else.
+fn step_minus(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    t = t + s.charCodeAt(i)
+    i = i - (0 - 1)
+  }
+  return t
+}
+
+fn step_nested(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    t = t + s.charCodeAt(i)
+    i = i - 1 + 2
+  }
+  return t
+}
+
+// The loop's own `continue` skips the step, from a `then` or an `else` (this
+// is an emission fixture: the loops spin on that character and are never run);
+// one inside a nested loop binds to that loop and does not count.
+fn own_continue(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    if (s.charCodeAt(i) == 0) { continue }
+    t = t + 1
+    i = i + 1
+  }
+  return t
+}
+
+fn else_continue(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    if (s.charCodeAt(i) != 0) { t = t + 1 } else { continue }
+    i = i + 1
+  }
+  return t
+}
+
+fn nested_continue(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    for (x of [1, 2]) {
+      if (x == 1) { continue }
+      t = t + x
+    }
+    t = t + s.charCodeAt(i)
+    i = i + 1
+  }
+  return t
+}
+
+// Nothing to gain: the loop never reads the text at the index.
+fn no_read(s: Str) -> Int {
+  var i = 0
+  var t = 0
+  while (i < s.length()) {
+    t = t + 1
+    i = i + 1
+  }
+  return t
+}
+
+// The bound is a length, but not of a plain local.
+fn bound_of_index(xs: List[Str]) -> Int {
+  var i = 0
+  var t = 0
+  while (i < xs[0].length()) {
+    t = t + xs[0].charCodeAt(i)
+    i = i + 1
+  }
+  return t
+}
+
+// A uniquely owned Map is updated in place; a Map whose old value is still
+// read afterwards keeps the persistent helpers.
+fn map_writes(k: Str) -> Int {
+  var m: Map[Str, Int] = Map.empty()
+  m = m.set(k, 1)
+  m = m.set("x", 2)
+  m = m.remove(k)
+  let kept = m.set("y", 3)
+  return m.size() + kept.size()
+}
+
+// Rebinds that are not the destructive shape: a non-builtin value, a builtin
+// outside push/set/remove, and a write from another receiver.
+fn other_rebinds(ys: List[Int]) -> Int {
+  var xs: List[Int] = []
+  xs = [1, 2]
+  xs = xs.concat([3])
+  xs = ys.push(4)
+  return xs.length()
+}

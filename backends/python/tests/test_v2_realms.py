@@ -67,5 +67,8 @@ async def test_intercept_metadata_reaches_the_consumer_context(trace):
 
 
 def test_realm_labels_are_shared_by_value():
-    assert runtime_mod.realm_label("t") is runtime_mod.realm_label("t")
-    assert runtime_mod.realm_label("t") is not runtime_mod.realm_label("u")
+    assert runtime_mod.realm_label("t", "kv") is runtime_mod.realm_label("t", "kv")
+    assert runtime_mod.realm_label("t", "kv") is not runtime_mod.realm_label("u", "kv")
+    # one label per key inside a realm (issue #1543): cordis keys the
+    # provision store by the label, so two keys must not share one.
+    assert runtime_mod.realm_label("t", "kv") is not runtime_mod.realm_label("t", "db")

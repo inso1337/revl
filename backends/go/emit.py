@@ -10004,7 +10004,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
 
     out.extend(_emit_host_stubs(ir))
 
-    return "\n".join(out) + "\n"
+    return _drop_unused_time_import("\n".join(out) + "\n")
 
 
 # ==========================================================================
@@ -10256,7 +10256,12 @@ def _emit_go_dispatch(sname, methods, out):
                 out.append("\t\ta%d := %s" % (i, dec))
             else:
                 out.append("\t\tvar a%d %s" % (i, _go_type(p["type"])))
-                out.append("\t\t_ = json.Unmarshal(_revlArg(args, %d), &a%d)" % (i, i))
+                # issue #1559: an argument the declared type cannot hold is an
+                # error, never the zero value (a string "41" read as 0).
+                out.append("\t\tif err := json.Unmarshal(_revlArg(args, %d), &a%d); err != nil {" % (i, i))
+                out.append('\t\t\treturn nil, fmt.Errorf("argument %d of %s.%s: %%v", err)'
+                           % (i, sname, mname))
+                out.append("\t\t}")
         call = "svc.%s(%s)" % (_camel(mname),
                                ", ".join("a%d" % i for i in range(len(params))))
         _emit_go_dispatch_encode(call, m.get("returns"), out)
@@ -10512,6 +10517,24 @@ def _emit_go_bridge(ir: dict) -> list[str]:
     out.append("}")
     out.append("")
     return out
+
+
+_TIME_IMPORT = '\t"time"\n'
+_TIME_USE = re.compile(r"\btime\.")
+
+
+def _drop_unused_time_import(module: str) -> str:
+    """Remove the `"time"` import from a module that never uses it (issue
+    #1559). A `lifecycle test` imports `time` for the unload waits
+    (`time.Sleep`), but one with no `unload` step emits none, and go refuses
+    to build a package with an unused import. Deciding on the finished text
+    covers every writer of `time.` at once (a lifecycle wait, the teardown
+    preamble's budgets, the timer preamble). The match is conservative: any
+    `time.` token keeps the import, so the worst case is the old behavior."""
+    head, sep, rest = module.partition(_TIME_IMPORT)
+    if not sep or _TIME_USE.search(rest) or _TIME_USE.search(head):
+        return module
+    return head + rest
 
 
 def _emit_v3_placement(ir: dict, package: str) -> str:
@@ -10921,7 +10944,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     out.extend(body)
     out.extend(host_stubs)
 
-    return "\n".join(out).rstrip() + "\n"
+    return _drop_unused_time_import("\n".join(out).rstrip() + "\n")
 
 
 def emit_placement(ir: dict, package: str = "emitted") -> str:

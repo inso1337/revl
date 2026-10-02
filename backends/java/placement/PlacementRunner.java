@@ -403,14 +403,15 @@ public final class PlacementRunner {
 
     // --- key resolution across realms (issue #1567) --------------------------
     //
-    // `placements` is key -> [{component, realm}] for this process's own
-    // provisions (src/revl/placement.py::_process_placements). A served or probed
-    // key used to be read with a shared-realm `ctx.get`, so a provider placed
-    // with `isolate kv in realm("wa")` answered `no provider`. The order is the
-    // py tier's `resolve_key`: the shared realm when the key is provided there,
-    // else its one isolated realm, read strictly. A key isolated in two or more
-    // realms has no single provider for a call that names only the key, so it
-    // is refused naming each provider and realm. A key this process does not
+    // A key resolves in the py tier's `resolve_key` order, the same order and
+    // refusal as RealPlacementRunner.resolveKey (issue #1581): the shared realm
+    // when the key is provided there; otherwise the ONE realm that isolates it.
+    // A key two realms isolate is refused by name: a call names a key, not a
+    // realm. The stub Context can read a realm by its label
+    // (`serviceInRealm`), so where the real runner keeps each component's
+    // isolated context, this one reads `placements`: key -> [{component,
+    // realm}] for this process's own provisions
+    // (src/revl/placement.py::_process_placements). A key this process does not
     // provide (a proxy) resolves in the shared realm, as before.
     static Map<String, Object> placements = Map.of();
 
@@ -457,6 +458,22 @@ public final class PlacementRunner {
         throw new RuntimeException("no method " + name + "/" + arity + " on " + iface.getName());
     }
 
+    private static final Map<Method, java.lang.reflect.Type[]> GENERIC_PARAM_CACHE =
+            new java.util.concurrent.ConcurrentHashMap<>();
+
+    // issue #1627: a SERVED call's arguments decoded by the method's declared
+    // (generic) parameter types, as a reply is by its return type. A wire
+    // `null` for an `Opt[T]` parameter becomes `Optional.empty()`, a record
+    // argument becomes the record, and an `Opt` inside either is rebuilt too.
+    // `coerceArgs` (by raw class) handed the provider a `null` Optional, a Map
+    // for a record and a `null` list element.
+    static Object[] decodeArgs(Method m, List<Object> args) {
+        java.lang.reflect.Type[] types = GENERIC_PARAM_CACHE.computeIfAbsent(m, Method::getGenericParameterTypes);
+        Object[] out = new Object[args.size()];
+        for (int i = 0; i < args.size(); i++) out[i] = BridgeCodec.decode(args.get(i), types[i]);
+        return out;
+    }
+
     static Object[] coerceArgs(Method m, List<Object> args) {
         Class<?>[] types = PARAM_TYPE_CACHE.computeIfAbsent(m, Method::getParameterTypes);
         Object[] out = new Object[args.size()];
@@ -499,7 +516,9 @@ public final class PlacementRunner {
                 }
             }
             List<Object> callArgs = new ArrayList<>();
-            if (args != null) for (Object a : args) callArgs.add(a);
+            // issue #1627: encoded as a reply is, so an Optional crosses as
+            // its value or `null`, never as its `toString()`
+            if (args != null) for (Object a : args) callArgs.add(BridgeCodec.encode(a));
             Object value = client.call(key, method.getName(), callArgs);
             return BridgeCodec.decode(value, method.getGenericReturnType());
         }
@@ -734,7 +753,7 @@ public final class PlacementRunner {
                         long seq = Estop.beginCrossing(key, method, "accept");
                         Object result;
                         try {
-                            result = m.invoke(service, coerceArgs(m, args));
+                            result = m.invoke(service, decodeArgs(m, args));
                         } finally {
                             Estop.endCrossing(seq);
                         }

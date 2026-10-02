@@ -60,7 +60,9 @@ describe('v2 realms', () => {
   })
 
   it('shares realm labels by value', () => {
-    expect(realmLabel('t')).toBe(realmLabel('t'))
-    expect(realmLabel('t')).not.toBe(realmLabel('u'))
+    expect(realmLabel('t', 'kv')).toBe(realmLabel('t', 'kv'))
+    expect(realmLabel('t', 'kv')).not.toBe(realmLabel('u', 'kv'))
+    // one label per key inside a realm (issue #1543)
+    expect(realmLabel('t', 'kv')).not.toBe(realmLabel('t', 'db'))
   })
 })

@@ -5,11 +5,13 @@ with a hand-transcribed number is a mirror that rots against what it mirrors,
 and that shape has cost this repository real wrong claims. So the tests here
 hold three separate things, and only one of them is about the tool:
 
-  1. THE COMMITTED ARTIFACT IS NOT STALE where staleness would make it wrong.
-     Not by re-running the census on every PR, which would red any branch that
-     adds a corpus file, but by coupling the named residuals to the committed
-     baseline. When issue #106's work closes the false-admit allowance, the
-     published table stops matching the baseline and this suite says so.
+  1. THE COMMITTED ARTIFACT IS NOT STALE where staleness would make it wrong,
+     by coupling the named residuals to the committed baseline. When issue
+     #106's work closes the false-admit allowance, the published table stops
+     matching the baseline and this suite says so. The census itself is re-run
+     by CI's `census-artifact` job (`--verify --strict`), only on a pull
+     request that moves an input, which then regenerates the artifact in the
+     same diff (issue #1572); section 5 holds that gate's logic.
 
   2. THE MECHANISM THE ARTIFACT CLAIMS IS THE ONE THE CODE HAS. The report says
      a `false-admission` cannot be written into the baseline and cannot be
@@ -727,3 +729,98 @@ def test_the_published_pins_cover_what_the_checker_version_does_not(committed):
         assert rel in deciding, f"{rel} decides verdicts and is not pinned"
     for rel, sha in deciding.items():
         assert len(sha) == 64 and not rel.startswith("/")
+
+
+# --- 5. the repository's gate on its own committed copy (issue #1572) --------
+#
+# `--verify` answers a reader holding an old copy, so new programs and moved
+# report inputs do not stop it. The repository's own copy is held to more:
+# `--verify --strict` in CI, on every pull request that moves an input. These
+# drive each arm of that stricter answer and of the diff filter that decides
+# when it runs, with no census run.
+
+
+def test_strict_accepts_only_a_full_reproduction_with_nothing_left_over(artifact):
+    result = artifact.judge(_published(_ROWS), _local(_ROWS))
+    assert artifact.current_problems(result) == []
+
+
+def test_strict_fails_on_a_program_the_committed_copy_does_not_carry(artifact):
+    """The reader's verdict stays `reproduced` here; the gate must not."""
+    local = list(_ROWS) + [("new.rvl", _SHA_B, "agree-admit")]
+    result = artifact.judge(_published(_ROWS), _local(local))
+    assert result["verdict"] == "reproduced"
+    assert artifact.current_problems(result) == [
+        "1 program in the corpus is not in the committed artifact"]
+
+
+def test_strict_fails_on_a_moved_report_input(artifact):
+    result = artifact.judge(
+        _published(_ROWS),
+        _local(_ROWS, report={"tests/fixtures/x.json": _SHA_B}))
+    assert result["verdict"] == "reproduced"
+    assert artifact.current_problems(result) == [
+        "report input moved: tests/fixtures/x.json"]
+
+
+def test_strict_fails_on_every_verdict_but_reproduced(artifact):
+    moved = artifact.judge(
+        _published(_ROWS),
+        _local(_ROWS, reference={"src/revl/compiler.py": _SHA_B}))
+    assert moved["verdict"] == "different-inputs"
+    assert artifact.current_problems(moved) == [
+        "the verdict is different-inputs, not reproduced"]
+    edited = list(_ROWS)
+    edited[0] = ("a.rvl", _SHA_B, "agree-admit")
+    partial = artifact.judge(_published(_ROWS), _local(edited))
+    assert partial["verdict"] == "partial"
+    assert artifact.current_problems(partial) == [
+        "the verdict is partial, not reproduced"]
+
+
+def _committed_for_filter():
+    return {"census": {
+        "cases": [["examples/a.rvl", _SHA_A, "agree-admit"],
+                  ["oracle-reject:twice", _SHA_A, "agree-refuse/G1"]],
+        "pins": {"decides_verdicts": {"backends/python/emit.py": _SHA_A},
+                 "reference": {"src/revl/lower.py": _SHA_A},
+                 "report_inputs": {"tools/gate_reference_census_baseline.json":
+                                   _SHA_A}}}}
+
+
+def test_the_diff_filter_names_every_kind_of_input(artifact):
+    committed = _committed_for_filter()
+    inputs = ["backends/python/emit.py", "src/revl/lower.py",
+              "tools/gate_reference_census_baseline.json", "examples/a.rvl",
+              "tests/fixtures/brand_new.rvl", "crates/revl-gate/src/admission.rs",
+              "crates/revl-gate/Cargo.toml", "tools/census_artifact.py",
+              "docs/census-artifact.json", "selfhost/lower.rvl"]
+    assert artifact.moved_inputs(inputs, committed) == inputs
+
+
+def test_the_diff_filter_ignores_what_the_census_does_not_read(artifact):
+    """A reference module the census never opens is not an input: this is
+    what keeps an unrelated compiler change from owing a regeneration."""
+    committed = _committed_for_filter()
+    unrelated = ["src/revl/mcp/http_face.py", "docs/v2.0-roadmap.md",
+                 "bench/results/x.rvl", "backends/python/.venv/lib/y.rvl",
+                 "crates/revl-gate/README.md", ""]
+    assert artifact.moved_inputs(unrelated, committed) == []
+
+
+def test_an_unreadable_artifact_makes_every_path_an_input(artifact):
+    """A broken committed copy cannot switch its own gate off."""
+    assert artifact.moved_inputs(["docs/x.md"], None) == ["docs/x.md"]
+
+
+def test_the_committed_reference_pins_are_what_the_run_opened(committed):
+    """Measured, not globbed: a subset of `src/revl`, and not all of it."""
+    reference = committed["census"]["pins"]["reference"]
+    assert reference and all(rel.startswith("src/revl/") and rel.endswith(".py")
+                             for rel in reference)
+    everything = list((ROOT / "src" / "revl").rglob("*.py"))
+    assert len(reference) < len(everything)
+    assert "src/revl/compiler.py" in reference
+    # The MCP HTTP face is never imported by a census run. Under the old glob
+    # it was pinned anyway, so a change to it made the artifact stale.
+    assert "src/revl/mcp/http_face.py" not in reference

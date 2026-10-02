@@ -14,6 +14,16 @@
 // cordis4j is single-threaded (a context must not be touched off its thread),
 // so the monitor threads only signal; the main thread does every context call.
 //
+// It also SERVES (issue #1581). A process whose spec carries `serve` binds the
+// unix socket and runs an accept loop on its own thread. Each connection thread
+// reads a request, applies the E-Stop accept check, and hands the call to the
+// MAIN thread through the same event queue the peer-death monitor uses; the
+// main thread checks the served-key and declared-method allowlists, resolves
+// the key (the shared realm first, then the one isolating component context
+// that provides it), runs the method with the crossing recorded in flight, and
+// completes the reply the connection thread is waiting on. Before this, the
+// runner bound nothing, so a java provider printed `UP` and answered no one.
+//
 // Compiled + run against the real cordis4j classes:
 //   javac --release 21 -cp <cordis4j-classes> -d out RealPlacementRunner.java revl/Components.java
 //   java -cp <cordis4j-classes>:out RealPlacementRunner <spec.json>
@@ -33,6 +43,7 @@ import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
 import java.net.StandardProtocolFamily;
+import java.nio.channels.ServerSocketChannel;
 import java.net.UnixDomainSocketAddress;
 import java.nio.ByteBuffer;
 import java.nio.channels.Channels;
@@ -46,8 +57,12 @@ import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.Optional;
 import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.LinkedBlockingQueue;
+import java.util.concurrent.TimeUnit;
 
 public final class RealPlacementRunner {
     static volatile String name = "?";
@@ -202,14 +217,13 @@ public final class RealPlacementRunner {
         // `[name] HALTED {json}` line as the JDK-17 stub `PlacementRunner`.
         Estop.publishLatch((String) spec.get("estopLatch"));
         Map<String, Object> ifaces = (Map<String, Object>) spec.getOrDefault("ifaces", Map.of());
-        placements = (Map<String, Object>) spec.getOrDefault("placements", Map.of());
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
         Map<String, Object> proxies = (Map<String, Object>) spec.getOrDefault("proxies", Map.of());
         List<Object> components = (List<Object>) spec.getOrDefault("components", List.of());
         List<Object> probes = (List<Object>) spec.getOrDefault("probe", List.of());
 
         Context root = Contexts.create();
-        BlockingQueue<String> events = new LinkedBlockingQueue<>();
+        BlockingQueue<Object> events = new LinkedBlockingQueue<>();
         Map<String, Disposable> bindings = new LinkedHashMap<>();
         Set<ServiceKey<?>> deps = new HashSet<>();
 
@@ -230,16 +244,16 @@ public final class RealPlacementRunner {
 
         // 2. load components. With cross-deps they are reactive consumers: one
         //    inject fiber gated on the deps, so a withdrawal deactivates it.
+        //    Every context a component is applied in is wrapped, so the realm
+        //    each isolating component provides into is kept for the serve path.
         if (!deps.isEmpty()) {
             root.inject(deps, ctx -> {
+                serveCtx = ctx;
                 List<Disposable> domains = new ArrayList<>();
                 for (Object comp : components) {
                     String cname = (String) comp;
                     try {
-                        Class<?> cls = Class.forName(container + "$" + cname + "Plugin");
-                        io.cordis4j.core.Plugin plugin =
-                                (io.cordis4j.core.Plugin) instantiate(cls, (Map<String, Object>) config.getOrDefault(cname, Map.of()));
-                        domains.add(plugin.apply(ctx));
+                        domains.add(loadPlugin(container, cname, config).apply(REALMS.track(ctx, cname)));
                         log("load", cname, "ACTIVE (reactive)");
                     } catch (Exception e) {
                         throw new RuntimeException(e);
@@ -249,6 +263,8 @@ public final class RealPlacementRunner {
                 // first-reverted cleanup: fires when the fiber deactivates on
                 // withdrawal, evidence of reactive teardown (no exception).
                 return () -> {
+                    serveCtx = null;
+                    REALMS.clear();
                     log("withdraw", "deactivated", "consumer unloaded reactively; inverses run");
                     for (int i = domains.size() - 1; i >= 0; i--) {
                         try { domains.get(i).dispose(); } catch (Throwable ignored) {}
@@ -256,15 +272,25 @@ public final class RealPlacementRunner {
                 };
             });
         } else {
+            serveCtx = root;
             for (Object comp : components) {
                 String cname = (String) comp;
-                Class<?> cls = Class.forName(container + "$" + cname + "Plugin");
-                io.cordis4j.core.Plugin plugin =
-                        (io.cordis4j.core.Plugin) instantiate(cls, (Map<String, Object>) config.getOrDefault(cname, Map.of()));
-                bindings.put("comp:" + cname, root.plugin(plugin));
+                io.cordis4j.core.Plugin plugin = loadPlugin(container, cname, config);
+                bindings.put("comp:" + cname, root.plugin(c -> plugin.apply(REALMS.track(c, cname))));
                 log("load", cname, "ACTIVE");
             }
             for (Object p : probes) runProbe(root, ifaces, (String) p);
+        }
+
+        // 3. serve the keys other processes need (issue #1581). Bound after the
+        //    components load, the order the stub runner uses; a consumer that
+        //    dials first retries until the socket exists.
+        Served served = Served.of((Map<String, Object>) spec.get("serve"), ifaces);
+        Endpoint endpoint = null;
+        if (served != null) {
+            endpoint = new Endpoint(served.socket, events);
+            endpoint.start();
+            log("serve", String.join(", ", served.ifaces.keySet()), "-> " + served.socket);
         }
 
         // THE SHUTDOWN HOOK GOES UP BEFORE THE `UP` LINE, and that ordering is
@@ -285,44 +311,63 @@ public final class RealPlacementRunner {
         // window is merely PARKED and the loop below takes it on its first
         // iteration: the unwind runs either way, and `UP` means what it says —
         // loaded, serving, AND able to be stopped.
-        Runtime.getRuntime().addShutdownHook(new Thread(() -> events.offer(STOP)));
+        //
+        // The hook WAITS for the main loop to print `DOWN` (issue #1581). It used
+        // to offer STOP and return at once, and the JVM halts as soon as its hooks
+        // return, so the main thread was usually killed mid-teardown: no `DOWN`,
+        // and the conductor reported `teardown HALTED`. The wait is bounded so a
+        // wedged teardown still lets the JVM go.
+        Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            SHUTTING_DOWN = true;
+            events.offer(STOP);
+            try { DOWN_PRINTED.await(25, TimeUnit.SECONDS); } catch (InterruptedException ignored) {}
+        }));
 
         System.out.println("[" + name + "] UP");
         System.out.flush();
 
-        // item 443 / issue #122 — the idle watcher (E6). The dispatch seam
-        // refuses lazily, at the NEXT crossing, which is useless for a process
-        // parked on the event queue below waiting to be stopped: it crosses
-        // nothing and would sit through the emergency. So the runner polls the
-        // latch and, on the button, prints its in-flight inventory on one
-        // `[name] HALTED {json}` line (the conductor merges it by prefix) and
-        // calls `Runtime.getRuntime().halt`, which runs NO teardown and prints no
-        // `DOWN` (E7). `System.exit(0)` below runs the shutdown hook and prints
-        // `DOWN`; `halt` is the reactive-runner equivalent of the go runner's
-        // `os.Exit`. Started only when the placement is armed.
-        final String watchLatch = Estop.latchPath(null, null, true);
-        if (watchLatch != null) {
-            Thread watcher = new Thread(() -> {
-                while (true) {
-                    Map<String, Object> record = Estop.readLatch(watchLatch);
-                    if (record != null) {
-                        System.out.println(
-                                Estop.estopHaltLine(name, Estop.inFlightCrossings(), record));
-                        System.out.flush();
-                        try { Thread.sleep(50); } catch (InterruptedException ignored) {}
-                        Runtime.getRuntime().halt(1); // E7: die where it stands, non-zero, no DOWN
-                    }
-                    try { Thread.sleep(20); } catch (InterruptedException ignored) { return; }
-                }
-            }, "revl-estop");
-            watcher.setDaemon(true);
-            watcher.start();
-        }
+        startEstopWatcher();
+        mainLoop(events, bindings, endpoint, served, container);
+        System.out.println("[" + name + "] DOWN");
+        System.out.flush();
+        DOWN_PRINTED.countDown();
+        // Inside the shutdown hook's wait, `System.exit` would block forever (the
+        // JVM is already shutting down); returning lets the hook finish instead.
+        if (!SHUTTING_DOWN) System.exit(0);
+    }
 
-        // 3. main loop: every context call stays on this thread (cordis4j D8).
+    // --- the main thread's state (every context call happens on it) ----------
+
+    // The context the served keys' components were applied in: `root`, or the
+    // reactive inject fiber's context while it is active. Null while a
+    // withdrawn dependency keeps the components deactivated.
+    static Context serveCtx;
+    static final Realms REALMS = new Realms();
+    static volatile boolean SHUTTING_DOWN = false;
+    static final CountDownLatch DOWN_PRINTED = new CountDownLatch(1);
+
+    static io.cordis4j.core.Plugin loadPlugin(String container, String cname, Map<String, Object> config)
+            throws Exception {
+        Class<?> cls = Class.forName(container + "$" + cname + "Plugin");
+        @SuppressWarnings("unchecked")
+        Map<String, Object> own = (Map<String, Object>) config.getOrDefault(cname, Map.of());
+        return (io.cordis4j.core.Plugin) instantiate(cls, own);
+    }
+
+    // 4. main loop: every context call stays on this thread (cordis4j D8). Three
+    //    kinds of event arrive: STOP, a peer's death (its key), and a served call.
+    static void mainLoop(BlockingQueue<Object> events, Map<String, Disposable> bindings,
+                         Endpoint endpoint, Served served, String container) throws InterruptedException {
+        boolean consumer = !bindings.isEmpty() && bindings.keySet().stream().noneMatch(k -> k.startsWith("comp:"));
         while (true) {
-            String event = events.take();
-            if (event.equals(STOP)) {
+            Object event = events.take();
+            if (event instanceof Call call) {
+                call.reply.complete(dispatch(call, served));
+                continue;
+            }
+            if (STOP.equals(event)) {
+                if (endpoint != null) endpoint.close();
+                refusePending(events);
                 teardown(bindings);
                 // item 322 Slice 2: a graceful stop is a clean unload. Under
                 // REVL_WAL, stamp the WAL's discharge + terminal marker via the
@@ -330,18 +375,61 @@ public final class RealPlacementRunner {
                 // (an abrupt death before this leaves no marker -> roll-back) —
                 // the real-cordis4j sibling of RunOnce.recordCleanUnload.
                 recordCleanUnload(container);
-                break;
+                return;
             }
-            Disposable binding = bindings.remove(event);
+            Disposable binding = bindings.remove((String) event);
             if (binding != null) {
-                log("peer", event, "provider died: withdrawing the binding");
+                log("peer", (String) event, "provider died: withdrawing the binding");
                 binding.dispose(); // withdrawal -> the injected consumer deactivates reactively
             }
-            if (bindings.isEmpty()) break; // every proxied provider gone; the consumer is fully withdrawn
+            // every proxied provider gone: the consumer is fully withdrawn. A
+            // process that also serves stops too, so its own consumers see it
+            // die and withdraw in turn, the cascade the stub-free path has.
+            if (consumer && bindings.isEmpty()) {
+                if (endpoint != null) endpoint.close();
+                refusePending(events);
+                return;
+            }
         }
-        System.out.println("[" + name + "] DOWN");
-        System.out.flush();
-        System.exit(0);
+    }
+
+    static void refusePending(BlockingQueue<Object> events) {
+        for (Object left : events.toArray()) {
+            if (left instanceof Call call) {
+                Map<String, Object> reply = new LinkedHashMap<>();
+                reply.put("ok", false);
+                reply.put("error", "process " + name + " is stopping; the call was not dispatched");
+                call.reply.complete(reply);
+            }
+        }
+    }
+
+    // item 443 / issue #122: the idle watcher (E6). The dispatch seam refuses
+    // lazily, at the NEXT crossing, which is useless for a process parked on
+    // the event queue waiting to be stopped: it crosses nothing and would sit
+    // through the emergency. So the runner polls the latch and, on the button,
+    // prints its in-flight inventory on one `[name] HALTED {json}` line (the
+    // conductor merges it by prefix) and calls `Runtime.getRuntime().halt`,
+    // which runs NO teardown and prints no `DOWN` (E7). Started only when the
+    // placement is armed.
+    static void startEstopWatcher() {
+        final String watchLatch = Estop.latchPath(null, null, true);
+        if (watchLatch == null) return;
+        Thread watcher = new Thread(() -> {
+            while (true) {
+                Map<String, Object> record = Estop.readLatch(watchLatch);
+                if (record != null) {
+                    System.out.println(
+                            Estop.estopHaltLine(name, Estop.inFlightCrossings(), record));
+                    System.out.flush();
+                    try { Thread.sleep(50); } catch (InterruptedException ignored) {}
+                    Runtime.getRuntime().halt(1); // E7: die where it stands, non-zero, no DOWN
+                }
+                try { Thread.sleep(20); } catch (InterruptedException ignored) { return; }
+            }
+        }, "revl-estop");
+        watcher.setDaemon(true);
+        watcher.start();
     }
 
     static void teardown(Map<String, Disposable> bindings) {
@@ -369,9 +457,300 @@ public final class RealPlacementRunner {
         }
     }
 
+    // --- the serve path (issue #1581) ----------------------------------------
+
+    // One served call, handed from a connection thread to the main thread. The
+    // connection thread blocks on `reply` until the main thread completes it.
+    record Call(String key, String method, List<Object> args,
+                CompletableFuture<Map<String, Object>> reply) {}
+
+    // What this process serves, read off the spec's `serve` block: each key's
+    // interface, and the operations its service declaration admits (`methods`,
+    // the allowlist `placement.py` reads off the IR). A request outside either
+    // is refused and never dispatched, so the served surface is exactly the
+    // enumerable one (G8), the rule the py bridge applies with the same words.
+    static final class Served {
+        final String socket;
+        final Map<String, Class<?>> ifaces = new LinkedHashMap<>();
+        final Map<String, Set<String>> methods = new LinkedHashMap<>();
+
+        private Served(String socket) { this.socket = socket; }
+
+        @SuppressWarnings("unchecked")
+        static Served of(Map<String, Object> serve, Map<String, Object> ifaces) throws ClassNotFoundException {
+            if (serve == null) return null;
+            List<Object> keys = (List<Object>) serve.getOrDefault("keys", List.of());
+            if (keys.isEmpty()) return null;
+            Served out = new Served((String) serve.get("socket"));
+            Map<String, Object> declared = (Map<String, Object>) serve.getOrDefault("methods", Map.of());
+            for (Object k : keys) {
+                String key = (String) k;
+                out.ifaces.put(key, Class.forName((String) ifaces.get(key)));
+                Object ops = declared.get(key);
+                if (ops instanceof List<?> list) {
+                    Set<String> names = new java.util.TreeSet<>();
+                    for (Object op : list) names.add(String.valueOf(op));
+                    out.methods.put(key, names);
+                }
+            }
+            return out;
+        }
+
+        Class<?> iface(String key) {
+            Class<?> iface = ifaces.get(key);
+            if (iface == null) throw new SeamRefusal("key '" + key + "' is not exported by this process");
+            return iface;
+        }
+
+        void checkMethod(String key, String method) {
+            Set<String> allowed = methods.get(key);
+            if (allowed != null && !allowed.contains(method)) {
+                String listed = allowed.isEmpty() ? "(none)" : String.join(", ", allowed);
+                throw new SeamRefusal("method '" + method + "' is not exported for key '" + key
+                        + "' (exported: " + listed + ")");
+            }
+        }
+    }
+
+    // A refusal decided by this runner, not raised by the provider: its text is
+    // the whole reply, with no exception class in front of it.
+    static final class SeamRefusal extends RuntimeException {
+        SeamRefusal(String message) { super(message); }
+    }
+
+    // Runs ON THE MAIN THREAD. The allowlists, the key's resolution and the
+    // method's run all touch the context, which cordis4j confines to it.
+    @SuppressWarnings("unchecked")
+    static Map<String, Object> dispatch(Call call, Served served) {
+        Map<String, Object> reply = new LinkedHashMap<>();
+        try {
+            Class<?> iface = served.iface(call.key());
+            served.checkMethod(call.key(), call.method());
+            if (serveCtx == null) {
+                throw new SeamRefusal("no provider for key '" + call.key() + "' right now: this "
+                        + "process's components are deactivated while a dependency is withdrawn");
+            }
+            Object service = resolveKey(serveCtx, iface, call.key());
+            Method m = findMethod(iface, call.method(), call.args().size());
+            // Recorded as in flight WHILE the method runs: a crossing still
+            // executing when the latch trips is the AMBIGUOUS one the halt
+            // inventory names (item 440). Cleared in a finally.
+            long seq = Estop.beginCrossing(call.key(), call.method(), "accept");
+            Object result;
+            try {
+                result = m.invoke(service, coerceArgs(m, call.args()));
+            } finally {
+                Estop.endCrossing(seq);
+            }
+            reply.put("ok", true);
+            reply.put("value", BridgeCodec.encode(result));
+        } catch (SeamRefusal refused) {
+            reply.put("ok", false);
+            reply.put("error", redactSecrets(refused.getMessage()));
+        } catch (Throwable t) {
+            reply.put("ok", false);
+            reply.put("error", seamFailure(t, call.args()));
+        }
+        return reply;
+    }
+
+    // A key resolves in the py tier's `resolve_key` order: the shared realm when
+    // the key is provided there; otherwise the ONE isolating component context
+    // that provides it. cordis4j cannot read an isolated realm by its label (an
+    // isolate always mints a fresh child; docs/contract-errata.md, "cordis4j
+    // global-realm divergence"), so the runner keeps the context each component
+    // isolated into (`Realms`) and reads the provision there. A key two contexts
+    // isolate is refused by name: a call names a key, not a realm.
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    static Object resolveKey(Context ctx, Class<?> iface, String key) {
+        ServiceKey sk = ServiceKey.of((Class) iface, key);
+        Optional<Object> shared = ctx.find(sk);
+        if (shared.isPresent()) return shared.get();
+        List<Realms.Isolated> holders = REALMS.providing(sk);
+        if (holders.size() == 1) return holders.get(0).ctx().get(sk);
+        if (holders.size() > 1) {
+            List<String> named = new ArrayList<>();
+            for (Realms.Isolated h : holders) named.add("`" + h.component() + "` in realm `" + h.realm() + "`");
+            throw new SeamRefusal("key '" + key + "' is provided in " + holders.size() + " realms ("
+                    + String.join(", ", named) + "); a call names a key, not a realm, so it has no "
+                    + "single provider to reach");
+        }
+        return ctx.get(sk); // absent everywhere: cordis4j's own NoSuchServiceException
+    }
+
+    // The contexts each component isolated into. Every context a component is
+    // applied in is wrapped (`track`); the wrapper records the child an
+    // `isolate` returns, and wraps that child too, so a nested isolate is seen.
+    // Only the main thread applies components, so the list needs no lock.
+    static final class Realms {
+        record Isolated(String component, String realm, Context ctx) {}
+
+        final List<Isolated> isolated = new ArrayList<>();
+
+        Context track(Context ctx, String component) {
+            return (Context) Proxy.newProxyInstance(Context.class.getClassLoader(),
+                    new Class<?>[]{Context.class}, (proxy, method, args) -> {
+                        Object out;
+                        try {
+                            out = method.invoke(ctx, args);
+                        } catch (java.lang.reflect.InvocationTargetException wrapped) {
+                            throw wrapped.getCause();
+                        }
+                        if (method.getName().equals("isolate") && out instanceof Context child) {
+                            isolated.add(new Isolated(component, String.valueOf(args[1]), child));
+                            return track(child, component);
+                        }
+                        return out;
+                    });
+        }
+
+        @SuppressWarnings({"unchecked", "rawtypes"})
+        List<Isolated> providing(ServiceKey key) {
+            List<Isolated> out = new ArrayList<>();
+            for (Isolated i : isolated) {
+                try {
+                    if (i.ctx().find(key).isPresent()) out.add(i);
+                } catch (IllegalStateException disposed) {
+                    // the component was withdrawn and its child discarded
+                }
+            }
+            return out;
+        }
+
+        void clear() { isolated.clear(); }
+    }
+
+    // The unix-socket endpoint. Connection threads only read, check the E-Stop
+    // latch and wait; the main thread does the dispatch.
+    static final class Endpoint {
+        final String path;
+        final BlockingQueue<Object> events;
+        ServerSocketChannel server;
+        volatile boolean running = true;
+
+        Endpoint(String path, BlockingQueue<Object> events) { this.path = path; this.events = events; }
+
+        void start() throws Exception {
+            Files.deleteIfExists(Path.of(path));
+            server = ServerSocketChannel.open(StandardProtocolFamily.UNIX);
+            server.bind(UnixDomainSocketAddress.of(path));
+            Thread t = new Thread(this::acceptLoop, "bridge-serve");
+            t.setDaemon(true);
+            t.start();
+        }
+
+        void acceptLoop() {
+            while (running) {
+                try {
+                    SocketChannel ch = server.accept();
+                    Thread handler = new Thread(() -> serveConn(ch), "bridge-conn");
+                    handler.setDaemon(true);
+                    handler.start();
+                } catch (Exception e) { return; }
+            }
+        }
+
+        @SuppressWarnings("unchecked")
+        void serveConn(SocketChannel ch) {
+            try (ch) {
+                BufferedReader r = new BufferedReader(new InputStreamReader(Channels.newInputStream(ch), StandardCharsets.UTF_8));
+                BufferedWriter w = new BufferedWriter(new OutputStreamWriter(Channels.newOutputStream(ch), StandardCharsets.UTF_8));
+                String line;
+                while ((line = r.readLine()) != null) {
+                    Map<String, Object> reply;
+                    List<Object> args = List.of();
+                    try {
+                        Map<String, Object> req = (Map<String, Object>) Json.parse(line);
+                        String key = (String) req.get("key");
+                        String method = (String) req.get("method");
+                        args = (List<Object>) req.getOrDefault("args", List.of());
+                        reply = estopEngaged() ? estopRefusal(key, method) : handOver(key, method, args);
+                    } catch (Throwable t) {
+                        reply = new LinkedHashMap<>();
+                        reply.put("ok", false);
+                        reply.put("error", seamFailure(t, args));
+                    }
+                    w.write(Json.write(reply)); w.write("\n"); w.flush();
+                }
+            } catch (Exception ignored) {}
+        }
+
+        static boolean estopEngaged() { return Estop.estopEngaged(); }
+
+        // item 443 / issue #122: the ACCEPT side of the E-Stop seam, checked
+        // here so a halted process refuses without involving the main thread.
+        // No inverse is replayed and nothing is discharged: the caller's
+        // attempt lands in item 440's ambiguous tier (docs/design/443-estop.md).
+        static Map<String, Object> estopRefusal(String key, String method) {
+            Map<String, Object> reply = new LinkedHashMap<>();
+            reply.put("ok", false);
+            reply.put("error", "revl E-Stop engaged: this process is HALTED and "
+                    + "refuses new crossings (key " + key + ", method " + method
+                    + "); see docs/design/443-estop.md");
+            return reply;
+        }
+
+        Map<String, Object> handOver(String key, String method, List<Object> args) throws Exception {
+            if (!running) throw new SeamRefusal("process " + name + " is stopping; the call was not dispatched");
+            CompletableFuture<Map<String, Object>> reply = new CompletableFuture<>();
+            events.put(new Call(key, method, args, reply));
+            return reply.get();
+        }
+
+        void close() {
+            running = false;
+            try { if (server != null) server.close(); } catch (Exception ignored) {}
+            try { Files.deleteIfExists(Path.of(path)); } catch (Exception ignored) {}
+        }
+    }
+
+    // --- what a failure may carry BACK across the seam (item 421 F5) ---------
+    //
+    // PlacementRunner's twin: the consumer is on the other side of a trust
+    // boundary, so every argument value the call was made with is scrubbed out
+    // of the host error text, and then every declared Secret[T] value is, while
+    // the exception's type and the sentence around it survive. The marker must
+    // equal confidential.REDACTED_ARG on the python tier.
+    static final String REDACTED_ARG = "<redacted:arg>";
+    static final int MIN_MATCHABLE_ARG = 3;
+
+    static void argNeedles(Object value, Set<String> into) {
+        if (value == null || value instanceof Boolean) return;
+        if (value instanceof String s) {
+            if (s.length() >= MIN_MATCHABLE_ARG) into.add(s);
+        } else if (value instanceof Number n) {
+            String form = String.valueOf(n);
+            if (form.length() >= MIN_MATCHABLE_ARG) into.add(form);
+        } else if (value instanceof List<?> items) {
+            for (Object item : items) argNeedles(item, into);
+        } else if (value instanceof Map<?, ?> record) {
+            for (Object item : record.values()) argNeedles(item, into);
+        }
+    }
+
+    static String seamFailure(Throwable t, List<Object> args) {
+        Throwable failure = unwrapDispatch(t);
+        String text = failure.getClass().getSimpleName() + ": " + failure.getMessage();
+        Set<String> needles = new HashSet<>();
+        argNeedles(args, needles);
+        List<String> ordered = new ArrayList<>(needles);
+        ordered.sort((a, b) -> Integer.compare(b.length(), a.length()));
+        for (String needle : ordered) {
+            if (!needle.isEmpty()) text = text.replace(needle, REDACTED_ARG);
+        }
+        return redactSecrets(text);
+    }
+
+    static Throwable unwrapDispatch(Throwable t) {
+        while (t instanceof java.lang.reflect.InvocationTargetException wrapped && wrapped.getCause() != null) {
+            t = wrapped.getCause();
+        }
+        return t;
+    }
+
     // --- peer-death monitor: an idle connection whose EOF means the provider died ---
 
-    static void startMonitor(String key, String path, BlockingQueue<String> events) {
+    static void startMonitor(String key, String path, BlockingQueue<Object> events) {
         Thread t = new Thread(() -> {
             SocketChannel ch = null;
             for (int attempt = 0; attempt < 200 && ch == null; attempt++) {
@@ -471,54 +850,6 @@ public final class RealPlacementRunner {
         return cls.getDeclaredConstructor().newInstance();
     }
 
-    // --- key resolution across realms (issue #1567) --------------------------
-    //
-    // `placements` is key -> [{component, realm}] for this process's own
-    // provisions (src/revl/placement.py::_process_placements). A served or probed
-    // key used to be read with a shared-realm `ctx.get`, so a provider placed
-    // with `isolate kv in realm("wa")` answered `no provider`. The order is the
-    // py tier's `resolve_key`: the shared realm when the key is provided there,
-    // else its one isolated realm, which this runtime cannot read by label and
-    // so refuses by name (see below). A key isolated in two or more
-    // realms has no single provider for a call that names only the key, so it
-    // is refused naming each provider and realm. A key this process does not
-    // provide (a proxy) resolves in the shared realm, as before.
-    static Map<String, Object> placements = Map.of();
-
-    @SuppressWarnings("unchecked")
-    static Object resolveKey(Context ctx, Class<?> iface, String key) {
-        List<Map<String, Object>> at =
-                (List<Map<String, Object>>) placements.getOrDefault(key, List.of());
-        boolean shared = at.isEmpty();
-        for (Map<String, Object> p : at) {
-            if (p.get("realm") == null) shared = true;
-        }
-        if (shared) {
-            return ctx.get(ServiceKey.of((Class) iface, key));
-        }
-        if (at.size() == 1) {
-            // The real cordis4j runtime has no by-label realm read: core
-            // `Context.isolate` mints a fresh store on every call, so the
-            // provision a component isolated is visible only through that
-            // component's own context, which the runner never holds. Refused
-            // by name rather than read from the shared realm, where it is not.
-            String realm = (String) at.get(0).get("realm");
-            throw new RuntimeException("key '" + key + "' is provided in realm `" + realm
-                    + "` by `" + at.get(0).get("component") + "`, which the real cordis4j "
-                    + "runtime cannot reach from outside that component: Context.isolate mints "
-                    + "a fresh store per call (docs/contract-errata.md, \"cordis4j global-realm "
-                    + "divergence\")");
-        }
-        StringBuilder where = new StringBuilder();
-        for (Map<String, Object> p : at) {
-            if (where.length() > 0) where.append(", ");
-            where.append('`').append(p.get("component")).append("` in realm `")
-                    .append(p.get("realm")).append('`');
-        }
-        throw new RuntimeException("key '" + key + "' is provided in " + at.size() + " realms ("
-                + where + "); a call names a key, not a realm, so it has no single provider to reach");
-    }
-
     static Method findMethod(Class<?> iface, String name, int arity) {
         for (Method m : iface.getMethods()) {
             if (m.getName().equals(name) && m.getParameterCount() == arity) return m;
@@ -567,7 +898,9 @@ public final class RealPlacementRunner {
                 }
             }
             List<Object> callArgs = new ArrayList<>();
-            if (args != null) for (Object a : args) callArgs.add(a);
+            // issue #1627: encoded as a reply is, so an Optional crosses as
+            // its value or `null`, never as its `toString()`
+            if (args != null) for (Object a : args) callArgs.add(BridgeCodec.encode(a));
             return BridgeCodec.decode(client.call(key, method.getName(), callArgs), method.getGenericReturnType());
         }
 

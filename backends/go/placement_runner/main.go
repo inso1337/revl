@@ -49,9 +49,13 @@ type serveInfo struct {
 }
 
 type probe struct {
-	Key    string   `json:"key"`
-	Method string   `json:"method"`
-	Args   []string `json:"args"`
+	Key    string `json:"key"`
+	Method string `json:"method"`
+	// Typed JSON values (issue #1559): `placement._parse_probe` types each
+	// argument by the operation's declared parameter type, so they pass
+	// through to the dispatch unchanged. A `[]string` here decoded `41` as
+	// the string "41", which an int64 parameter then read as 0.
+	Args []json.RawMessage `json:"args"`
 }
 
 type placement struct {
@@ -263,11 +267,7 @@ func main() {
 
 	// 4. probes: call provided services (may cross a seam), print results
 	for _, pr := range s.Probe {
-		args := make([]json.RawMessage, len(pr.Args))
-		for i, a := range pr.Args {
-			b, _ := json.Marshal(a)
-			args[i] = b
-		}
+		args := pr.Args
 		label := pr.Key + "." + pr.Method + "(...)"
 		value, err := invokeIn(root, s.Placements, pr.Key, pr.Method, args)
 		if err != nil {

@@ -50,6 +50,7 @@ CI_ARGS = [
     "--check-duplicate-headers",
     "--check-orphan",
     "--require-issue",
+    "--check-tier-parity",
     "--head-branch",
     "",
 ]

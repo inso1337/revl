@@ -1,17 +1,18 @@
-"""The java placement runners resolve a key in its provider's realm (issue #1567).
+"""The java stub placement runner resolves a key in its provider's realm (issue #1567).
 
-WHAT WAS WRONG. `PlacementRunner` (stub runtime) and `RealPlacementRunner`
-(cordis4j) read a served or probed key with a shared-realm `ctx.get`. A
-provider placed with `isolate kv in realm("wa")` publishes `kv` in realm `wa`
-only, so on main a java placement could neither probe it nor serve it over a
-seam: both answered `no provider for revl.Components$Kv under key "kv"`.
+WHAT WAS WRONG. `PlacementRunner`, the runner on the in-repo stub runtime,
+read a served or probed key with a shared-realm `ctx.get`. A provider placed
+with `isolate kv in realm("wa")` publishes `kv` in realm `wa` only, so a java
+placement could neither probe it nor serve it over a seam: both answered
+`no provider for revl.Components$Kv under key "kv"`. (`RealPlacementRunner`
+had the same gap; issue #1581 closed it there.)
 
 WHAT IT DOES NOW. `placement._process_placements` hands each java process the
-realm of every provision it makes, and the runners resolve a key in the py
-tier's `resolve_key` order: the shared realm when the key is provided there,
-else its one isolated realm (a strict single-realm read). A key isolated in
-two or more realms is refused naming each provider and realm, because a call
-names a key, not a realm.
+realm of every provision it makes, and the stub runner resolves a key in the
+py tier's `resolve_key` order: the shared realm when the key is provided
+there, else its one isolated realm (a strict single-realm read). A key
+isolated in two or more realms is refused naming each provider and realm,
+because a call names a key, not a realm.
 
 The runtime tests boot real JVM processes through `revl run --placement
 --once` and need a JDK; without one they skip, and a skip is not a pass. CI's
@@ -19,12 +20,10 @@ The runtime tests boot real JVM processes through `revl run --placement
 
 TWO RUNNERS. `revl run --placement` picks `RealPlacementRunner` when real
 cordis4j classes are present (`REVL_CORDIS4J_CLASSES`, set in CI) and
-`PlacementRunner` on the in-repo stubs otherwise. The stub-runner tests pin
-the stubs by clearing that variable: the real runner is consumer-only (it does
-not serve a key), and real cordis4j has no by-label realm read (core
-`Context.isolate` mints a fresh store per call, docs/contract-errata.md), so on
-it an isolated key is refused by name. The last test pins that refusal, and
-runs only where the real classes are.
+`PlacementRunner` on the in-repo stubs otherwise. These tests pin the stub
+runner by clearing that variable. The real runner resolves in the same order
+with the same refusal (`RealPlacementRunner.resolveKey`, issue #1581), and
+backends/java/test_real_runner_serve_java.py covers it on real cordis4j.
 """
 
 from __future__ import annotations
@@ -96,14 +95,11 @@ probe = ["kv.get('who')"]
 """
 
 
-_REAL_CLASSES = os.environ.get("REVL_CORDIS4J_CLASSES", "")
-
-
-def _run(tmp_path: Path, source: str, placement: str, real: bool = False) -> str:
+def _run(tmp_path: Path, source: str, placement: str) -> str:
     (tmp_path / "p.rvl").write_text(source, encoding="utf-8")
     (tmp_path / "p.toml").write_text(placement, encoding="utf-8")
     env = dict(os.environ, PYTHONPATH=str(ROOT / "src"),
-               REVL_CORDIS4J_CLASSES=_REAL_CLASSES if real else "")
+               REVL_CORDIS4J_CLASSES="")
     if javac_gate.JAVA:
         env["JAVA_HOME"] = str(Path(javac_gate.JAVA).parents[1])
     ran = subprocess.run(
@@ -167,22 +163,3 @@ def test_the_shared_realm_provision_answers_first(tmp_path):
     out = _run(tmp_path, SHARED_AND_ISOLATED, ONE_PROCESS)
     assert _probe(out, "kv.get('who')") == '=> "b:who"'
 
-
-ONE_ISOLATED = """\
-[processes.walled]
-backend = "java"
-components = ["Walled"]
-probe = ["kv.get('p')"]
-"""
-
-
-@needs_jdk
-@pytest.mark.skipif(not (_REAL_CLASSES and Path(_REAL_CLASSES).is_dir()),
-                    reason="needs real cordis4j classes (REVL_CORDIS4J_CLASSES); "
-                           "CI's backend-java job builds them")
-def test_on_real_cordis4j_an_isolated_key_is_refused_by_name(tmp_path):
-    out = _run(tmp_path, ISOLATED.split("service Ops", 1)[0], ONE_ISOLATED, real=True)
-    assert "RealPlacementRunner" in out or "real cordis4j" in out, out
-    answer = _probe(out, "kv.get('p')")
-    assert answer.startswith("ERROR RuntimeException: key 'kv' is provided in realm `wa` "
-                             "by `Walled`, which the real cordis4j runtime cannot reach"), out
