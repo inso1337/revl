@@ -2,8 +2,8 @@
  "briefs": [
   {
    "hard_gate": "compiles",
-   "n": 521,
-   "note": "The 521 census programs the reference admits compile under the current checker with no error and no compiler crash, and the gate raised no objection to any of them. Reference faults over the whole corpus: 0.",
+   "n": 522,
+   "note": "The 522 census programs the reference admits compile under the current checker with no error and no compiler crash, and the gate raised no objection to any of them. Reference faults over the whole corpus: 0.",
    "reference_faults": [],
    "result": "pass",
    "spec": "census/agree-admit"
@@ -14,11 +14,11 @@
   "buckets": [
    {
     "bucket": "agree-admit",
-    "count": 521
+    "count": 522
    },
    {
     "bucket": "agree-refuse/G4",
-    "count": 128
+    "count": 159
    },
    {
     "bucket": "agree-refuse/G1",
@@ -30,7 +30,7 @@
    },
    {
     "bucket": "no-objection-out-of-slice",
-    "count": 54
+    "count": 53
    },
    {
     "bucket": "agree-refuse/A1",
@@ -105,15 +105,15 @@
     "count": 2
    },
    {
+    "bucket": "refuse-out-of-slice/G4",
+    "count": 2
+   },
+   {
     "bucket": "agree-refuse/BOOT",
     "count": 1
    },
    {
     "bucket": "agree-refuse/COUNCIL",
-    "count": 1
-   },
-   {
-    "bucket": "refuse-out-of-slice/G4",
     "count": 1
    }
   ],
@@ -440,7 +440,7 @@
    ],
    [
     "examples/rejections/a1_async_extern_sync_method.rvl",
-    "f701484199e958dedcf97542abf098c16f2917e4c5037833788511517b631086",
+    "ad7cafe2427f75f03ed21980818d3a14a6f868b0a7960f624ef8d81e312b67da",
     "agree-refuse/A1"
    ],
    [
@@ -450,7 +450,7 @@
    ],
    [
     "examples/rejections/a1_async_undo_suspends.rvl",
-    "da62b51ff8f207867022901fbbd8ede06461f0be3769b2645b78a7a25a1c74e6",
+    "f85164d78a6c51181ae69e4ab9a5c709c046b30526884962875bef0ce5bbddf8",
     "agree-refuse/A1"
    ],
    [
@@ -629,6 +629,21 @@
     "agree-refuse/G3"
    ],
    [
+    "examples/rejections/g4_approval_helper_reach.rvl",
+    "4910ddf68e712d8a6ef343d45acd25b505ab291052ee184fb6e3ebb13e6cb1ab",
+    "agree-refuse/G4"
+   ],
+   [
+    "examples/rejections/g4_approval_scoped_extern.rvl",
+    "f70aa952de81e39a52ab384dce83a5bd2ba641fd513051d9570007b0b33954de",
+    "agree-refuse/G4"
+   ],
+   [
+    "examples/rejections/g4_approval_value_form_method.rvl",
+    "4f357950555a04568a5447c80aeb8bd6fdbc5fbcffad32977a82c0801489f9fe",
+    "agree-refuse/G4"
+   ],
+   [
     "examples/rejections/g4_arrow_param_emission.rvl",
     "7da24af7a6c72130e9c01947e76e3dced656814501979f3aee14df1c32df1939",
     "agree-refuse/G4"
@@ -697,6 +712,11 @@
     "examples/rejections/g4_missing_undo.rvl",
     "0b04ae13351039425dff1347a6cda92ff9a4facd47e503cac3ed986fca533120",
     "no-objection-out-of-slice"
+   ],
+   [
+    "examples/rejections/g4_nested_approval_emission.rvl",
+    "75a8e5f8dfddc69dd2b60f937870ad846642775c839c14321588ca7f03a9d7ac",
+    "agree-refuse/G4"
    ],
    [
     "examples/rejections/g4_nested_emit_expression.rvl",
@@ -784,14 +804,29 @@
     "agree-refuse/G4"
    ],
    [
+    "examples/rejections/g4_unmarked_host_emission.rvl",
+    "ceca2034d9fe48360ed8927676a9de5924a969c452507ea979c66e480c7a9fd5",
+    "agree-refuse/G4"
+   ],
+   [
+    "examples/rejections/g4_unmarked_host_emission_acquire.rvl",
+    "b118e2ae6c3cfd782cddf8512c0a2368eb0bb5b74d29c01e9f3a28d7e00ecc10",
+    "agree-refuse/G4"
+   ],
+   [
+    "examples/rejections/g4_unmarked_host_emission_helper.rvl",
+    "8a47857f1b12a08565c7e088320f51cefb60a4fcacd1e725bd32b9acef05bef1",
+    "agree-refuse/G4"
+   ],
+   [
     "examples/rejections/g5_undo_arrow_emission.rvl",
-    "5f21b9d92dfcee51397dab89aa38f5047d0819f17a436fcb5c03f4a2045793b0",
+    "fb18b2b599a5362d522f74d65acbc749c1d24a7f31c8d063f125ccaaf61bf42b",
     "no-objection-out-of-slice"
    ],
    [
     "examples/rejections/g5_undo_fn_emission.rvl",
     "5bc38e435429ea85a096eab49f7aa8a546ee1c31da0692282406c19de907d94a",
-    "no-objection-out-of-slice"
+    "refuse-out-of-slice/G4"
    ],
    [
     "examples/rejections/g5_undo_fn_value_emission.rvl",
@@ -890,7 +925,7 @@
    ],
    [
     "examples/rejections/gretain_expired_at_persistence_sink.rvl",
-    "051b9dc1ef7537adf40e1b4b289dc491d85977c421abf2fc5292ce3b63233ad7",
+    "88dbb8e80ec7e7912a3f237888891a09fe23f3b8033452499f9f4e91f7d9ba3b",
     "refuse-out-of-slice/BAD"
    ],
    [
@@ -2310,7 +2345,7 @@
    ],
    [
     "tests/fixtures/emit_ts_corpus/component_edges.rvl",
-    "bb305c247e71fcc484e922875db09ccfb9050aab20053891f2a8c8c969f975bf",
+    "f3b4dad041e8df8fe33ba724c3f55f71d57329146428a966937797bbb8a0c96d",
     "agree-admit"
    ],
    [
@@ -2704,6 +2739,126 @@
     "agree-refuse/G1"
    ],
    [
+    "tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl",
+    "cdaa82d2d902a19f5c58c69848faa8f2ebe082cd3cdc956c69fa30a4a5151259",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl",
+    "a6980b694d7980ad0d8e09b7ba1688461731a33497526e66a1332f6ec7eece3d",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl",
+    "215f863a828c6aa41f507e335bc4861a24d9576d32b320c0267ff6adb38393ff",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_after_guard_setup.rvl",
+    "57b608b71846289d16a03a4bf5fc29574b9b1b8b4c77f981b97ad5ab4b926d6e",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_after_if.rvl",
+    "0785be5c8393bbc3925b8c26189391eecc1b04e58581a7b7da8334e665d63780",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_after_while.rvl",
+    "eb7d93f94cb8ec964ec67030a1c83730c403ec0c88092dd9a9400aa42da0a176",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_in_braceless_if.rvl",
+    "e63cc7a0e5ebe40d32bfe733c6c5299bf9a1edfc8ffd78450aa46f29b7ecf50e",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_in_multiline_if.rvl",
+    "80c12e3064d9901ca355e89f3dc719a523c700b0486c5c556113852a035d8cb3",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl",
+    "310492204a5783199896e646e76fdf79e071eff0e8e69244bfb8c4bac909a23b",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl",
+    "243ece2afe57f3e55a52851cf1ce9c0cbb087ec2033e0902447d33dd2bcc7826",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl",
+    "c5769915f38fa0f2a5955afd7e7cc004e7defe3022d80b5ff9d52337b03a2f50",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl",
+    "45ae70d6ae1646562f9b00cebe60c320622f274fbef0756eec9306e52a0d9f5f",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_after_else.rvl",
+    "a0e156e45087d03b4e5ceeb1af090d3c2f7fb17c8d5de10730df9559deb9c466",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_after_for.rvl",
+    "bb8714a0fc023619ae13c0e90263cd7e3f71cdf931d2f063ab127480394c5c13",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_after_guard_provide.rvl",
+    "f0acef0f1ea36e8c9e18cb284ca6548985d3e18b32951712dfa14340d70086ba",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_after_guard_setup.rvl",
+    "494d8d49d121ee23ba48c16c6ed61384586bb84e378a8670af241b0afc6da352",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_after_if.rvl",
+    "f18fc905f29516304ce1d568a839c29ba414ee29c5aa7f7bc2617a0eb83d010a",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_after_while.rvl",
+    "bb30607b6dc93b6a3db2261d44a2fe1423d07cb0fc1553fa6ddecf0f0a96e753",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_in_braceless_if.rvl",
+    "c0feb835ea30e44f5ced97831750c73918f197183eecc1a82c22181b859ab0b2",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_in_multiline_if.rvl",
+    "f3444c5749e4c31d5a05c5cfffcf1a5af5e059cd4c531d1e3edc7876489b2058",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_else.rvl",
+    "1a233bd234a6e290c8711a9fbf831baec57820dd0ef1a35f639d066c69967ade",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_for.rvl",
+    "e55034118e4e6deec593eff901ce5718d5a2eb8953d3c84ce52eb591f0047aaa",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_if.rvl",
+    "9310343312fb8129529da6e45510b9d13c3223b2579580d354b22f2726a2de9a",
+    "agree-refuse/G4"
+   ],
+   [
+    "tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_while.rvl",
+    "8d6cf8ca2f8e25ea05a13d48e607fd543d7bb22ff66ee13165b69781c82f32ac",
+    "agree-refuse/G4"
+   ],
+   [
     "tests/fixtures/gate_block_nesting/g4_marker_after_else.rvl",
     "29aedf0e948a82398224e4bc99a98ddac73ee542b7f6db4b37568a14ef1fe956",
     "agree-refuse/G4"
@@ -2735,72 +2890,72 @@
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_after_else.rvl",
-    "6a3b0fee9425bce616f0a3463e7ccab3a5cf09c8051665aa5b0fed8ef542136b",
+    "82b1c209b3a0415a8aeb136ae87c20c79bea6354a46f3b72d0a2bcffeec1d430",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_after_for.rvl",
-    "2932dc00d0cf11b4239564cb78857b97dfec4d70eb1845c5564b012d64675a0b",
+    "702293eb20b963e88810415b9944f2340ab5802cc0a2453bd9262e81cc549c1f",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_after_guard.rvl",
-    "3e16c0a4e1545e2642d6ca682556320895da28de2f4dc8a905710afd22e27dd8",
+    "7871a08cacf10e5c3d83ddbf6e7366b2bd7e925539019d3f5e7e7d1e70006a80",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_after_if.rvl",
-    "cf98c664d79865c73b4a5d102e95ca07a2450337ae6af2917f1220c37e2e53f4",
+    "617dddc3865048e3e03c8829decc03b60d3512d32f9664e907848811e1e00c07",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_after_nested_blocks.rvl",
-    "d2dcb22474d0887ade70304e2867b0ab3bd19ce974474b6f02dbe2b6e3c20417",
+    "b95d5196e95daedf26dfde533b732d7a114d3b2b39d490e53b85e27c522468b5",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_after_while.rvl",
-    "1b2f5e472ae6ab06920d99ca1ace82db7e28b86739a71c1366030fcff7bd348e",
+    "91272a6b5db130fcc47df685b487042bbab8c48d555a9dd349bc733b99d697f6",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_braceless_if.rvl",
-    "4b7613b898b4746e1fbe8fe71c93d87f03e806787339ae9a7c10688af4225149",
+    "5b5b6577f29c3f3951ff0e97b472f9d56f7089687edc60cad2dfb88ac180f84b",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_if_condition.rvl",
-    "3f3cf88f0bcf214c384214c578d1ba8bc5f6bb8dcd9013e5233ce191ed810cb8",
+    "66d762ad1d2bb06eeba44fda5c533a2923b3449caf03cf416538aedc9e84cc7b",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_multiline_if.rvl",
-    "315989fb00aba08f6e0e46829672b66877f28f8221afa643a02152bb8fc62e39",
+    "5e21b64af2de28ef3ee496ddb5a22bb2b7fee8082fd1767cdbb813f965791d47",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_oneline_else.rvl",
-    "cd57e2e72a8bdbaf293b7ae6dae2ccd9b3c5193cf431dc3eb0555d54ab615779",
+    "e623a07be9eb3ac9b700051f4fa21722efa0592b30ac52c6826cac547c78c140",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_oneline_for.rvl",
-    "c583c5dd7a6f258ce9a6be9f4270910cb97b5af23055fcd82e6a4b4c3fd17c69",
+    "0a26b5507a01fd1c4b427c6840eb5fdff68bf27f560b2d74341389b05669f638",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_oneline_if.rvl",
-    "1a9f8949a8d69ecd3961ac7cb9cdd21de89087eb606c5c99311ae233bc7d19d4",
+    "a9ecbba2214e8dd29cfc83bb48f4d84345cdbd084f02a79462d64a98cf064c19",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_oneline_while.rvl",
-    "d74f2aa240aae707e03a066ac714459e9a4c15e1bc70a11afa3e327453325e96",
+    "2aa5f80444f3bfe87b2c8b3d4b752dd0d7397deb9dbf0e5bc72a13a670e1e772",
     "agree-refuse/G4"
    ],
    [
     "tests/fixtures/gate_block_nesting/g4_upper_in_while_condition.rvl",
-    "93f0ea3a8f312dbb6f18e5beb86274e2f19cafc81bf1f73a6a4e71abfdcd87a7",
+    "949eeef5f1616f8c6bee39a42eff27b8c84b9f87b855235044af82fc2937e7ac",
     "agree-refuse/G4"
    ],
    [
@@ -2845,7 +3000,7 @@
    ],
    [
     "tests/fixtures/query_mesh.rvl",
-    "3e028b26b4775c7be9851403b957557f6bf878f59955e06bb37f0531909e1696",
+    "b8639f90d58e1981afda1ad19b4c337bbc421af319807a93302042268cfac206",
     "agree-admit"
    ],
    [
@@ -2880,12 +3035,12 @@
    ],
    [
     "selfhost/checker.rvl",
-    "72fe1d5fde1e02b31c85ffa83d9bdce79704c6cd616ec0841ed8dbac3afa3941",
+    "e9761de5f1f13c7568b98ca5cec0dac6c06cdb05b25a6dc7e34e1bfb8a698a57",
     "frontier-declined"
    ],
    [
     "selfhost/compile.rvl",
-    "85219914b2d6827ed6f8a5786b6a068e5e657f61c6e8733ca5143e19ed4ce27e",
+    "65a5bcf9ef5af86fe647ac0db0a3f4217b7f696b9719515ac8195f65b6c0f25b",
     "no-objection-out-of-slice"
    ],
    [
@@ -2925,7 +3080,7 @@
    ],
    [
     "selfhost/lower.rvl",
-    "d0117d7284a8cb8de478c6de702882aa3ef521a2091a3ce62be7657aaf9e28ad",
+    "24d8fc4c217fc04129dc8d48a2ced04b6d965928610438c95eea998e486841f7",
     "frontier-declined"
    ],
    [
@@ -3149,6 +3304,11 @@
     "agree-admit"
    ],
    [
+    "backends/go/testdata/module_fn_lifecycle_1669.rvl",
+    "83d3b8aa58881eee7294daf29a0b0a35a2edc822ffb2beabd88e84a4956b9df8",
+    "agree-admit"
+   ],
+   [
     "backends/go/testdata/opt_gaps_280.rvl",
     "49091b116681bd64b023199ed7046cf226c4f0615f9ced561c992c9a132309df",
     "agree-admit"
@@ -3250,22 +3410,22 @@
    ],
    [
     "backends/typescript/tests/fixtures/a2a_agent.rvl",
-    "87ded0b6ddede73b55aba14902bf08a94df22231b4bd26559b684db0c59aa003",
+    "5486b640c9ba3a8a5d2c89c11061777ae4d7d88e00209f686b5469d20924b50c",
     "agree-admit"
    ],
    [
     "backends/typescript/tests/fixtures/async_agent_loop.rvl",
-    "72ee0ef4bde6fb7f5c1a6ef11dccc2cb1f216af2712e7bfd456fdbb3dd0583e0",
+    "e694e4185ee703d34124dc98c807270af983ea2ffd10a6de5c8386eab90f79cf",
     "agree-admit"
    ],
    [
     "backends/typescript/tests/fixtures/async_fn_values.rvl",
-    "fd9a9842d175e3a959188bb2a729d2e9a86a3141f309087cee4f687260efb6ac",
+    "757f34aa1d58dd60f1c753451cb89062c40265e3eba26f119d2b580b25c8ccd7",
     "agree-admit"
    ],
    [
     "backends/typescript/tests/fixtures/async_http.rvl",
-    "b45014e58a7761e3cd7652582ff06ed3f657a0fd0589c3fdebf81e34eb93855e",
+    "e44e9bdc90a1ac099753d8982a072d0f892bb6b11f0eadb9420d6b0c28c81fe0",
     "agree-admit"
    ],
    [
@@ -3435,7 +3595,7 @@
    ],
    [
     "oracle-accept:async op admits an async body",
-    "8acd6c370570d19aec9dbad9b86a50ece011b794d02fae22184a19e3c865b02f",
+    "ab60e0bef1c00d6d0ce85121c9f35b2f3f3faa5ab863183b78fe4b95ab1ecec0",
     "agree-admit"
    ],
    [
@@ -3520,7 +3680,7 @@
    ],
    [
     "oracle-accept:async method reaching a rule-2-colored fn admits",
-    "d80fb4ea9769b6fd03d00990bd3c6bdff458b4840eee890249a3612862c75a71",
+    "bf026f7ef89de0b96cfce31bf2ed76a5832910de3af5d4fa0d143f14ccca225f",
     "agree-admit"
    ],
    [
@@ -3550,7 +3710,7 @@
    ],
    [
     "oracle-accept:a coerced arrow nested in a sync arrow does not leak",
-    "744cda520631e33b76b51a627f737fda8866b6cca399fac99fc6c2bfece0ca4b",
+    "eda7e9e03c3fee0c737535d694d61bf0f60c1db8da76c5bcb0467713434ef2f5",
     "agree-admit"
    ],
    [
@@ -4035,7 +4195,7 @@
    ],
    [
     "oracle-reject:a1 async extern in sync method",
-    "f701484199e958dedcf97542abf098c16f2917e4c5037833788511517b631086",
+    "ad7cafe2427f75f03ed21980818d3a14a6f868b0a7960f624ef8d81e312b67da",
     "agree-refuse/A1"
    ],
    [
@@ -4065,7 +4225,7 @@
    ],
    [
     "oracle-reject:a1 async undo suspends",
-    "da62b51ff8f207867022901fbbd8ede06461f0be3769b2645b78a7a25a1c74e6",
+    "f85164d78a6c51181ae69e4ab9a5c709c046b30526884962875bef0ce5bbddf8",
     "agree-refuse/A1"
    ],
    [
@@ -4080,12 +4240,12 @@
    ],
    [
     "oracle-reject:g4 multi-hop named-call chain",
-    "18452ea4db6384f9dda07670a4867898c3c8a2a1a24bd4b164a47445d21d9e86",
+    "1f0b2ed55a7cd4bb71d909b4857a8aa0ff34a9aa169be1d1b7be537bb52c81fe",
     "agree-refuse/G4"
    ],
    [
     "oracle-reject:a1 transitively-colored fn in sync method",
-    "8a0bf0062e4d0bfc63919d3552dce7ec1237da0502b1e133f5e1d74c7c4c4564",
+    "ee29eadb4c0c5c59f34769281f086de3b741b73a586a216db8bbed8e486e298a",
     "agree-refuse/A1"
    ],
    [
@@ -4255,7 +4415,7 @@
    ],
    [
     "oracle-reject:a1 leaky arrow in a sync fn-parameter slot",
-    "8c335b70202207a6101fbb10a5986157acdc5e66908edcc2b659b273294d1d48",
+    "2b929df8b58dcee932b405a6c644ef22afb1d13d0a0d8056088ea519500699f2",
     "agree-refuse/A1"
    ],
    [
@@ -4290,7 +4450,7 @@
    ],
    [
     "oracle-reject:a1 rule-2 param-colored fn in a sync method",
-    "95a35ffb85f3bda4b38b72c2b6dc6f22ca60382ad8f807b831136005037355bb",
+    "71820a9773e157f35bbc842e34cfaee47176068bd586c38935507257c712f7c7",
     "agree-refuse/A1"
    ],
    [
@@ -4944,18 +5104,18 @@
     "agree-refuse/G4"
    ],
    [
-    "oracle-reject:an unmarked reach through a helper carries no host label",
-    "3ef2156c1dadb051716ed5e8d1983cc5a8dc65f33532472f9c41128b6b298999",
+    "oracle-reject:a marked reach through a helper carries no host label",
+    "e372cf4cd56c5d7cf60de9fd10b25b7efd8cba96deb0a3790aa423e74751a253",
     "agree-refuse/G4"
    ],
    [
     "oracle-reject:two host externs in one statement sort by name",
-    "10e9b65704b5334b03cde0abe3cb73d9e6545018f559884417bda37afec299f7",
+    "83217f719bd7d471f9288319ced667777668fc7073187dc00308977cdee64bfa",
     "agree-refuse/G4"
    ],
    [
     "oracle-reject:two host externs in one statement sort by name, plain half",
-    "25adecd69ac593e1b7edeadb8ecf4074cb5386fdd05a789a31b472589dca5aaf",
+    "2155ae5f9ff7010bcd93d329651ddcd9a9cc12eb23b6a7ec38969d1ae830ae00",
     "agree-refuse/G4"
    ],
    [
@@ -4970,12 +5130,12 @@
    ],
    [
     "oracle-reject:a conditional reaching two host externs sorts them",
-    "d6f515dba388881d0ea5ca7cc9ac0f49cdeeb9fab7a44dcbd79db80e655fdc59",
+    "82cb1651bb1721f94450412578c2a691afb8f621798992d802e371c4138595d0",
     "agree-refuse/G4"
    ],
    [
     "oracle-reject:two host externs in two statements keep source order",
-    "6eb37aef3032ecaa1883dec27c92e1a17de0cb69e455992969bd550902af173e",
+    "e17cb72f8cd1a541b5c00f13b539852904f7f26d55f028acf51f8ca12044bda8",
     "agree-refuse/G4"
    ],
    [
@@ -5136,14 +5296,14 @@
   ],
   "cases_note": "One row per program run, in run order: case id, sha256 of the source bytes, bucket. `tools/census_artifact.py --verify` re-runs the census and compares these rows one by one, so a published verdict is checkable on its own and not only as part of a bucket count.",
   "checker_sources": {
-   "selfhost/lower.rvl": "d0117d7284a8cb8de478c6de702882aa3ef521a2091a3ce62be7657aaf9e28ad",
+   "selfhost/lower.rvl": "24d8fc4c217fc04129dc8d48a2ced04b6d965928610438c95eea998e486841f7",
    "tests/test_gate_reference_census.py": "db49e785415076e632e8fb070ce5a12a3964e98ff5a0c234ed322d06b5d695a0",
-   "tools/build_gate_crate.py": "88eb0b3d84a48290cb777319cce4afc7352705d8025df540746ad9dcaa9f5c63",
+   "tools/build_gate_crate.py": "9c1947aed30321deba81b5b749149a3549281e094c3d585e3c4c47f1c7ef3d13",
    "tools/corpus_provenance.py": "a98efd43d77d634328bb36a233c8f77ddb6c44f316bfab38da8a1cb2c73ef9bd",
    "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
   },
-  "checker_version": "GATE-CENSUS-1+189c635de62e",
-  "compiler_tree_digest": "src/revl@sha256:82a58185cd18",
+  "checker_version": "GATE-CENSUS-1+6feced95a60e",
+  "compiler_tree_digest": "src/revl@sha256:eb399b5f334c",
   "compiler_tree_digest_note": "EVAL-REPORT-1 names this field `compiler_commit`. It is not a commit. It is a sha256 over the src/revl/**/*.py modules the census run opened, listed in `pins.reference`, which is narrower than a commit (a commit that touched no module the run reads does not move it) and recomputable by anyone with a checkout.",
   "corpus_dirs": [
    "examples",
@@ -5187,8 +5347,8 @@
    "measured_but_not_baselined": [],
    "total": 0
   },
-  "n": 1003,
-  "n_distinct": 997,
+  "n": 1035,
+  "n_distinct": 1029,
   "n_note": "`n` is programs RUN. `n_distinct` is distinct case ids: 6 case ids reach the corpus twice, once from each of two entries that spell the same name, so every bucket count and `n` itself carry them twice. The distinct number is the one to quote.",
   "not_established": [
    "This report says nothing about any implementation other than revl's own two. It is not a comparison and carries no comparative claim.",
@@ -5196,13 +5356,13 @@
    "Generation zero in the provenance manifest is a declaration about the tree as it stood, not a measurement. What holds from there on is that an arriving document must name its generation, and that an undeclared one counts as loop-authored.",
    "Generation zero does not mean a person typed it. Issue #1397 measured the generation-zero set against the commits that introduced it: 153 of 850 entries arrived on a branch named agent/*, 132 more on a commit carrying an AI co-author trailer, 415 on commits pushed to the trunk with no branch to read, and the repository's root commit carries such a trailer itself. Both signals are lower bounds. The honest reading is that this corpus is model-written and pre-loop, and the floors gate the second word, not the first.",
    "A mislabelled provenance entry defeats the provenance measurement exactly as re-recording the baseline would defeat the census. Neither is detected by a tool; both are edits in a diff somebody reads.",
-   "The corpus holds 6 case ids that appear twice, so `n` (1003) counts 6 programs twice and `n_distinct` (997) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported."
+   "The corpus holds 6 case ids that appear twice, so `n` (1035) counts 6 programs twice and `n_distinct` (1029) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported."
   ],
   "pins": {
    "decides_verdicts": {
     "backends/python/emit.py": "a6a0996505be8faff037194fb7c575d3850414277a13fb3099bff96a208d03d6",
-    "tests/test_selfhost_lower.py": "f1a63220d88cf3c26891ab6ac364b91aacd0c92e2d1e3b803fa72d7d4a654803",
-    "tools/build_gate_crate.py": "88eb0b3d84a48290cb777319cce4afc7352705d8025df540746ad9dcaa9f5c63",
+    "tests/test_selfhost_lower.py": "5df224ccfdacaba58c49b5a297aa2bc96fc948575c80aaf643393747f6f4f629",
+    "tools/build_gate_crate.py": "9c1947aed30321deba81b5b749149a3549281e094c3d585e3c4c47f1c7ef3d13",
     "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
    },
    "note": "Every file the published verdicts depend on, by sha256. `decides_verdicts` is MEASURED: it is the set of files under the checkout that the census run opened, recorded by an audit hook, minus the corpus (pinned per case in `cases`) and the reference (pinned here per file). A file that decides a verdict cannot be left out of this list by forgetting to name it, and `tools/census_artifact.py --verify` measures it again on the reader's side.",
@@ -5226,10 +5386,10 @@
     "src/revl/hostref.py": "45f90347be17bfa157ee0901534d58c54ca8e5dc8d971f1239904f3e6082e702",
     "src/revl/kernel_boundary.py": "fbce94cb69042b099a0aaead6d2327d4e4cf78b1c667fc61bf2ec424b025c56a",
     "src/revl/lexer.py": "2c74dc6f972a40ac97efcada0b6cb57ad01646dfd454a011696a76dea3422c37",
-    "src/revl/lower.py": "9f104d6186c066993aae139639fb8cf9f494c58dfde3c8e100155bccf4408710",
+    "src/revl/lower.py": "433bc164ffba261db7e36ae24103bb3f7832a153ee5d0ed353bdc2ff41f12731",
     "src/revl/manifest.py": "bb02c10d66a224db2be5594c9352cd5eef3c039346c2325ecd36544ad3df9bbb",
     "src/revl/mcp/__init__.py": "0fd5b46dae686502c19b461717deb260f4816b082c605eebad7c0331d02e825a",
-    "src/revl/mcp/schema.py": "fb209a63e0e70f6db7d2ba93af648917f717ae2c22ecc92af47808671d0882ee",
+    "src/revl/mcp/schema.py": "c837e6e1a0aa15fdf594c8d78d4848bc6d03d60d1d773baafe3f8d96dd3a2632",
     "src/revl/model_answer.py": "b6f9b78c76c132de4e5a6aeb13fd90e66efa2047d65aa33cadc6441327252083",
     "src/revl/model_council.py": "e1624ed5b84d43b12a362f524a4e6d11f7e44394573cdbd374b2f3f589fa0e52",
     "src/revl/model_profile.py": "5e63b72a4ea582f95e1401692dca8c0ada94cfe3bc87c5feefa6e052757c32f4",
@@ -5248,15 +5408,15 @@
    },
    "report_inputs": {
     "crates/revl-gate/Cargo.toml": "de0fdc92fd47facfe7b962a233722285724deddca3f2a8495dd427008ff9f25c",
-    "crates/revl-gate/src/admission.rs": "fb5597078ad3c758bb7d6d02059665335cd480421323abfb30e53ca393b1dc66",
-    "crates/revl-gate/src/frontier.rs": "d3cf63926878a35a924c862123ded163a882abc0853cb503cacdae5169c163cf",
+    "crates/revl-gate/src/admission.rs": "c4efc40097dd0bb28ac0750167ebe3ff0a2c0cb97a938d11de1eb5c5ed93e2ed",
+    "crates/revl-gate/src/frontier.rs": "8952e31ef54b5d74fa8abda832b85c6e60f7ac4abb4b334e7411a1203ed1b8e4",
     "crates/revl-gate/src/ir.rs": "0d171beeb651561811e855308c62554f44fbfca7a64bb3030abf0a3f20f9793b",
     "crates/revl-gate/src/lib.rs": "e9c5ddb7d29b757a7e08df675ae54fbaa637a7e952c3421c0ca6934016a13869",
-    "crates/revl-gate/src/selfhost.rs": "a649b8d9d518cfcd837c4a32bc9f3bc2f4f4e57e24918f594b5c4ff7101cb12b",
+    "crates/revl-gate/src/selfhost.rs": "0c8553f6084aaacb2a298cd761d6f0d2cc371c8718fd78291cc9a427e96ded6b",
     "crates/revl-gate/src/session.rs": "98470ddaf7803dd69da9e6c8c6750fc23956906d6529d5de5514ad0e02da6455",
     "crates/revl-gate/src/symbols.rs": "698969ee2ea20647b73a6b758da946a29658f1c72b1553153d50551b94becbec",
-    "tests/fixtures/census_crate_reproduction.json": "17b0266b27118117e465cf254c71cf8d3c3574b8ef869adb3d80ad15885d9941",
-    "tests/fixtures/corpus_provenance.json": "bfdb908bc2a391ff5ade65c40cfec67b044ddc0a4b861197b6a76437dfb6549b",
+    "tests/fixtures/census_crate_reproduction.json": "d488c1db5f25417065c1725705b5891bdca419bb7f0ae3676dd113fb3a8c7cfb",
+    "tests/fixtures/corpus_provenance.json": "07e76a76063474fe0c6b0024f43a639b0b1db0309025faadfc2837195e7a5b46",
     "tools/gate_reference_census_baseline.json": "5dc8b0ab9b4be6c8dd5e480f99446cce787a923334f113a5badf5dde0c946852"
    }
   },
@@ -5271,7 +5431,7 @@
      "independent_percent": "100.0",
      "independent_permille": 1000,
      "loop_authored": 0,
-     "total": 1003,
+     "total": 1035,
      "undeclared": 0
     },
     {
@@ -5375,16 +5535,16 @@
    "by": "tools/gate_reference_census.py --engine crate",
    "crate_false_admissions": [],
    "crate_tracked_buckets": {},
-   "current_checker_version": "GATE-CENSUS-1+189c635de62e",
+   "current_checker_version": "GATE-CENSUS-1+6feced95a60e",
    "does_not_establish": "The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.",
    "is_current": true,
-   "n": 1003,
-   "recorded_at_checker_version": "GATE-CENSUS-1+189c635de62e",
+   "n": 1035,
+   "recorded_at_checker_version": "GATE-CENSUS-1+6feced95a60e",
    "recorded_in": "tests/fixtures/census_crate_reproduction.json",
    "tracked_buckets_agree": true,
    "what": "the committed crates/revl-gate, built by cargo and asked through a standalone consumer, over the same corpus"
   },
-  "run": "census-selfhost-0fda28faac6a",
+  "run": "census-selfhost-aede64ff155a",
   "schema": "GATE-CENSUS-1",
   "tracked_bucket_prefixes": [
    "false-admission",
@@ -5398,21 +5558,21 @@
  "claims": [
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:82a58185cd18",
+    "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-0fda28faac6a"
+    "run": "census-selfhost-aede64ff155a"
    },
    "public": true,
    "rung": "demonstrated",
-   "text": "Over 997 distinct programs (1003 runs; 6 case ids appear more than once and are named in the report), the gate issued no admission the reference refuses: the `false-admission` bucket is empty, and it is in NEVER_BASELINED, so `--record` cannot write one into the baseline and `--check` fails on any member however the baseline reads."
+   "text": "Over 1029 distinct programs (1035 runs; 6 case ids appear more than once and are named in the report), the gate issued no admission the reference refuses: the `false-admission` bucket is empty, and it is in NEVER_BASELINED, so `--record` cannot write one into the baseline and `--check` fails on any member however the baseline reads."
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:82a58185cd18",
+    "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-0fda28faac6a"
+    "run": "census-selfhost-aede64ff155a"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5420,28 +5580,28 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:82a58185cd18",
+    "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-0fda28faac6a"
+    "run": "census-selfhost-aede64ff155a"
    },
    "public": true,
    "rung": "measured",
-   "text": "0 of 1003 census programs were produced by a generation of the self-improvement loop at or after generation 1 (100.0% independent of the loop, 0 undeclared), measured by tools/corpus_provenance.py over tests/fixtures/corpus_provenance.json. The loop has never run, which is why this figure is what it is."
+   "text": "0 of 1035 census programs were produced by a generation of the self-improvement loop at or after generation 1 (100.0% independent of the loop, 0 undeclared), measured by tools/corpus_provenance.py over tests/fixtures/corpus_provenance.json. The loop has never run, which is why this figure is what it is."
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:82a58185cd18",
+    "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-0fda28faac6a"
+    "run": "census-selfhost-aede64ff155a"
    },
    "public": true,
    "rung": "measured",
-   "text": "0 of 1003 census programs are declared in tests/fixtures/corpus_provenance.json as typed by a person (0.0%). This report makes no claim that its corpus is human-written, and the figure above is not that claim: it is the share no generation of the self-improvement loop produced."
+   "text": "0 of 1035 census programs are declared in tests/fixtures/corpus_provenance.json as typed by a person (0.0%). This report makes no claim that its corpus is human-written, and the figure above is not that claim: it is the share no generation of the self-improvement loop produced."
   }
  ],
  "generator": {
   "name": "selfhost/lower.rvl admit_src behind crates/revl-gate",
-  "run": "census-selfhost-0fda28faac6a",
+  "run": "census-selfhost-aede64ff155a",
   "tool": "tools/gate_reference_census.py --engine selfhost"
  },
  "grader": {

@@ -289,12 +289,14 @@ def test_within_and_acting_are_not_reserved_words():
 #
 # `_check_intent_refinement` closes one hole per crossing: an `emit` step under
 # a declaration must state what it does. That left the declaration vacuous
-# through every OTHER spelling of a crossing, and the tree has three:
+# through every OTHER spelling of a crossing, and the tree had three:
 #
-#   * a direct call to an `emission` extern, which needs no `emit` marker;
+#   * a direct call to an `emission` extern, which needed no `emit` marker
+#     (since issue #1437 it does, so that spelling is refused by the marker
+#     rule before any declaration is consulted; see the test below);
 #   * a value-position emission (`let r = emit ...`), whose marker sits inside
 #     an expression where no clause can trail it;
-#   * a helper `fn` that reaches an emission one hop down.
+#   * a helper `fn` that reaches an emission one hop down, marked or not.
 #
 # Each of them let a body declare `within { object: fs.write(path="/tmp") }`
 # and then reach `/etc` with no refusal at all. The rule is therefore stated
@@ -318,9 +320,8 @@ component W provides worker: Worker {{
 
 STATED = 'emit wr("row") acting { verb: ingest }'
 UNSTATED = {
-    "a direct call to an emission extern": 'let n = wr("row")',
     "a value-position emission": 'let n = emit wr("row")',
-    "a helper that reaches an emission": 'let n = helper("row")',
+    "a helper that reaches an emission": 'let n = emit helper("row")',
 }
 
 
@@ -347,9 +348,19 @@ def test_an_unstated_crossing_is_refused_even_inside_the_declared_cone():
     cone and the same crossing spelled as an annotated `emit` compiles, so the
     only difference is that this spelling states nothing."""
     with pytest.raises(RevlError) as exc:
-        compile_source(extern_source('let n = wr("row")'), "<test>")
+        compile_source(extern_source('let n = emit wr("row")'), "<test>")
     assert "states nothing about itself" in str(exc.value)
     assert compile_source(extern_source(STATED), "<test>")
+
+
+@pytest.mark.parametrize("within", [DECLARE_TMP, ""], ids=["declared", "undeclared"])
+def test_an_unmarked_extern_call_is_refused_by_the_marker_rule(within):
+    """The spelling the list above no longer carries. An unmarked call to an
+    emission extern is refused for its missing marker (issue #1437) whether or
+    not the operation declares an intent, so the intent check never sees it."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(extern_source('let n = wr("row")', within=within), "<test>")
+    assert "call to emission `wr` must be marked `emit` (G4)" in str(exc.value)
 
 
 @pytest.mark.parametrize("body", list(UNSTATED.values()), ids=list(UNSTATED))
@@ -477,25 +488,36 @@ def test_a_bound_crossing_that_names_no_boundary_is_refused():
 
 def test_a_clause_on_an_unmarked_value_is_refused():
     """The marker stays load-bearing. A clause on a value that carries no
-    `emit` would state something about a crossing that is not there while
-    leaving the real one — a bare call to an `emission` extern — unstated, so
-    the honest spellings stay `let n = emit wr(...) acting { ... }` and
-    `emit wr(...) acting { ... }`."""
+    `emit` would state something about a crossing that is not there, so the
+    honest spellings stay `let n = emit wr(...) acting { ... }` and
+    `emit wr(...) acting { ... }`. A bare call to an `emission` extern is
+    refused before the clause is read, for its missing marker (issue #1437);
+    a value that crosses nothing is refused by the clause check itself."""
     with pytest.raises(RevlError) as exc:
         compile_source(
             extern_source('let n = wr("row") acting { verb: ingest }'), "<test>")
+    assert "call to emission `wr` must be marked `emit` (G4)" in str(exc.value)
+    with pytest.raises(RevlError) as exc:
+        compile_source(
+            extern_source('let n = 7 acting { verb: ingest }'), "<test>")
     assert "carries no `emit` marker" in str(exc.value)
 
 
 def test_a_clause_on_a_helper_hop_is_refused():
     """The helper hop keeps its verdict. One clause cannot state a crossing the
-    binding does not perform, so the transitive reach stays the completeness
-    check's business."""
+    binding does not name: marked, the hop crosses an unnameable boundary as
+    far as the clause can tell; unmarked, it is refused for its marker first
+    (issue #1437)."""
+    with pytest.raises(RevlError) as exc:
+        compile_source(
+            extern_source('let n = emit helper("row") acting { verb: ingest }'),
+            "<test>")
+    assert "this `let` crosses an unnameable boundary" in str(exc.value)
     with pytest.raises(RevlError) as exc:
         compile_source(
             extern_source('let n = helper("row") acting { verb: ingest }'),
             "<test>")
-    assert "carries no `emit` marker" in str(exc.value)
+    assert "call to emission `helper` must be marked `emit` (G4)" in str(exc.value)
 
 
 def test_a_stated_binding_is_admitted_inside_control_flow():
