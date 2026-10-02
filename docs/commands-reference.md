@@ -2051,6 +2051,77 @@ that composes `stdlib/auth.rvl` for them is refused at compile time.
   `<prefix>.<key>.<op>`; HTTP routes are `/<prefix>/<key>/<op>`; default:
   `revl`).
 
+The callers of `--http` are the application's users (design 569, option B): the
+face authenticates nobody and serves no operator verb. Operators reach the same
+session through the operator listener below (option C2, issue #1553). These
+options apply to `--http` only; with `--mcp` they are refused.
+
+- `--approval-policy auto` - load the auto-approve policy (item 246) on the
+  served session. A class-(c) crossing (an irreversible emission with no checked
+  inverse) that an app request reaches is held with a ticket instead of firing,
+  and the app caller gets `403` with
+  `{"ok": false, "approvalRequired": true, "pendingApproval": true, "code":
+  "pending_approval", "message": ..., "ticket": {"hash": ...}}`: the ticket id
+  and nothing else, no operator identity and no way to approve. The app sends
+  the identical request again once an operator has answered: after an approve
+  it runs once; after a revoke it is refused once with `403` and
+  `"code": "approval_refused"`; asking after either is a new question. The
+  session records (a WAL at the default path), because an approval spend must be
+  durable. Without `--operator-listen` nothing can answer a ticket, so those
+  requests stay pending (a warning says so at start). Without this option there
+  is no policy, and a class-(c) crossing an app request reaches fires unapproved.
+- `--refuse-ungated-emissions` - opt-in. While no approval policy is loaded,
+  an app request that reaches a class-(c) crossing is refused by name instead
+  of firing: `403` with `{"ok": false, "ungatedEmission": true, "code":
+  "ungated_emission", "message": ...}`, naming the operation (never its
+  capabilities), and nothing runs. An operation whose crossing class cannot be
+  resolved is refused the same way. The class comes from the checked reach
+  facts of the live composition (the same classifier the approval policy uses).
+  At start it lists the public operations it will refuse. With
+  `--approval-policy` it changes nothing: the policy holds such a crossing with
+  a ticket. Without either option, a class-(c) crossing an app request reaches
+  fires unapproved, as before.
+- `--operator-listen HOST:PORT` - also serve operators, on a second address:
+  the MCP Streamable HTTP transport ([mcp-http-transport.md](mcp-http-transport.md))
+  at `/mcp`, against the same session and the same dispatch lock as the face.
+  Every request authenticates on its own against `--operator-profile`, exactly
+  as on `revl mcp serve --http`, and each verb is gated by that operator's
+  grants. The verbs this exists for: `revl_approve` and `revl_revoke` with the
+  ticket `hash` the app caller was given, and `revl_estop` (never fenced, and
+  never queued behind a busy session: it latches, the request in flight is
+  refused at its next crossing seam that reads the latch (item 443; issue #1504
+  gates every crossing before its host body), and the face answers `503` with
+  `"code": "halted"` from then on, including to a request that was queued).
+  Refused at start: the app face's port, a non-loopback address without
+  `--operator-tls-cert`, and a missing `--operator-profile`. It takes no
+  `--allow-origin`, so any request carrying an `Origin` header is refused
+  (`403`): no browser page can reach it. It prints its own E-Stop latch path
+  (`revl estop --latch <path>`); that latch's directory is removed when the
+  server stops, including on SIGTERM, which shuts it down cleanly (exit 0).
+  Both listeners hold ONE session reference, changed only under the shared
+  lock: after `revl_fork_confirm` on the operator listener freezes the parent
+  and makes the branch the live session (item 250), the next app request is
+  served by the branch. With an operator listener the served composition keeps
+  its source files as its admission inputs, so it can be snapshotted and
+  forked.
+- `--operator-profile PROFILE` - the operator profile the operator listener
+  authenticates against (a `key sha256:` line per operator for bearer auth) and
+  gates by (item 55). Re-read when it changes, adopted once it settles
+  (`--profile-settle-ms`, default 1000). Refused without `--operator-listen`.
+- `--operator-auth bearer|mtls` - how an operator proves who it is: a bearer
+  secret (default) or a client certificate whose commonName is its token (needs
+  `--operator-tls-client-ca`).
+- `--operator-tls-cert PEM`, `--operator-tls-key PEM`,
+  `--operator-tls-client-ca PEM` - TLS and mutual TLS for the operator listener.
+- `--operator-allow-host NAME` - a Host value the operator listener answers
+  besides its bind address (repeatable).
+- `--profile-settle-ms MS` - see `--operator-profile`.
+
+An operator credential sent to the face is only an app request: the face has no
+`/mcp` endpoint and no operator route, and an `Authorization` header there is
+bound, untouched, only into a routed `Bearer` parameter for the application's
+own validation (item 457).
+
 ---
 
 ## The component manager
