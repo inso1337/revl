@@ -13904,6 +13904,33 @@ def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> No
                      "approval (item 246)")
         step["approval"] = {"capability": edge_scope, "expr": appr_node}
     _require_declared_approval(node, edge_scope, env, stmt.line)
+    # A compensation crosses too, during rollback, where there is nobody to
+    # ask: every emission it reaches meets the same floor, covered by the same
+    # step's `with` edge. The slot keeps its bare-emission exception for the
+    # MARKER; it has none for approval.
+    for crossing in _compensate_crossings(step.get("compensate"), env):
+        _require_declared_approval(crossing, edge_scope, env, stmt.line,
+                                   slot="compensate")
+
+
+def _compensate_crossings(node, env: Env) -> list:
+    """Every emission crossing inside a lowered `compensate` slot, outermost
+    first, in source order. The slot is lowered bare (teardown mode), so a
+    crossing there carries no marker and has to be found by walking."""
+    found: list = []
+
+    def walk(n) -> None:
+        if isinstance(n, dict):
+            if n.get("kind") in ("fn", "call") and _is_emission_call(n, env):
+                found.append(n)
+            for value in n.values():
+                walk(value)
+        elif isinstance(n, list):
+            for value in n:
+                walk(value)
+
+    walk(node)
+    return found
 
 
 def _approval_crossed_caps(node: dict, env: Env) -> list:
@@ -13914,10 +13941,24 @@ def _approval_crossed_caps(node: dict, env: Env) -> list:
     emission fixed point (`env.emitting_caps`). Without this, `emit helper(1)`
     carried `charge`'s crossing past the floor that `emit charge(1)` meets.
 
+    A spawn-handle crossing contributes its op's declared scope the same way.
+
     Kept apart from `_emit_crossed_caps` on purpose: item 470's refinement reads
     that function and refuses a crossing it cannot name, and widening it would
     change that judgment too."""
     crossed = _emit_crossed_caps(node, env)
+    if not crossed:
+        # a provision method call off a spawn handle (`w.<key>.<op>(...)`, or
+        # the same through a local aliasing `w.<key>`): the op's declared scope
+        # on the service that key yields, `*` when bare, resolved by
+        # `_instance_get_call`, the resolver the marker rule already uses for
+        # this carrier. Resolved here and not in `_emit_crossed_caps`, because
+        # item 470's refinement reads that function and refuses a handle
+        # crossing as unnameable; resolving it there would loosen that check.
+        inst = _instance_get_call(node, env)
+        if inst is not None:
+            caps = getattr(inst[1], "capabilities", None)
+            return list(caps) if caps else ["*"]
     if not crossed and node.get("kind") == "fn":
         reached = (getattr(env, "emitting_caps", None) or {}).get(node.get("name"))
         crossed = sorted(reached or ())
@@ -13925,7 +13966,8 @@ def _approval_crossed_caps(node: dict, env: Env) -> list:
 
 
 def _require_declared_approval(node: dict, edge_scope: str | None, env: Env,
-                               line: int, value_form: bool = False) -> None:
+                               line: int, value_form: bool = False,
+                               slot: str | None = None) -> None:
     """The declaration-owned approval floor over one marked crossing (item 246,
     Decision 3): every token it crosses that an extern declared `requires
     approval` for must be covered by the crossing's `with` edge.
@@ -13951,6 +13993,10 @@ def _require_declared_approval(node: dict, edge_scope: str | None, env: Env,
             if value_form:
                 hint += (". The value form `emit <call>` has no `with` clause, "
                          "so write this crossing as an `emit … with a` step")
+            if slot == "compensate":
+                hint += (". The crossing is in this step's `compensate` slot, "
+                         "which runs during rollback with nobody to ask, so the "
+                         "step's own `with` edge has to cover it too")
             raise RevlError(
                 env.filename, line,
                 f"crossing capability `{token}` requires approval, but this "
