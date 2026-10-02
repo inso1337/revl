@@ -236,7 +236,7 @@ test "an unsupported tier is reported, not waved through" {
 }
 
 test "a refused program never reaches an emitter (G4), natively" {
-  let src = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let n = audit_write(key) } } }"
+  let src = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let n = emit audit_write(key) } } }"
   let out = compile_to(src, "py")
   // the native gate's verdict, carrying the guarantee tag — the emitter never ran
   assert out.slice(0, 11) == "REFUSED|G4|"
@@ -270,7 +270,7 @@ test "admit_into with the empty manifest is exactly the standalone gate (issue #
   assert admit_into(src, "") == admit(src)
   assert admit_into(src, "") == ""
   // A standalone refusal still surfaces through the manifest entry point.
-  let bad = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let n = audit_write(key) } } }"
+  let bad = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let n = emit audit_write(key) } } }"
   assert admit_into(bad, "").slice(0, 3) == "G4|"
 }
 
@@ -312,7 +312,7 @@ test "the three tiers wired by this slice emit target source, not a verdict (ite
 }
 
 test "a refused program never reaches ANY of the six emitters (G4), natively" {
-  let src = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let n = audit_write(key) } } }"
+  let src = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } service Cache { fn put(key: Str) } component C provides cache: Cache { provide cache { fn put(key) { let n = emit audit_write(key) } } }"
   assert compile_to(src, "go").slice(0, 11) == "REFUSED|G4|"
   assert compile_to(src, "java").slice(0, 11) == "REFUSED|G4|"
   assert compile_to(src, "wasm").slice(0, 11) == "REFUSED|G4|"
