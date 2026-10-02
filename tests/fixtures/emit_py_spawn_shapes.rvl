@@ -1,0 +1,44 @@
+// item 391: the spawn shapes the tree's spawn documents leave out, held to byte
+// agreement by tests/test_selfhost_emit_py.py. selfhost/emit_py.rvl refused
+// `spawn` and `instance-get` by name before.
+//
+//   - a spawned component that provides TWO keys, so the spawn's realm tuple
+//     has more than one entry (every tree document spawns a one-key worker);
+//   - an async operation emitted off a spawn handle (`emit w.counter.bump()`) from
+//     an async provide operation: the await-seed treats it exactly as an async
+//     operation through a required key, so the call is awaited.
+//
+// It sits beside emit_py_corpus/ rather than in it because
+// tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
+// is not this slice.
+
+service Counter {
+  fn get() -> Int
+  emission async fn bump() -> Int
+}
+
+service Label {
+  fn name() -> Str
+}
+
+component Worker provides counter: Counter, label: Label {
+  config { tag: Str = "w" }
+  provide counter {
+    fn get() = 1
+    async fn bump() = 2
+  }
+  provide label {
+    fn name() = config.tag
+  }
+}
+
+service Front {
+  emission async fn poke() -> Int
+}
+
+component Boss provides front: Front {
+  let w = effect spawn Worker with { tag: "boss" } undo w.dispose()
+  provide front {
+    async fn poke() = emit w.counter.bump()
+  }
+}

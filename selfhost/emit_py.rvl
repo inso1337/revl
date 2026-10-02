@@ -58,9 +58,9 @@
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
-//   * spawn/instances and the ABI. A deferred emission, a `validated` call and
-//     a possible item-259 fan-out are each REFUSED by name (item 391), never
-//     emitted as a plausible sync body. Ported since item 391: realm
+//   * the ABI. A deferred emission, a `validated` call and a possible item-259
+//     fan-out are each REFUSED by name (item 391), never emitted as a
+//     plausible sync body. Ported since item 391: spawn and instance-get, realm
 //     placements (`isolate`/`intercept`/`routes` and the router), async
 //     colouring (coloured fns, async operations, the await-seed, async arrows,
 //     the async timer window), awaited activation-body effect/emit steps, the
@@ -686,10 +686,16 @@ fn yields_co(node: Any, cx: Colour) -> Bool {
       let svc = value_str(value_field(cx.reqs, value_str(value_field(tgt, "name"))))
       if (list_contains(cx.async_ops, `${svc}.${value_str(value_field(node, "method"))}`)) { return true }
     }
-    // (The reference also counts an async operation called off a spawn handle,
-    // an `instance-get` receiver. This port refuses `instance-get` by name, so
-    // such a body never renders and the case is left to the spawn slice.)
+    // a provision method called off a spawn handle (`w.<key>.<method>(...)`,
+    // item 106): the receiver is an `instance-get` carrying the service type
+    // the handle's key yields, so it suspends exactly as a `req`-target async
+    // operation does.
     let callee = value_field(node, "callee")
+    if (node_kind(callee) == "field") {
+      let recv = value_field(callee, "target")
+      if (node_kind(recv) == "instance-get"
+          && list_contains(cx.async_ops, `${value_str(value_field(recv, "service"))}.${value_str(value_field(callee, "name"))}`)) { return true }
+    }
     if (node_kind(callee) == "var") {
       let nm = value_str(value_field(callee, "name"))
       if (list_contains(cx.colored, nm) || list_contains(cx.async_ext, nm) || list_contains(cx.locals, nm)) { return true }
@@ -817,6 +823,12 @@ fn ir_needs_as_async(ir: Any) -> Bool {
     found = found || uses_as_async(colour(value_field(c, "body"), doc_colour(ir, value_field(c, "requires"), [], true), false, false))
   }
   return found
+}
+
+fn uses_kind(n: Any, kind: Str) -> Bool {
+  if (node_kind(n) == kind) { return true }
+  for (c of value_children(n)) { if (uses_kind(c, kind)) { return true } }
+  return false
 }
 
 fn has_async_timer(n: Any) -> Bool {
@@ -1878,8 +1890,8 @@ fn comp_names(ir: Any) -> Str {
 // Slice 4 (item 206) added the `config` cexpr, config (`ConfigSchema`), and the
 // method-body `effect`/`let-effect`/compensated-`emit` accumulator (the
 // `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
-// threaded through provides/methods). STILL DEFERRED: spawn/instances and the
-// `spawn`/`instance-get` cexpr kinds. Async operations and the await-seed, the
+// threaded through provides/methods). Spawn/instances (the `spawn` and
+// `instance-get` cexpr kinds), async operations and the await-seed, the
 // activation-body `await` step and the lifecycle-test driver are ported (item
 // 391). The
 // component-body `${…}` template (the `format` cexpr, `_revl_fmt` + the `fmt`
@@ -1917,6 +1929,7 @@ fn runtime_ref(name: Str) -> Str {
   // `interp` f-string concat instead; only the component/method-body path
   // reaches `format`).
   if (name == "fmt") { return "_revl_fmt" }
+  if (name == "spawn") { return "_revl_spawn" }
   return name
 }
 
@@ -2142,7 +2155,29 @@ fn cexpr(node: Any) -> Str {
     for (a of value_list(value_field(node, "args"))) { args = args.concat(", ").concat(cexpr(a)) }
     return `${runtime_ref("fmt")}(${py_repr(value_field(node, "template"))}${args})`
   }
+  // instance-parametric components (docs/design-v2-instances.md): `spawn`
+  // plugs a fresh child instance, each provided key isolated into its own local
+  // realm, and returns a handle; `instance-get` reads a provision off that
+  // handle through the instance's private realm.
+  if (kind == "spawn") {
+    let cfg = value_field(node, "config")
+    var parts = []
+    for (k of value_keys(cfg)) { parts = parts.push(`${py_repr(k)}: ${cexpr(value_field(cfg, k))}`) }
+    return `${runtime_ref("spawn")}(_revl_ctx, ${value_str(value_field(node, "component"))}, {${parts.join(", ")}}, ${py_tuple(value_list(value_field(node, "realms")))})`
+  }
+  if (kind == "instance-get") {
+    return `${cexpr(value_field(node, "target"))}.get(${py_repr(value_field(node, "key"))})`
+  }
   return `<<UNSUPPORTED-CEXPR:${kind}>>`
+}
+
+// A list of strings as the repr of the Python tuple it becomes: `()`, `('a',)`,
+// `('a', 'b')`.
+fn py_tuple(items: List[Any]) -> Str {
+  var parts = []
+  for (i of items) { parts = parts.push(py_repr(i)) }
+  if (parts.length() == 1) { return `(${parts[0]},)` }
+  return `(${parts.join(", ")})`
 }
 
 // item 414 (ported per item 429(d)): the Python expression that FIRES a direct
@@ -3144,7 +3179,7 @@ fn emit_services_table(services: Any) -> List[Str] {
 // body via stdlib/str.rvl::dedent + local `splitlines`), component `config`/
 // `ConfigSchema`, and method-body `effect`/`let-effect`/compensated-`emit` (the
 // `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED:
-// spawn/instances and the canonical ABI.
+// the canonical ABI.
 
 // -------------------------------------------------------------- string utils
 // `trim` / `lstrip` / `last_index_of` / `ident_tokens` now come from
@@ -4068,6 +4103,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (need_config) { imports = imports.push("ConfigSchema as _revl_ConfigSchema") }
   if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
   if (ir_uses_fmt(ir)) { imports = imports.push("fmt as _revl_fmt") }
+  if (uses_kind(value_field(ir, "components"), "spawn")) { imports = imports.push("spawn as _revl_spawn") }
   if (ir_uses_extern_emit(ir)) { imports = imports.push("extern_emit as _revl_extern_emit") }
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }

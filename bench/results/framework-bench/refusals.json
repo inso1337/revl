@@ -23,8 +23,8 @@
         },
         "py": {
           "residual": 17,
-          "corpus": 85,
-          "reproduced": 68,
+          "corpus": 90,
+          "reproduced": 73,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
             "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
@@ -73,7 +73,7 @@
         }
       },
       "total_residual": 26,
-      "total_corpus": 304,
+      "total_corpus": 309,
       "clean_tiers": [
         "java",
         "wasm"
@@ -225,8 +225,8 @@
           }
         },
         "py": {
-          "unported_constructs": 13,
-          "unported_reasons": 6,
+          "unported_constructs": 11,
+          "unported_reasons": 5,
           "blind_constructs": 1,
           "reasons": {
             "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
@@ -246,10 +246,6 @@
             ],
             "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
               "kind=__rendered__"
-            ],
-            "Spawn/instance runtime boundary: emit.py::_ComponentEmitter._expr calls runtime spawn and handle.get; emit_py.rvl::cexpr emits markers. backends/go/scenarios/accessor.rvl reproduces both; the spawn marker is independently pinned by test_named_runtime_and_harness_boundaries.": [
-              "kind=instance-get",
-              "kind=spawn"
             ],
             "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
               "validated=<true>"
@@ -412,7 +408,7 @@
           }
         }
       },
-      "total_unported": 173
+      "total_unported": 171
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -422,14 +418,14 @@
         "compile": 1,
         "emit_go": 49,
         "emit_java": 36,
-        "emit_py": 14,
+        "emit_py": 12,
         "emit_rust": 34,
         "emit_ts": 20,
         "emit_wasm": 50,
         "gate_census": 5,
-        "lower_ir": 5
+        "lower_ir": 3
       },
-      "total_unreached": 214
+      "total_unreached": 210
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

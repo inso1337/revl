@@ -64,7 +64,7 @@ Slice 4 (item 206) adds three more byte-identical forms:
     #{n}`` ``_label``).
 
 Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
-spawn/instances and the canonical ABI. Async colouring (coloured fns, async
+the canonical ABI. Spawn/instances, async colouring (coloured fns, async
 operations, the await-seed), destructuring ``let``, the activation-body
 ``await`` step and the in-file ``test`` / ``lifecycle test`` / ``fault test``
 sections are ported since item 391. Realm placements (``isolate``/``intercept``/``routes``)
@@ -253,6 +253,19 @@ CORPUS = [
     #     an awaited match in an async operation, and an async timer that
     #     mixes an inline sync emission with a spawned async one.
     "../emit_py_async_shapes.rvl",
+    # item 391: instance-parametric components (docs/design-v2-instances.md),
+    # refused by name before: `spawn` plugs a child instance and returns its
+    # handle (`spawn as _revl_spawn`), `instance-get` reads a provision off the
+    # handle. spawn.rvl and instance_get.rvl are the minimal shapes,
+    # accessor.rvl reads two provisions off two handles, tenant_attenuation.rvl
+    # spawns two attenuated workers.
+    "../emit_ts_corpus/spawn.rvl",
+    "../emit_ts_corpus/instance_get.rvl",
+    "../../../backends/go/scenarios/accessor.rvl",
+    "../../../examples/tenant_attenuation.rvl",
+    # emit_py_spawn_shapes.rvl: a two-key spawn (a realm tuple of more than one
+    # entry) and an async operation emitted off a spawn handle, awaited.
+    "../emit_py_spawn_shapes.rvl",
     # Reference fix followed by the port, issue #1632: a `Map.remove` whose
     # receiver carries a `:=` temp is evaluated through a lambda.
     "../emit_py_map_remove_nested.rvl",
@@ -682,8 +695,6 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     # unvalidated model response.
     ("tests/fixtures/emit_ts_refusals/validated_emission_operation.rvl",
      "_revl_validate(", "<<UNSUPPORTED-COMPONENT:validated Model.complete>>"),
-    ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
-     "<<UNSUPPORTED-CEXPR:spawn>>"),
     # item 130 (issue #81): a stream document reaches this port at TWO
     # boundaries, and the row below covered only the first. The `subscribe`
     # acquisition is one; the `every … in` loop the reference lowers as a
