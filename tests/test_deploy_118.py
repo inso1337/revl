@@ -1607,19 +1607,18 @@ def test_the_compiler_sees_every_function_value_spelling_too(tmp_path, spelling)
 
 
 @pytest.mark.parametrize("spelling", sorted(_FN_VALUE_SPELLINGS))
-def test_a_deferred_emission_reached_as_a_function_value_is_not_held(tmp_path, spelling):
-    """`deferred` is honoured only at an `emit charge(..)` step: the py tier
-    enqueues that shape and nothing else. A function value is dispatched as an
-    ordinary call and fires on the spot, so it is class (c), not (b)."""
-    ir = _ir(_fn_value_source(_DEFERRED_CHARGE, spelling), tmp_path, "d.rvl")
-    assert deploy.reached_emissions(ir) == [
-        {"component": "C", "extern": "charge", "deferrable": False,
-         "idempotency_key": None, "via": None}]
-    verdict = deploy.federation_admission({"c": ir})
-    assert verdict["admitted"] is False
-    (refusal,) = verdict["refusals"]
-    assert "already `deferred`" in refusal["reason"]
-    assert "function value" in refusal["reason"]
+def test_a_deferred_emission_reached_as_a_function_value_does_not_compile(
+        tmp_path, spelling):
+    """`deferred` is honoured only where an `emit` marker enqueues it. A
+    function value is dispatched as an ordinary call and would fire on the
+    spot, so it is refused by the compiler (issue #1457) before the federation
+    layer, which refused it as not holdable, is ever reached."""
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError) as excinfo:
+        _ir(_fn_value_source(_DEFERRED_CHARGE, spelling), tmp_path, "d.rvl")
+    assert "`deferred` emission extern `charge` is passed as a function value" \
+        in excinfo.value.message
 
 
 def test_a_deferred_emission_emitted_directly_is_still_held(tmp_path):
@@ -1639,10 +1638,13 @@ component C provides s: S {
 
 def test_a_held_emit_in_one_scope_does_not_launder_a_value_route_in_another(tmp_path):
     """One component, two provide-methods: `go` emits the deferred extern as a
-    held step, `other` dispatches it as a value. The rows are per component, so
-    the component is deferrable only if every route is; the first-seen held
-    row used to decide it alone."""
-    ir = _ir(_DEFERRED_CHARGE + """\
+    held step, `other` dispatches it as a value. The first-seen held row used
+    to decide the component alone; the value route is now refused by the
+    compiler itself (issue #1457), so the held step cannot launder it."""
+    from revl.errors import RevlError
+
+    with pytest.raises(RevlError) as excinfo:
+        _ir(_DEFERRED_CHARGE + """\
 service S { emission fn go(n: Int) -> Int  emission fn other(n: Int) -> Int }
 component C provides s: S {
   provide s {
@@ -1651,10 +1653,8 @@ component C provides s: S {
   }
 }
 """, tmp_path, "m.rvl")
-    assert deploy.reached_emissions(ir) == [
-        {"component": "C", "extern": "charge", "deferrable": False,
-         "idempotency_key": None, "via": None}]
-    assert deploy.federation_admission({"c": ir})["admitted"] is False
+    assert "is passed as a function value in component `C`" \
+        in excinfo.value.message
 
 
 def test_a_pure_function_value_crosses_nothing(tmp_path):

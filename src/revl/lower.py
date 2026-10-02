@@ -3888,6 +3888,15 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     `callables` set), so these are explicit refusals, checked over the author's
     AST where the call site still has a line.
 
+    A `deferred` emission is also refused wherever it is reached with no
+    `emit` marker that could enqueue it (issue #1457): passed as a function
+    VALUE (`apply(deliver, s, m)`, in a fn/test body or a component), and,
+    in a fn/test body, called inside an arrow (named as such, the route the
+    author took). Whoever calls the value or the arrow fires the host body at
+    once, with no session commit, so a deferral that cannot be honoured does
+    not compile. A component's own CALL of one carries the marker (#1437) and
+    is enqueued in every position the marker appears.
+
     These were three sequential passes, each re-walking the identical set of
     fn/test bodies (P-9, #543). Folded into one traversal here. Diagnostic order
     is preserved verbatim: the walk records the FIRST violation of each kind (in
@@ -3897,7 +3906,7 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     carries one classification, so the `witnessed` and `acquire` sets are
     disjoint; `acquire` is checked before `deferred`, matching the original
     first-`if`-raises order."""
-    from .parser import ExprCall, ExprVar
+    from .parser import ExprArrow, ExprCall, ExprVar
 
     witnessed = _witnessed_extern_names(program)
     acquire_undo = {
@@ -3910,9 +3919,16 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     first_witnessed: RevlError | None = None
     first_teardown: RevlError | None = None
 
-    def _walk(node, where: str):
+    def _walk(node, where: str, in_arrow: bool = False, calls: bool = True):
         nonlocal first_witnessed, first_teardown
-        if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
+        if isinstance(node, ExprArrow):
+            in_arrow = True
+        if isinstance(node, ExprVar) and node.name in deferred \
+                and first_teardown is None:
+            # a value, not a call: the callee position is skipped below
+            first_teardown = _deferred_value_refusal(node.name, where,
+                                                     filename, node.line)
+        if calls and isinstance(node, ExprCall) and isinstance(node.callee, ExprVar):
             name = node.callee.name
             if first_witnessed is None and name in witnessed:
                 first_witnessed = RevlError(
@@ -3939,10 +3955,12 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                     code="G4", category="acquire",
                 )
             elif first_teardown is None and name in deferred:
+                route = (f"inside an arrow in {where}" if in_arrow
+                         else f"in {where}")
                 first_teardown = RevlError(
                     filename, node.line,
-                    f"`deferred` emission extern `{name}` cannot be called in "
-                    f"{where}; a fn/test body has no session commit for the "
+                    f"`deferred` emission extern `{name}` cannot be called "
+                    f"{route}; a fn/test body has no session commit for the "
                     f"deferral to fire at (G4)",
                     hint="a deferred emission enqueues onto the session deferral "
                          "queue and fires at commit; that queue exists only inside "
@@ -3952,10 +3970,14 @@ def _refuse_effect_position_bound_externs_in_fn_body(
                 )
         if hasattr(node, "__dataclass_fields__"):
             for f in type(node).__dataclass_fields__:
-                _walk(getattr(node, f), where)
+                child = getattr(node, f)
+                if f == "callee" and isinstance(node, ExprCall) \
+                        and isinstance(child, ExprVar):
+                    continue  # the callee position is a CALL, judged above
+                _walk(child, where, in_arrow, calls)
         elif isinstance(node, (list, tuple)):
             for x in node:
-                _walk(x, where)
+                _walk(x, where, in_arrow, calls)
 
     for fn in program.fn_decls:
         for stmt in fn.body:
@@ -3963,11 +3985,34 @@ def _refuse_effect_position_bound_externs_in_fn_body(
     for test in program.tests:
         for stmt in test.body:
             _walk(stmt, f"the body of test `{test.name}`")
+    if deferred:
+        # a component CALLS a deferred extern under its `emit` marker, which is
+        # enqueued wherever it appears; only a VALUE reference is refused there
+        for comp in program.components:
+            _walk(comp.body, f"component `{comp.name}`", calls=False)
 
     if first_witnessed is not None:
         raise first_witnessed
     if first_teardown is not None:
         raise first_teardown
+
+
+def _deferred_value_refusal(name: str, where: str, filename: str,
+                            line: int) -> RevlError:
+    """A `deferred` emission passed as a function value (issue #1457): whoever
+    calls the value fires the host body at once, with no `emit` marker to
+    enqueue it and no session commit to wait for."""
+    return RevlError(
+        filename, line,
+        f"`deferred` emission extern `{name}` is passed as a function value in "
+        f"{where}; whoever calls the value fires it at once, with no session "
+        f"commit (G4)",
+        hint="a deferred emission is enqueued only by an `emit`-marked call, "
+             "which fires at the session commit; call it directly as "
+             f"`emit {name}(...)` in a component activation or provide method "
+             "(docs/design/245-session-commit.md, issue #1457)",
+        code="G4", category="deferred",
+    )
 
 
 def _refuse_host_acquire_in_component_reachable_fn(program: Program, filename: str) -> None:
