@@ -95,8 +95,10 @@ def test_fullwidth_homoglyph_cannot_capture_an_emission_extern():
 def test_ascii_control_still_gets_its_original_g4_diagnostic():
     # The control that proves the homoglyph was doing the work: with an ASCII
     # `s` the SAME program is refused by the emission checker, and that
-    # diagnostic must be untouched by this change.
-    err = _err(_CAPTURE.format(name="send"))
+    # diagnostic must be untouched by this change. The call carries its `emit`
+    # marker here, or the marker rule (issue #1437) would refuse it first and
+    # the upper bound below would never be reached.
+    err = _err(_CAPTURE.format(name="send").replace("= send(x)", "= emit send(x)"))
     assert "`Pure.calc` is declared plain, but this implementation reaches `send()`" in err
     assert "(G4)" in err
 
