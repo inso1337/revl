@@ -49,15 +49,15 @@
   ],
   "_budget": {
     "reference": {
-      "go": 2821,
+      "go": 2822,
       "java": 986,
-      "py": 661,
+      "py": 667,
       "rust": 1200,
       "ts": 580,
       "wasm": 1558
     },
     "selfhost": {
-      "go": 103,
+      "go": 104,
       "java": 175,
       "py": 103,
       "rust": 286,
@@ -297,6 +297,9 @@
           "_method_ret": 1,
           "_method_returns_value": 1,
           "_needs_sync": 1
+        },
+        "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
+          "_v3_fill_erased": 1
         }
       },
       "uncovered_statements": 3190
@@ -650,8 +653,8 @@
         "#850 added `_ComponentEmitter._extern_emit_fire` to the reference emitter and left this record off the ledger. The shipped corpus reaches the four `emission_fire` call sites, so the dispatch arm counts as covered, while the single `if` body that actually fires the extern hook is never taken: no document in the corpus declares an extern emit. services_body.rvl and witnessed.rvl pin every other shape in this region. A fixture that compiles an extern emit onto a component method is the corpus work that retires this entry.": {
           "_ComponentEmitter._extern_emit_fire": 1
         },
-        "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms. Item 130 §4.9 adds one statement: the durable-cursor subscription's self-describing disposer (`yield sub.durable_undo()`), which only a `replay(from: …)` program reaches and which selfhost/emit_py.rvl does not port, for the same reason the rest of the stream runtime boundary is not ported.": {
-          "_ComponentEmitter._body_step": 18
+        "Activation residuals: Map.cas conditional undo belongs to component host runtime; non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). Deferred/approval/await/stream paths belong to the named runtime boundaries. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms. Item 130 §4.9 adds one statement: the durable-cursor subscription's self-describing disposer (`yield sub.durable_undo()`), which only a `replay(from: …)` program reaches and which selfhost/emit_py.rvl does not port, for the same reason the rest of the stream runtime boundary is not ported. The `validated` async emission fix adds six statements to the activation-body `emit` arm: a `validated` async service operation fired as `await emit model.op(..)` renders its fire in async mode, so the await lands inside the seam (`_revl_validate((await <call>), ..)`) instead of around it. No py corpus document fires a validated operation from an activation body, and selfhost/emit_py.rvl does not carry the new form on main; backends/python/tests/test_validated_async_emit_activation.py runs it against cordis-py.": {
+          "_ComponentEmitter._body_step": 24
         },
         "Approval/lease runtime boundary: _approval_step renders frame.approval handles; _emit_fire renders approval_crossing with capability and callback. Neither exists in selfhost/emit_py.rvl. Representative accepted inputs are tests/test_approval_typed.py and tests/test_capability_leases.py::_SOURCE, not ordinary witnessed effects.": {
           "_ComponentEmitter._approval_step": 3,
@@ -1533,6 +1536,9 @@
         },
         "`has_any_word` tests the neighbours of an `any` only when the left one is not a word character; an erased `any` is always inside brackets and a user type name that contains the letters starts with a capital, so the empty neighbour and a digit right after a non-word left neighbour do not occur.": {
           "is_word_char": 2
+        },
+        "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
+          "fill_erased": 1
         }
       },
       "uncovered_statements": 86

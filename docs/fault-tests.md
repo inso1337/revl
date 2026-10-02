@@ -439,6 +439,18 @@ step N (`fault._inject`, section 2). What differs is how residue is *observed*:
   (`[run] NO-RESIDUE`). This is the same boot → LIFO teardown → no-residue
   round-trip the cross-tier suite already runs, now with the fault armed.
 
+  The program's extern bodies run in that same child and share its stdout,
+  so the proof is authenticated (issue #1621). The runner draws a per-run
+  token, sends it as the child's first stdin line, and sets only a
+  `proofOnStdin` flag in the spec. The child reads the token before any
+  component loads and tags its `UP`, `NO-RESIDUE`, `RESIDUE-LEFT` and `DOWN`
+  lines with it. The runner counts only tagged lines and shows them as the
+  usual `[run] ...`. A program that prints `[run] NO-RESIDUE` itself is shown
+  as program output and counts for nothing. The sweep reads the runner's
+  verified proof (`proof_out`), never the text. This does not cover host
+  code that reads the runner's own memory, and on the in-process py tier a
+  body that calls `os._exit(0)` still ends the checker with status 0.
+
 **Compensations are checked too, not only residue** (issue #1511). A
 compensation offsets an emission on the far side of a boundary, so the runtime
 is exactly as clean whether it ran or not: the residue proof cannot see it. At

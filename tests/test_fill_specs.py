@@ -72,7 +72,7 @@ def test_fill_spec_names_reachable_service_signatures():
     reachable = spec["reachableServices"]
     assert reachable == [{
         "service": "Db", "method": "q", "signature": "q(sql: Str) -> Str",
-        "instance": "db", "emission": False}]
+        "instance": "db", "emission": False, "callableHere": True}]
 
 
 def test_a_hole_in_a_non_emission_method_may_not_emit():
