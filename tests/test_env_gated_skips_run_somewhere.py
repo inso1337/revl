@@ -137,6 +137,14 @@ _INTENTIONALLY_LOCAL: dict[str, str] = {
         "runs in CI against a loopback fake server speaking the same wire "
         "format, so the gate hides a machine, not a code path."
     ),
+    "REVL_LIVE_OLLAMA_PROVISION_MODEL": (
+        "Opt-in live test of a model role's load and unload against a local "
+        "Ollama (item 515 S2, issue #1189). It loads real weights, so no CI "
+        "runner can set it, and it skips when the local server already holds "
+        "a model. Every other test in tests/test_model_provision_515.py runs "
+        "in CI against a loopback fake of the same native API, so the gate "
+        "hides a machine, not a code path."
+    ),
 }
 
 # Reading one of these is a read of the CHILD process's environment being

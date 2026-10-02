@@ -13,6 +13,13 @@ reach any other adapter: there is no fallback and no runtime choice.
 `PlacementRefused` with every refusal, so no host exists for a configuration
 the program's placement forbids, however the host was constructed.
 
+A host is also a CONSUMER of the provisions of the managed roles it routes to
+(`revl.providers.provision`, item 515 slice S2). Every host `build_hosts`
+returns shares one `Provisions`, keyed by role, so hosts at two keys that both
+reach `small` load it once. Whoever provides a host calls `_revl_open()` before
+the host is reachable and `_revl_close()` after the last component that could
+call it is gone; `revl run` and the placement runner both do.
+
 HOW ARGUMENTS BECOME A PROMPT
 -----------------------------
 A parameter named `system` of type `Str` is the system prompt. The remaining
@@ -49,7 +56,9 @@ from dataclasses import replace
 
 from .adapter import Adapter
 from .completion import Completion, CompletionRequest
+from .. import model_placement
 from .placement import Refusal, check_bindings, model_operations
+from .provision import Provisions
 from .structured import (CLAIMING, GrammarEngineError, Structured,
                          gemini_response_schema, recogniser_for,
                          representation, tool_input_schema)
@@ -139,13 +148,33 @@ class ModelHost:
     """Base class of the per-key host types `build_hosts` makes. Attribute
     names start with `_revl_` so no revl operation name can shadow one."""
 
-    def __init__(self, key: str, service: str, routes: dict) -> None:
+    def __init__(self, key: str, service: str, routes: dict,
+                 provisions: Provisions | None = None) -> None:
         self._revl_key = key
         self._revl_service = service
         # {method: (op, adapter)}, fixed at build time
         self._revl_routes = routes
         self._revl_last = None
+        self._revl_provisions = provisions or Provisions({})
+        self._revl_held: tuple = ()
         self._revl_runtime = None
+
+    def _revl_roles(self) -> set:
+        return {op.role for op, _ in self._revl_routes.values()}
+
+    def _revl_open(self) -> tuple:
+        """Acquire the provision of every managed role this host routes to
+        and the schedule placed here. The consumer is the host's key."""
+        if self._revl_held:
+            raise RuntimeError(f"model host `{self._revl_key}` is already open")
+        self._revl_held = self._revl_provisions.open(self._revl_key,
+                                                     self._revl_roles())
+        return self._revl_held
+
+    def _revl_close(self) -> None:
+        """Release what `_revl_open` acquired."""
+        held, self._revl_held = self._revl_held, ()
+        self._revl_provisions.close(self._revl_key, held)
 
     @property
     def last_completion(self) -> Completion | None:
@@ -161,6 +190,12 @@ class ModelHost:
 
     def _revl_prepare(self, method: str, args: tuple):
         op, adapter = self._revl_routes[method]
+        if adapter.managed:
+            # the schedule is asked on every call, not only at the load: a
+            # role the schedule did not place here refuses by name, and the
+            # device the member is loaded on must be the scheduled one
+            model_placement.claim(op.role, adapter.loaded_on
+                                  or model_placement.device_for(op.role))
         structured = structured_for(op, adapter.binding, self._revl_runtime)
         return op, adapter, replace(request_for(op, args),
                                     structured=structured)
@@ -252,13 +287,79 @@ def build_hosts(ir, placement, config, *, environ=None) -> dict:
                                         environ=environ)
         by_key.setdefault((op.key, op.service), {})[op.method] = (
             op, adapters[op.role])
+    provisions = Provisions(adapters)
     hosts = {}
     for (key, service), routes in by_key.items():
         methods = {name: _method(name, op.is_async)
                    for name, (op, _) in routes.items()}
         cls = type(f"ModelHost_{service}", (ModelHost,), methods)
-        hosts[key] = cls(key, service, routes)
+        hosts[key] = cls(key, service, routes, provisions)
     return hosts
+
+
+def open_hosts(hosts) -> None:
+    """Open every host in `hosts` (a mapping or iterable of hosts), in key
+    order. If one refuses, the ones already opened are closed again before
+    the refusal propagates, so a refused boot leaves nothing loaded."""
+    opened = []
+    try:
+        for host in _each(hosts):
+            host._revl_open()
+            opened.append(host)
+    except BaseException:
+        for host in reversed(opened):
+            try:
+                host._revl_close()
+            except Exception:  # noqa: BLE001 - the first refusal is the news
+                pass
+        raise
+
+
+def close_hosts(hosts) -> list:
+    """Close every host, in reverse key order. Returns the failures rather
+    than stopping at the first, so one bad unload does not strand the rest."""
+    failures = []
+    for host in reversed(list(_each(hosts))):
+        try:
+            host._revl_close()
+        except Exception as exc:  # noqa: BLE001 - reported by the caller
+            failures.append(f"{host._revl_key}: {type(exc).__name__}: {exc}")
+    return failures
+
+
+def has_provisions(hosts) -> bool:
+    """Whether any of `hosts` routes to a managed role, so there is a load
+    to make and a residue to prove."""
+    return any(p.roles() for p in _provision_sets(hosts))
+
+
+def provision_residue(hosts) -> dict:
+    """`{role: [problem, ...]}` over the provisions `hosts` share."""
+    out: dict = {}
+    for provisions in _provision_sets(hosts):
+        out.update(provisions.residue())
+    return out
+
+
+def provision_summaries(hosts) -> list:
+    """One line per role that was loaded."""
+    return [line for provisions in _provision_sets(hosts)
+            for line in provisions.summaries()]
+
+
+def _each(hosts):
+    items = hosts.items() if isinstance(hosts, dict) else (
+        (h._revl_key, h) for h in hosts)
+    return [host for _, host in sorted(items, key=lambda kv: kv[0])
+            if isinstance(host, ModelHost)]
+
+
+def _provision_sets(hosts) -> list:
+    seen: list = []
+    for host in _each(hosts):
+        if not any(host._revl_provisions is p for p in seen):
+            seen.append(host._revl_provisions)
+    return seen
 
 
 def grammar_refusals(config, ops) -> list:

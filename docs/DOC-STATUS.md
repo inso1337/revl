@@ -122,7 +122,7 @@ was corrected by hand and had drifted back within a day.
 | eval-protocol.md | needs-work | 0 |  |
 | evolve-loop.md | current | 18 |  |
 | expressible-iteration.md | needs-work | 14 |  |
-| fault-tests.md | needs-work | 70 |  |
+| fault-tests.md | needs-work | 71 |  |
 | federation.md | current | 16 |  |
 | fix-code.md | needs-work | 10 |  |
 | fmt.md | needs-work | 14 |  |
@@ -166,6 +166,7 @@ was corrected by hand and had drifted back within a day.
 | prop-test.md | needs-work | 23 |  |
 | providers-anthropic.md | current | 0 | written with issue #1461 |
 | providers-gemini.md | current | 0 | written with issue #1461 |
+| providers-ollama.md | current | 0 | written with issue #1189 (item 515 S2) |
 | providers-openai-compatible.md | current | 0 | written with issue #1461 |
 | quarantine-tier.md | needs-work | 25 |  |
 | queries.md | needs-work | 43 |  |
