@@ -187,7 +187,13 @@ fn handle_conn(
                     let _guard = estop::CrossingGuard::new(key, method, "accept");
                     components::_revl_invoke(&ctx, key, method, &args)
                 };
-                serde_json::json!({ "ok": true, "value": value })
+                // issue #1634: a call the generated dispatch could not make is
+                // an error reply. It used to come back as `null` and be sent as
+                // `ok: true`.
+                match value {
+                    Ok(value) => serde_json::json!({ "ok": true, "value": value }),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                }
             }
             None => serde_json::json!({
                 "ok": false,
@@ -245,14 +251,18 @@ fn spawn_listener(
 /// activation (the runtime has no root-level require, so probing rides a plugin).
 fn probe_plugin(name: String, key: String, method: String, args: Vec<J>) -> cordis::PluginHandle {
     cordis::plugin_sync::<(), _>("RevlProbe", cordis::Inject::new([key.as_str()]), move |ctx, _config| {
-        let value = components::_revl_invoke(&ctx, &key, &method, &args);
+        let rendered = match components::_revl_invoke(&ctx, &key, &method, &args) {
+            Ok(value) => format!("-> {value}"),
+            // issue #1634: a probe that could not be made says so
+            Err(error) => format!("ERROR {error}"),
+        };
         // item 421 F6(c): this line is written by the runner, not by the emitted
         // runtime, so it does not pass through the emitted trace choke point.
         // The returned value is the one thing on this channel that can hold a
         // registered secret, so the whole rendered line goes through the funnel
         // (confidential.rs) rather than the value alone.
         println!("{}", confidential::revl_redact_text(format!(
-            "[{name}] probe | {key}.{method}(...) -> {value}")));
+            "[{name}] probe | {key}.{method}(...) {rendered}")));
         Ok(cordis::PluginOutput::none())
     })
 }

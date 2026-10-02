@@ -51,7 +51,7 @@
     "reference": {
       "go": 2839,
       "java": 986,
-      "py": 667,
+      "py": 669,
       "rust": 1200,
       "ts": 580,
       "wasm": 1558
@@ -674,14 +674,15 @@
           "_ComponentEmitter._stream_iter": 25
         },
         "Async timer boundary only: _timer's inflight set, ensure_future callbacks, cancellation loop and async import are selected by a coroutine-reachable emission. services_timers.rvl covers both synchronous modes; async extern/service inputs require the excluded await/coloring surface.": {
-          "_ComponentEmitter._timer": 19
+          "_ComponentEmitter._timer": 20
         },
         "Async/walrus match-binding path: _match_expr.bind_payload uses a walrus for emitter temps or a comprehension to retain an awaited binder; _walrus_temp recognizes generated names/optional-temp regex. Sync binder use/folding is covered by result/control/services_match and branches fixtures. Async match source is represented by emit_ts_corpus/async_module_switch.rvl; async lowering is the retained boundary, not ordinary match.": {
           "_match_expr.bind_payload": 3,
           "_walrus_temp": 1
         },
-        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run.": {
-          "_ComponentEmitter._compensated_extern": 3
+        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run. `_ComponentEmitter._timer_compensation` registers the same compensation on a timer firing (issue #1589) and is unreached for the same reason; its one call on the async-timer path adds one statement to `_ComponentEmitter._timer`.": {
+          "_ComponentEmitter._compensated_extern": 3,
+          "_ComponentEmitter._timer_compensation": 1
         },
         "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal).": {
           "_ComponentEmitter._expr": 81
