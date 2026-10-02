@@ -9111,47 +9111,10 @@ fn note_host_emission(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
     return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), vec![String::from("a host emission")]), ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
 }
 
-fn svc_recv_head(e: Expr, cx: Ctx__m2) -> bool {
-    return match e {
-    Expr::Call(c) => { let c = *c; match c.target {
-    Expr::Field(fl) => { let fl = *fl; (((svc_live(cx.clone()) && svc_local_first(fl.clone(), cx.clone())) && (!svc_reads_param(fl.target.clone(), cx.clone()))) && svc_recv_msig(fl.target.clone(), &fl.name, cx.clone()).isEm) },
-    _ => false,
-} },
-    _ => false,
-};
-}
-
-fn handle_head_ref(e: Expr, cx: Ctx__m2) -> bool {
-    return match e {
-    Expr::Call(c) => { let c = *c; match c.target {
-    Expr::Field(fl) => { let fl = *fl; match fl.target {
-    Expr::Field(inner) => { let inner = *inner; match inner.target {
-    Expr::Var(h) => cx.handles.contains_key(&h),
-    _ => false,
-} },
-    Expr::Var(v) => cx.provAlias.contains_key(&v),
-    _ => false,
-} },
-    _ => false,
-} },
-    _ => false,
-};
-}
-
-fn note_handle_emission(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
-    if ((s.kind != "emit") || (s.bind != "")) {
-        return a;
-    }
-    if ((!handle_head_ref(s.e.clone(), cx.clone())) && (!svc_recv_head(s.e.clone(), cx.clone()))) {
-        return a;
-    }
-    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), vec![String::from("a host emission")]), ecaps: union_into(a.ecaps.clone(), vec![String::from("*")]), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
-}
-
 fn walk_one_stmt(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
     let marked = ((s.kind == "emit") || (s.kind == "compensate"));
     let scx = ctx_acq(cx.clone(), stmt_acq_where(&s.kind));
-    let na = note_handle_emission(s.clone(), cx.clone(), note_host_emission(s.clone(), cx.clone(), a.clone()));
+    let na = note_host_emission(s.clone(), cx.clone(), a.clone());
     let root_ = acq_root_of(s.clone());
     if root_.hit {
         return walk_exprs(&root_.args, 0i64, marked.clone(), scx.clone(), na.clone());
@@ -9661,7 +9624,7 @@ fn call_check(tg: Expr, args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
         return ac_refuse(a.clone(), String::from("G4"), lr.clone());
     }
     let pa = match tg.clone() {
-    Expr::Field(fl) => { let fl = *fl; if svc_local_first(fl.clone(), cx.clone()) { svc_param_note(fl.target.clone(), &fl.name, cx.clone(), a.clone()) } else { a.clone() } },
+    Expr::Field(fl) => { let fl = *fl; if svc_local_first(fl.clone(), cx.clone()) { svc_recv_note(fl.target.clone(), &fl.name, cx.clone(), a.clone()) } else { a.clone() } },
     _ => a,
 };
     return match tg.clone() {
@@ -9726,6 +9689,19 @@ fn handle_emit(h: String, key: &str, op: &str, args: &[Expr], marked: bool, cx: 
         return ac_refuse(a.clone(), String::from("G4"), (((((String::from("call to emission `").revl_concat(&h)).revl_concat(".")).revl_concat(&key)).revl_concat(".")).revl_concat(&op)).revl_concat("` must be marked `emit` (G4)"));
     }
     let mut na = a.clone();
+    if decl.isEm {
+        let comp = match cx.handles.get(&h).cloned() {
+    Some(c) => c,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+        let svcName = match cx.provKeySvc.get(&(comp.revl_concat("#")).revl_concat(&key)).cloned() {
+    Some(sv) => sv,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+        na = Ac { msg: na.msg.clone(), tag: na.tag.clone(), labels: union_into(na.labels.clone(), vec![(svcName.revl_concat(".")).revl_concat(&op)]), ecaps: union_into(na.ecaps.clone(), if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] }), areach: na.areach.clone(), aops: na.aops.clone(), avals: na.avals.clone() };
+    }
     if (decl.isAsync && (!cx.underArrow)) {
         na = Ac { msg: String::from(""), tag: String::from(""), labels: na.labels.clone(), ecaps: na.ecaps.clone(), areach: na.areach.clone(), aops: union_into(na.aops.clone(), vec![(((h.revl_concat(".")).revl_concat(&key)).revl_concat(".")).revl_concat(&op)]), avals: na.avals.clone() };
     }
@@ -10278,45 +10254,8 @@ fn svc_ty_mentions(ty: &str, cx: Ctx__m2) -> bool {
     return false;
 }
 
-fn svc_reads_param(e: Expr, cx: Ctx__m2) -> bool {
-    return match e {
-    Expr::Var(n) => (tenv_get(&cx.svcTys, &(String::from("param ").revl_concat(&n))) == "1"),
-    Expr::Field(f) => { let f = *f; svc_reads_param(f.target, cx.clone()) },
-    Expr::Index(x) => { let x = *x; (svc_reads_param(x.target.clone(), cx.clone()) || svc_reads_param(x.idx.clone(), cx.clone())) },
-    Expr::If(x) => { let x = *x; ((svc_reads_param(x.cond.clone(), cx.clone()) || svc_reads_param(x.then_.clone(), cx.clone())) || svc_reads_param(x.els.clone(), cx.clone())) },
-    Expr::Match(m) => { let m = *m; (svc_reads_param(m.scrut.clone(), cx.clone()) || svc_reads_arms(&m.arms, 0i64, cx.clone())) },
-    Expr::Rec(r) => svc_reads_inits(&r.fields, 0i64, cx.clone()),
-    Expr::Lst(l) => svc_reads_list(&l.items, 0i64, cx.clone()),
-    Expr::Call(c) => { let c = *c; (svc_reads_param(c.target.clone(), cx.clone()) || svc_reads_list(&c.args, 0i64, cx.clone())) },
-    Expr::Bin(b) => { let b = *b; (svc_reads_param(b.l.clone(), cx.clone()) || svc_reads_param(b.r.clone(), cx.clone())) },
-    Expr::Un(u) => { let u = *u; svc_reads_param(u.e, cx.clone()) },
-    _ => false,
-};
-}
-
-fn svc_reads_list(xs: &[Expr], i: i64, cx: Ctx__m2) -> bool {
-    if (i >= xs.revl_length()) {
-        return false;
-    }
-    return (svc_reads_param((xs)[(i) as usize].clone(), cx.clone()) || svc_reads_list(xs, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone()));
-}
-
-fn svc_reads_inits(xs: &[InitN], i: i64, cx: Ctx__m2) -> bool {
-    if (i >= xs.revl_length()) {
-        return false;
-    }
-    return (svc_reads_param((xs)[(i) as usize].value.clone(), cx.clone()) || svc_reads_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone()));
-}
-
-fn svc_reads_arms(xs: &[ArmN], i: i64, cx: Ctx__m2) -> bool {
-    if (i >= xs.revl_length()) {
-        return false;
-    }
-    return (svc_reads_param((xs)[(i) as usize].body.clone(), cx.clone()) || svc_reads_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone()));
-}
-
-fn svc_param_note(recv: Expr, op: &str, cx: Ctx__m2, a: Ac) -> Ac {
-    if ((!svc_live(cx.clone())) || (!svc_reads_param(recv.clone(), cx.clone()))) {
+fn svc_recv_note(recv: Expr, op: &str, cx: Ctx__m2, a: Ac) -> Ac {
+    if (!svc_live(cx.clone())) {
         return a;
     }
     let decl = svc_recv_msig(recv.clone(), op, cx.clone());
@@ -30182,8 +30121,8 @@ fn a_marked_crossing_through_a_list_literal_read_in_place_meets_the_floor() {
 
 #[test]
 fn a_step_through_an_if_bound_provision_local_meets_a_scoped_upper_bound() {
-    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[production.payment] fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
-    assert!((v == "G4|`Till.go` is declared `emission[production.payment]`, but this implementation emits through an unnameable host boundary (reaching `a host emission`)"));
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[audit.log] fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"));
 }
 
 #[test]
@@ -30202,6 +30141,18 @@ fn a_crossing_through_a_service_typed_parameter_fits_the_declared_bound() {
 fn a_crossing_through_a_service_typed_parameter_inside_its_bound_is_admitted() {
     let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[production.payment] fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      emit p.charge(n)\n      return 0\n    }\n  }\n}"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_spawn_handle_step_under_a_bound_covering_the_op_s_scope_is_admitted() {
+    let v = admit_src(String::from("service Task { emission[net] fn go() -> Int }\nservice Sup { emission[net] fn run() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() = 0 }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup {\n    fn run() {\n      let w = effect spawn Worker with { } undo w.dispose()\n      emit w.task.go()\n      return 0\n    }\n  }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn a_spawn_handle_value_under_a_bound_missing_the_op_s_scope_is_refused() {
+    let v = admit_src(String::from("service Task { emission[net] fn go() -> Int }\nservice Sup { emission[db] fn run() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() = 0 }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup {\n    fn run() {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let r = emit w.task.go()\n      return r\n    }\n  }\n}"));
+    assert!((v == "G4|`Sup.run` is declared `emission[db]`, but this implementation emits through `net` (reaching `Task.go`)"));
 }
 
 #[test]

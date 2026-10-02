@@ -969,11 +969,12 @@ class Env:
         # A provide method's own parameters whose declared type mentions a
         # service (issue #1682): a call through one is a crossing of that
         # service's declared emission scopes, judged in the method like any
-        # other. `param_crossings` carries what the body crossed through them,
-        # by IR node, from the body walk to the provider upper bound, which
-        # runs after the method's type environment is restored.
+        # other. `resolved_crossings` carries what the body crossed through a
+        # resolved receiver (a parameter, a spawn handle, a service-typed
+        # local; issue #1508), by IR node, from the body walk to the provider
+        # upper bound, which runs after the method's types are restored.
         self.service_params: set = set()
-        self.param_crossings: dict = {}
+        self.resolved_crossings: dict = {}
         # item 130: stream lifecycle tracking. `terminal_stream_sources` holds
         # the safe names of stream sources (`let s = effect Stream.source() undo
         # s.close()`) whose inverse CLOSES the source — the terminal-delivering
@@ -13348,9 +13349,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         _check_intent_completeness(decl, mbody, env, svc.name, method.name,
                                    comp.source or filename, method.line)
         safe_params = [env.params[p] for p in method.params]
-        # issue #1682: what the body crossed through a service-typed
-        # parameter, read while the method's types are still in scope
-        env.param_crossings = _param_crossings(mbody, env)
+        # issues #1682 and #1508: what the body crossed through a resolved
+        # receiver, read while the method's types are still in scope
+        env.resolved_crossings = _resolved_crossings(mbody, env)
         env.params = saved
         env.declared_intent = saved_intent
         env.stated_crossings = saved_stated
@@ -13437,7 +13438,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                     code="G4", category="emission-capability",
                 )
 
-        env.param_crossings = {}
+        env.resolved_crossings = {}
 
         # sync/async arrow polymorphism (item 342): in a SYNC method, redirect
         # each call of a colour-polymorphic fn that receives only genuinely-sync
@@ -13703,14 +13704,16 @@ def _check_intent_refinement(stmt: EmitStmt, node: dict, env: Env) -> None:
                  "adding `tenant:` and `scopes:` where the intent bounds them "
                  "(item 470)",
             code="G4", category="intent-refinement")
-    crossed = _emit_crossed_caps(node, env)
+    crossed = _resolved_crossed_caps(node, env)
     if not crossed or "*" in crossed:
         # The crossing names no capability this check can compare: a bare
         # `emission` operation, or a shape whose boundary set the per-crossing
-        # resolution cannot pin down (a provision call off a spawn handle, a
-        # service-typed local, an unclassified extern). Either way no declared
-        # object can be SHOWN to cover it, and reading the unnameable as the
-        # declared one is the direction the whole kernel was built to close.
+        # resolution cannot pin down (an unclassified extern, a `fn` hop).
+        # Either way no declared object can be SHOWN to cover it, and reading
+        # the unnameable as the declared one is the direction the whole kernel
+        # was built to close. A provision call off a spawn handle and a call
+        # through a service-typed receiver ARE named, at the op's declared
+        # scope (`_resolved_crossed_caps`, issue #1508).
         _refuse_unnameable_crossing(clause, where, filename, stmt.line, "`emit`")
     for token in crossed:
         _refine_one_crossing(token, clause, acting, where, filename, stmt.line,
@@ -13773,7 +13776,7 @@ def _check_let_intent_refinement(stmt, value, env: Env) -> None:
                  "clause on an unmarked value would leave the real crossing "
                  "unstated (item 470)",
             code="G4", category="intent-refinement")
-    crossed = _emit_crossed_caps(value, env)
+    crossed = _resolved_crossed_caps(value, env)
     if not crossed or "*" in crossed:
         _refuse_unnameable_crossing(clause, where, filename, stmt.line, "`let`")
     for token in crossed:
@@ -14025,38 +14028,39 @@ def _compensate_crossings(node, env: Env) -> list:
     return found
 
 
+def _resolved_crossed_caps(node: dict, env: Env) -> list:
+    """The capability tokens one crossing's HEAD reaches, through the one
+    resolver every reader of a crossing shares. `_emit_crossed_caps` names a
+    `req` service emission and a direct host emission extern; a provision call
+    off a spawn handle (`w.<key>.<op>(...)`, the same through a local aliasing
+    `w.<key>`) and a call through a service-typed receiver (a `let` local, a
+    receiver written in place, a provide method's own parameter) resolve to the
+    op's declared `emission[...]` scope, `*` when bare
+    (`_instance_get_call`, `_service_receiver_decl`, the resolvers the marker
+    rule uses for those carriers).
+
+    Read by the approval floor (`_approval_crossed_caps`) and by item 470's
+    intent check (issue #1508). Kept apart from `_emit_crossed_caps`, whose
+    other readers keep their own reading."""
+    crossed = _emit_crossed_caps(node, env)
+    if crossed:
+        return crossed
+    inst = _instance_get_call(node, env)
+    decl = inst[1] if inst is not None else _service_receiver_decl(node, env)
+    if decl is not None and decl.emission:
+        caps = getattr(decl, "capabilities", None)
+        return list(caps) if caps else ["*"]
+    return crossed
+
+
 def _approval_crossed_caps(node: dict, env: Env) -> list:
     """The capability tokens one marked crossing reaches, for the approval
-    floor. `_emit_crossed_caps` resolves the HEAD: a `req` service emission or a
-    direct host emission extern. A marked call to a module `fn` that reaches an
-    emission extern crosses what that `fn` reaches, so its tokens come from the
-    emission fixed point (`env.emitting_caps`). Without this, `emit helper(1)`
-    carried `charge`'s crossing past the floor that `emit charge(1)` meets.
-
-    A spawn-handle crossing contributes its op's declared scope the same way.
-
-    Kept apart from `_emit_crossed_caps` on purpose: item 470's refinement reads
-    that function and refuses a crossing it cannot name, and widening it would
-    change that judgment too."""
-    crossed = _emit_crossed_caps(node, env)
-    if not crossed:
-        # a provision method call off a spawn handle (`w.<key>.<op>(...)`, or
-        # the same through a local aliasing `w.<key>`): the op's declared scope
-        # on the service that key yields, `*` when bare, resolved by
-        # `_instance_get_call`, the resolver the marker rule already uses for
-        # this carrier. Resolved here and not in `_emit_crossed_caps`, because
-        # item 470's refinement reads that function and refuses a handle
-        # crossing as unnameable; resolving it there would loosen that check.
-        inst = _instance_get_call(node, env)
-        if inst is not None:
-            caps = getattr(inst[1], "capabilities", None)
-            return list(caps) if caps else ["*"]
-        # a call through a service-typed local (issue #1509), resolved by the
-        # resolver the marker rule reads: the op's declared scope, `*` when bare
-        decl = _service_receiver_decl(node, env)
-        if decl is not None and decl.emission:
-            caps = getattr(decl, "capabilities", None)
-            return list(caps) if caps else ["*"]
+    floor: the head as `_resolved_crossed_caps` names it, and a marked call to
+    a module `fn` that reaches an emission extern, whose tokens come from the
+    emission fixed point (`env.emitting_caps`). Without the latter,
+    `emit helper(1)` carried `charge`'s crossing past the floor that
+    `emit charge(1)` meets."""
+    crossed = _resolved_crossed_caps(node, env)
     if not crossed and node.get("kind") == "fn":
         reached = (getattr(env, "emitting_caps", None) or {}).get(node.get("name"))
         crossed = sorted(reached or ())
@@ -14742,41 +14746,44 @@ def _receiver_names_decided(recv, env: Env) -> bool:
     return ok(recv)
 
 
-def _param_crossings(body, env: Env) -> dict:
-    """Every emission crossing a provide-method body makes through a receiver
-    that reads one of its own service-typed parameters (issue #1682), by IR
-    node: `id(node) -> (label, capabilities)`. The label is `<Service>.<op>`
-    and the capabilities are the op's declared scope, `{"*"}` when bare. Read
-    by the provider upper bound (`_method_emissions`), which runs after the
-    method's type environment is restored and so cannot resolve them itself."""
-    params = getattr(env, "service_params", None) or set()
-    out: dict = {}
-    if not params:
-        return out
+def _resolved_crossings(body, env: Env) -> dict:
+    """Every emission crossing a provide-method body makes through a resolved
+    receiver, by IR node: `id(node) -> (label, capabilities)`. Issues #1682 and
+    #1508.
 
-    def reads_param(n) -> bool:
-        if isinstance(n, dict):
-            if n.get("kind") == "name" and n.get("id") in params:
-                return True
-            return any(reads_param(v) for v in n.values())
-        if isinstance(n, list):
-            return any(reads_param(v) for v in n)
-        return False
+    A resolved receiver is one the shared resolver names (`_instance_get_call`,
+    `_service_receiver_decl`): a provision call off a spawn handle, the same
+    through an alias, a service-typed `let` local or a receiver written in
+    place, and a provide method's own service-typed parameter. The label is
+    `<Service>.<op>` and the capabilities are the op's declared scope,
+    `{"*"}` when bare. The declared scope is a fact the provider is held to by
+    its own G4 provider bound, which is why the crossing can be read at it.
+
+    Read by the provider upper bound (`_method_emissions`), which runs after
+    the method's type environment is restored and so cannot resolve them
+    itself. A step through one is therefore not a host emission."""
+    out: dict = {}
 
     def walk(n) -> None:
         if isinstance(n, dict):
             if n.get("kind") == "call":
-                decl = _service_receiver_decl(n, env)
-                if decl is not None and decl.emission:
-                    target = n.get("target")
-                    recv = target if isinstance(target, dict) else \
-                        (n.get("callee") or {}).get("target")
-                    if reads_param(recv):
+                inst = _instance_get_call(n, env)
+                if inst is not None:
+                    recv, decl = inst
+                    head = recv.get("service")
+                else:
+                    decl = _service_receiver_decl(n, env)
+                    head = None
+                    if decl is not None:
+                        target = n.get("target")
+                        recv = target if isinstance(target, dict) else \
+                            (n.get("callee") or {}).get("target")
                         ty = infer_ir(recv, env.type_env, env.types,
                                       env.services)
                         head, _ = parse_type(ty or "")
-                        caps = set(getattr(decl, "capabilities", None) or ())
-                        out[id(n)] = (f"{head}.{decl.name}", caps or {"*"})
+                if decl is not None and decl.emission and head:
+                    caps = set(getattr(decl, "capabilities", None) or ())
+                    out[id(n)] = (f"{head}.{decl.name}", caps or {"*"})
             for v in n.values():
                 walk(v)
         elif isinstance(n, list):
