@@ -456,6 +456,13 @@ component Renamer {
 
 Fix, when the collision was deliberate: rename the source binding.
 
+A provided service method's name is part of its contract: the bridge, the
+router and every dispatcher look it up by that string. So no tier renames it
+where a caller can see it. On ts a keyword is a legal property name, and the
+method keeps its contract name at the interface, the definition and every call
+(`s.delete(x)`, issue #1512). On py the `def` is renamed (`class_`) and the
+provided class carries the contract name as an alias (issue #1474).
+
 ## A5 — compensation accompanies an emission
 
 No refusing example: `compensate` is an *optional* slot (DESIGN.md §3.5 —
@@ -874,7 +881,9 @@ an admitted program is byte-identical to the same program without it.
 
 Rejections that enforce no guarantee code exist too, and follow the same
 message-plus-hint discipline: parse and lex errors (`expected ..., found
-...` — classified `SYNTAX`), arithmetic definedness (`mod` by a literal
+...` — classified `SYNTAX`; a `requires`/`provides` clause written inside a
+component body is its own `SYNTAX` refusal, category `header`, whose `fix` is
+the corrected header line), arithmetic definedness (`mod` by a literal
 zero), integer literal range, lifecycle-test mistakes (`unknown component
 Ghost`, `` `Kv` is already loaded ``), realm-label rules, and module-system
 refusals (missing import, private access). Each has its entry in

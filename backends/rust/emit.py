@@ -185,6 +185,19 @@ def _mname(name: str) -> str:
     return name
 
 
+def _method_ident(name: object) -> str:
+    """The ONE Rust spelling of a revl service method, at every site: the trait
+    declaration, a provider's impl, a router's impl, the bridge proxy and its
+    dispatch, a call through a required service and a lifecycle `call`
+    (issue #1512). `_mname` moves a name off the destructor and the smart
+    pointer's methods; `_ident` then moves a Rust keyword (`box`, `match`,
+    `type`, ...) onto the append-`_` ladder. Every site spelling it through
+    here is what keeps them agreeing: the impl named `box_` while the proxy and
+    the dispatch said `box`, which rustc refused as a keyword. The contract
+    name on the wire and every lookup in the service table stay the revl name."""
+    return _ident(_mname(name), "method")
+
+
 class EmitError(ValueError):
     """The IR document violates the backend contract."""
 
@@ -2318,7 +2331,7 @@ def _emit_service_traits(services: dict, types: dict | None = None) -> list[str]
             # pointer the emitter wraps a service in, and the trait method the
             # impls satisfy has to spell the renamed name too or the impl fails
             # to name a trait member (and the user method is never dispatched).
-            emitted_mname = _ident(_mname(mname), "method")
+            emitted_mname = _method_ident(mname)
             params = ", ".join(
                 f"{_ident(p.get('name'), 'parameter')}: {_rust_type(p.get('type'), types)}"
                 for p in method.get("params") or []
@@ -4786,7 +4799,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
         )
         for method in provide.get("methods") or []:
             original_mname = method.get("name")
-            mname = _ident(_mname(original_mname), "method")
+            mname = _method_ident(original_mname)
             params = ", ".join(
                 f"{p}: {_rust_type(_param_type(env, key, original_mname, p), env.types)}"
                 for p in method.get("params") or []
@@ -5060,7 +5073,7 @@ def _emit_router_struct(env: "_Env", cname: str, key: str, service: str,
         f"impl {service} for {struct} {{",
     ]
     for mname, method in methods.items():
-        rmname = _mname(mname)
+        rmname = _method_ident(mname)
         params = ", ".join(
             f"{_ident(p.get('name'), 'parameter')}: {_rust_type(p.get('type'), env.types)}"
             for p in method.get("params") or []
@@ -5144,7 +5157,9 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
             {"methods": []},
         )
         for method in provide.get("methods") or []:
-            mname = _ident(method.get("name"), "method")
+            # issue #1512: the service table is keyed by the revl name; the
+            # Rust spelling is for the `fn` alone.
+            mname = method.get("name")
             params = ", ".join(
                 f"{p}: {_rust_type(_param_type(env, key, mname, p), env.types)}"
                 for p in method.get("params") or []
@@ -5167,7 +5182,7 @@ def _emit_component(component: dict, services: dict, ir: dict | None = None) -> 
                 env, key, mname, method.get("params") or [])
             mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
                            for p, t in secret_params)
-            out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
+            out.append(f"    fn {_method_ident(mname)}(&self, {params}) -> {ret} {{ {mark}{_method_body(env, method)} }}")
         out.append("}")
         out.append("")
 
@@ -6825,7 +6840,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
             return f"{callee}({', '.join(bv_args)})"
         # component form: `target.method(args)`.
         target = node.get("target") or {}
-        method = _ident(_mname(node.get("method")), "method")
+        method = _method_ident(node.get("method"))
         arg_nodes = node.get("args") or []
         arg_exprs = [_render_expr(a, ctx, rename) for a in arg_nodes]
         recv_ty = str(
@@ -8558,7 +8573,7 @@ def _emit_v3_lifecycle_tests(tests: list, types: dict, functions: list,
                 service = provided.get(key)
                 if service is None:  # pragma: no cover — the lowerer rejects it
                     raise EmitError(f"{where}: no provider for key {key!r}")
-                method_name = _mname(step["method"])
+                method_name = _method_ident(step["method"])
                 method = (method_tables.get(service) or {}).get(step["method"])
                 if method is None:  # pragma: no cover — the lowerer rejects it
                     raise EmitError(f"{where}: unknown method {step['method']!r}")
@@ -9541,7 +9556,7 @@ def _emit_bridge(ir: dict) -> list[str]:
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             argvec = ", ".join(_bridge_arg_ser(p["name"], _rust_type(p.get("type"), types)) for p in params)
             deser = _bridge_ret_deser("_v", ret)
-            out.append(f"    fn {_mname(mname)}(&self, {plist}) -> {ret} {{")
+            out.append(f"    fn {_method_ident(mname)}(&self, {plist}) -> {ret} {{")
             if deser is None:
                 out.append(f'        panic!("bridge proxy: unsupported return type for {sname}.{mname}");')
             else:
@@ -9560,7 +9575,7 @@ def _emit_bridge(ir: dict) -> list[str]:
             if any(e is None for e in extracts):
                 out.append(f'        "{mname}" => serde_json::Value::Null, // unmarshalled param type')
                 continue
-            call = f"svc.{_mname(mname)}({', '.join(extracts)})"
+            call = f"svc.{_method_ident(mname)}({', '.join(extracts)})"
             out.append(f'        "{mname}" => {_bridge_ret_ser(call, ret)},')
         out.append("        _ => serde_json::Value::Null,")
         out.append("    }")

@@ -1,0 +1,39 @@
+// In-file `test` blocks on the go tier (issue #106): each one is a
+// `func TestX(revlT *testing.T)` whose asserts fail through the receiver, and
+// the module imports `testing`. The second test accumulates a string in a loop,
+// so its builder is numbered against the names the last function left reserved,
+// the way the reference's shared ctx numbers it, and the last three pin the Go
+// test-name rules.
+
+fn coalesce(o: Opt[Int]) -> Int { return o ?? 0 }
+
+fn joined(xs: List[Str]) -> Str {
+  var out = ""
+  for (x of xs) { out = out + x }
+  return out
+}
+
+test "coalesce defaults a missing value" {
+  assert coalesce(None) == 0
+  assert coalesce(Some(3)) == 3
+}
+
+test "a loop accumulates through a builder" {
+  var acc = ""
+  for (p of ["1", "a", "2"]) { acc = acc + p }
+  assert acc == joined(["1", "a", "2"])
+}
+
+// Go test names: a name with no letters or digits falls back to `TestCase`,
+// and two names that normalise alike are numbered.
+test "!!" {
+  assert true
+}
+
+test "edge-case" {
+  assert coalesce(Some(1)) == 1
+}
+
+test "edge case" {
+  assert coalesce(None) == 0
+}

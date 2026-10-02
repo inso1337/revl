@@ -1,0 +1,5247 @@
+{
+  "ir_version": 1,
+  "services": {
+    "S": {
+      "methods": {
+        "case": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "catch": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "class": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "const": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "debugger": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "default": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "delete": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "do": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "enum": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "export": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "extends": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "finally": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "function": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "import": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "instanceof": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "new": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "super": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "switch": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "this": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "throw": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "try": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "typeof": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "void": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "implements": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "interface": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "package": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "private": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "protected": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "public": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "static": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "yield": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "abstract": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "accessor": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "asserts": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "any": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "boolean": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "constructor": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "declare": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "get": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "infer": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "intrinsic": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "is": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "keyof": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "module": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "namespace": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "never": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "out": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "readonly": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "require": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "number": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "object": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "satisfies": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "set": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "string": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "symbol": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "undefined": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "unique": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "unknown": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "using": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "from": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "global": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "bigint": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "override": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "defer": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "class_": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "delete_": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "let_": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "yield__": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    },
+    "Ops": {
+      "methods": {
+        "run0": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run1": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run2": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run3": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run4": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run5": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run6": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run7": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run8": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run9": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run10": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run11": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run12": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run13": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run14": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run15": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run16": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run17": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run18": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run19": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run20": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run21": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run22": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run23": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run24": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run25": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run26": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run27": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run28": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run29": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run30": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run31": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run32": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run33": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run34": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run35": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run36": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run37": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run38": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run39": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run40": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run41": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run42": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run43": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run44": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run45": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run46": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run47": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run48": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run49": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run50": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run51": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run52": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run53": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run54": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run55": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run56": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run57": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run58": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run59": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run60": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run61": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run62": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run63": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run64": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run65": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run66": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        },
+        "run67": {
+          "params": [
+            {
+              "name": "x",
+              "type": "Int"
+            }
+          ],
+          "returns": "Int",
+          "emission": false
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "P",
+      "source": "reserved_method_names.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "s": "S"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "s",
+          "service": "S",
+          "methods": [
+            {
+              "name": "case",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "catch",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "class",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "const",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "debugger",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "default",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "delete",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "do",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "enum",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "export",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "extends",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "finally",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "function",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "import",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "instanceof",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "new",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "super",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "switch",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "this",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "throw",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "try",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "typeof",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "void",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "implements",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "interface",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "package",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "private",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "protected",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "public",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "static",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "yield",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "abstract",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "accessor",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "asserts",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "any",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "boolean",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "constructor",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "declare",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "get",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "infer",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "intrinsic",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "is",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "keyof",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "module",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "namespace",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "never",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "out",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "readonly",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "require",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "number",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "object",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "satisfies",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "set",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "string",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "symbol",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "undefined",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "unique",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "unknown",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "using",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "from",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "global",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "bigint",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "override",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "defer",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "class_",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "delete_",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "let_",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "yield__",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "name",
+                      "id": "x"
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "C",
+      "source": "reserved_method_names.rvl",
+      "config": [],
+      "requires": {
+        "s": "S"
+      },
+      "provides": {
+        "ops": "Ops"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "ops",
+          "service": "Ops",
+          "methods": [
+            {
+              "name": "run0",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "case",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run1",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "catch",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run2",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "class",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run3",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "const",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run4",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "debugger",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run5",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "default",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run6",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "delete",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run7",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "do",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run8",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "enum",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run9",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "export",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run10",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "extends",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run11",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "finally",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run12",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "function",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run13",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "import",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run14",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "instanceof",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run15",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "new",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run16",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "super",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run17",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "switch",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run18",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "this",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run19",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "throw",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run20",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "try",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run21",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "typeof",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run22",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "void",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run23",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "implements",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run24",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "interface",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run25",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "package",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run26",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "private",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run27",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "protected",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run28",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "public",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run29",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "static",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run30",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "yield",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run31",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "abstract",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run32",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "accessor",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run33",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "asserts",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run34",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "any",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run35",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "boolean",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run36",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "constructor",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run37",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "declare",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run38",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "get",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run39",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "infer",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run40",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "intrinsic",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run41",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "is",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run42",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "keyof",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run43",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "module",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run44",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "namespace",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run45",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "never",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run46",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "out",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run47",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "readonly",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run48",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "require",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run49",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "number",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run50",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "object",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run51",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "satisfies",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run52",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "set",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run53",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "string",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run54",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "symbol",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run55",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "undefined",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run56",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "unique",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run57",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "unknown",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run58",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "using",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run59",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "from",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run60",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "global",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run61",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "bigint",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run62",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "override",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run63",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "defer",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run64",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "class_",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run65",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "delete_",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run66",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "let_",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            },
+            {
+              "name": "run67",
+              "params": [
+                "x"
+              ],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "bin",
+                    "op": "*",
+                    "left": {
+                      "kind": "call",
+                      "target": {
+                        "kind": "req",
+                        "name": "s"
+                      },
+                      "method": "yield__",
+                      "args": [
+                        {
+                          "kind": "name",
+                          "id": "x"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 10
+                    }
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "P",
+        "file": "reserved_method_names.rvl",
+        "inject": [],
+        "provides": [
+          "s"
+        ]
+      },
+      {
+        "name": "C",
+        "file": "reserved_method_names.rvl",
+        "inject": [
+          "s"
+        ],
+        "provides": [
+          "ops"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "P",
+      "C"
+    ]
+  }
+}

@@ -9,7 +9,7 @@ Runners:
            whatever provider/model cline is configured with, override with
            --model/--provider). Costs real money.
   local  — posts directly to an OpenAI-compatible /chat/completions endpoint
-           (LM Studio, ollama's OpenAI shim, etc) via stdlib urllib. Free,
+           (LM Studio, ollama's OpenAI shim, etc) via revl's own adapter. Free,
            override with --model/--base-url (default openai/gpt-oss-20b @
            http://localhost:1234/v1).
   mock   — no model; attempt 1 is deliberately broken (exercises the retry
@@ -29,8 +29,6 @@ import re
 import subprocess
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 BENCH = Path(__file__).resolve().parent
@@ -40,6 +38,11 @@ ROOT = BENCH.parent
 # residue probe, not on compile-rate — see score_raw_ts.py. The revl variants'
 # compile-rate path below is untouched by it.
 sys.path.insert(0, str(BENCH))
+sys.path.insert(0, str(ROOT / "src"))
+from revl.providers import (  # noqa: E402
+    Adapter, CompletionRequest, ProviderError, parse_config,
+)
+from revl.providers.wire_openai import REASONING_KEYS  # noqa: E402,F401
 from score_raw_ts import (  # noqa: E402
     RAW_TS_VARIANT, DEFAULT_CYCLES, probe_source, render_raw_ts_summary,
 )
@@ -190,17 +193,18 @@ def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
 DEFAULT_LOCAL_MAX_TOKENS = 8192
 
 # Servers that separate a reasoning channel from the answer do not agree on the
-# key. `reasoning` is ollama's; `reasoning_content` is the deepseek-style name
-# several OpenAI-compatible servers copied. Both are read, in this order.
-REASONING_KEYS = ("reasoning", "reasoning_content")
+# key: `reasoning` is ollama's, `reasoning_content` the deepseek-style name
+# several OpenAI-compatible servers copied. The adapter reads both, in the order
+# `REASONING_KEYS` (imported above from `revl.providers.wire_openai`) gives.
 
 
 def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
               max_tokens: int = DEFAULT_LOCAL_MAX_TOKENS):
     """OpenAI-compatible chat-completions runner for a local server (LM Studio,
     ollama's OpenAI shim, etc). Mirrors run_cline's call/return shape but posts
-    directly to `{base_url}/chat/completions` with stdlib urllib — no new
-    dependency, no cost, no cline process to spawn.
+    directly to `{base_url}/chat/completions` through the runtime's
+    OpenAI-compatible adapter (`revl.providers`): no new dependency, no cost,
+    no cline process to spawn.
 
     Two things here are about reasoning models and were measured, not guessed.
 
@@ -219,95 +223,42 @@ def run_local(system: str, prompt: str, model: str, base_url: str, timeout: int,
     (`answer_from_reasoning`) rather than done silently, because a corpus
     scored off draft code is not the same measurement.
     """
-    url = base_url.rstrip("/") + "/chat/completions"
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0,
-        "max_tokens": max_tokens,
-    }
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Content-Type": "application/json"},
-    )
-    # The runner is pointed at a base URL the operator names, and urllib
-    # follows a redirect off it by default — re-issuing this POST as a GET,
-    # body dropped, at whatever host `Location` says. A benchmark that silently
-    # measured a different server is not a benchmark, so nothing is followed:
-    # the same policy the emitted crossings carry (`revl.crossing_redirect`),
-    # applied to the one other place in this tree that makes an outbound
-    # request.
-    class _NoRedirect(urllib.request.HTTPRedirectHandler):
-        def redirect_request(self, req, fp, code, msg, headers, newurl):
-            raise RuntimeError(
-                f"local runner: HTTP {code} redirect refused — "
-                f"{url} is the endpoint you named")
-
-    opener = urllib.request.build_opener(_NoRedirect)
+    # One client: the runtime's OpenAI-compatible adapter (issue #1461). It
+    # refuses redirects, so a benchmark cannot silently measure a server other
+    # than the one named, and it reads `content` and the reasoning channel
+    # separately, which is what the fallback below needs.
+    binding = parse_config({"roles": {"bench": {
+        "provider": "openai-compatible", "base_url": base_url, "model": model,
+        "timeout": timeout, "max_tokens": max_tokens,
+    }}}, "bench/run.py --base-url").binding("bench")
     try:
-        with opener.open(req, timeout=timeout) as resp:
-            status = resp.status
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read()[:400].decode("utf-8", "replace")
-        raise RuntimeError(f"local runner: HTTP {exc.code} from {url}: {detail}") from exc
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"local runner: cannot reach {url}: {exc.reason}") from exc
-    except TimeoutError as exc:
-        raise RuntimeError(f"local runner: timed out after {timeout}s: {exc}") from exc
+        completion = Adapter(binding).complete(
+            CompletionRequest(prompt=prompt, system=system, temperature=0))
+    except ProviderError as exc:
+        raise RuntimeError(f"local runner: {exc}") from None
 
-    if status != 200:
-        raise RuntimeError(f"local runner: HTTP {status} from {url}: {raw[:400]!r}")
-
-    try:
-        parsed = json.loads(raw.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise RuntimeError(f"local runner: unparseable JSON from {url}: {exc}") from exc
-
-    try:
-        choice = parsed["choices"][0]
-        message = choice["message"]
-        text = message.get("content")
-    except (KeyError, IndexError, TypeError) as exc:
-        raise RuntimeError(
-            f"local runner: unexpected response shape from {url}: {exc}; "
-            f"body={str(parsed)[:400]}"
-        ) from exc
-
-    reasoning = ""
-    for key in REASONING_KEYS:
-        value = message.get(key)
-        if isinstance(value, str) and value.strip():
-            reasoning = value
-            break
-
+    text, reasoning = completion.text, completion.reasoning
     from_reasoning = False
     if not text or not text.strip():
         if reasoning:
             text, from_reasoning = reasoning, True
         else:
-            finish = choice.get("finish_reason")
             raise RuntimeError(
-                f"local runner: empty completion content from {url} "
-                f"(finish_reason={finish!r}, no reasoning channel either)")
+                f"local runner: empty completion content from {binding.base_url} "
+                f"(finish_reason={completion.finish_reason!r}, no reasoning "
+                f"channel either)")
 
-    usage = parsed.get("usage") or {}
-    details = usage.get("completion_tokens_details") or {}
     return {
         "text": text,
         "cost": 0.0,
         # completion_tokens counts the reasoning channel too, and that is the
         # number tokens-to-green wants: reasoning tokens are paid for.
-        "output_tokens": usage.get("completion_tokens"),
-        "reasoning_tokens": details.get("reasoning_tokens"),
+        "output_tokens": completion.tokens_out,
+        "reasoning_tokens": completion.reasoning_tokens,
         "reasoning_chars": len(reasoning),
         "answer_from_reasoning": from_reasoning,
-        "finish_reason": choice.get("finish_reason"),
-        "model": parsed.get("model") or model,
+        "finish_reason": completion.finish_reason,
+        "model": completion.model or model,
         "provider": "local",
     }
 
