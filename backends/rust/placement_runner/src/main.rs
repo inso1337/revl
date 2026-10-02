@@ -22,9 +22,66 @@ fn args_of(probe: &J) -> Vec<J> {
     probe["args"].as_array().cloned().unwrap_or_default()
 }
 
+/// What this process serves: the keys other processes consume from it
+/// (`serve.keys`) and, per key, the operations its service declaration admits
+/// (`serve.methods`, the allowlist `placement.py` reads off the IR).
+///
+/// The generated `_revl_invoke` resolves EVERY key the document's components
+/// provide, and answers a key or method it does not know with `null`, which
+/// `handle_conn` used to wrap in `"ok": true` (issue #1599). So a raw call
+/// reached a key this process provides but does not export, and a refused call
+/// read as an answer. A request outside this surface is now refused with the
+/// py bridge's wording and never dispatched.
+struct Exported {
+    keys: std::collections::BTreeSet<String>,
+    methods: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl Exported {
+    fn from_spec(serve: &serde_json::Map<String, J>) -> Exported {
+        let names = |v: &J| -> std::collections::BTreeSet<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let keys = serve.get("keys").map(names).unwrap_or_default();
+        let methods = serve
+            .get("methods")
+            .and_then(|m| m.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), names(v))).collect())
+            .unwrap_or_default();
+        Exported { keys, methods }
+    }
+
+    /// The refusal for a request outside the surface, or `None`. A key with
+    /// no `methods` entry is left to the generated dispatch.
+    fn refusal(&self, key: &str, method: &str) -> Option<String> {
+        if !self.keys.contains(key) {
+            return Some(format!("key '{key}' is not exported by this process"));
+        }
+        match self.methods.get(key) {
+            Some(ops) if !ops.contains(method) => {
+                let listed = if ops.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    ops.iter().cloned().collect::<Vec<_>>().join(", ")
+                };
+                Some(format!(
+                    "method '{method}' is not exported for key '{key}' (exported: {listed})"
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Provider side: dispatch one connection's requests to locally-provided
-/// services via the generated `_revl_invoke`.
-fn handle_conn(stream: UnixStream, ctx: &cordis::Context) {
+/// services via the generated `_revl_invoke`, inside the exported surface.
+fn handle_conn(stream: UnixStream, ctx: &cordis::Context, exported: &Exported) {
     let reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -66,6 +123,15 @@ fn handle_conn(stream: UnixStream, ctx: &cordis::Context) {
             }
             continue;
         }
+        if let Some(error) = exported.refusal(key, method) {
+            let reply = serde_json::json!({ "ok": false, "error": error });
+            let mut out = serde_json::to_string(&reply).unwrap_or_else(|_| "{\"ok\":false}".into());
+            out.push('\n');
+            if writer.write_all(out.as_bytes()).is_err() {
+                break;
+            }
+            continue;
+        }
         // Record the crossing as in flight WHILE its handler runs: a crossing
         // still executing when the latch trips is the AMBIGUOUS one the halt
         // inventory names (item 440). The guard clears it on any exit.
@@ -84,11 +150,13 @@ fn handle_conn(stream: UnixStream, ctx: &cordis::Context) {
 
 /// A plugin that requires the served keys (so its provider components have
 /// activated), then spawns a blocking accept loop that serves them.
-fn serve_plugin(socket: String, keys: Vec<String>) -> cordis::PluginHandle {
+fn serve_plugin(socket: String, keys: Vec<String>, exported: Exported) -> cordis::PluginHandle {
     let inject: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
+    let exported = std::sync::Arc::new(exported);
     cordis::plugin_sync::<(), _>("RevlServe", cordis::Inject::new(inject), move |ctx, _config| {
         let served = ctx.clone();
         let socket = socket.clone();
+        let exported = exported.clone();
         std::thread::spawn(move || {
             let _ = std::fs::remove_file(&socket);
             let listener = match UnixListener::bind(&socket) {
@@ -98,7 +166,8 @@ fn serve_plugin(socket: String, keys: Vec<String>) -> cordis::PluginHandle {
             for conn in listener.incoming() {
                 if let Ok(stream) = conn {
                     let ctx = served.clone();
-                    std::thread::spawn(move || handle_conn(stream, &ctx));
+                    let exported = exported.clone();
+                    std::thread::spawn(move || handle_conn(stream, &ctx, &exported));
                 }
             }
         });
@@ -201,6 +270,19 @@ fn main() {
     }
 
     let once = spec["once"].as_bool().unwrap_or(false);
+    // issue #1621: the `--once` runner hands this process a per-run token as
+    // the first line of stdin, and the four proof lines (`UP`, `NO-RESIDUE`,
+    // `RESIDUE-LEFT`, `DOWN`) carry it, so a program's own output cannot forge
+    // them. Read here, before any component loads (so before any host code
+    // runs), into a local the generated `components` module cannot name. The
+    // spec carries only the flag: it is a file the program could read.
+    let proof_name = if spec["proofOnStdin"].as_bool().unwrap_or(false) {
+        let mut token = String::new();
+        let _ = std::io::stdin().read_line(&mut token);
+        format!("{name}#{}", token.trim())
+    } else {
+        name.clone()
+    };
     let root = cordis::Context::new();
     let mut fibers = Vec::new();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -275,7 +357,7 @@ fn main() {
             .as_array()
             .map(|a| a.iter().filter_map(|k| k.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
-        let fiber = root.plugin(serve_plugin(socket.clone(), keys.clone()), ());
+        let fiber = root.plugin(serve_plugin(socket.clone(), keys.clone(), Exported::from_spec(serve)), ());
         fiber.try_wait().unwrap();
         fibers.push(("serve".to_string(), fiber));
         log("serve", &keys.join(", "), &format!("-> {socket}"));
@@ -295,7 +377,7 @@ fn main() {
         }
     }
 
-    println!("[{name}] UP");
+    println!("[{proof_name}] UP");
 
     // item 443 / issue #122 — the idle watcher. The accept seam refuses lazily,
     // at the NEXT crossing, which is useless for a process parked waiting to be
@@ -367,11 +449,11 @@ fn main() {
         log("residue", "registry", &format!("{live_plugins} live plugin(s)"));
         log("residue", "provisions", &format!("{live_services} service(s) provided"));
         if live_plugins == 0 && live_services == 0 {
-            println!("[{name}] NO-RESIDUE — the composition left nothing behind");
+            println!("[{proof_name}] NO-RESIDUE — the composition left nothing behind");
         } else {
-            println!("[{name}] RESIDUE-LEFT — see the residue lines above");
+            println!("[{proof_name}] RESIDUE-LEFT — see the residue lines above");
         }
     }
 
-    println!("[{name}] DOWN");
+    println!("[{proof_name}] DOWN");
 }
