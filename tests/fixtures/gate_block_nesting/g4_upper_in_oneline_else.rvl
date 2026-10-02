@@ -12,7 +12,7 @@ service K { fn f(k: Str) -> Int }
 component C provides k: K {
   provide k {
     fn f(k) {
-      if (k == "a") { let z = 1 } else { let q = zz_write(k) }
+      if (k == "a") { let z = 1 } else { let q = emit zz_write(k) }
       return 0
     }
   }
