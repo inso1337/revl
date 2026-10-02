@@ -35,6 +35,7 @@ from __future__ import annotations
 import asyncio
 import builtins
 import importlib.util
+import io
 import json
 import os
 import queue
@@ -1048,7 +1049,7 @@ def _write(tmp_path, name, text):
 
 
 def test_the_ordinary_run_placement_path_leaves_a_live_correlation_guard(
-        tmp_path, monkeypatch, capfd):
+        tmp_path, monkeypatch):
     """Boot a real two-process composition through the SAME `run_placement`
     the `revl run --placement` CLI calls; nothing in this test constructs a
     `CorrelationGuard`, a `Correlation`, or a `bridge.serve(correlation=...)`
@@ -1077,6 +1078,14 @@ def test_the_ordinary_run_placement_path_leaves_a_live_correlation_guard(
 
     monkeypatch.setattr(builtins, "input", fake_input)
 
+    # Collect the conductor's log in a buffer nothing truncates. Polling
+    # `capfd.readouterr()` raced the pump thread that writes each child line:
+    # `snap` reads the capture file and then truncates it, so a line written
+    # between the two was discarded, and the wait below ran out its deadline
+    # on a log that no longer held the line (a load-dependent red).
+    log = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", log)
+
     result: dict = {}
 
     def run():
@@ -1093,7 +1102,7 @@ def test_the_ordinary_run_placement_path_leaves_a_live_correlation_guard(
         out = ""
         sock_path = None
         while time.time() < deadline:
-            out += capfd.readouterr().out
+            out = log.getvalue()
             m = re.search(r"\[provider] serve\s*\|.*-> (\S+) \(correlation-guarded\)", out)
             if m:
                 sock_path = m.group(1)
@@ -1107,7 +1116,7 @@ def test_the_ordinary_run_placement_path_leaves_a_live_correlation_guard(
         # with the real secret, still gets through: its probe result is in
         # the log the moment it ran.
         while time.time() < deadline and "cache.get" not in out:
-            out += capfd.readouterr().out
+            out = log.getvalue()
             time.sleep(0.1)
         assert "'v:alice'" in out or "v:alice" in out, out
 
