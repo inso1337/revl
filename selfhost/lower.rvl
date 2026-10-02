@@ -330,7 +330,11 @@ type SvcD = { name: Str, methods: List[MSig] }
 // reads it (docs/design/457): an annotated local is the one name in such a body
 // whose type is written down rather than resolved through a table this walk does
 // not carry.
-type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool, bindTy: Str }
+// `edge` is an `emit` STEP's `with <e>` approval edge (item 246): "" when the
+// step carries none, the bound NAME when `<e>` is a bare name, and "?" when it
+// is some other expression this reader does not resolve. Every other statement
+// kind leaves it "".
+type Stmt = { kind: Str, e: Expr, bind: Str, spawnTarget: Str, awaited: Bool, line: Int, inTimer: Bool, bindTy: Str, edge: Str }
 
 // A provide method: its parameters feed the G1 scope (a param is a declared
 // name in the method body), and its body is walked for G4/A1/G1. `isAsync` is
@@ -1244,12 +1248,12 @@ fn concat_refs(reqs: List[SvcRef], provs: List[SvcRef], i: Int) -> List[SvcRef] 
 
 fn mkstmt(kind: Str, e: Expr) -> Stmt {
   return { kind: kind, e: e, bind: "", spawnTarget: "", awaited: false, line: 0,
-           inTimer: false, bindTy: "" }
+           inTimer: false, bindTy: "", edge: "" }
 }
 
 fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: false, line: 0,
-           inTimer: false, bindTy: "" }
+           inTimer: false, bindTy: "", edge: "" }
 }
 
 // A forward `effect`/`emit`/`undo`/`compensate` statement carrying its item-131
@@ -1258,7 +1262,7 @@ fn mkstmtb(kind: Str, e: Expr, bind: Str) -> Stmt {
 // position after it, so per-statement pairing can read it directly.
 fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool, ty: Str) -> Stmt {
   return { kind: kind, e: e, bind: bind, spawnTarget: "", awaited: aw, line: 0,
-           inTimer: false, bindTy: ty }
+           inTimer: false, bindTy: ty, edge: "" }
 }
 
 // A `spawn <target>` acquisition bound to handle `bn`. It is an `effect`
@@ -1267,7 +1271,7 @@ fn mkstmt_aw(kind: Str, e: Expr, bind: Str, aw: Bool, ty: Str) -> Stmt {
 // not by walking an expression parser.rvl cannot produce.
 fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
   return { kind: "effect", e: int_lit0(), bind: bn, spawnTarget: target,
-           awaited: false, line: 0, inTimer: false, bindTy: "" }
+           awaited: false, line: 0, inTimer: false, bindTy: "", edge: "" }
 }
 
 // An UNBOUND `effect spawn <target>` (no `let` handle). A spawn's inverse is the
@@ -1277,10 +1281,17 @@ fn mkstmt_spawn(bn: Str, target: Str) -> Stmt {
 // composes); the post-parse `spawn_form_verdict` reports it.
 fn mkstmt_spawn_unbound(target: Str) -> Stmt {
   return { kind: "spawn_unbound", e: int_lit0(), bind: "", spawnTarget: target,
-           awaited: false, line: 0, inTimer: false, bindTy: "" }
+           awaited: false, line: 0, inTimer: false, bindTy: "", edge: "" }
 }
 
 fn int_lit0() -> Expr { return IntLit("0") }
+
+// The same statement carrying an `emit` step's approval edge.
+fn with_edge(s: Stmt, edge: Str) -> Stmt {
+  return { kind: s.kind, e: s.e, bind: s.bind, spawnTarget: s.spawnTarget,
+           awaited: s.awaited, line: s.line, inTimer: s.inTimer,
+           bindTy: s.bindTy, edge: edge }
+}
 
 // The expression of a statement that exists ONLY to bind a name — an iteration
 // head (`every <x> in <sub>`, and the same node read for `on <Event> as <x> in
@@ -1426,6 +1437,32 @@ type SRun = { ss: List[Stmt], i: Int }
 
 fn mk_srun(ss: List[Stmt], i: Int) -> SRun { return { ss: ss, i: i } }
 
+// An `emit` step's tail after its head, in parser.py's `_emit_stmt` order:
+// `[compensate <e>] [with <e>]`. The compensation is read as its own statement
+// (see the `emit` branch below). The `with` edge (item 246) rides the step as
+// `edge`, read here so the approval floor can judge it; before, the reader
+// stopped at `with` and the rest of the line was skipped as a bad expression.
+fn emit_step_tail(ts: List[Token], em: Stmt, i: Int, hi: Int) -> SRun {
+  var out: List[Stmt] = []
+  var j = i
+  var comp: List[Stmt] = []
+  if (atw(ts, j, "compensate")) {
+    let uc = operand_at(ts, j + 1)
+    if (is_bad(uc.e)) { return mk_srun([em], hi) }
+    comp = [mkstmt_aw("compensate", uc.e, "", uc.aw, "")]
+    j = uc.i
+  }
+  var edge = ""
+  if (atw(ts, j, "with")) {
+    let we = expr_at(ts, j + 1)
+    if (is_bad(we.e)) { return mk_srun(append_stmts([em], comp), hi) }
+    edge = match we.e { Var(n) => n, _ => "?" }
+    j = we.i
+  }
+  out = append_stmts([with_edge(em, edge)], comp)
+  return mk_srun(out, j)
+}
+
 fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
@@ -1440,6 +1477,22 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
     let bn = tkc(ts, lo + 1).text
     var j = eq + 1
     var kd = "expr"
+    // item 246: `let a = await approval[C] { fields }` binds `a` at type
+    // `Approval[C]`. The capability token is a boundary name, not an
+    // expression, so it is stepped over; the fields are the human's evidence
+    // and are walked as the record they are written as (the reference lowers
+    // each field value in the pure stratum). Read as an expression, `approval`
+    // was an undeclared name and every program minting an approval was refused.
+    if (atw(ts, j, "await") && ati(ts, j + 1, "approval") && atk(ts, j + 2, "[")) {
+      var k = j + 3
+      while (k < hi && !atk(ts, k, "]")) { k += 1 }
+      if (!atk(ts, k, "]") || !atk(ts, k + 1, "{")) {
+        return mk_srun([mkstmt("skip", int_lit0())], hi)
+      }
+      let fr = expr_at(ts, k + 1)
+      if (is_bad(fr.e)) { return mk_srun([mkstmt("skip", fr.e)], hi) }
+      return mk_srun([mkstmtb("expr", fr.e, bn)], fr.i)
+    }
     if (atw(ts, j, "emit")) {
       kd = "emit"
       j += 1
@@ -1542,15 +1595,7 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   if (t.kind == "kw" && t.text == "emit") {
     let re1 = operand_at(ts, lo + 1)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", re1.aw, "")]
-    if (atw(ts, re1.i, "compensate")) {
-      let uc = operand_at(ts, re1.i + 1)
-      if (!is_bad(uc.e)) {
-        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw, "")), uc.i)
-      }
-      return mk_srun(oute, hi)
-    }
-    return mk_srun(oute, re1.i)
+    return emit_step_tail(ts, mkstmt_aw("emit", re1.e, "", re1.aw, ""), re1.i, hi)
   }
   // `await emit <call> [compensate <e>]` — an AWAITED emission step (item 131,
   // parser.py's `_emit_stmt(is_async=True)`): the boundary marker sits outermost
@@ -1561,15 +1606,7 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   if (t.kind == "kw" && t.text == "await" && atw(ts, lo + 1, "emit")) {
     let re1 = expr_at(ts, lo + 2)
     if (is_bad(re1.e)) { return mk_srun([mkstmt("skip", re1.e)], hi) }
-    let oute: List[Stmt] = [mkstmt_aw("emit", re1.e, "", true, "")]
-    if (atw(ts, re1.i, "compensate")) {
-      let uc = operand_at(ts, re1.i + 1)
-      if (!is_bad(uc.e)) {
-        return mk_srun(oute.push(mkstmt_aw("compensate", uc.e, "", uc.aw, "")), uc.i)
-      }
-      return mk_srun(oute, hi)
-    }
-    return mk_srun(oute, re1.i)
+    return emit_step_tail(ts, mkstmt_aw("emit", re1.e, "", true, ""), re1.i, hi)
   }
   // `await <expr>` is a statement of its own (the A1 await-outside-body surface
   // reads its kind). The expression is still walked for G4/A1/G1.
@@ -1847,7 +1884,7 @@ fn stamp_lines(ss: List[Stmt], ln: Int) -> List[Stmt] {
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited,
                      line: s.line == 0 ? ln : s.line,
-                     inTimer: s.inTimer, bindTy: s.bindTy })
+                     inTimer: s.inTimer, bindTy: s.bindTy, edge: s.edge })
     i += 1
   }
   return out
@@ -1870,7 +1907,7 @@ fn mark_timer(ss: List[Stmt]) -> List[Stmt] {
     let s = ss[i]
     out = out.push({ kind: s.kind, e: s.e, bind: s.bind,
                      spawnTarget: s.spawnTarget, awaited: s.awaited,
-                     line: s.line, inTimer: true, bindTy: s.bindTy })
+                     line: s.line, inTimer: true, bindTy: s.bindTy, edge: s.edge })
     i += 1
   }
   return out
@@ -2471,6 +2508,20 @@ fn span_may_return(ts: List[Token], lo: Int, hi: Int) -> Bool {
   return false
 }
 
+// The body of a `fn m(p) = <expr>` method. The reference makes it ONE `return
+// <expr>` (parser.py), so `fn m(p) = emit c(p)` is an `emit` in VALUE
+// position: no emit step, so no `a host emission` label on the provider upper
+// bound and no `with` edge on the approval floor. The statement reader reads
+// the same text as an `emit` step, which is right for a statement and wrong
+// here, so it is folded back into the return the reference builds.
+fn arrow_body(ss: List[Stmt]) -> List[Stmt] {
+  if (ss.length() != 1 || ss[0].kind != "emit" || ss[0].bind != "") { return ss }
+  let s = ss[0]
+  let ret = mkstmt("return", Emit({ op: "emit", e: s.e }))
+  return [{ kind: ret.kind, e: ret.e, bind: "", spawnTarget: "", awaited: s.awaited,
+            line: s.line, inTimer: s.inTimer, bindTy: "", edge: "" }]
+}
+
 fn p_prov_methods(ts: List[Token], i: Int, end: Int,
                   acc: List[ProvM]) -> ProvMR {
   if (i >= end || atk(ts, i, "}")) { return { xs: acc, i: i, ok: true } }
@@ -2498,7 +2549,7 @@ fn p_prov_methods(ts: List[Token], i: Int, end: Int,
     let r = p_stmt_run(ts, si + 1, le)
     let nx = r.i > si + 1 ? r.i : le
     return p_prov_methods(ts, nx, end,
-                          acc.push({ name: nm, params: pnames, body: r.ss,
+                          acc.push({ name: nm, params: pnames, body: arrow_body(r.ss),
                                      isAsync: masync, ps: ps.ps, ret: pret,
                                      isArrow: true, line: mline,
                                      mayRet: true }))
@@ -3369,7 +3420,8 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
              provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
-             localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str }
+             localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str,
+             appr: ApprI }
 
 // The accumulator threaded through the walk. `msg` (non-"") is a definite
 // inline refusal (the G4 emit-marker rule or a G1 undeclared access), tagged
@@ -3604,6 +3656,241 @@ fn walk_one_stmt(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   return walk_expr(s.e, marked, s.kind == "emit" ? ctx_emit_pos(scx, "head") : scx, na)
 }
 
+// ---- the emission-crossing rules of issue #1437 ----------------------------
+//
+// Two rules the reference applies in `lower.py`, carried here so the gate's
+// refusals stay the reference's verbatim.
+//
+// THE MARKER. Every emission crossing carries `emit`, the host extern carrier
+// included (`_refuse_unmarked_emission_call`). `fn_call` holds a named call to
+// an emitting name to it wherever `marked` is false, which is the reference's
+// `_expr_mode == "setup"`. A `witnessed` extern is exempt: `effect` is its
+// marker (docs/design/243-witnessed-externs.md), and it sits in
+// `emittingNames` only because it seeds the G4 evidence.
+//
+// THE APPROVAL FLOOR (item 246, `_require_declared_approval`). A crossing whose
+// capability TOKEN an extern declared `requires approval` for must carry a
+// covering `with` edge. `req` is the required token set, keyed by token (the
+// declared scope, else the name), as the reference's `_approval_index` is;
+// `vcaps` is the emission fixed point WITH first-class values, the reference's
+// `env.emitting_caps`, which a marked call to a helper `fn` reads; `edges` maps
+// `<component>#<name>` to the capability of a `let <name> = await
+// approval[C] { … }` in that component. The `emit` STEP passes its `with`
+// edge; the VALUE form has no `with` clause and passes none.
+//
+// What this gate does not decide it leaves to the reference, never refuses: a
+// `with` edge that is not a bare name, a name no `await approval[…]` in the
+// component binds (the reference refuses that with a different sentence), and a
+// scope that uses a `[` character class, which `fnmatchcase` reads and the
+// matcher below does not.
+type ApprI = { req: List[Str], vcaps: CapsT, wit: List[Str], exts: List[Str],
+               edges: Map[Str, Str] }
+
+fn no_appr() -> ApprI {
+  return { req: [], vcaps: Map.empty(), wit: [], exts: [], edges: Map.empty() }
+}
+
+fn ctx_appr(cx: Ctx, ap: ApprI) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
+           underArrow: cx.underArrow, handles: cx.handles,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere,
+           emitPos: cx.emitPos, appr: ap }
+}
+
+fn appr_info(ts: List[Token], pg: Prog) -> ApprI {
+  let wit = witnessed_extern_names(ts)
+  var exts: List[Str] = []
+  var i = 0
+  while (i < pg.fns.length()) {
+    if (pg.fns[i].isEmExtern && !contains(wit, pg.fns[i].name)) {
+      exts = exts.push(pg.fns[i].name)
+    }
+    i += 1
+  }
+  return { req: approval_req_tokens(ts), vcaps: emit_caps_reach(pg.fns, true),
+           wit: wit, exts: exts, edges: approval_edges_of(ts) }
+}
+
+// The capability tokens an extern declaring `requires approval` makes
+// unreachable without an edge: its `[caps]` scope when it declares one, else
+// its own name (`capabilities or [name]`).
+fn approval_req_tokens(ts: List[Token]) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (!atw(ts, i, "extern")) {
+      i += 1
+    } else {
+      var j = i + 1
+      var caps: List[Str] = []
+      var sawCaps = false
+      while (j < ts.length() && !atw(ts, j, "fn") && !atk(ts, j, "eof")) {
+        if (atk(ts, j, "[") && !sawCaps) {
+          let cl = cap_list_at(ts, j, ts.length())
+          caps = cl.xs
+          sawCaps = true
+          j = cl.i
+        } else { j += 1 }
+      }
+      if (!atw(ts, j, "fn")) { return out }
+      let nm = tkc(ts, j + 1).text
+      // the clause sits after the signature and before the first `=` body
+      var k = j + 2
+      var req = false
+      while (k < ts.length() && !atk(ts, k, "=") && !atk(ts, k, "eof")
+             && !atw(ts, k, "extern") && !atw(ts, k, "service")
+             && !atw(ts, k, "component") && !atw(ts, k, "fn")) {
+        if (atw(ts, k, "requires") && ati(ts, k + 1, "approval")) { req = true }
+        k += 1
+      }
+      if (req) { out = union_into(out, caps.length() > 0 ? caps : [nm]) }
+      i = k
+    }
+  }
+  return out
+}
+
+// `<component>#<name>` -> C for every `let <name> = await approval[C] { … }`,
+// the binding `_lower_let_approval` types `Approval[C]`. C is a string literal
+// or a dotted identifier path (parser.py `_capability_token`).
+fn approval_edges_of(ts: List[Token]) -> Map[Str, Str] {
+  var m: Map[Str, Str] = Map.empty()
+  var comp = ""
+  var i = 0
+  while (i < ts.length() && !atk(ts, i, "eof")) {
+    if (atw(ts, i, "component") && atk(ts, i + 1, "ident")) {
+      comp = tkc(ts, i + 1).text
+    }
+    if (atw(ts, i, "let") && atk(ts, i + 1, "ident") && atk(ts, i + 2, "=")
+        && atw(ts, i + 3, "await") && ati(ts, i + 4, "approval")
+        && atk(ts, i + 5, "[")) {
+      var tok = ""
+      var j = i + 6
+      if (atk(ts, j, "string")) {
+        tok = tkc(ts, j).text
+        j += 1
+      } else {
+        if (atk(ts, j, "ident")) {
+          tok = tkc(ts, j).text
+          j += 1
+          while (atk(ts, j, ".") && atk(ts, j + 1, "ident")) {
+            tok = tok.concat(".").concat(tkc(ts, j + 1).text)
+            j += 2
+          }
+        }
+      }
+      if (tok != "" && atk(ts, j, "]")) {
+        m = m.set(comp.concat("#").concat(tkc(ts, i + 1).text), tok)
+      }
+    }
+    i += 1
+  }
+  return m
+}
+
+// `fnmatchcase(token, scope)` over the `*` and `?` wildcards, the reference's
+// `_approval_covers`: 1 covers, 0 does not, -1 when the scope uses a `[` class
+// this matcher does not read.
+fn appr_covers(scope: Str, tok: Str) -> Int {
+  if (scope == tok) { return 1 }
+  if (scope.indexOf("[") != 0 - 1) { return 0 - 1 }
+  return glob_at(scope, 0, tok, 0) ? 1 : 0
+}
+
+fn glob_at(p: Str, i: Int, t: Str, j: Int) -> Bool {
+  if (i >= p.length()) { return j >= t.length() }
+  let c = p.charAt(i)
+  if (c == "*") {
+    var k = j
+    while (k <= t.length()) {
+      if (glob_at(p, i + 1, t, k)) { return true }
+      k += 1
+    }
+    return false
+  }
+  if (j >= t.length()) { return false }
+  if (c == "?" || c == t.charAt(j)) { return glob_at(p, i + 1, t, j + 1) }
+  return false
+}
+
+// The tokens one marked crossing reaches, the reference's
+// `_approval_crossed_caps`: a `req` emission's `emission[...]` scope (`*` when
+// bare), a direct emission extern's scope or name, and otherwise a named call
+// to an emitting `fn`, whose reach comes SORTED off the fixed point.
+fn appr_crossed(head: Expr, cx: Ctx) -> List[Str] {
+  return match head {
+    Call(c) => match c.target {
+      Field(fl) => match fl.target {
+        Var(v) => cx.reqMap.has(v) && !cx.provAlias.has(v)
+          ? appr_req_caps(v, fl.name, cx) : [],
+        _ => [],
+      },
+      Var(n) => appr_name_caps(n, cx),
+      _ => [],
+    },
+    _ => [],
+  }
+}
+
+fn appr_req_caps(key: Str, op: Str, cx: Ctx) -> List[Str] {
+  let svcName = match cx.reqMap.lookup(key) { Some(s) => s, None => "" }
+  let decl = find_msig(svc_of(cx, svcName), op, 0)
+  if (decl.name == "") { return ["*"] }
+  return decl.caps.length() > 0 ? decl.caps : ["*"]
+}
+
+fn appr_name_caps(n: Str, cx: Ctx) -> List[Str] {
+  let reach = caps_of(cx.appr.vcaps, n)
+  if (reach.length() == 0) { return [] }
+  // a direct emission extern keeps its declared order; a helper's reach is
+  // `sorted(env.emitting_caps[name])`
+  return contains(cx.appr.exts, n) ? reach : sort_strs(reach)
+}
+
+fn appr_msg(tok: Str) -> Str {
+  return "crossing capability `".concat(tok)
+    .concat("` requires approval, but this `emit` carries no covering `with` edge")
+}
+
+// The floor over one marked crossing. `edge` is the step's `with` name, "" for
+// none (the value form, or a step without the clause), "?" for an edge this
+// reader did not resolve.
+fn appr_check(head: Expr, edge: Str, cx: Ctx, a: Ac) -> Ac {
+  if (a.msg != "" || cx.appr.req.length() == 0 || edge == "?") { return a }
+  var scope = ""
+  if (edge != "") {
+    scope = match cx.appr.edges.lookup(cx.compName.concat("#").concat(edge)) {
+      Some(c) => c, None => "?" }
+    if (scope == "?") { return a }
+  }
+  let toks = appr_crossed(head, cx)
+  var i = 0
+  while (i < toks.length()) {
+    if (contains(cx.appr.req, toks[i])) {
+      if (scope == "") { return ac_refuse(a, "G4", appr_msg(toks[i])) }
+      let cov = appr_covers(scope, toks[i])
+      if (cov == 0 - 1) { return a }
+      if (cov == 0) { return ac_refuse(a, "G4", appr_msg(toks[i])) }
+    }
+    i += 1
+  }
+  return a
+}
+
+// The floor over a statement GROUP that heads with an `emit`: the step with its
+// `with` edge, judged after its `compensate` slot is walked (the reference
+// lowers the slot before `_lower_emit_approval`), or a `let x = emit …`
+// binding, the value form, with none.
+fn appr_group(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
+  if (a.msg != "" || ss[i].kind != "emit") { return a }
+  return appr_check(ss[i].e, ss[i].bind == "" ? ss[i].edge : "", cx, a)
+}
+
 // ---- one `emit` marker per crossing (issue #1175) --------------------------
 //
 // The reference lowers an emit head's ARGUMENTS in the mode the `emit` sits in
@@ -3628,7 +3915,7 @@ fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
            // "setup" there, whose host-acquire phrase is "this position"
            acqWhere: pos == "args" && cx.emitPos == "head" ? "this position"
                                                             : cx.acqWhere,
-           emitPos: pos }
+           emitPos: pos, appr: cx.appr }
 }
 
 // Whether a marked head's arguments admit a bare emission: never under a
@@ -3668,7 +3955,8 @@ fn nested_emit_msg() -> Str {
 
 fn walk_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
-  return walk_stmts(ss, i + 1, cx, walk_one_stmt(ss[i], cx, a))
+  let j = group_end(ss, i)
+  return walk_stmts(ss, j, cx, appr_group(ss, i, cx, walk_span(ss, i, j, cx, a)))
 }
 
 // ---- one statement's evidence, in the reference's order (issue #1261) ------
@@ -3780,7 +4068,7 @@ fn group_end(ss: List[Stmt], i: Int) -> Int {
 fn walk_method_stmts(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Ac {
   if (i >= ss.length() || a.msg != "") { return a }
   let j = group_end(ss, i)
-  let b = walk_span(ss, i, j, cx, a)
+  let b = appr_group(ss, i, cx, walk_span(ss, i, j, cx, a))
   if (b.msg != "") { return b }
   return walk_method_stmts(ss, j, cx,
     ac_labels(b, order_stmt_labels(a.labels, b.labels, ss[i].kind == "emit")))
@@ -3842,7 +4130,8 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
     Un(u)      => walk_expr(u.e, marked, cx, a),
     Emit(u)    => cx.emitPos == "args"
                     ? ac_refuse(a, "G4", nested_emit_msg())
-                    : walk_expr(u.e, true, ctx_emit_pos(cx, emit_head_pos(marked, cx)), a),
+                    : appr_check(u.e, "", cx,
+                        walk_expr(u.e, true, ctx_emit_pos(cx, emit_head_pos(marked, cx)), a)),
     Call(c)    => call_check(c.target, c.args, marked, cx, a),
     Field(f)   => field_check(f.target, marked, cx, a),
     OptField(f) => field_check(f.target, marked, cx, a),
@@ -4253,7 +4542,7 @@ fn fn_call(name: Str, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
   // same admission the other two carriers read. Raised AFTER the arguments are
   // walked because the reference lowers a call's arguments before it builds the
   // call node, so an inner refusal wins.
-  if (cx.emitPos == "args" && !marked && contains(cx.emittingNames, name)) {
+  if (!marked && contains(cx.emittingNames, name) && !contains(cx.appr.wit, name)) {
     return ac_refuse(wa, "G4", "call to emission `".concat(name)
       .concat("` must be marked `emit` (G4)"))
   }
@@ -4318,7 +4607,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying the host-acquire position phrase of the statement
@@ -4332,7 +4621,7 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
-           acqWhere: where, emitPos: cx.emitPos }
+           acqWhere: where, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying a body's provision-alias map.
@@ -4344,7 +4633,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -4358,7 +4647,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -4379,7 +4668,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            handles: cx.handles, provKeySvc: cx.provKeySvc,
            provAlias: cx.provAlias, localArrows: cx.localArrows,
            acqWhere: cx.acqWhere,
-           emitPos: cx.emitPos == "args" ? "" : cx.emitPos }
+           emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr }
 }
 
 // A field access `t.f` that is not a call. `config.<field>` is a config read,
@@ -4549,7 +4838,7 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "" }
+           acqWhere: "this position", emitPos: "", appr: no_appr() }
 }
 
 // The same context with extra callable names — the program's own ADT
@@ -4563,7 +4852,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The RUNNING composition's service table, off the item-346 service block's
@@ -4585,7 +4874,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
            provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
-           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos }
+           localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 fn req_map_of(reqs: List[Bind]) -> Map[Str, Str] {
@@ -4609,7 +4898,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
            provAlias: Map.empty(), localArrows: Map.empty(),
-           acqWhere: "this position", emitPos: "" }
+           acqWhere: "this position", emitPos: "", appr: base.appr }
 }
 
 // The spawn handles a component binds: every `let h = effect spawn C …` in its
@@ -4789,9 +5078,19 @@ fn append_verds(a: List[Verd], b: List[Verd]) -> List[Verd] {
 // caller then falls back to the component line, e.g. a post-walk verdict).
 fn refusal_line(ss: List[Stmt], i: Int, cx: Ctx, a: Ac) -> Int {
   if (i >= ss.length()) { return 0 }
-  let na = walk_one_stmt(ss[i], cx, a)
+  let j = group_end(ss, i)
+  var na = a
+  var k = i
+  while (k < j) {
+    na = walk_one_stmt(ss[k], cx, na)
+    if (na.msg != "") { return ss[k].line }
+    k += 1
+  }
+  // the approval floor is judged once the group is walked, and the reference
+  // reports it at the `emit` step's own line
+  na = appr_group(ss, i, cx, na)
   if (na.msg != "") { return ss[i].line }
-  return refusal_line(ss, i + 1, cx, na)
+  return refusal_line(ss, j, cx, na)
 }
 
 // ============================ the provide-method SIGNATURE (docs/design/457)
@@ -14847,8 +15146,9 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // call head resolves against (`call_head_declared`). Read off the token
   // stream rather than out of `Prog`, because `p_top` steps over `type`
   // declarations structurally — see `type_ctors`.
-  let base = ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
-                         amb_ops_map(ambOps, 0, Map.empty()))
+  let base = ctx_appr(ctx_amb_ops(ctx_with_callables(build_maps(pg), type_ctors(ts)),
+                                  amb_ops_map(ambOps, 0, Map.empty())),
+                      appr_info(ts, pg))
   // ---- the FAIL-FAST phases (the reference RAISES these before its collect-all
   // `errors` sink exists): a program that trips one produces that single
   // diagnostic and never reaches the component loop, so the gate returns it
@@ -22032,6 +22332,38 @@ test "an emission extern in an emit head's arguments needs its own marker (G4)" 
   assert admit_src("""extern emission fn log_line(n: Int) -> Int = @py { return 1 } extern emission fn charge(c: Int) -> Int = @py { return 1 } service K { emission fn f(n: Int) -> Int } component C provides k: K { provide k { fn f(n) { let r = emit charge(n) return emit log_line(r) } } }""") == ""
 }
 
+// issue #1437: the marker is required on every emission crossing, the host
+// extern carrier included, not only inside an `emit`'s arguments. A module `fn`
+// reaching one is a crossing too; a `witnessed` extern is marked by `effect`.
+test "every host emission crossing carries its marker (issue #1437)" {
+  let ch = "extern emission fn charge(n: Int) -> Int = @py { return 1 } service S { emission fn go(n: Int) -> Int } "
+  assert admit_src(ch.concat("component C provides s: S { provide s { fn go(n) { let r = charge(n) return r } } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src(ch.concat("component C provides s: S { provide s { fn go(n) = charge(n) } }")) == "G4|call to emission `charge` must be marked `emit` (G4)"
+  assert admit_src(ch.concat("component C provides s: S { provide s { fn go(n) { let r = emit charge(n) return r } } }")) == ""
+  assert admit_src(ch.concat("fn bill(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = bill(n) } }")) == "G4|call to emission `bill` must be marked `emit` (G4)"
+  assert admit_src(ch.concat("fn bill(n: Int) -> Int { return charge(n) } component C provides s: S { provide s { fn go(n) = emit bill(n) } }")) == ""
+  // marked, a plain-declared method still meets the provider upper bound
+  assert admit_src("""extern emission fn charge(n: Int) -> Int = @py { return 1 } service S { fn go(n: Int) -> Int } component C provides s: S { provide s { fn go(n) = emit charge(n) } }""") == "G4|`S.go` is declared plain, but this implementation reaches `charge()`"
+}
+
+// item 246: the declaration-owned approval floor. Keyed by capability TOKEN, so
+// a scoped extern is required under its scope; judged on every marked
+// crossing, so the value form (which has no `with` clause) and a marked call to
+// a `fn` reaching the extern meet it too; covered by an edge whose scope
+// matches the token.
+test "the approval floor is keyed by token and reaches every marked crossing (item 246)" {
+  let sc = "extern emission[production.payment] fn charge(n: Int) -> Int requires approval = @py { return 1 } "
+  let msg = "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"
+  assert admit_src(sc.concat("service O { fn ping() -> Int } component C provides o: O { emit charge(1) provide o { fn ping() = 1 } }")) == msg
+  assert admit_src(sc.concat("service O { emission[production.payment] fn ping() -> Int } component C provides o: O { provide o { fn ping() { let r = emit charge(1) return r } } }")) == msg
+  assert admit_src(sc.concat("service O { emission[production.payment] fn ping() -> Int } component C provides o: O { provide o { fn ping() = emit charge(1) } }")) == msg
+  assert admit_src(sc.concat("fn bill(n: Int) -> Int { return charge(n) } service O { fn ping() -> Int } component C provides o: O { emit bill(1) provide o { fn ping() = 1 } }")) == msg
+  assert admit_src(sc.concat("service O { fn ping() -> Int } component C provides o: O { let a = await approval[production.payment] { reason: \"pay\" } emit charge(1) with a provide o { fn ping() = 1 } }")) == ""
+  assert admit_src(sc.concat("service O { fn ping() -> Int } component C provides o: O { let a = await approval[staging.payment] { reason: \"pay\" } emit charge(1) with a provide o { fn ping() = 1 } }")) == msg
+  assert admit_src(sc.concat("service O { fn ping() -> Int } component C provides o: O { let a = await approval[production.*] { reason: \"pay\" } emit charge(1) with a provide o { fn ping() = 1 } }")) == ""
+  assert admit_src("""extern emission fn charge(n: Int) -> Int requires approval = @py { return 1 } service O { fn ping() -> Int } component C provides o: O { emit charge(1) provide o { fn ping() = 1 } }""") == "G4|crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge"
+}
+
 // An arrow's body is not in the enclosing `emit`'s argument list: it runs when
 // the arrow is called. The inline spelling and its two `let` twins are the same
 // crossings in the same order and all three admit; before `ctx_under_arrow`
@@ -22099,17 +22431,17 @@ test "two providers of one key are refused (G2)" {
 }
 
 test "sync provide method reaching an async extern is refused (A1)" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }")
   assert v == "A1|`Http.post` is declared sync, but this implementation reaches async extern `http_post` — a sync method has no in-flight window (A1)"
 }
 
 test "async-declared op admits the same async body" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { async fn post(url, body) = emit http_post(url, body) } }")
   assert v == ""
 }
 
 test "sync method implementing an async op is refused (signature parity)" {
-  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = http_post(url, body) } }")
+  let v = admit_src("extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url } service Http { emission async fn post(url: Str, body: Str) -> Str } component Poster provides http: Http { provide http { fn post(url, body) = emit http_post(url, body) } }")
   assert v == "A1|method `post` of provision `http` is not async but service Http declares it async"
 }
 
@@ -22845,11 +23177,11 @@ test "sync-typed arrow reaching an async op leaks (A1)" {
 }
 
 test "an arrow in an Async[T] slot is coerced, not leaky (admits)" {
-  assert admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Async[Str], x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } } }""") == ""
+  assert admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Async[Str], x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), "x")   return r } } }""") == ""
 }
 
 test "the same arrow in a sync slot leaks (A1)" {
-  let v = admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } } }""")
+  let v = admit_src("""extern emission async fn tick(n: Str) -> Str = @py { return n } fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) } service S { emission async fn go() -> Str } component C provides s: S { provide s { async fn go() { let r = apply(msgs => emit tick(msgs), "x")   return r } } }""")
   assert v == "A1|this arrow reaches an async operation, but its type carries no async color — the caller would receive an unawaited suspension (A1)"
 }
 
@@ -23135,7 +23467,7 @@ test "rule-2 param-colored fn in a sync method is refused (A1)" {
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission fn go() -> Int }
 component C provides s: S {
-  provide s { fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { fn go() { let r = caller(() => emit tick())   return 0 } }
 }""")
   assert v == "A1|`S.go` is declared sync, but this implementation reaches async function `caller`, `tick` — a sync method has no in-flight window (A1)"
 }
@@ -23147,7 +23479,7 @@ test "async method reaching a rule-2-colored fn admits" {
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission async fn go() -> Int }
 component C provides s: S {
-  provide s { async fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { async fn go() { let r = caller(() => emit tick())   return 0 } }
 }""") == ""
 }
 
@@ -23415,7 +23747,7 @@ fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
 fn plain(f: (Str) -> Str) -> Str { return f("a") }
 service S { emission async fn go(y: Str) -> Str }
 component C provides s: S {
-  provide s { async fn go(y) { let r = plain(w => wrap(z => tick(z), w))   return r } }
+  provide s { async fn go(y) { let r = plain(w => wrap(z => emit tick(z), w))   return r } }
 }""") == ""
 }
 
