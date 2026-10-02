@@ -1,0 +1,21 @@
+// REJECTED, G4: an unmarked host `emission` extern as the acquisition of an
+// `effect` bracket in an activation body.
+//
+// A bracket's acquisition is a setup position. An emission there crosses the
+// boundary the moment it runs, and the bracket's `undo` does not make it
+// reversible, so it needs the marker like any other crossing (issue #1437).
+// A `witnessed` extern in the same position is different: `effect` is its
+// marker (docs/design/243-witnessed-externs.md).
+//
+// expected error:
+//   call to emission `open_line` must be marked `emit` (G4)
+
+extern emission fn open_line(n: Int) -> Int = @py { return 1 }
+extern pure fn close_line(n: Int) -> Int = @py { return 1 }
+
+service Phone { fn dial(n: Int) -> Int }
+
+component Caller provides phone: Phone {
+  effect open_line(1) undo close_line(1)
+  provide phone { fn dial(n) = n }
+}

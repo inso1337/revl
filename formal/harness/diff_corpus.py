@@ -394,12 +394,14 @@ def _bound_index(services_by_name: dict) -> dict[tuple[str, str], tuple[str, tup
 #: exporter writes one only for a callee `_fn_emitting` put in the set.
 HOST_SERVICE = "@host"
 
-#: The marker contexts a host emission is judged in. The checker holds the
-#: extern carrier to the marker inside an `emit` head's argument list (issue
-#: #1427), and a marker written there is refused whatever it marks; the head
-#: itself is the marked crossing. A host emission in a `plain` position is not
-#: judged by the marker rule, so it gets no row.
-HOST_MARKER_CONTEXTS = ("emit", "emitarg", "emitnested")
+#: The marker contexts a host emission is judged in: every one but a teardown
+#: slot. The checker holds the extern carrier to the marker wherever it holds a
+#: service emission (issue #1437, docs/design/1437-emit-marks-every-crossing.md),
+#: so a host emission in a `plain` position is refused as an unmarked service
+#: emission is. (Issue #1427 had judged only the argument-list contexts.) A
+#: bracket's `undo` is recorded as `undo` (see `walk_calls`) and gets no row:
+#: the checker lowers it in teardown mode, and an emission there is G5's.
+HOST_MARKER_CONTEXTS = ("emit", "emitarg", "emitnested", "plain")
 
 
 def _fn_emitting(prog) -> set[str]:
@@ -846,7 +848,9 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
     checker refuses an emission call whose pairing is an inverse, because a
     boundary crossing cannot be reverted by pairing. Only `emit` legalizes
     an emission, and (two-sided) `emit` around a non-emission method is
-    itself a refusal ('emission not declared')."""
+    itself a refusal ('emission not declared'). A bracket's `undo` slot is
+    recorded as 'undo': judged as 'plain' for a service crossing, and given no
+    host-emission row, because the checker lowers it in teardown mode."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
     if isinstance(node, (EmitStmt, EmitExpr)):
@@ -887,6 +891,15 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
             out.append((*route, ctx))
         for a in node.args:
             walk_calls(a, out, ctx)
+        return
+    if isinstance(node, (EffectStmt, LetEffect)):
+        # A bracket's `undo` is a teardown slot. The checker lowers it in
+        # "undo" mode, where the marker rule does not apply (an emission there
+        # is G5's to refuse), so its calls are recorded as `undo`: judged as
+        # `plain` for a service crossing, as before, and given no host row.
+        for f in dataclasses.fields(node):
+            walk_calls(getattr(node, f.name), out,
+                       "undo" if f.name == "undo" else ctx)
         return
     if isinstance(node, ExprArrow) and ctx == "emitarg":
         # An arrow's body runs when the arrow is CALLED, not while the
@@ -3269,6 +3282,18 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # model does not — the model is stricter than the fragment it
             # covers, which is a finding to chase, not a licence to relax it.
             record("agree-accept" if formal_clean else "formal-strict", rel)
+        elif code == "G4" and category == "approval":
+            # The declaration-owned approval floor (item 246, `lower.
+            # _require_declared_approval`) carries the G4 code, but it is not
+            # the marker rule the `G` row states: it asks whether a crossing's
+            # capability TOKEN is covered by an `Approval[C]` edge, and the
+            # model carries no fact about approvals at all. Judged against
+            # the `G` row it would be a `missed-G4` the row was never aimed
+            # at. It is an absence of fact, so it is ratcheted by name like
+            # G5 and G6 below: a new approval refusal joins the ledger, or
+            # somebody models the floor.
+            record("out-of-fragment-approval" if formal_clean
+                   else "formal-found-other", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -3351,7 +3376,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         n = align.get(k, 0)
         mark = "  FATAL" if k in FATAL_BUCKETS and n else ""
         print(f"  {k:20} {n}{mark}")
-    for k in (*FATAL_BUCKETS, "out-of-fragment-G5", "out-of-fragment-G6"):
+    for k in (*FATAL_BUCKETS, *OOF_RATCHET_BUCKETS):
         for rel in samples.get(k, []):
             print(f"  ALIGN {k}: {rel}")
     for rel in samples.get("agree-G5", []):
@@ -3430,14 +3455,16 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # the `C` confinement surface — so "no fact about this file" is a claim
 # about a specific row that exists, and that is the claim worth pinning.
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
-OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6")
+OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
+                       "out-of-fragment-approval")
 OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5 or G6 and the model has NO",
-    "fact about: `out-of-fragment-G5` and `out-of-fragment-G6` in",
+    "The corpus files the checker refuses G5, G6 or with the G4 approval",
+    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
+    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
     "",
-    "Both buckets record an absence, so neither can disagree with anything",
-    "and neither could fail the gate on its own (issue #1169). This ledger",
+    "Each bucket records an absence, so none can disagree with anything",
+    "and none could fail the gate on its own (issue #1169). This ledger",
     "is what makes them fire: MEMBERSHIP is checkable even when the",
     "contents are not. A file that joins a bucket without a line here is a",
     "gate failure, and a line that is no longer in its bucket is a gate",
@@ -3621,8 +3648,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         lines.append(f"| `{k}` | {align.get(k, 0)} | {gate} |")
     lines.append("")
     named = [(k, rel)
-             for k in ("out-of-fragment-G5", "out-of-fragment-G6",
-                       *FATAL_BUCKETS)
+             for k in (*OOF_RATCHET_BUCKETS, *FATAL_BUCKETS)
              for rel in sorted(_ALIGN_SAMPLES.get(k, []))]
     if named:
         lines.append(para("Nothing is counted without being named; the files "

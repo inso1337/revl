@@ -21,7 +21,7 @@ fn agent_loop(current: Str, complete: (Str) -> Async[Str]) -> Str {
 
 component RealModel provides model: Model {
   provide model {
-    async fn complete(msgs) = remote(msgs)
+    async fn complete(msgs) = emit remote(msgs)
   }
 }
 
