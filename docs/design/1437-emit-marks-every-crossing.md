@@ -316,11 +316,34 @@ on both sides: the reference lambda-lifts the block and does not type its
 value as the service, and the gate does not read block arms. It is not in the
 corpus.
 
-## What is not covered
+### A provide method's own service-typed parameter (issue #1682)
 
-- **A service-typed method parameter.** A provide method whose service
-  declares a parameter of a service type is not resolved: whether a provision
-  reaches it is a question about the caller.
+`service Till { emission[audit.log] fn go(p: Pay, n: Int) -> Int }`, with
+`Register` implementing it as `p.charge(n)` and `Shop` passing a spawn-handle
+provision into `p`: the crossing of `production.payment` was admitted
+unmarked, unapproved and outside `Till.go`'s declared bound. Three ways it
+could be judged were considered:
+
+1. **The parameter is a crossing, judged in the method** (decided). A call
+   through it is a crossing of the service's declared emission scopes: it
+   needs the marker, meets the approval floor, and must fit the method's own
+   declared upper bound.
+2. Refuse service-typed parameters on service operations. Rejected: it bans
+   capability passing, a legitimate pattern.
+3. Judge it at the caller. Rejected: a method's safety would depend on its
+   callers, and checking would stop being modular.
+
+`Env.service_params` holds the method's parameters whose declared type
+mentions a service, and `_receiver_names_decided` decides them as it decides
+a `let` local, so the marker and the floor follow from the one resolver. The
+provider upper bound runs after the method's types are restored, so the body
+walk records each crossing through a parameter first (`_param_crossings`,
+`<Service>.<op>` at the op's declared scope, `*` when bare), and
+`_method_emissions` reads it. Such a step is not a host emission. In the gate
+the method's service-typed parameters are typed in `Ctx.svcTys` and marked
+`param <name>`, and `svc_param_note` adds the evidence.
+
+## What is not covered
 - **`undo` slots.** A bracket's `undo` that reaches an emission is refused
   under G5 before any approval question arises.
 - **The formal model** carries no fact about approvals. The approval

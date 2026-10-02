@@ -368,6 +368,29 @@ def test_every_receiver_expression_document_is_decided_alike_by_both(measured):
     assert not wrong, "\n  ".join(["receiver-expression documents moved:"] + wrong)
 
 
+# --- crossings through a service-typed method parameter (issue #1682) ---------
+#
+# A provide method's own parameter of a service type: a call through it is a
+# crossing of the service's declared scopes, judged in the method (marker,
+# approval floor, provider upper bound). `g4_` both refuse under G4, `ok_`
+# both admit.
+SERVICE_TYPED_PARAMS = ROOT / "tests" / "fixtures" / "service_typed_params"
+
+
+def test_every_service_typed_param_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(SERVICE_TYPED_PARAMS.glob("*.rvl"))
+    assert len(docs) == 10, f"the service-typed-param corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["service-typed-param documents moved:"] + wrong)
+
+
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
     """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
     calls its reference set is read STATICALLY out of `_classify`, so that the

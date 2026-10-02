@@ -966,6 +966,14 @@ class Env:
         # parameters of the arrow being lowered out of the set.
         self.let_locals: set = set()
         self._arrow_params: set = set()
+        # A provide method's own parameters whose declared type mentions a
+        # service (issue #1682): a call through one is a crossing of that
+        # service's declared emission scopes, judged in the method like any
+        # other. `param_crossings` carries what the body crossed through them,
+        # by IR node, from the body walk to the provider upper bound, which
+        # runs after the method's type environment is restored.
+        self.service_params: set = set()
+        self.param_crossings: dict = {}
         # item 130: stream lifecycle tracking. `terminal_stream_sources` holds
         # the safe names of stream sources (`let s = effect Stream.source() undo
         # s.close()`) whose inverse CLOSES the source — the terminal-delivering
@@ -12746,6 +12754,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         saved_arrows = dict(env.local_arrows)
         saved_values = dict(env.provision_values)
         saved_let_locals = set(env.let_locals)
+        saved_service_params = set(env.service_params)
         env.params = env.bind_params(method.params, method.line)
         # method params carry the service's declared types (A6): surface
         # names bind the body, the service contributes the signature
@@ -12753,6 +12762,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         method_locals: dict[str, str] = {}
         for surface, (_, ptype) in zip(method.params, decl.params):
             env.type_env[env.params[surface]] = ptype
+            if _mentions_service(ptype, env):
+                env.service_params.add(env.params[surface])
 
         # L1 (roadmap item 441 / issue #120,
         # docs/design/458-termination-language-surface.md §3): a termination
@@ -13292,6 +13303,9 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         _check_intent_completeness(decl, mbody, env, svc.name, method.name,
                                    comp.source or filename, method.line)
         safe_params = [env.params[p] for p in method.params]
+        # issue #1682: what the body crossed through a service-typed
+        # parameter, read while the method's types are still in scope
+        env.param_crossings = _param_crossings(mbody, env)
         env.params = saved
         env.declared_intent = saved_intent
         env.stated_crossings = saved_stated
@@ -13300,6 +13314,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         env.local_arrows = saved_arrows
         env.provision_values = saved_values
         env.let_locals = saved_let_locals
+        env.service_params = saved_service_params
 
         # A service declaration is an *upper bound* on its providers' effects:
         # consumers bind to the service, not to this component, and a provider
@@ -13376,6 +13391,8 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
                                           decl.capabilities, extra),
                     code="G4", category="emission-capability",
                 )
+
+        env.param_crossings = {}
 
         # sync/async arrow polymorphism (item 342): in a SYNC method, redirect
         # each call of a colour-polymorphic fn that receives only genuinely-sync
@@ -14626,8 +14643,9 @@ def _service_receiver_decl(node: dict, env: Env):
     A receiver that depends on a binder this rule does not decide is left out
     (`_receiver_names_decided`): an arrow PARAMETER, whose value is decided at
     the application (`_check_arrow_param_crossings`), so an arrow never applied
-    to a provision must still compile; and a provide method's own
-    service-typed parameter, whose value comes from the caller (issue #1682)."""
+    to a provision must still compile. A provide method's own service-typed
+    parameter IS decided (issue #1682): a call through it is a crossing of the
+    service's declared scopes, judged in the method."""
     if node.get("kind") != "call":
         return None
     target = node.get("target")
@@ -14653,11 +14671,13 @@ def _service_receiver_decl(node: dict, env: Env):
 
 def _receiver_names_decided(recv, env: Env) -> bool:
     """Whether every name a receiver expression reads is one this rule
-    decides: a `let`-bound local of the body being lowered, or a name whose
-    type mentions no service at all (a condition's `n`, a scrutinee's `o`).
-    An arrow parameter, and a provide method's own parameter of a type that
-    mentions a service, are not decided here."""
-    lets = getattr(env, "let_locals", None) or ()
+    decides: a `let`-bound local of the body being lowered, a provide
+    method's own parameter of a type that mentions a service (issue #1682),
+    or a name whose type mentions no service at all (a condition's `n`, a
+    scrutinee's `o`). An arrow parameter is not decided here: what flows into
+    it is decided at the application."""
+    lets = set(getattr(env, "let_locals", None) or ()) \
+        | set(getattr(env, "service_params", None) or ())
     arrow_params = getattr(env, "_arrow_params", None) or ()
     tenv = getattr(env, "type_env", None) or {}
 
@@ -14675,6 +14695,51 @@ def _receiver_names_decided(recv, env: Env) -> bool:
         return True
 
     return ok(recv)
+
+
+def _param_crossings(body, env: Env) -> dict:
+    """Every emission crossing a provide-method body makes through a receiver
+    that reads one of its own service-typed parameters (issue #1682), by IR
+    node: `id(node) -> (label, capabilities)`. The label is `<Service>.<op>`
+    and the capabilities are the op's declared scope, `{"*"}` when bare. Read
+    by the provider upper bound (`_method_emissions`), which runs after the
+    method's type environment is restored and so cannot resolve them itself."""
+    params = getattr(env, "service_params", None) or set()
+    out: dict = {}
+    if not params:
+        return out
+
+    def reads_param(n) -> bool:
+        if isinstance(n, dict):
+            if n.get("kind") == "name" and n.get("id") in params:
+                return True
+            return any(reads_param(v) for v in n.values())
+        if isinstance(n, list):
+            return any(reads_param(v) for v in n)
+        return False
+
+    def walk(n) -> None:
+        if isinstance(n, dict):
+            if n.get("kind") == "call":
+                decl = _service_receiver_decl(n, env)
+                if decl is not None and decl.emission:
+                    target = n.get("target")
+                    recv = target if isinstance(target, dict) else \
+                        (n.get("callee") or {}).get("target")
+                    if reads_param(recv):
+                        ty = infer_ir(recv, env.type_env, env.types,
+                                      env.services)
+                        head, _ = parse_type(ty or "")
+                        caps = set(getattr(decl, "capabilities", None) or ())
+                        out[id(n)] = (f"{head}.{decl.name}", caps or {"*"})
+            for v in n.values():
+                walk(v)
+        elif isinstance(n, list):
+            for v in n:
+                walk(v)
+
+    walk(body)
+    return out
 
 
 def _mentions_service(ty, env: Env) -> bool:
