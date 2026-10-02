@@ -19,6 +19,7 @@ import importlib.util
 import io
 import json
 import os
+import socket
 import ssl
 import subprocess
 import sys
@@ -881,6 +882,66 @@ def test_mutual_tls_binds_the_certificate_common_name(serving, tmp_path):
     # no client certificate: the handshake itself is refused
     with pytest.raises((ssl.SSLError, ConnectionError, OSError)):
         _rpc(port, "tools/list", context=_client_context(pki))
+
+
+def _refused_before_the_body(port, *, context=None):
+    """POST a body the server refuses (401) without reading, let the server
+    answer and close, and only then read: the whole answer, as raw bytes.
+
+    The body is far larger than one read of the request headers pulls in, so it
+    is still unread on the server when the server closes the connection
+    (issue #1564)."""
+    body = b"x" * 100_000
+    raw = socket.create_connection(("127.0.0.1", port), timeout=30)
+    sock = context.wrap_socket(raw, server_hostname="127.0.0.1") if context else raw
+    try:
+        sock.sendall(b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:%d\r\n"
+                     b"Content-Type: application/json\r\nContent-Length: %d\r\n\r\n"
+                     % (port, len(body)) + body)
+        time.sleep(0.5)  # the server has answered and closed by now
+        received = b""
+        while chunk := sock.recv(65536):
+            received += chunk
+        return received
+    finally:
+        sock.close()
+
+
+def _complete_401(received: bytes) -> dict:
+    head, _, body = received.partition(b"\r\n\r\n")
+    lines = head.decode("latin-1").split("\r\n")
+    assert lines[0].startswith("HTTP/1.1 401 "), lines[0]
+    length = [int(line.split(":", 1)[1]) for line in lines[1:]
+              if line.lower().startswith("content-length:")]
+    assert length == [len(body)], (length, len(body))
+    return json.loads(body)
+
+
+def test_a_refusal_survives_an_unread_request_body(serving):
+    """A refusal is answered before the body is read. Closing a socket that
+    still holds unread bytes makes the kernel send a reset, and the reset can
+    destroy the answer before the client reads it. The listener drains first."""
+    transport = serving()
+    for _ in range(3):
+        refused = _complete_401(_refused_before_the_body(_port(transport)))
+        assert refused["error"]["code"] == -32600
+
+
+def test_an_mtls_refusal_survives_an_unread_request_body(serving, tmp_path):
+    """The shape that made the mTLS test flaky: `http.client` sends the body as
+    its own TLS record, which arrives after the 401 is decided. Before the
+    listener drained on close, a few requests in a hundred lost the 401 body."""
+    pki = _pki(tmp_path, ("mallory",))
+    transport = serving(profile="operator alice may lease on *\n",
+                        exposure=Exposure("127.0.0.1", 0, tls_cert=pki["server"][0],
+                                          tls_key=pki["server"][1],
+                                          tls_client_ca=str(pki["ca"])),
+                        auth="mtls")
+    context = _client_context(pki, "mallory")
+    for _ in range(500):
+        status, body, _ = _rpc(_port(transport), "tools/list", context=context)
+        assert status == 401
+        assert "names no operator" in body["error"]["message"]
 
 
 def test_mutual_tls_needs_a_client_ca():
