@@ -253,6 +253,9 @@ CORPUS = [
     #     an awaited match in an async operation, and an async timer that
     #     mixes an inline sync emission with a spawned async one.
     "../emit_py_async_shapes.rvl",
+    # Reference fix followed by the port, issue #1632: a `Map.remove` whose
+    # receiver carries a `:=` temp is evaluated through a lambda.
+    "../emit_py_map_remove_nested.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -577,6 +580,8 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
 
     runtime = types.ModuleType("runtime")
     runtime.Frame = Frame
+    # issue #1504: a witnessed extern carries the E-Stop gate; no halt here
+    runtime.estop_gated = lambda name: (lambda fn: fn)
     monkeypatch.setitem(sys.modules, "runtime", runtime)
     ns = {}
     exec(compile(source, "witnessed_emitted.py", "exec"), ns)
