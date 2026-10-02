@@ -346,6 +346,28 @@ def test_every_service_local_document_is_decided_alike_by_both(measured):
     assert not wrong, "\n  ".join(["service-local documents moved:"] + wrong)
 
 
+# --- crossings through a service-typed receiver expression (issue #1681) -------
+#
+# The same crossing as the service-typed local, with the receiver written in
+# place: an `if`, a `match`, a record or list literal read in place. `g4_` both
+# refuse under G4, `ok_` both admit.
+SERVICE_RECEIVER_EXPRESSIONS = ROOT / "tests" / "fixtures" / "service_receiver_expressions"
+
+
+def test_every_receiver_expression_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(SERVICE_RECEIVER_EXPRESSIONS.glob("*.rvl"))
+    assert len(docs) == 16, f"the receiver-expression corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["receiver-expression documents moved:"] + wrong)
+
+
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
     """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
     calls its reference set is read STATICALLY out of `_classify`, so that the

@@ -292,6 +292,30 @@ The gate keeps a per-body typing environment (`Ctx.svcTys`) built with its
 `field @spawn:C.<key>`), and reads it through `svc_recv_msig` for the marker
 (`svc_local_refusal`) and the floor (`appr_local_caps`).
 
+### A receiver written in place (issue #1681)
+
+The same crossing with the receiver written as an expression rather than bound
+first: `(if (n > 0) { w.pay } else { w.pay }).charge(n)`, a `match`, a record
+or list literal read in place. Unmarked it was admitted with neither rule
+seeing it; marked it was refused as "not declared `emission`". The resolver
+now reads any receiver whose static type is a service, not only one rooted at
+a `let`-bound local. It still leaves out a receiver that depends on a binder
+it does not decide (`_receiver_names_decided`): an arrow parameter, and a
+provide method's own parameter of a type that mentions a service. The gate
+needs no extra rule for that: `Ctx.svcTys` types only the body's `let`s and
+the spawn-handle reads, so such a receiver types "" there.
+
+The provider upper bound reads an `emit` STEP through such a receiver as it
+reads every step whose head is not a requirement: a host emission over the
+unnameable `*`, which a scoped `emission[...]` list does not name. The gate
+noted nothing for that head and so raised no objection where the reference
+refused; `svc_recv_head` now notes it (`g4_upper_bound_*`).
+
+A match arm written as a block (`Some(v) => { ...; w.pay }`) is a known gap
+on both sides: the reference lambda-lifts the block and does not type its
+value as the service, and the gate does not read block arms. It is not in the
+corpus.
+
 ## What is not covered
 
 - **A service-typed method parameter.** A provide method whose service
