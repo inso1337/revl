@@ -24,7 +24,6 @@ from __future__ import annotations
 import ast
 import contextlib
 import dataclasses
-import io
 import json
 import os
 import random
