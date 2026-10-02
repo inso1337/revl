@@ -85,6 +85,14 @@ def main() -> int:
     record = bool(spec.get("record", False))
     order = spec.get("order") or list((spec.get("modules") or {}).keys())
     modules = spec.get("modules") or {}
+    # issue #1621: the `--once` runner hands this process a per-run token as
+    # the first line of stdin, and the four proof lines (UP, NO-RESIDUE,
+    # RESIDUE-LEFT, DOWN) carry it, so a program's own output cannot forge
+    # them. Read before any module is plugged, into a local of main(). The
+    # spec carries only the flag: it is a file the program could read.
+    proof_name = name
+    if spec.get("proofOnStdin"):
+        proof_name = f"{name}#{sys.stdin.readline().strip()}"
 
     cordis_wasm = os.environ.get("CORDIS_WASM") or str(pathlib.Path.home() / "Projects" / "cordis-wasm")
     sys.path.insert(0, cordis_wasm)
@@ -113,7 +121,7 @@ def main() -> int:
     if not all_active:
         stuck = ", ".join(c for c, f in fibers if f.state is not State.ACTIVE)
         _log(name, "note", "inactive", stuck)
-    print(f"[{name}] {'UP' if all_active else 'PARTIAL'}", flush=True)
+    print(f"[{proof_name}] {'UP' if all_active else 'PARTIAL'}", flush=True)
 
     # teardown, consumers before providers (reverse load order)
     for cname, fiber in reversed(fibers):
@@ -131,11 +139,13 @@ def main() -> int:
         _log(name, "residue", "registry", f"{live_fibers} live plugin(s)")
         _log(name, "residue", "provisions", f"{live_services} service(s) provided")
         if live_fibers == 0 and live_services == 0:
-            print(f"[{name}] NO-RESIDUE — the composition left nothing behind", flush=True)
+            print(f"[{proof_name}] NO-RESIDUE — the composition left nothing behind",
+                  flush=True)
         else:
-            print(f"[{name}] RESIDUE-LEFT — see the residue lines above", flush=True)
+            print(f"[{proof_name}] RESIDUE-LEFT — see the residue lines above",
+                  flush=True)
 
-    print(f"[{name}] DOWN", flush=True)
+    print(f"[{proof_name}] DOWN", flush=True)
     return 0 if all_active else 1
 
 
