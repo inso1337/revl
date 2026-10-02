@@ -894,7 +894,11 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   proof. See [model-providers.md](model-providers.md) and
   [providers-ollama.md](providers-ollama.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
-  refused and the run keeps going.
+  refused and the run keeps going. Ambient host provisions (`revl dev`'s
+  WebUI host, the `--providers` model hosts) belong to the run, not to one
+  generation, so a reload keeps them provided. An edit that changes what the model hosts serve (a key, an
+  operation, a role, or a binding in the provider file) is refused, because
+  the hosts are bound at boot; restart the run to rebind them (issue #1569).
 - `--record` - record the effect accumulator so the REPL can step backwards
   (`:timeline`, `:back k`); see [replay.md](replay.md).
 - `--wal FILE` - persist the effect accumulator as a durable write-ahead log
