@@ -3260,7 +3260,7 @@ fn approval_required(token: Str, ck: Ck) -> Bool {
 fn appr_token_in(names: List[Str], i: Int, token: Str, ck: Ck) -> Bool {
   if (i >= names.length()) { return false }
   let hit = match ck.ctx.fns.lookup(names[i]) {
-    Some(f) => f.appr && f.extEm && f.extCaps.indexOf(token) != 0 - 1,
+    Some(f) => f.appr && f.extEm && list_contains(f.extCaps, token),
     None    => false,
   }
   if (hit) { return true }
