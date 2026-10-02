@@ -150,7 +150,7 @@ class Adapter:
         raw = request_json(url, body=body, headers=headers, timeout=b.timeout,
                            secrets=secrets, label=self.label)
         try:
-            completion = self._wire.parse(raw)
+            completion = self._wire.parse(raw, request)
         except (KeyError, IndexError, TypeError, ValueError) as exc:
             snippet = redact(str(raw)[:400], secrets)
             raise ProviderError(

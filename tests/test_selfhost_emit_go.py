@@ -9,55 +9,27 @@ are forced to agree, and the agreement is the strongest an emitter can be held
 to: the emitted Go source must be identical to the last byte. The reference is
 ground truth; any divergence is a defect in the slice.
 
-Every IR the frontend produces is ir_version 3, and a FUNCTION-ONLY document
-(no components) routes through the reference's PURE typed-core path
-(``emit`` -> ``_emit_v3_go`` -> ``_emit_v3_go_functions`` -> ``_go_v3_stmt`` /
-``_go_v3_expr``): ordinary Go, no stc-go runtime. The covered corpus is the
-corner of that path which emits byte-identical with only the module scaffold,
-the conditional runtime preambles, and the free-function bodies.
+A document with no components, or with top-level declarations beside only
+incidental components, routes through the reference's PURE typed-core path
+(``emit`` -> ``_emit_v3_go`` -> the types / externs / functions / tests
+renderers -> ``_go_v3_stmt`` / ``_go_v3_expr``): ordinary Go, no stc-go
+runtime. Since issue #106 the port covers that whole path: the module scaffold
+with every runtime preamble and import the reference gates on what it renders
+(structural equality, the canonical Float rendering, the Int/Int32 traps, the
+integer division helpers, the Opt / Result / Map / stdlib constants), user
+types, externs (``Secret[T]``, item 378 ``config``, the ``//revl:import``
+hoist), every statement and expression form including the stdlib builtins, the
+built-in Opt/Result values and their ``match``, optional chaining, the item 434
+string builders and code-point scan, the item 445 destructive rebind, and the
+in-file ``test`` blocks.
 
-Covered subset (what emits byte-identical):
-  * the module scaffold — the two ``// Code generated …`` banner lines, the
-    ``package emitted``, the conditional ``import ( "fmt" )`` block (only when
-    interpolation is present in-slice), and the conditional runtime preambles
-    the pure path prepends: ``revlDiv`` (true division), the
-    ``revlAdd``/``revlSub``/``revlMul`` Int-overflow trio, and the
-    ``revlAddI32``/``revlSubI32``/``revlMulI32``/``revlToI32`` Int32 block.
-    Which preambles appear is a deterministic function of the IR (computed by a
-    structural pass mirroring the flags the reference sets while rendering).
-  * ``_emit_v3_go_functions`` — each module fn as a Go ``func`` with ``go_type``
-    for scalar / ``List`` / ``Opt`` / ``Map`` / ``Result`` / function parameter
-    and return types, and an empty (Unit) return rendered as no result.
-  * ``_go_v3_stmt`` — let (with the int64/float64 ``var name T = …`` pin and the
-    ``_ = name`` keep-alive), assign, return, if/else, while, for (the
-    ``for _, x := range …`` form with its ``_ = x``), the bare-expr ``_ = …``,
-    and assert (``if !(…) { t.Fatalf(…) }``).
-  * ``_go_v3_expr`` — lit, name/var, bin (the trapping Int/Int32 ``+ - *``,
-    ``/`` as ``revlDiv(float64(..), float64(..))``, ``%``, comparisons,
-    ``&&``/``||``, native scalar ``==``/``!=``, and string ``+`` as Go ``+``),
-    un (``!``, and the ``revlSub(0, x)`` Int negate), the free-function call,
-    index, list literal, the sync arrow (with untyped-param recovery), the
-    ``widen`` Float/Int markers, and non-float ``${..}`` interpolation via
-    ``fmt.Sprintf``.
-
-Covered typed-core (item 209, byte-identical): user ``type`` decls
-(``_emit_v3_go_types`` — a record as a Go ``struct`` with EXPORTED,
-``json:"<source>"``-tagged fields (item 390), a variant as a sealed interface +
-case structs), record literals and field access, ADT construction (nullary +
-payload), and ``match`` over user variants as a Go type-switch IIFE, plus user
-type names in ``go_type``.
-
-Deliberately OUT (excluded from the corpus, deferred to Go Path B slice 3+):
-the go LIVE-COMPONENT world (v1/v2 stc-go runtime — a component routes there,
-not here); functional record-update (``{r | f = e}`` — the go reference itself
-RAISES on it, python/typescript-only today); the built-in Opt / Result / Map surface
-(``??``, ``Some``/``None``/``Ok``/``Err``, ``Map.empty()``, optional chaining,
-and the Opt/Result/Map preambles they pull in); the stdlib surface (every
-``builtin``/``len`` node, the total division forms and their helpers,
-``Str.to_int``); structural equality over non-scalars (``revlEq`` / the
-``reflect`` import) and the canonical Float->Str ``revlFtoa`` in interpolation
-(so a Float part is excluded); externs, in-file ``test`` emission, async /
-lifecycle, and the astral reaches of ``_go_string`` beyond the ASCII/BMP core.
+Deliberately OUT, each answered with a named ``<<UNSUPPORTED-...>>`` marker:
+the go LIVE-COMPONENT world (an ir_version 1/2 document, a component with no
+top-level declarations, an observable component beside declarations, a
+``lifecycle test``), ``fault test`` blocks (the reference refuses them), the
+item 388 colour-erased extern clone, and an extern body whose line breaks
+Python ``splitlines()`` reads differently. Functional record-update is a
+reference refusal.
 """
 
 import importlib.util
@@ -119,6 +91,44 @@ CORPUS = [
     # document in this corpus declares a `Secret[T]` (or an extern), so without
     # this one the byte-agreement gate never reaches the redaction.
     "secrets.rvl",
+    # issue #106: the surface the port used to refuse or skip. A document of its
+    # own for the shapes no tree document reaches together: the stdlib builtins
+    # and `len`, Opt/Result construction and `match`, `??`, optional chaining,
+    # the Map value type and its faulting subscript, structural `==`, the
+    # canonical Float rendering, the code-point scan, the destructive rebind and
+    # in-file tests.
+    "stdlib_surface.rvl",
+    # the item 378 extern `config` seam and the `//revl:import` hoist
+    "extern_config.rvl",
+    # the code-point scan rewrite and every near miss it must refuse, the
+    # `.concat` string builder, and the destructive Map rebinds
+    "loop_shapes.rvl",
+    # the preamble gates read the IR's JSON text, field names included
+    "blob_probes.rvl",
+    # in-file `test` blocks, the `testing` import and the Go test-name rules
+    "in_file_tests.rvl",
+    # issue #106: tree documents the port refused or diverged on before, chosen
+    # by `tools/selfhost_differential_survey.py --select-cover` for the
+    # statements they reach beyond the documents above. The host-family
+    # constructors and the predeclared-name escape (`make`); Opt/Result
+    # construction recovered from the argument; the item 280 Opt gaps with
+    # their in-file tests; let-inference through builtins; a `match` whose arms
+    # ignore their binders; the total division forms; declared Opt/Map/List
+    # shapes; optional chaining across the builtin table; and the Map methods.
+    "../emit_py_corpus/hostroots.rvl",
+    "../emit_py_corpus/adt_inference.rvl",
+    "../../../backends/go/testdata/opt_gaps_280.rvl",
+    "../emit_wasm_corpus/inference.rvl",
+    "../emit_java_corpus/match_ignored.rvl",
+    "../emit_py_corpus/checked_div.rvl",
+    "../emit_py_corpus/declared_type_shapes.rvl",
+    "../emit_py_corpus/optionals.rvl",
+    "../emit_py_corpus/maps.rvl",
+    # issue #1631: a built-in Ok/Err/None whose type the argument does not
+    # fully say takes the missing part from where it flows (a declared return
+    # or parameter, or the other operand of an `==`), and a call through a
+    # function value types its payload
+    "../../../backends/go/testdata/result_erased_1631.rvl",
 ]
 
 
@@ -207,6 +217,8 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
 
 @pytest.mark.parametrize("rel", [
     "inference.rvl", "accumulators.rvl", "../emit_rust_corpus/perf_shapes.rvl",
+    # issue #106: every preamble and import the ported surface pulls in
+    "stdlib_surface.rvl", "loop_shapes.rvl", "extern_config.rvl", "in_file_tests.rvl",
 ])
 def test_supported_corpus_compiles_as_go(emitted, reference, tmp_path, rel):
     """Agreement alone cannot catch a type error shared by both emitters."""
@@ -322,33 +334,19 @@ def test_builder_text_literal_does_not_import_strings(emitted, reference):
     assert '"strings"' not in got
 
 
+# The families this list used to hold (the Opt/Result/Map surface, the stdlib
+# builtins, structural equality, the Float rendering helper, the extern
+# `//revl:import` hoist and the in-file test section) were ported under issue
+# #106 and their witnesses moved into CORPUS (`stdlib_surface.rvl`,
+# `extern_config.rvl`). `test_the_closed_families_now_agree` below keeps each
+# old witness source as an agreement pin, so a regression in one of them names
+# the family rather than only a corpus document.
 @pytest.mark.parametrize("source, reference_token, port_token", [
-    pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }",
-                 "RevlOpt", "<<DEFER-coalesce>>", id="opt-coalesce-runtime"),
-    pytest.param("fn f(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 } }",
-                 "RevlResult", "<<DEFER-match-builtin>>", id="result-match-runtime"),
-    pytest.param("fn f() -> Map[Str, Int] { return Map.empty() }",
-                 "map[string]int64", "<<UNSUPPORTED-EXPR:", id="map-runtime"),
-    pytest.param("fn f(s: Str) -> Int { return s.length() }",
-                 "utf8.RuneCountInString", "<<UNSUPPORTED-EXPR:builtin>>", id="stdlib-runtime"),
-    pytest.param("fn f(a: List[Int], b: List[Int]) -> Bool { return a == b }",
-                 "reflect.DeepEqual", "<<DEFER-reflect-eq>>", id="structural-equality"),
-    # No port-only text: the port emits the CALL `revlFtoa(x)` (so did the
-    # reference, which is why that token could not witness anything) and drops
-    # the helper's DEFINITION and the "math"/"strconv"/"strings" import block
-    # with it. Witnessed by the definition's absence from the port's output.
-    pytest.param("fn f(x: Float) -> Str { return `x=${x}` }",
-                 "func revlFtoa", None, id="float-format-helper"),
-    pytest.param('extern pure fn f() -> Str = @go {\n//revl:import strings\nreturn strings.ToUpper("x")\n}',
-                 '"strings"', "<<DEFER-EXTERN-import:f>>", id="extern-imports"),
-    # issue #1123: the port_token here used to be `func f()` — the emitted
-    # function itself, present in EVERY go emission of this document, so the
-    # witness could not tell a named refusal from silence, which is what the
-    # port actually produced. It now pins the marker.
-    pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
-                 "*testing.T", "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
     pytest.param("service S { fn f() -> Int }\ncomponent C provides s: S { provide s { fn f() = 1 } }",
                  "stc-go", "pure typed-core tier", id="live-component"),
+    # an ir_version 1 document is a live stc-go module on the reference
+    pytest.param("service S { fn f() -> Int }",
+                 "stc-go", "<<UNSUPPORTED-LIVE-TIER:ir_version 1>>", id="live-tier-service"),
 ])
 def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
                                          reference_token, port_token):
@@ -360,25 +358,53 @@ def test_deferred_families_remain_explicit(emitted, reference, tmp_path, source,
     assert_boundary_witness(want, got, reference_token, port_token)
 
 
-def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_path):
-    """Non-vacuity for the meta-check, planting the exact token it was written for.
+@pytest.mark.parametrize("source", [
+    pytest.param("fn f(x: Opt[Int]) -> Int { return x ?? 0 }", id="opt-coalesce"),
+    pytest.param("fn f(x: Result[Int, Str]) -> Int { return match x { Ok(v) => v, Err(e) => 0 } }",
+                 id="result-match"),
+    pytest.param("fn f() -> Map[Str, Int] { return Map.empty() }", id="map"),
+    pytest.param("fn f(s: Str) -> Int { return s.length() }", id="stdlib"),
+    pytest.param("fn f(a: List[Int], b: List[Int]) -> Bool { return a == b }",
+                 id="structural-equality"),
+    pytest.param("fn f(x: Float) -> Str { return `x=${x}` }", id="float-format-helper"),
+    pytest.param('extern pure fn f() -> Str = @go {\n//revl:import strings\nreturn strings.ToUpper("x")\n}',
+                 id="extern-imports"),
+    pytest.param('fn f() -> Bool { return true }\ntest "probe" { assert f() }',
+                 id="in-file-tests"),
+])
+def test_the_closed_families_now_agree(emitted, reference, tmp_path, source):
+    """Issue #106: each family the port once deferred is byte-identical now."""
+    path = tmp_path / "closed.rvl"
+    path.write_text(source)
+    ir = compile_files([str(path)])
+    assert emitted["emit_go_src"](ir) == reference.emit(ir)
 
-    Until item 1136 the `in-file-tests` case above pinned `func f()` as its port
-    token. Both sides emit it -- it is the document's own function -- so the case
-    passed green while the port dropped the entire `testing` section. Plant it
-    back and the witness must now refuse it by name; the honest form of the same
-    case (the reference's driver, absent from the port) still passes.
+
+def test_a_witness_token_both_sides_emit_is_rejected(emitted, reference, tmp_path):
+    """Non-vacuity for the meta-check, planting the exact kind of token it was
+    written for.
+
+    Until item 1136 the `in-file-tests` case pinned `func f()` as its port
+    token. Both sides emit it -- it is the document's own function -- so the
+    case passed green while the port dropped the entire `testing` section. That
+    family is ported now, so the plant moves to the one that is still deferred:
+    a declaration beside an observable component, where both sides emit the
+    function and only the reference emits the component. The planted token must
+    be refused by name; the honest form (the reference's component, absent from
+    the port) still passes.
     """
     path = tmp_path / "planted.rvl"
-    path.write_text('fn f() -> Bool { return true }\ntest "probe" { assert f() }')
+    path.write_text("fn f() -> Int { return 1 }\n"
+                    "service S { fn g() -> Int }\n"
+                    "component C provides s: S { provide s { fn g() = 1 } }\n")
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_go_src"](ir)
     assert "func f()" in want and "func f()" in got, (
         "the plant is only a proof while it is text BOTH sides emit"
     )
     with pytest.raises(AssertionError, match="text the REFERENCE also emits"):
-        assert_boundary_witness(want, got, "*testing.T", "func f()")
-    assert_boundary_witness(want, got, "*testing.T", None)
+        assert_boundary_witness(want, got, "stc.Component", "func f()")
+    assert_boundary_witness(want, got, "stc.Component", None)
 
 
 STREAM_130 = ROOT / "backends" / "go" / "testdata" / "stream_130.rvl"
@@ -665,8 +691,25 @@ component Fulfiller requires ship: Ship { }
     assert got == reference.emit(ir)
 
 
-def test_record_update_is_a_reference_refusal(reference, tmp_path):
-    path = tmp_path / "record_update.rvl"
-    path.write_text("type R = { x: Int }\nfn f(r: R) -> R { return {r | x = 2} }")
+def test_record_update_is_a_reference_refusal(emitted, reference):
+    """`tests/fixtures/emit_go_refusals/record_update.rvl`: the reference
+    refuses functional record update by name, and the port names the node."""
+    path = ROOT / "tests" / "fixtures" / "emit_go_refusals" / "record_update.rvl"
+    ir = compile_files([str(path)])
     with pytest.raises(reference.EmitError, match="record.update"):
-        reference.emit(compile_files([str(path)]))
+        reference.emit(ir)
+    assert "<<UNSUPPORTED-EXPR:record_update>>" in emitted["emit_go_src"](ir)
+
+
+def test_a_fault_test_the_reference_refuses_is_named_here_too(emitted, reference):
+    """`tests/fixtures/emit_go_refusals/fault_test_section.rvl`: the reference
+    refuses a `fault test` section by name, and the port, which has no refusal
+    channel, names the section and the component instead of answering with a
+    module that drops them."""
+    path = ROOT / "tests" / "fixtures" / "emit_go_refusals" / "fault_test_section.rvl"
+    ir = compile_files([str(path)])
+    with pytest.raises(reference.EmitError, match="fault tests do not lower"):
+        reference.emit(ir)
+    got = emitted["emit_go_src"](ir)
+    assert "<<UNSUPPORTED-FAULT-TEST:probe>>" in got
+    assert "<<UNSUPPORTED-COMPONENT:P>>" in got

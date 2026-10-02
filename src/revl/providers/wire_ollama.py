@@ -62,7 +62,10 @@ def build(binding, request: CompletionRequest, credential: str | None,
     return binding.base_url + "/api/chat", headers, body
 
 
-def parse(raw: dict) -> Completion:
+def parse(raw: dict, request: CompletionRequest | None = None) -> Completion:
+    # `request` is the adapter's uniform wire interface (issue #1462). This
+    # wire requests no structured output, so there is nothing to read back.
+    del request
     message = raw["message"]
     text = message.get("content") or ""
     if not isinstance(text, str):

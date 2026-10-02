@@ -123,6 +123,7 @@ Fields every provider accepts:
 | `timeout` | seconds per request | 120 |
 | `residence` | `off_device` to narrow a loopback endpoint (see below) | derived from the endpoint |
 | `reaches` | capability tokens the endpoint's model can reach on its own | `[]` |
+| `structured_output` | how a `validated` operation's grammar is attached (see "Structured output") | per provider |
 
 An unknown field is refused, not ignored: a field that is silently dropped is a
 setting the operator believes is in force.
@@ -197,6 +198,64 @@ proxy that forwards to a cloud API) and may never widen one.
   answer (`Completion.reasoning`) and is never returned as the value.
 - An `async` operation is served on a worker thread and awaited.
 
+## Structured output: constrained decoding (issue #1462)
+
+A `validated` operation's return type derives two artifacts
+([542-grammar-constrained-decoding.md](design/542-grammar-constrained-decoding.md)):
+a GBNF grammar and a JSON Schema (the "wire schema"). Under `revl run`, each
+adapter attaches one of them to the request, chosen by the binding's
+`structured_output` field:
+
+| `provider` | `structured_output` | What is sent | Claims the decode |
+| ---------- | ------------------- | ------------ | ----------------- |
+| `openai-compatible` | `json-schema` (default) | `response_format: {type: json_schema, json_schema: {schema: <wire schema>, strict: true}}` | yes |
+| `openai-compatible` | `gbnf` | `grammar: <GBNF text>` (llama.cpp's server) | yes |
+| `anthropic` | `tool` (default) | one forced tool whose `input_schema` is the wire schema | no |
+| `gemini` | `response-schema` (default) | `responseMimeType: application/json` and a translated `responseSchema` | no |
+| `ollama` | `none` (the only value) | nothing | no |
+| any | `none` | nothing | no |
+
+**Claiming** means the adapter took the artifact through the runtime's
+`revl_constrain`, so `validate_response` holds the completion to exactly that
+artifact and a completion outside it is a named `GrammarNotHonouredError`,
+retried under a declared `retry N`. An adapter claims only where the provider
+enforces the artifact during decoding. The Anthropic and Gemini adapters send
+the schema and claim nothing. Every `validated` completion, claimed or not, is
+still validated against the revl type on return.
+
+`revl run --plan --providers FILE` prints, for every `validated` operation, the
+mode, whether it claims, and each gap below.
+
+### Which revl types each adapter represents exactly
+
+| Adapter and mode | Exact | Approximated (validated on return, gap named) |
+| ---------------- | ----- | --------------------------------------------- |
+| `openai-compatible` `json-schema` | every type `validated` admits, on a server whose JSON Schema engine supports `type`, `properties`, `required`, `additionalProperties`, `items`, `anyOf`, `oneOf` and `const` (llama.cpp, Ollama, vLLM, SGLang) | hosted OpenAI strict mode refuses a non-object root (a variant, `Str`, `List`, ...) and `oneOf` with HTTP 400, which is loud, not silent. `Bytes` is a plain string in this dialect (base64 is not constrained) |
+| `openai-compatible` `gbnf` | every type, on llama.cpp's server | a server that ignores `grammar` (Ollama does, silently) is caught by the claim check, and byte for byte with llguidance installed |
+| `anthropic` `tool` | none: tool input is schema-guided, not grammar-constrained | every type. A root that is not an object is wrapped as `{"value": ...}` and unwrapped on return |
+| `gemini` `response-schema` | `Str`, `Int`, `Float`, `Bool`, `List`, `Opt` (as `nullable`), a variant's tag (a one-value `enum`), a tagged variant (`anyOf`, disjoint by tag), member order (`propertyOrdering`) | a record or variant arm: `additionalProperties: false` has no form, so extra members are not excluded by the decoder. A type containing `Map[Str, V]` has no `responseSchema` form at all, so only `responseMimeType: application/json` is sent |
+
+### The local grammar engine (optional)
+
+`pip install "revl[constrain]"` installs [llguidance](https://github.com/guidance-ai/llguidance).
+It is never required. When it is installed:
+
+- every derived GBNF grammar a `gbnf` binding would claim is compiled by it
+  first, and a grammar it refuses is a refusal at boot, not a claim;
+- a completion made under a `gbnf` claim is matched against the grammar byte
+  for byte. The runtime's own check sees only the decoded value, where
+  whitespace, number spelling and text around the JSON are already gone; a
+  completion the engine refuses raises `GrammarNotHonouredError`, retried like
+  any response fault.
+
+Without it both checks are skipped and nothing else changes.
+
+### Measured
+
+`bench/structured_output_bench.py` runs the whole path (compiled `validated`
+crossing, runtime registry, model host, adapter, `validate_retry`) against a
+local server, per mode, and writes to `bench/results/structured-output/`.
+
 ## What is checked, and what is not
 
 Checked: everything under "Credentials" and "What decides which adapter", before
@@ -217,7 +276,8 @@ Not checked:
 - **Token usage on the trace hop.** Usage and latency are on the host's
   `last_completion`, not yet on the `llm` hop of a `--trace` record.
 - **Multi-turn conversations and tool calls.** An adapter sends one system
-  prompt and one user turn.
+  prompt and one user turn. (The Anthropic adapter's forced tool under
+  structured output is the adapter's own, not a tool the program declares.)
 
 ## Python API
 

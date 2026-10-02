@@ -686,3 +686,40 @@ def test_live_one_load_on_the_cpu_and_no_residue(schedule):
     small = provisions.get("small")
     assert (small.loads, small.unloads) == (1, 1)
     assert provisions.residue() == {}
+
+
+# --------------------------------------------------------------------------
+# 5. a swap successor and --providers
+# --------------------------------------------------------------------------
+#
+# The boot path serves a model key inside the process that requires it and
+# builds no proxy for it, so the successor of a swapped component must carry
+# the same `providers` entry, or nothing serves the key after the cutover.
+# `tests/test_swap_ref_pins.py` pins that the key is set on the successor at
+# all; these pin what it is set to and when the swap refuses instead.
+
+def test_a_successor_carries_the_predecessors_providers():
+    old = {"providers": "/cfg/providers.json"}
+    assert _placement._successor_providers(old, [], "Classifier", "py") == (
+        "/cfg/providers.json", None)
+
+
+def test_a_successor_with_no_model_keys_gets_no_providers():
+    assert _placement._successor_providers({}, [], "Classifier", "node") == (
+        None, None)
+
+
+def test_a_successor_off_the_py_tier_refuses_the_swap():
+    path, refusal = _placement._successor_providers(
+        {"providers": "/cfg/providers.json"}, [], "Classifier", "node")
+    assert path is None
+    assert "binds no model host" in refusal and "py tier only" in refusal
+
+
+def test_a_successor_of_a_managed_role_refuses_the_swap():
+    """A provision belongs to one process: the successor would load the
+    member and the predecessor's teardown would unload it again."""
+    path, refusal = _placement._successor_providers(
+        {"providers": "/cfg/providers.json"}, ["small"], "Classifier", "py")
+    assert path is None
+    assert "small" in refusal and "unload the member" in refusal
