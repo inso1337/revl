@@ -567,6 +567,14 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "size") { return `len(${target})` }
   if (method == "keys") { return `sorted(${target})` }
   if (method == "remove") {
+    // issue #1632: Python refuses an assignment expression in a comprehension's
+    // iterable, and a receiver that is not a bare name carries one (the `_fv :=`
+    // field temp, a bounded `_bi :=`). The receiver and key are then passed as
+    // arguments, outside the comprehension; a plain receiver keeps the one-frame
+    // form.
+    if (target.indexOf(":=") >= 0) {
+      return "(lambda _revl_m, _revl_k: {kk: vv for kk, vv in _revl_m.items() if kk != _revl_k})".concat(`(${target}, ${args[0]})`)
+    }
     return "{".concat(`kk: vv for kk, vv in ${target}.items() if kk != ${args[0]}`).concat("}")
   }
   if (method == "div_trunc") {
@@ -2836,12 +2844,11 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
 // `on <Event> as <x> in <sub>`. The await lands, the A1 yield closes the
 // iteration, a `Closed` terminal ends the loop, and (for an event) the
 // contract built once above the loop gates each item before the body runs.
-// The item is mangled TWICE, as the reference's `_mangle(_ident(bind))` does
-// (`_ident` already mangles). Body reads are mangled once, so a builtin-named
-// item (`every len in sub`) binds `len___` and reads `len__` on both sides.
-// That is a reference defect, mirrored here for byte parity rather than fixed.
+// The item is mangled once, as every name the body reads is (issue #1646: a
+// second rename bound a builtin-named item as `len___` while the body read
+// `len__`).
 fn stream_iter(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
-  let item = mangle(mangle(value_str(value_field(step, "bind"))))
+  let item = mangle(value_str(value_field(step, "bind")))
   let subject = cexpr(value_field(step, "subject"))
   let contract = value_field(step, "event")
   var out = []

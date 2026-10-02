@@ -22,9 +22,9 @@
           "documents": []
         },
         "py": {
-          "residual": 24,
-          "corpus": 96,
-          "reproduced": 72,
+          "residual": 23,
+          "corpus": 98,
+          "reproduced": 75,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
             "../../../backends/go/testdata/stream_130.rvl",
@@ -41,11 +41,10 @@
             "../../../stdlib/fs.rvl",
             "../emit_py_async_shapes.rvl",
             "../emit_py_builtin_shadow.rvl",
-            "../emit_py_deferred_shapes.rvl",
             "../emit_py_placement.rvl",
+            "../emit_py_stream_builtin_bind.rvl",
             "../emit_py_test_sections.rvl",
             "../emit_rust_corpus/comp_stream.rvl",
-            "../emit_ts_refusals/deferred_emission_call.rvl",
             "branches.rvl",
             "services_control_flow.rvl",
             "services_host_stream.rvl",
@@ -79,8 +78,8 @@
           "documents": []
         }
       },
-      "total_residual": 33,
-      "total_corpus": 315,
+      "total_residual": 32,
+      "total_corpus": 317,
       "clean_tiers": [
         "java",
         "wasm"

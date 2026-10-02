@@ -286,6 +286,12 @@ CORPUS = [
     # fires through the `extern_emit` seam.
     "../emit_ts_refusals/deferred_emission_call.rvl",
     "../emit_py_deferred_shapes.rvl",
+    # Reference fixes followed by the port. emit_py_map_remove_nested.rvl
+    # (issue #1632): a `Map.remove` whose receiver carries a `:=` temp is
+    # evaluated through a lambda. emit_py_stream_builtin_bind.rvl (issue
+    # #1646): an `every ... in` item named after a builtin is renamed once.
+    "../emit_py_map_remove_nested.rvl",
+    "../emit_py_stream_builtin_bind.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.

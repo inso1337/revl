@@ -51,7 +51,7 @@
     "reference": {
       "go": 2824,
       "java": 986,
-      "py": 311,
+      "py": 310,
       "rust": 1200,
       "ts": 552,
       "wasm": 1558
@@ -777,8 +777,8 @@
         "Parallel component output boundary: emit advances over an emitted item-259 parallel group, which only a whole-program `revl.parallel` plan produces; the port refuses two adjacent awaited emits by name instead. Route proxies, the intercept inject map and isolate metadata are ported and exercised by emit_py_placement.rvl and emit_ts_corpus/realm_intercept.rvl.": {
           "_ComponentEmitter.emit": 2
         },
-        "Reviewed Map.has branch plus unknown-method rejection: _render_builtin renders key in map exactly like selfhost render_builtin; existing map corpus uses lookup/set/size/keys/remove but not has. Unknown builtin names are frontend-invalid and produce an explicit port marker. This is not a deferred supported map operation. Issue #1632 adds one statement to `_render_builtin`: a `Map.remove` receiver that carries an assignment expression (a nested field read such as `o.ctx.sc`) is evaluated as an argument outside the dict comprehension, because Python refuses a walrus in a comprehension's iterable. selfhost/emit_py.rvl does not mirror it yet and no py corpus document removes through a nested field; tests/test_py_nested_field_remove_1632.py executes it.": {
-          "_render_builtin": 3
+        "Reviewed Map.has branch plus unknown-method rejection: _render_builtin renders key in map exactly like selfhost render_builtin; existing map corpus uses lookup/set/size/keys/remove but not has. Unknown builtin names are frontend-invalid and produce an explicit port marker. This is not a deferred supported map operation. Issue #1632's `Map.remove` through a receiver that carries an assignment expression (evaluated as a lambda argument, outside the comprehension) is mirrored by selfhost/emit_py.rvl and exercised by emit_py_map_remove_nested.rvl.": {
+          "_render_builtin": 2
         },
         "Reviewed eager-substitution residuals: _inline_eager_vars returns empty for non-dict children and descends optfield/optcall targets or match scrutinees. Both sources implement the same recursion; inline.rvl covers strict/list/record/index/field/unary/short-circuit argument positions, while opt/match functions may exceed the 24-node template bound before this helper is queried. No broader optimization claim is inferred from coverage.": {
           "_inline_eager_vars": 2
@@ -816,7 +816,7 @@
           "_deferred_register_kwargs": 9
         }
       },
-      "uncovered_statements": 311
+      "uncovered_statements": 310
     },
     "rust": {
       "statements": 3771,
@@ -1698,7 +1698,7 @@
       "uncovered_statements": 175
     },
     "py": {
-      "statements": 2805,
+      "statements": 2807,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. The final three statements return an explicit unsupported-step marker for an approval step or an invalid kind. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8
