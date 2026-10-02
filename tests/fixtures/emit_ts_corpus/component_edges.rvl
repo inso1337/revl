@@ -30,7 +30,7 @@ component Components provides ops: EdgeOps {
       return y
     }
     async fn wait(x) {
-      await later(x)
+      await emit later(x)
       return
     }
     fn bytes(x, n, f) = x

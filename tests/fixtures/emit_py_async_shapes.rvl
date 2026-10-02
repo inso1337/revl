@@ -79,11 +79,11 @@ service Relay {
 component Relayer provides relay: Relay {
   provide relay {
     async fn send(path) {
-      await fetch(path)
+      await emit fetch(path)
       emit host_get(path)
-      let got = fetch(path)
+      let got = emit fetch(path)
       return match got.length() > 0 ? Some(got) : None {
-        Some(g) => fetch(g),
+        Some(g) => emit fetch(g),
         None => "empty"
       }
     }
