@@ -37,10 +37,28 @@ ROOT = Path(__file__).resolve().parents[1]
 # The cross-tier half drives real toolchains (cargo/javac/wasmtime/go), which is
 # minutes, not seconds. It is gated so the default run stays fast; set
 # REVL_SWEEP_ALL_TIERS=1 (CI's conformance job) to exercise it. The python half
-# below is in-process and always runs.
+# below sweeps the python tier ONLY, in-process, and always runs.
 _CROSS_TIER = pytest.mark.skipif(
     not os.environ.get("REVL_SWEEP_ALL_TIERS"),
     reason="set REVL_SWEEP_ALL_TIERS=1 to sweep the real per-tier toolchains")
+
+
+@pytest.fixture(scope="module")
+def private_gocache(tmp_path_factory):
+    """The go leg's build cache. An unset GOCACHE means go's per-user default,
+    which every concurrent checkout shares, and concurrent `go test` runs have
+    corrupted it into phantom failures. A GOCACHE the caller already exported
+    is their own choice and is kept, and so is the default on a CI runner,
+    which is one job's machine and already warm from the job's earlier go
+    steps. Otherwise this module gets a fresh one, shared by its cross-tier
+    tests so the standard library builds once."""
+    if os.environ.get("GOCACHE") or os.environ.get("CI"):
+        yield os.environ.get("GOCACHE")
+        return
+    path = str(tmp_path_factory.mktemp("gocache"))
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("GOCACHE", path)
+        yield path
 
 import sys
 
@@ -172,10 +190,33 @@ KNOWN_FNNAME_REMAINDER = {
 }
 
 
-def test_python_param_and_local_positions_are_safe_verbatim():
+def test_python_param_and_local_positions_are_safe_verbatim(monkeypatch):
     """The reference tier, in-process (fast): every union member is safe as a
-    parameter and as a value local. This is the half of #320 this change lands."""
-    res = S.sweep(names=S.UNION, positions=("param", "local"))
+    parameter and as a value local. This is the half of #320 this change lands.
+
+    It sweeps the python tier ONLY (issue #1582). It used to call the sweep
+    with every tier and keep the python rows, so it ran a `go test`, node,
+    cargo and javac subprocess per probe and threw the answers away: 185s at
+    load average 6 to 14, and a timeout under the pre-commit hook's
+    `--timeout=60`. The other tiers are the cross-tier tests' job. Python-only
+    it measures 0.3 to 0.5s and starts no subprocess, which the spy below
+    holds. The spy records rather than raises: the tier runners turn a crashed
+    runner into an outcome, so an exception from inside one would be
+    swallowed."""
+    import subprocess
+
+    spawned = []
+
+    def no_subprocess(*args, **kwargs):
+        spawned.append(args[0] if args else kwargs.get("args"))
+        raise OSError("the python-only sweep may not start a subprocess")
+
+    monkeypatch.setattr(subprocess, "Popen", no_subprocess)
+    res = S.sweep(names=S.UNION, positions=("param", "local"),
+                  tiers=("python",))
+    assert not spawned, f"python-only sweep started subprocesses: {spawned[:3]}"
+    assert {tier for (_, _, tier) in res} == {"python"}, sorted(res)[:5]
+    assert sum(1 for (out, _) in res.values() if out == "pass") > 50, res
     fails = {
         (t, pos, name): detail
         for (name, pos, t), (out, detail) in res.items()
@@ -184,8 +225,14 @@ def test_python_param_and_local_positions_are_safe_verbatim():
     assert not fails, f"python binding-position regressions: {fails}"
 
 
+# Measured 1284s at load average 15 to 56 with every toolchain present and a
+# cold private GOCACHE (211s with vitest absent, typescript then unavailable):
+# one `go test` and one vitest run per probe, plus a batched cargo/javac/wasm
+# check. Slow by nature (every cell is a real toolchain run), not re-deriving
+# anything a session could share (issue #1582).
 @_CROSS_TIER
-def test_cross_tier_param_and_local_positions_are_safe_verbatim():
+@pytest.mark.timeout(2400)
+def test_cross_tier_param_and_local_positions_are_safe_verbatim(private_gocache):
     """Every AVAILABLE tier's real toolchain accepts every union member in a
     binding position. Tiers whose toolchain is absent are skipped, never
     counted as a pass."""
@@ -198,8 +245,12 @@ def test_cross_tier_param_and_local_positions_are_safe_verbatim():
     assert not fails, f"binding-position regressions across tiers: {fails}"
 
 
+# Measured 686s in the same run, after the test above warmed the GOCACHE (91s
+# with vitest absent): the same toolchain runs for one position instead of two
+# (issue #1582).
 @_CROSS_TIER
-def test_only_the_known_fnname_cells_remain():
+@pytest.mark.timeout(1500)
+def test_only_the_known_fnname_cells_remain(private_gocache):
     """The function-NAME position: assert the set of remaining failures is
     EXACTLY the documented remainder, so a new gap (or a fixed one) is caught."""
     res = S.sweep(names=S.UNION, positions=("fnname",))
