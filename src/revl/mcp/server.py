@@ -73,6 +73,7 @@ from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
 from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
+from .. import source_grammar as _source_grammar
 from . import fillspec
 from . import edit as _edit
 from . import leases as _leases
@@ -2089,12 +2090,34 @@ def _tool_resolve(arguments: dict) -> dict:
         return report(error)
 
 
-def _tool_grammar(_arguments: dict) -> dict:
-    # `fixes` is the `revl explain` payload: for every guarantee, the rewrite
-    # that satisfies it — so an agent that gets a code back can act without
-    # a second round trip
-    return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES,
-            "fixes": FIXES}
+# the derivation itself is lazy (`render` reads the parser's source on call);
+# importing the module costs nothing and keeps the enums one list
+_GRAMMAR_FORMATS = _source_grammar.FORMATS
+_GRAMMAR_CATEGORIES = tuple(_source_grammar.CATEGORIES)
+
+
+def _tool_grammar(arguments: dict) -> dict:
+    """revl_grammar: the prose summary by default; with `format`, the grammar
+    of revl source derived from the parser (issue #1661, the MCP twin of
+    `revl grammar --format/--category`), for a grammar-constrained decoder."""
+    fmt = arguments.get("format")
+    category = arguments.get("category")
+    if fmt is None and category is None:
+        # `fixes` is the `revl explain` payload: for every guarantee, the
+        # rewrite that satisfies it, so an agent that gets a code back can act
+        # without a second round trip
+        return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES,
+                "fixes": FIXES}
+    if fmt not in _GRAMMAR_FORMATS:
+        return _session_error(
+            f"`format` must be one of {', '.join(_GRAMMAR_FORMATS)}"
+            + ("" if fmt is not None else " when `category` is given"))
+    category = "program" if category is None else category
+    if category not in _GRAMMAR_CATEGORIES:
+        return _session_error(
+            f"`category` must be one of {', '.join(_GRAMMAR_CATEGORIES)}")
+    return {"ok": True, "format": fmt, "category": category,
+            "grammar": _source_grammar.render(fmt, category)}
 
 
 # -- the authoring toolbox as MCP tools (roadmap item 345) -------------------
@@ -3427,8 +3450,22 @@ TOOLS = [
     {
         "name": "revl_grammar",
         "description": "The revl surface syntax and the rules that reject code — "
-                       "small enough to keep in context while generating.",
-        "inputSchema": {"type": "object", "properties": {}},
+                       "small enough to keep in context while generating. With "
+                       "`format`, instead a grammar of revl source derived from "
+                       "the parser, for a grammar-constrained decoder: `lark` "
+                       "(llguidance), `gbnf` (llama.cpp server, XGrammar) or "
+                       "`ebnf`; `category` scopes it to one hole's slot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "enum": list(_GRAMMAR_FORMATS),
+                           "description": "return the derived source grammar in "
+                                          "this format instead of the summary"},
+                "category": {"type": "string", "enum": list(_GRAMMAR_CATEGORIES),
+                             "description": "with `format`: the syntactic slot "
+                                            "to constrain to (default `program`)"},
+            },
+        },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_grammar,
     },

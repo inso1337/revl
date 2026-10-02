@@ -163,7 +163,7 @@ the same admission gate a human's `revl compile` does.
 | `revl_admit` | may it enter **this running composition**? (ambient services, G2/G3 across both, interface drift) |
 | `revl_audit` | what can this composition touch? |
 | `revl_tools` | project its provided services to MCP tools (§1) |
-| `revl_grammar` | the language surface, prompt-sized |
+| `revl_grammar` | the language surface, prompt-sized; with `format`, a derived grammar for constrained decoding |
 | `revl_resolve` | is there already a component to **import** for this need? ([below](#import-before-you-regenerate--revl_resolve)) |
 
 Rejections come back structured, so the agent reacts to a *code*, not prose:
