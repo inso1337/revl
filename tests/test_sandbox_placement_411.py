@@ -60,7 +60,7 @@ component Provider provides work: Work {
   provide work { async fn compute(x) = x }
 }
 component Untrusted requires work: Work provides job: Job {
-  provide job { fn run() = fetch("x") }
+  provide job { fn run() = emit fetch("x") }
 }
 """
 

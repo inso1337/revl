@@ -19,6 +19,7 @@ operation whose implementation reaches an irreversible call, so a generated
 plain `fn` is genuinely plain.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -247,6 +248,10 @@ def test_a_plain_operation_backed_by_an_emission_is_rejected(tmp_path):
     source = import_wit(NOTHING_ASSERTED, filename="probe.wit",
                         pure=["probe.read-only-looking"])
     broken = source.replace("extern pure fn", "extern emission fn")
+    # The extern is now an emission, so its call carries the `emit` marker
+    # (issue #1437); the upper bound is what this test is about.
+    for name in re.findall(r"extern emission fn (\w+)\(", broken):
+        broken = broken.replace(f"= {name}(", f"= emit {name}(")
     with pytest.raises(RevlError) as excinfo:
         _compile(broken, tmp_path, "broken.rvl")
     assert "declared plain, but this implementation reaches" in str(excinfo.value)
