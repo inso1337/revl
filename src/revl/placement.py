@@ -2239,7 +2239,7 @@ def _model_schedules(files, processes: dict) -> tuple[str | None, dict]:
 def _model_host_plan(ir, files, providers_path: str, processes: dict,
                      requires: dict, model_handoffs: dict) -> tuple:
     """Check `--providers` against a placement (item 515 S2). Returns
-    `(refusal, {model key: service})`.
+    `(refusal, {model key: service}, {process: managed roles it loads})`.
 
     Refused here, before anything spawns: a configuration the program's
     placement forbids (the same check `revl run --providers` makes); a model
@@ -2253,10 +2253,11 @@ def _model_host_plan(ir, files, providers_path: str, processes: dict,
         config = _p.load_config(providers_path)
     except (_p.ProviderConfigError, _p.PlacementRefused, _p.ProviderError,
             RevlError) as exc:
-        return str(exc), {}
+        return str(exc), {}, {}
     except OSError as exc:
-        return f"cannot read provider configuration: {exc}", {}
+        return f"cannot read provider configuration: {exc}", {}, {}
     served = _p.model_keys(ir)
+    loads: dict[str, list[str]] = {}
     for pname, pconf in processes.items():
         keys = sorted(k for k in requires[pname] if k in served)
         if not keys:
@@ -2265,7 +2266,7 @@ def _model_host_plan(ir, files, providers_path: str, processes: dict,
         if backend != "py":
             return (f"process `{pname}` requires model key(s) "
                     f"{', '.join(keys)} and is on the {backend} tier; "
-                    f"--providers binds model hosts on the py tier only"), {}
+                    f"--providers binds model hosts on the py tier only"), {}, {}
         managed = sorted({role for key in keys for role in hosts[key]._revl_roles()
                           if role and config.binding(role).managed})
         entry = model_handoffs.get(pname)
@@ -2275,7 +2276,7 @@ def _model_host_plan(ir, files, providers_path: str, processes: dict,
                     f"model action is scheduled on it, so nothing says which "
                     f"device to load them on. Route the action with `route "
                     f"model` and declare the host's devices "
-                    f"(docs/model-scheduling.md)"), {}
+                    f"(docs/model-scheduling.md)"), {}, {}
         resident = (entry or {}).get("schedule", {}).get("resident") or {}
         for role in managed:
             device = resident.get(role)
@@ -2289,8 +2290,10 @@ def _model_host_plan(ir, files, providers_path: str, processes: dict,
                         f"no load options for `{device}` (it names "
                         f"{', '.join(binding.device_names())}). The member is "
                         f"loaded only where the schedule placed it; add "
-                        f"`devices.{device}` to the binding"), {}
-    return None, served
+                        f"`devices.{device}` to the binding"), {}, {}
+        if managed:
+            loads[pname] = managed
+    return None, served, loads
 
 
 def model_binding_view(files, placement: dict) -> tuple[list[str], str | None]:
@@ -2350,6 +2353,36 @@ def _successor_model_schedule(files, old_spec: dict, succ: str, component: str,
                       f"the {to_backend} tier's runner does not read a model "
                       f"schedule (item 515)")
     return model_schedule.handoff(decided[0]), None
+
+
+def _successor_providers(old_spec: dict, managed: list, component: str,
+                         to_backend: str) -> tuple[str | None, str | None]:
+    """The `providers` entry a swap successor is handed (item 515 S2), as
+    `(configuration path or None, refusal or None)`.
+
+    The boot path serves a model key in the process that requires it and gives
+    that process no proxy for it, so a successor without this entry would have
+    nothing bound to the key. It is carried as-is, with two refusals. A
+    successor off the py tier cannot bind a model host (the boot path refuses
+    the same placement). A managed role cannot cross a swap, because provisions
+    are per process: the successor would load the member, and the
+    predecessor's teardown would then unload it from under the successor."""
+    path = old_spec.get("providers")
+    if path is None:
+        return None, None
+    backend = _canonical_backend(to_backend)
+    if backend != "py":
+        return None, (f"component {component!r} requires model key(s) served "
+                      f"in-process by --providers, and the {to_backend} tier "
+                      f"binds no model host; --providers binds them on the py "
+                      f"tier only")
+    if managed:
+        return None, (f"component {component!r} loads model role(s) "
+                      f"{', '.join(managed)}, which revl loads itself; a "
+                      f"provision belongs to one process, so the "
+                      f"predecessor's teardown would unload the member the "
+                      f"successor loaded. Restart the placement to move it")
+    return path, None
 
 
 # --------------------------------------------------------------------------
@@ -3969,8 +4002,9 @@ def run_placement(files, placement_path: str, once: bool = False,
     # configuration is checked here, before anything spawns. Without the flag
     # nothing changes: such a key is still "provided by no process".
     model_served: dict = {}
+    model_loads: dict = {}
     if providers:
-        model_problem, model_served = _model_host_plan(
+        model_problem, model_served, model_loads = _model_host_plan(
             ir, files, providers, processes, requires, model_handoffs)
         if model_problem:
             return abort(model_problem)
@@ -5280,6 +5314,16 @@ def run_placement(files, placement_path: str, once: bool = False,
             return
         if succ_model is not None:
             succ_spec["modelSchedule"] = succ_model
+        # item 515 S2: a model key the predecessor served in-process stays
+        # served in-process on the successor, or the swap refuses.
+        succ_providers, providers_refusal = _successor_providers(
+            specs[old], model_loads.get(old, []), component, to_backend)
+        if providers_refusal:
+            print(f"swap refused: {providers_refusal}", flush=True)
+            print("  running composition untouched.", flush=True)
+            return
+        if succ_providers is not None:
+            succ_spec["providers"] = succ_providers
         _old_corr = old_serve.get("correlation")
         if _old_corr and to_backend in _CORRELATION_SEALING_TIERS:
             succ_spec["serve"]["correlation"] = {
