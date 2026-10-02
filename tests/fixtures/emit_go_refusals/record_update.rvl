@@ -1,0 +1,10 @@
+// Functional record update `{r | f = e}`. The frontend admits it, and the go
+// reference REFUSES it by name: only the python and typescript tiers emit it
+// today (docs/records.md §6, "lift it into a helper fn instead").
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS. The
+// line-coverage gate drives both halves over it here: the reference's raise in
+// `_go_v3_expr`, and the port's `<<UNSUPPORTED-EXPR:record_update>>` marker.
+type R = { x: Int, y: Int }
+
+fn bump(r: R) -> R { return {r | x = r.x + 1} }

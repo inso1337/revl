@@ -515,6 +515,12 @@ question.
 - `--mcp-scope COMPONENT` - treat `COMPONENT` as MCP/agent-admitted so the
   policy's `mcp` sandbox allow-list applies to it; repeatable, `*` = every
   component.
+- `--placement PLACEMENT` - a TOML/JSON placement map. Also prints the item-411
+  sandbox envelope per sandboxed process, and each model role's binding per
+  host with the model bindings digest (item 515,
+  [model-scheduling.md](model-scheduling.md)). A placement whose routed model
+  actions cannot be scheduled exits nonzero with the scheduler's refusal.
+  Human output only; the `--json` body is unchanged.
 
 ### `revl goal audit`
 
@@ -854,6 +860,14 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   value outside a declared `under "<prefix>"` / `in [...]` bound each refuse the
   boot before any runtime is imported. See
   [environment-binding.md](environment-binding.md).
+- `--providers FILE` - JSON/TOML provider configuration binding each
+  `model role` to a runtime adapter (OpenAI-compatible, Anthropic Messages,
+  Gemini). The composition's model `requires` keys are then served by those
+  adapters. Checked before any runtime is imported: an `on_device` role bound
+  to an endpoint off the device, a crossing on an unbound or undeclared role, a
+  binding that reaches past its role, a credential written into the file, or
+  an unset credential variable each refuse the boot. py tier only. `--plan`
+  prints the bindings. See [model-providers.md](model-providers.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
   refused and the run keeps going.
 - `--record` - record the effect accumulator so the REPL can step backwards
@@ -1739,7 +1753,31 @@ becomes an `emission`).
 - `--key KEY` - provision key (default: `imported`).
 - `--backend {ts, py}` - host block backend for the generated externs
   (default: `ts`).
+- `--undo TOOL=INVERSE[:result]` - declare `INVERSE` as the tool that reverts
+  `TOOL`, making `TOOL` `witnessed` (repeatable). `INVERSE` receives `TOOL`'s
+  arguments, or with `:result` its `structuredContent`. Your assertion, not the
+  server's.
 - `-o`, `--output PATH` - output path (default: stdout).
+
+`revl mcp proxy [OPTIONS] -- COMMAND [ARG ...]` - gate an existing MCP server
+with no `.rvl` written ([mcp-proxy.md](mcp-proxy.md)). The proxy starts
+`COMMAND`, speaks MCP over stdio to it and to its own client, classifies each
+upstream tool with the same classifier `revl mcp import` uses, and routes every
+tool call through a live session with the approval policy on: approval, the
+write-ahead log and declared undos apply at call time.
+
+- `upstream` - the server command after `--` (required).
+- `--undo TOOL=INVERSE[:result]` - as for `revl mcp import`; a witnessed tool
+  runs without a prompt and is reverted on abort.
+- `--trust-read-only-hints` - admit a tool whose uncontradicted `readOnlyHint:
+  true` revl cannot check, as `plain`. By default such a tool is gated like any
+  emission and its verdict reads `gated: unchecked read-only claim`.
+- `--upstream-timeout SECONDS` - how long to wait for one upstream answer
+  (default: `120`).
+- `--wal PATH` - the session write-ahead log (default: the per-user state
+  directory).
+- `--operator-profile PROFILE`, `--operator TOKEN`, `--policy POLICY`,
+  `--approval-record-values {bound, withheld}` - as for `revl mcp serve`.
 
 ### `revl import`
 
@@ -1931,6 +1969,30 @@ and its type. A `Principal` comes only from the validator that mints it
 first-party code, so `stdlib/admit.rvl`'s `admission.admit` (whose `granted` is
 `Trusted[List[Str]]`) is never served. `revl serve` prints each withheld
 operation to stderr at start.
+
+The face authenticates nobody itself: a routed handler that takes a `Bearer`
+runs `auth.validate`, and on the py tier `stdlib/auth.rvl` backs that with an
+HS256 JWT validator (issue #1554). It verifies the signature and requires
+`exp`, `iss`, `aud` and `sub`. Configure it through the environment of the
+`revl serve` process, never through `--config`:
+
+- `REVL_AUTH_HS256_SECRET` (or `REVL_AUTH_HS256_SECRET_FILE`, a file holding
+  it) - the shared key, at least 32 bytes.
+- `REVL_AUTH_ISSUER` - the exact `iss` a token must carry.
+- `REVL_AUTH_AUDIENCE` - the audience a token's `aud` must contain.
+- `REVL_AUTH_LEEWAY` - optional clock-skew allowance, 0 to 300 seconds.
+
+A valid token's `sub` becomes the `Principal`'s subject. A bad token is a `401`.
+With no validator configured, every authenticated route answers `503`
+`auth_not_configured`, naming the variables to set. The any-token test stub
+(a non-blank token is that subject) runs only with
+`REVL_AUTH_INSECURE_DEV_STUB=1`, and is refused if a key is also set. With
+that flag set to any value, `revl serve --http` refuses to start on a
+non-loopback `--host` (exit 2, naming the flag and the address), before it
+loads or binds anything; `127.0.0.1`, `::1` and names that resolve only to
+loopback still start. The ts,
+rust, go, java and wasm tiers have no validator body, so emitting a composition
+that composes `stdlib/auth.rvl` for them is refused at compile time.
 
 - `FILES` (required).
 - One transport (mutually exclusive; required):

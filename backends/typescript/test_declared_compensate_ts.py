@@ -46,13 +46,23 @@ def test_the_fixture_is_what_its_generator_writes():
     assert json.loads(json.dumps(gen.build())) == _fixture()
 
 
-def test_every_method_position_goes_through_frame_declared():
+def test_every_method_position_registers_exactly_once():
+    """An `emit` statement (`statement`, and the one in the `if` arm) registers
+    through the statement path every emit site shares (issue #1592,
+    `compensationMethod`). Every expression position goes through
+    `Frame.declared`. Each crossing registers once, never twice."""
     code = EMIT.emit(_fixture())
     for tag in ("statement", "let", "return", "argument", "ifarm", "nested"):
         calls = re.findall(rf"\bput_{tag}\(\"k\"\)", code)
         wrapped = re.findall(rf"\$revl_frame\.declared\(put_{tag}\(\"k\"\), ", code)
+        stated = re.findall(
+            rf'\$revl_frame\.compensationMethod\(\{{ key: "undo_{tag}"', code)
+        offsets = re.findall(rf"=> undo_{tag}\(\)", code)
         # crossed once in `Positions` and once in `Everything.run`
-        assert len(calls) == 2 and len(wrapped) == 2, (tag, calls, wrapped)
+        assert len(calls) == 2, (tag, calls)
+        expected = (0, 2) if tag in ("statement", "ifarm") else (2, 0)
+        assert (len(wrapped), len(stated)) == expected, (tag, wrapped, stated)
+        assert len(offsets) == 2, (tag, offsets)
 
 
 def test_the_activation_statement_registers_with_the_step():

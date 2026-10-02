@@ -552,6 +552,77 @@ correctly — no `types`-table parameter had to be threaded into `go_type` at al
 unlike the rust port's `rust_type_t(t, tnames)`. The go tier's decision to not
 special-case the known-vs-unknown named type paid off directly in the self-host.
 
+## Go emitter: the whole pure typed-core path (issue #106, item 391)
+
+`selfhost/emit_go.rvl` now ports every arm of the reference's pure typed-core
+path: the stdlib builtins and `len`, `Map.empty()` and the Map methods and
+subscript, the built-in Opt/Result construction, `??`, their two-value `match`
+and optional chaining, structural `==` through `revlEq`, the canonical Float
+rendering, the total division forms, the item 434 (c) code-point scan and (e)
+string builders, the item 445 destructive rebind, extern `config` and the
+`//revl:import` hoist, in-file `test` blocks, and every runtime preamble and
+import the reference gates on what it renders. Over the whole tree
+(`tools/selfhost_differential_survey.py --tiers go`) the port went from 58 agree,
+35 silent divergences and 576 refusals to 171 agree, 0 divergences and 498
+refusals, and every remaining refusal is the live stc-go component tier, named
+per component (or per document for an ir_version 1/2 one, which used to come
+back as a bare banner).
+
+### The preamble flags are read off the rendered text (design)
+The reference sets most of its feature flags as a side effect of RENDERING a
+node, then assembles the imports and preambles from them. The port renders
+first too and reads each flag off the rendered lines, because every helper the
+flag gates has a name only that node renders (`revlEq(`, `revlFtoa(`,
+`revlDivFloor(`, ...). The one flag without such a name is the stdlib one: an
+Int `x.to_str()` renders the same `strconv.FormatInt(..)` an interpolation
+does. A rendered stdlib node therefore carries a one-byte mark (U+0001) in front
+of its text, which `emit_go_src` reads and strips before assembly; the `assert`
+message, the one place rendered text becomes data, strips it first.
+
+### The reference gates preambles on the IR's JSON text, keys included (LOW)
+`_emit_v3_go` decides the Opt / Result / Map preambles by substring probes over
+`json.dumps({types, functions, externs, tests})`. A record field NAMED `maplit`
+pulls in the Map preamble (and with it Opt and the `slices` import), and one
+named `checked_mod` pulls in Result, in a document that uses neither. The
+output still builds; the preambles are dead code. The port mirrors the probe
+exactly (`tests/fixtures/emit_go_corpus/blob_probes.rvl` pins it). Not fixed.
+
+### An erased `Ok`/`Err` type argument breaks the go tier twice (MED)
+When neither the flow target nor the argument types a built-in Result
+constructor, `_go_v3_construct` erases the missing side to `any`:
+- `let r = Ok(g(1)); return r`, with `g` a function parameter, emits
+  `var r RevlResult[any, any] = ...` in a function returning
+  `RevlResult[int64, string]`, which `go build` rejects.
+- `Ok(g(2)) == Ok(2)` emits `revlEq(RevlResult[any, any]{..}, RevlResult[int64, any]{..})`,
+  and `reflect.DeepEqual` across two instantiations answers `false` where the
+  python tier answers `true` (measured with `go test`).
+
+Both sides of the byte oracle agree on these bytes, so the oracle cannot see
+it; no corpus document holds either shape. Not fixed: it is a reference
+(`backends/go/emit.py`) defect, the item 280/302 element-type recovery not
+reaching a call whose callee the ctx cannot type.
+
+### The reference's match binders leak into the rest of the function (LOW)
+`_go_v3_match` and its Opt/Result siblings write each arm binder's type into
+the ONE shared `ctx.var_types`, so the binder stays typed after the `match`.
+The port scopes a binder to its arm. A later use of a binder is out of scope at
+the source level, so no document reaches the difference.
+
+### Python backend: `.remove` on a chained field emits invalid Python (LOW)
+`with_scan(cctx, closed.ctx.sc.remove(key), ..)` compiled to a dict
+comprehension whose iterable holds a walrus, which Python rejects
+("assignment expression cannot be used in a comprehension iterable
+expression"). Binding the receiver to a local first avoids it. Not fixed in
+`backends/python/emit.py`.
+
+### Two `selfhost/lower.rvl` gaps the new corpus measured (LOW)
+- The IR `tests` section is not produced, so `in_file_tests.rvl` and
+  `backends/go/testdata/opt_gaps_280.rvl` are `LOWER_GAP_DOCS["go"]` entries.
+- A parameter named `len` is renamed `len_` by the reference frontend in the
+  signature and the body alike; the native chain renames it in the body only,
+  so the go output reads `len_ int64` in the signature and `len__` in the body.
+  The go corpus avoids the name; not fixed.
+
 ## emit_java.rvl slice 2 (item 210): the v3 typed-core
 
 ### Component/service tail deferred AS ONE UNIT — bridge-entangled, as feared
@@ -1739,17 +1810,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     57 |                   57 (100%) |             52 (91.2%) |
+| py   |     59 |                   59 (100%) |             53 (89.8%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
-| go   |     23 |                   23 (100%) |            23 (100.0%) |
+| go   |     37 |                   37 (100%) |             35 (94.6%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **261** | **261 (100%)** | **250 (95.8%)** |
+| **total** | **277** | **277 (100%)** | **263 (94.9%)** |
 
-Every one of the 261 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 250 of
-them survive the **fully-native** chain, so all 11 residual documents
+Every one of the 277 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 263 of
+them survive the **fully-native** chain, so all 14 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,9 +1850,10 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 5 residual of 57:
+`py`, 6 residual of 59:
 
 - `services_control_flow.rvl`
+- `services_host_stream.rvl`
 - `branches.rvl`
 - `../../../backends/typescript/tests/fixtures/fr1_loop.rvl`
 - `../../../backends/typescript/tests/fixtures/fr3_json_int.rvl`
@@ -1794,9 +1866,10 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `component_edges.rvl`
 - `../emit_py_corpus/services_control_flow.rvl`
 
-`go`, 0 residual of 23:
+`go`, 2 residual of 37:
 
-- none; the fully-native chain reproduces the whole corpus.
+- `in_file_tests.rvl`
+- `../../../backends/go/testdata/opt_gaps_280.rvl`
 
 `java`, 0 residual of 59:
 

@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { Context } from 'cordis'
 
-import { makeProxy, serve } from './bridge.ts'
+import { decodeAs, encodeValue, makeProxy, serve, signatureOf } from './bridge.ts'
 import { assertNoResidue, fiberStateName, redactText, snapshotRuntime } from './runtime.ts'
 
 // The uncaught-failure funnel (issue #814, the ts half of the same rule the py
@@ -160,6 +160,8 @@ function parseProbeArgs(src: string): unknown[] {
       const raw = (end < 0 ? rest : rest.slice(0, end)).trim()
       if (raw === 'true' || raw === 'false') args.push(raw === 'true')
       else if (raw === 'null') args.push(null)
+      // an integer literal past 2^53 stays exact as a `bigint` (issue #1566)
+      else if (/^-?\d+$/.test(raw) && !Number.isSafeInteger(Number(raw))) args.push(BigInt(raw))
       else if (raw !== '' && !Number.isNaN(Number(raw))) args.push(Number(raw))
       else throw new Error(`probe arguments must be literals, got ${JSON.stringify(raw)}`)
       rest = end < 0 ? '' : rest.slice(end + 1).trim()
@@ -180,8 +182,16 @@ function evalProbe(expr: string, scope: Record<string, unknown>): unknown {
   const service = scope[key] as Record<string, unknown>
   const target = service?.[method]
   if (typeof target !== 'function') throw new Error(`'${key}' has no method '${method}'`)
-  return (target as (...a: unknown[]) => unknown).apply(service, parseProbeArgs(argSrc))
+  // issue #1566: a probe's literals are decoded by the method's declared
+  // types, as a seam argument is, so `s.bump(41)` hands the method `41n`.
+  const sig = signatureOf(typing, key, method)
+  const args = parseProbeArgs(argSrc).map((a, i) => (sig ? decodeAs(a, sig.params[i], typing?.types) : a))
+  return (target as (...a: unknown[]) => unknown).apply(service, args)
 }
+
+// issue #1566: the declared seam types (`placement.py` `seam_typing`); absent
+// in a spec from an older conductor, which then decodes as before.
+const typing = spec.typing ?? null
 
 const mod = await import(pathToFileURL(path.resolve(spec.module)).href)
 const ctx = new Context()
@@ -212,7 +222,7 @@ for (const [key, info] of Object.entries<any>(spec.proxies || {})) {
   // no secret because the mTLS handshake already bound the identity). Absent,
   // the request line is byte-identical to the pre-118 wire.
   const { component, onPeerLost } = makeProxy(
-    key, info.methods, target, deadlineMs, info.correlation ?? null,
+    key, info.methods, target, deadlineMs, info.correlation ?? null, typing,
   )
   const fiber = ctx.plugin(component)
   await fiber
@@ -249,7 +259,7 @@ let server: import('node:net').Server | undefined
 if (spec.serve) {
   // `methods` (key -> declared operations) is the stub's allowlist; fall back
   // to the bare key list for a spec written before it existed.
-  server = await serve(ctx, spec.serve.methods ?? spec.serve.keys, spec.serve.socket)
+  server = await serve(ctx, spec.serve.methods ?? spec.serve.keys, spec.serve.socket, typing)
   log('serve', spec.serve.keys.join(', '), `-> ${spec.serve.socket}`)
 }
 
@@ -261,7 +271,7 @@ for (const expr of (spec.probe || []) as string[]) {
   try {
     let value = evalProbe(expr, scope)
     if (value && typeof (value as any).then === 'function') value = await value
-    log('probe', expr, `=> ${value === undefined ? 'undefined' : JSON.stringify(value)}`)
+    log('probe', expr, `=> ${value === undefined ? 'undefined' : JSON.stringify(encodeValue(value))}`)
   } catch (error) {
     log('probe', expr, `ERROR ${error}`)
   }
