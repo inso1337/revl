@@ -55,7 +55,7 @@ def _read_wasm_str(memory, store, ptr: int) -> str:
     return memory.read(store, ptr + 4, ptr + 4 + length).decode("utf-8")
 
 
-def _install_wal_channel(rt) -> None:
+def _install_wal_channel(rt, prefix: str = "[wal] ") -> None:
     """Bind the item 322 Slice 2 record channel: the host half of a record-mode
     module's ``coeffect:revl:wal.record`` import. At each witnessed transactional
     registration the module calls it with (seq, receiver_ptr, method_ptr,
@@ -73,7 +73,10 @@ def _install_wal_channel(rt) -> None:
             "method": _read_wasm_str(memory, store, method_ptr),
             "witness": _read_wasm_str(memory, store, witness_ptr),
         }
-        print("[wal] " + json.dumps(frame), flush=True)
+        # `prefix` carries the run's proof token when the runner sent one, so
+        # the drain can tell this channel's frames from anything else that
+        # reaches the shared stdout (issue #1621)
+        print(prefix + json.dumps(frame), flush=True)
 
     rt.host_provide("revl:wal", {"record": record})
 
@@ -90,9 +93,12 @@ def main() -> int:
     # RESIDUE-LEFT, DOWN) carry it, so a program's own output cannot forge
     # them. Read before any module is plugged, into a local of main(). The
     # spec carries only the flag: it is a file the program could read.
-    proof_name = name
+    # The same token tags the record channel's `[wal]` frames, which share
+    # this stdout too: a forged descriptor would be replayed by recover.
+    proof_name, wal_prefix = name, "[wal] "
     if spec.get("proofOnStdin"):
-        proof_name = f"{name}#{sys.stdin.readline().strip()}"
+        token = sys.stdin.readline().strip()
+        proof_name, wal_prefix = f"{name}#{token}", f"[wal#{token}] "
 
     cordis_wasm = os.environ.get("CORDIS_WASM") or str(pathlib.Path.home() / "Projects" / "cordis-wasm")
     sys.path.insert(0, cordis_wasm)
@@ -103,7 +109,7 @@ def main() -> int:
     # plugging, so a record-mode module's `coeffect:revl:wal` import resolves at
     # activation and its framing calls relay while the mutation registers.
     if record:
-        _install_wal_channel(rt)
+        _install_wal_channel(rt, wal_prefix)
     fibers = []
     for cname in order:
         fiber = rt.plug(cname, modules[cname])

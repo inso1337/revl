@@ -65,6 +65,11 @@ class OnceProof:
             except (BrokenPipeError, OSError):
                 pass
 
+    def tag(self, channel: str) -> str:
+        """The token-tagged prefix for another framed channel the child prints
+        on the same stdout, e.g. the wasm record channel's ``[wal#<token>] ``."""
+        return f"[{channel}#{self.token}] "
+
     def line(self, raw: str) -> str:
         """The line as a person should see it. A token-tagged line is the
         runtime's proof: it is recorded and shown as `[<name>] ...`. Any other

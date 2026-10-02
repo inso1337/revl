@@ -129,8 +129,12 @@ use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
 // item 513 slice 4: the `json-schema` dialect of a validated crossing's stated
 // grammar is digested over its canonical JSON, the same two primitives the
 // reference's `revl.decode_grammar` uses (`json.dumps` + `hashlib.sha256`).
+// The digest is a local pure extern rather than stdlib/crypto.rvl's `sha256`:
+// a named `use` links the whole module, and crypto.rvl carries an EMISSION
+// extern (`random_token`) that has no place in a pure emitter (since #1518 the
+// reference wraps it in the E-Stop gate, which an inert runtime stub cannot
+// apply).
 use "../stdlib/json.rvl" { json_stringify }
-use "../stdlib/crypto.rvl" { sha256 }
 
 // ------------------------------------------- NAVIGATION GAP CLOSED (item 188)
 // The ONE navigation primitive slices 1-2 could not express in pure revl was an
@@ -150,6 +154,11 @@ use "../stdlib/crypto.rvl" { sha256 }
 // join them: identifier CASING is the same category (they mirror the reference's
 // pure string helpers `_snake` / `_pascal`, kin to `_mangle`).
 extern pure fn py_repr(v: Any) -> Str = @py { return repr(v) }
+// Lower-case hex SHA-256 of the UTF-8 bytes of `text` (`grammar_digest`).
+extern pure fn sha256_hex(text: Str) -> Str = @py {
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+}
 // A real newline. revl plain strings carry no escapes (`"\n"` is a literal
 // backslash-n, which is exactly what the emitted `assert` message wants), so the
 // line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
@@ -1603,7 +1612,13 @@ fn extern_config_bind(name: Str, schema: List[Any]) -> Str {
   return `_revl_config = _revl_extern_config(${py_repr(name)}, ${py_repr(required)}, {${defaults.join(", ")}})`
 }
 
-fn emit_externs(externs: List[Any]) -> List[Str] {
+// The extern classes whose host body crosses a boundary (issue #1504), the
+// reference's `_GATED_EXTERN_CLASSES`.
+fn gated_extern_class(cls: Str) -> Bool {
+  return cls == "emission" || cls == "witnessed" || cls == "acquire"
+}
+
+fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   var out = []
   var any_secret = false
   var any_config = false
@@ -1628,6 +1643,11 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     // marking of its own (the host trace an operator console prints) scrub it.
     // Emitted ONLY for a `Secret[T]`-returning extern, so every other module is
     // byte-identical.
+    // issue #1504: an extern whose body crosses a boundary checks the E-Stop
+    // before its body runs; the gate is the outermost decorator.
+    if (gated && gated_extern_class(value_str(value_field(ext, "class")))) {
+      out = out.push(`@${runtime_ref("estop_gated")}(${py_repr(value_str(value_field(ext, "name")))})`)
+    }
     if (value_bool(value_field(ext, "secret_return"))) {
       out = out.push("@".concat(runtime_ref("secret_result")))
     }
@@ -1932,6 +1952,7 @@ fn runtime_ref(name: Str) -> Str {
   // the `ConfigSchema` argument list and needs no name of its own.
   if (name == "mark_secret") { return "_revl_mark_secret" }
   if (name == "secret_result") { return "_revl_secret_result" }
+  if (name == "estop_gated") { return "_revl_estop_gated" }
   // item 414 (ported per item 429(d)): the recording seam a DIRECT host-extern
   // emission fires through. The alias is the one the reference's `_IMPORT_ALIAS`
   // carries, so the `from runtime import` line and the call site that references
@@ -2714,7 +2735,7 @@ fn grammar_registry(services: Any) -> Any {
 fn json_schema_grammar(schema: Any) -> Any {
   let wire = wire_json_schema(schema)
   var g: Map[Str, Any] = Map.empty()
-  return g.set("format", "json-schema").set("schema", wire).set("digest", sha256(json_stringify(sorted_keys(wire))))
+  return g.set("format", "json-schema").set("schema", wire).set("digest", sha256_hex(json_stringify(sorted_keys(wire))))
 }
 
 fn sorted_keys(v: Any) -> Any {
@@ -4363,8 +4384,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     if (body_has_receiver_secret_witness(value_list(value_field(c, "body")), value_list(value_field(ir, "externs")))) { need_mark_secret = true }
   }
   var need_secret_result = false
+  var need_estop_gated = false
   for (e of value_list(value_field(ir, "externs"))) {
     if (value_bool(value_field(e, "secret_return"))) { need_secret_result = true }
+    if (components.length() > 0 && gated_extern_class(value_str(value_field(e, "class")))) { need_estop_gated = true }
   }
   // Collect the needed imports in any order; `list_sort` fixes the canonical
   // codepoint order below. Each alias-bearing name carries its `_revl_` alias.
@@ -4409,6 +4432,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     validates = validates || uses_validated(value_field(c, "body"), value_field(c, "requires"), value_field(ir, "services"))
   }
   if (validates) { imports = imports.push("validate_response as _revl_validate") }
+  if (need_estop_gated) { imports = imports.push("estop_gated as _revl_estop_gated") }
   if (imports.length() > 0) {
     let sorted_imports = list_sort(list_dedup(imports))
     out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
@@ -4494,7 +4518,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // Externs (slice 4): `def <name>(...)` + dedented verbatim body, gated on a
   // non-empty extern list, between the functions and the SERVICES table.
   let externs = value_list(value_field(ir, "externs"))
-  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs, components.length() > 0)) }
   let tests = value_list(value_field(ir, "tests"))
   if (tests.length() > 0) { out = out.concat(emit_tests(ir, tests)) }
   let fault_tests = value_list(value_field(ir, "fault_tests"))

@@ -648,7 +648,7 @@
       "uncovered_statements": 976
     },
     "py": {
-      "statements": 2619,
+      "statements": 2622,
       "uncovered": {
         "Activation residuals: non-witnessed setup and if-else emission mirror body_step but source guards only permit fail/nested guard (negative tests pin conditional effects). The approval path belongs to the named runtime boundaries. The `await` step is exercised by emit_ts_corpus/components_await.rvl, the `stream-iter` step by emit_py_corpus/streams.rvl and a deferred emission by emit_py_deferred_shapes.rvl since item 391. The result-guarded `Map.cas` undo and the extern-declared compensation are exercised by emit_ts_corpus/cas_runtime.rvl and erase_receipt.rvl. Return-in-activation and unknown-step branches are frontend-invalid. services_body.rvl and witnessed.rvl cover supported effect/guard/compensation/setup forms. Item 130 §4.9 adds one statement: the durable-cursor subscription's self-describing disposer (`yield sub.durable_undo()`), which only a `replay(from: …)` program reaches. No corpus document can be one while the self-host gate refuses the `replay(…)` clause with G1, and selfhost/emit_py.rvl refuses the subscribe that asks for it by name (test_a_subscribe_replay_request_is_named_not_dropped). The activation-body `emit` arm of the `validated` async emission fix (issue #1647: the await lands inside the seam, `_revl_validate((await <call>), ..)`) is mirrored by selfhost/emit_py.rvl and exercised by emit_py_validated_shapes.rvl.": {
           "_ComponentEmitter._body_step": 10
@@ -1691,7 +1691,7 @@
       "uncovered_statements": 175
     },
     "py": {
-      "statements": 2937,
+      "statements": 2948,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. The final three statements return an explicit unsupported-step marker for an approval step or an invalid kind. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 8

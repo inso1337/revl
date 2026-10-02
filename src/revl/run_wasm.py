@@ -130,15 +130,21 @@ def write_wal_record(handle, record: dict) -> None:
         pass
 
 
-def drain_wal_frame(handle, line: str) -> int | None:
-    """If ``line`` is a ``[wal] {…}`` frame, assemble its discharge-descriptor
+def drain_wal_frame(handle, line: str,
+                    prefix: str = _WAL_FRAME_PREFIX) -> int | None:
+    """If ``line`` is a ``<prefix>{…}`` frame, assemble its discharge-descriptor
     and write+fsync it to the open WAL ``handle``; return its seq. Otherwise
     return ``None``. This is the host-side drain that makes a wasm module's
-    framed residue durable."""
+    framed residue durable.
+
+    :func:`run_wasm` passes the run's token-tagged prefix (``[wal#<token>] ``,
+    issue #1621), so only the harness's own record channel reaches the WAL. A
+    bare ``[wal] …`` line is then ordinary output: the frames share stdout with
+    the program, and an undischarged descriptor is what recover replays."""
     text = line.strip()
-    if not text.startswith(_WAL_FRAME_PREFIX):
+    if not text.startswith(prefix):
         return None
-    frame = json.loads(text[len(_WAL_FRAME_PREFIX):])
+    frame = json.loads(text[len(prefix):])
     seq = frame["seq"]
     write_wal_record(handle, wal_descriptor(
         seq, frame["receiver"], frame["method"], frame["witness"]))
@@ -317,7 +323,7 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             # drain a `[wal] {…}` frame into the durable WAL (item 322 Slice 2);
             # every other line is the harness's own `[run] …`/`_log` output.
             if wal_handle is not None:
-                seq = drain_wal_frame(wal_handle, line)
+                seq = drain_wal_frame(wal_handle, line, proof.tag("wal"))
                 if seq is not None:
                     drained_seqs.append(seq)
                     continue
