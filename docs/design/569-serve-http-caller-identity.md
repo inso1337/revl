@@ -1,6 +1,10 @@
 # 569: Who calls `revl serve --http`: operators or the application's users
 
-Status: DECISION NEEDED. Design only; nothing here is implemented.
+Status: Accepted: B + C2. Decided by the owner in issue #1553: callers of
+`revl serve --http` are the application's users (option B), and operators use a
+separate operator-only listener on the same session (option C2). B1 landed in
+PR #1505; B2, B3 and C2 landed for issue #1553. Section 8 records what was built
+and where it differs from the proposal below, which is kept as it was argued.
 
 Source read: `src/revl/mcp/http_face.py` (item 424 gap (c), item 457 routes),
 `src/revl/mcp/composed.py`, `src/revl/mcp/schema.py`, `src/revl/mcp/session.py`,
@@ -349,3 +353,67 @@ from the wire.** (Precondition for B, and needed under A or C too.)
    address, until the item 457 Slice 3 binding exists?
 6. **C2 at all.** Is an in-process operator listener wanted, or is "E-Stop by
    latch, approvals not supported on the face" an acceptable permanent answer?
+
+## 8. Decision and what was built
+
+The owner accepted **B + C2** (issue #1553). What shipped, and where it departs
+from sections 6 and 7:
+
+**B1** (PR #1505): as proposed, with open question 1 answered the safer way.
+The face serves routed operations plus an explicit public set, and the language
+has no public marking yet, so the canonical path serves nothing today.
+
+**C2, the operator listener** (`src/revl/mcp/operator_listener.py`). The flag is
+`--operator-listen HOST:PORT` (not `--operator-http`), with `--operator-profile`,
+`--operator-auth`, `--operator-tls-cert`, `--operator-tls-key`,
+`--operator-tls-client-ca`, `--operator-allow-host` and `--profile-settle-ms`.
+It is `HttpTransport` over `ServerDispatcher`, reused rather than copied: the
+compiler server's `SESSION` is the face's session while it runs, and the face
+dispatches through the transport's `CallerBinding`, so both listeners take one
+lock. Each app request is bound, for that request only, to the operator token
+`<app caller>`, which no profile can declare. It takes no `--allow-origin`, so
+`http_guard` refuses every request carrying an `Origin`; it refuses the app
+face's port; and like every revl listener it refuses a non-loopback address
+without TLS.
+Both listeners hold one session reference: the one the binding yields under
+the shared lock. A `revl_fork_confirm` on the operator listener freezes the
+parent and makes the branch the only live continuation (item 250), and the face
+follows it before its next dispatch rather than serving the frozen parent. That
+was chosen over refusing `revl_fork_confirm` there, because a fork's point is to
+continue on the branch, and the parent is non-callable after it.
+
+**B2, E-Stop.** `revl_estop` on the operator listener, never fenced and never
+queued: while an app request holds the session it arms the transport's latch.
+The face reads that latch before it waits for the lock and again once it holds
+it, so every later request, including one already queued, is refused `503`
+(`"code": "halted"`) without dispatch. The request in flight is refused at its
+next crossing seam that reads the latch, and that seam coverage is the runtime's
+(item 443, and issue #1504 / PR #1518 for every crossing before its host body).
+The face itself never serves an E-Stop. The latch path is printed at start.
+
+**B3, approval routing.** `revl serve --http --approval-policy auto` loads the
+policy on the session (with recording, as item 246 requires). A class-(c)
+crossing an app request reaches raises the ticket; the app caller gets `403`
+with `"code": "pending_approval"` and the ticket id only, no ticket body, no
+approve instruction and no operator identity. The two-step is the existing one,
+unchanged: an operator answers on the operator listener with `revl_approve` or
+`revl_revoke` and the `hash`, and the app's identical re-issue then fires once,
+or is refused once with `"code": "approval_refused"`. Asking after either is a
+new question. The one addition to the ticket machinery is the revoke of a
+single-party ticket: `revl_revoke` with a `hash` used to refuse any ticket that
+did not demand a quorum, so a plain ticket could only be approved or left
+pending. `Session.revoke_ticket` now answers it NO (withdrawing a yes that was
+minted and not yet spent, and closing the round to a later approve), and
+`Session.call` refuses the re-issue it held with `ApprovalRefused`. There is no second approval path.
+
+`--refuse-ungated-emissions` (section 6, B3) is built as a per-request refusal
+rather than a refusal to start, and it is opt-in (open question 4 stays open
+for the default). With it and no policy, an app request that reaches a class-(c)
+crossing (or one whose class cannot be resolved) is refused `403`
+`ungated_emission`, naming the operation, and nothing fires; the operations it
+will refuse are listed at start. Without it, and without a policy, a class-(c)
+crossing still fires unapproved, as before. With a policy and no operator
+listener, `revl serve` warns that nothing can answer its tickets.
+
+Tests: `tests/test_serve_http_operator_listener_1553.py`.
+
