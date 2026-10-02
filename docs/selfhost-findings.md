@@ -1741,15 +1741,15 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 |------|-------:|----------------------------:|-----------------------:|
 | py   |     75 |                   75 (100%) |             60 (80.0%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
-| go   |     23 |                   23 (100%) |            23 (100.0%) |
+| go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **279** | **279 (100%)** | **258 (92.5%)** |
+| **total** | **294** | **294 (100%)** | **270 (91.8%)** |
 
-Every one of the 279 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 258 of
-them survive the **fully-native** chain, so all 21 residual documents
+Every one of the 294 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 270 of
+them survive the **fully-native** chain, so all 24 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1804,9 +1804,11 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `component_edges.rvl`
 - `../emit_py_corpus/services_control_flow.rvl`
 
-`go`, 0 residual of 23:
+`go`, 3 residual of 38:
 
-- none; the fully-native chain reproduces the whole corpus.
+- `in_file_tests.rvl`
+- `../../../backends/go/testdata/opt_gaps_280.rvl`
+- `../../../backends/go/testdata/result_erased_1631.rvl`
 
 `java`, 0 residual of 59:
 

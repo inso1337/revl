@@ -515,6 +515,12 @@ question.
 - `--mcp-scope COMPONENT` - treat `COMPONENT` as MCP/agent-admitted so the
   policy's `mcp` sandbox allow-list applies to it; repeatable, `*` = every
   component.
+- `--placement PLACEMENT` - a TOML/JSON placement map. Also prints the item-411
+  sandbox envelope per sandboxed process, and each model role's binding per
+  host with the model bindings digest (item 515,
+  [model-scheduling.md](model-scheduling.md)). A placement whose routed model
+  actions cannot be scheduled exits nonzero with the scheduler's refusal.
+  Human output only; the `--json` body is unchanged.
 
 ### `revl goal audit`
 

@@ -167,7 +167,12 @@ files, its own components and the devices in the entry, and refuses to boot
 - the entry differs in any field from the derived schedule.
 
 Otherwise it installs the result in `revl.model_placement`, which is what
-code running in the child reads:
+code running in the child reads. The lookup is declared `extern pure` because
+it has no observable effect: it reads a table the runner installs once, at
+boot, before any component activates, and that table cannot change for the
+life of the process, so the same role always gets the same answer or the same
+refusal. None of the other classifications fits: nothing is acquired,
+emitted or mutated.
 
 ```revl
 model role fast  on_device device gpu memory 6144 quant q4_k_m
@@ -211,6 +216,27 @@ the devices the predecessor's host declared, from the files it is about to
 load. A candidate that no longer fits, or a scheduled successor on a tier that
 does not read the schedule, refuses the swap and leaves the running
 composition untouched.
+
+## The binding record
+
+Each role's binding is recorded on the placement side, never in the compiler
+IR. `revl audit app.rvl --placement placement.toml` prints it, and `revl run
+--placement` prints the same lines before anything spawns:
+
+```
+model binding [edge]: fast on gpu0 (gpu), device gpu memory 6144 quant q4_k_m; used by First.classify confidential, Second.classify confidential
+model bindings digest: 2f0c...
+```
+
+There is one row per role per host, however many actions share the role. The
+digest is sha256 over `revl-model-bindings-v1`, a LF, and the canonical JSON of
+every host's declared devices and binding rows. Changing one role's device,
+quantisation or memory, or a host's declared devices, changes the digest. A
+composition with no `route model` block has no record and prints nothing.
+
+This digest is over what the placement declared and the scheduler decided. It
+is not item 517's `placement_digest`, which the provider computes over what it
+actually loaded.
 
 ## Additivity
 
