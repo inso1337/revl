@@ -455,6 +455,16 @@ pub struct WfAcc {
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct ExtMods {
+    j: i64,
+    lead: bool,
+    caps: bool,
+    idem: bool,
+    key: String,
+    other: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TInf {
     ty: String,
     v: String,
@@ -8171,7 +8181,7 @@ fn p_extern(ts: Vec<Token>, i: i64, pg: Prog) -> PStep {
     let mut isWit = false;
     let mut caps: Vec<String> = vec![];
     let mut sawCaps = false;
-    while (((((((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) || ati(&ts, j.clone(), "witnessed")) || ati(&ts, j.clone(), "deferred")) || atk(&ts, j.clone(), "[")) || atk(&ts, j.clone(), "(")) {
+    while ((((((((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) || ati(&ts, j.clone(), "witnessed")) || ati(&ts, j.clone(), "deferred")) || atw(&ts, j.clone(), "idempotent")) || atk(&ts, j.clone(), "[")) || atk(&ts, j.clone(), "(")) {
         if atw(&ts, j.clone(), "emission") {
             isEm = true;
         }
@@ -14004,26 +14014,104 @@ fn ext_slot_verd(ts: Vec<Token>, e: Expr, start: i64, nm: &str, slot: &str, boun
     return no_verd();
 }
 
-fn ext_decl_verdict(ts: Vec<Token>, i: i64, declared: Vec<String>, gtys: Vec<Bind>) -> Verd {
+fn ext_mods_lead(j: i64) -> ExtMods {
+    return ExtMods { j: j, lead: true, caps: false, idem: false, key: String::from(""), other: false };
+}
+
+fn ext_mods(ts: &[Token], start: i64) -> ExtMods {
+    if atk(ts, start, "(") {
+        return ext_mods_lead(start);
+    }
+    let mut j = start;
+    let mut caps = false;
+    if atk(ts, j, "[") {
+        caps = true;
+        while ((j < ts.revl_length()) && (!atk(ts, j, "]"))) {
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        }
+        j = (j).checked_add(1i64).expect("revl: Int overflow");
+        if atk(ts, j, "(") {
+            return ext_mods_lead(start);
+        }
+    }
+    let mut idem = false;
+    let mut key = String::from("");
+    let mut other = false;
+    while ((((atw(ts, j, "async") || ati(ts, j, "deferred")) || atw(ts, j, "idempotent")) || ati(ts, j, "validated")) || ati(ts, j, "retry")) {
+        if atw(ts, j, "idempotent") {
+            idem = true;
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+            if atk(ts, j, "(") {
+                if (((ati(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "key") && atk(ts, (j).checked_add(2i64).expect("revl: Int overflow"), ":")) && atk(ts, (j).checked_add(3i64).expect("revl: Int overflow"), "ident")) && atk(ts, (j).checked_add(4i64).expect("revl: Int overflow"), ")")) {
+                    key = tkc(ts, (j).checked_add(3i64).expect("revl: Int overflow")).text;
+                    j = (j).checked_add(5i64).expect("revl: Int overflow");
+                } else {
+                    return ext_mods_lead(j);
+                }
+            }
+        } else {
+            if ati(ts, j, "retry") {
+                other = true;
+                j = (j).checked_add(2i64).expect("revl: Int overflow");
+            } else {
+                other = true;
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+    }
+    if (caps && (!idem)) {
+        return ext_mods_lead(start);
+    }
+    return ExtMods { j: j, lead: false, caps: caps, idem: idem, key: key.clone(), other: other };
+}
+
+fn ext_idem_verdict(cls: &str, nm: &str, mods: ExtMods, ps: &[ParamN], line: i64, al: std::collections::HashMap<String, String>) -> Verd {
+    if (cls != "emission") {
+        return mk_verd(tagged("G4", &((((String::from("`").revl_concat(&cls)).revl_concat("` extern `")).revl_concat(&nm)).revl_concat("` cannot be declared `idempotent`"))), line);
+    }
+    if (mods.key == "") {
+        return no_verd();
+    }
+    let mut names: Vec<String> = vec![];
+    let mut keyTy = String::from("");
+    let mut found = false;
+    let mut p = 0i64;
+    while (p < ps.revl_length()) {
+        names.push((ps)[(p) as usize].name.clone());
+        if ((ps)[(p) as usize].name == mods.key) {
+            found = true;
+            keyTy = alias_subst(taint_strip((ps)[(p) as usize].ty.clone()), al.clone());
+        }
+        p = (p).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (!found) {
+        let listed = if (names.revl_length() == 0i64) { String::from("(none)") } else { join_comma(&sort_strs(&names), 0i64, String::from("")) };
+        return mk_verd(tagged("G4", &((((((((String::from("emission `").revl_concat(&nm)).revl_concat("` declares `idempotent(key: ")).revl_concat(&mods.key)).revl_concat(")`, but `")).revl_concat(&mods.key)).revl_concat("` is not one of its parameters (")).revl_concat(&listed)).revl_concat(")"))), line);
+    }
+    if ((keyTy != "Str") && (keyTy != "Int")) {
+        return mk_verd(tagged("G4", &((((((String::from("emission `").revl_concat(&nm)).revl_concat("` idempotency key `")).revl_concat(&mods.key)).revl_concat("` has type `")).revl_concat(&keyTy)).revl_concat("`, which is not scalar-serializable"))), line);
+    }
+    return no_verd();
+}
+
+fn ext_decl_verdict(ts: Vec<Token>, i: i64, declared: Vec<String>, gtys: Vec<Bind>, al: std::collections::HashMap<String, String>) -> Verd {
     let line = tkc(&ts, i).line;
     let cls = ext_class_at(&ts, (i).checked_add(1i64).expect("revl: Int overflow"));
     if (cls == "") {
         return mk_verd(tagged("G8", &ext_unclassified_msg()), line);
     }
-    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
-    if atk(&ts, j.clone(), "[") {
+    let mods = ext_mods(&ts, (i).checked_add(2i64).expect("revl: Int overflow"));
+    if mods.lead {
         return no_verd();
     }
-    if atk(&ts, j.clone(), "(") {
+    if ((mods.caps && (cls != "emission")) && (cls != "witnessed")) {
         return no_verd();
     }
-    if ((((atw(&ts, j.clone(), "async") || atw(&ts, j.clone(), "deferred")) || atw(&ts, j.clone(), "idempotent")) || atw(&ts, j.clone(), "validated")) || ati(&ts, j.clone(), "retry")) {
+    let mut j = mods.j;
+    if (!atw(&ts, j, "fn")) {
         return no_verd();
     }
-    if (!atw(&ts, j.clone(), "fn")) {
-        return no_verd();
-    }
-    if (cls == "witnessed") {
+    if ((cls == "witnessed") && (!mods.idem)) {
         return no_verd();
     }
     let nm = tkc(&ts, (j).checked_add(1i64).expect("revl: Int overflow")).text;
@@ -14047,6 +14135,15 @@ fn ext_decl_verdict(ts: Vec<Token>, i: i64, declared: Vec<String>, gtys: Vec<Bin
     }
     if ((cls == "emission") && atw(&ts, k, "undo")) {
         return mk_verd(tagged("G4", &ext_emission_undo_msg(&nm)), line);
+    }
+    if mods.idem {
+        let iv = ext_idem_verdict(&cls, &nm, mods.clone(), &ps.ps, line, al.clone());
+        if (iv.v != "") {
+            return iv;
+        }
+    }
+    if (mods.other || mods.idem) {
+        return no_verd();
     }
     if atw(&ts, k, "undo") {
         let mut u = (k).checked_add(1i64).expect("revl: Int overflow");
@@ -14084,7 +14181,7 @@ fn extern_decl_refusal(ts: Vec<Token>, pg: Prog) -> Verd {
                 if ((d == 0i64) && atw(&ts, i, "extern")) {
                     let nm = ext_decl_name(&ts, i);
                     if ((nm == "") || (!contains__m2(&seen, &nm))) {
-                        let v = ext_decl_verdict(ts.clone(), i, declared.clone(), gtys.clone());
+                        let v = ext_decl_verdict(ts.clone(), i, declared.clone(), gtys.clone(), al.clone());
                         if (v.v != "") {
                             return v;
                         }
@@ -15247,7 +15344,7 @@ fn ext_no_head() -> ExtH {
 fn ext_head(ts: Vec<Token>, i: i64) -> ExtH {
     let mut j = (i).checked_add(1i64).expect("revl: Int overflow");
     let mut wit = false;
-    while (((((((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) || ati(&ts, j.clone(), "witnessed")) || ati(&ts, j.clone(), "deferred")) || atk(&ts, j.clone(), "[")) || atk(&ts, j.clone(), "(")) {
+    while ((((((((atw(&ts, j.clone(), "emission") || atw(&ts, j.clone(), "acquire")) || atw(&ts, j.clone(), "pure")) || atw(&ts, j.clone(), "async")) || ati(&ts, j.clone(), "witnessed")) || ati(&ts, j.clone(), "deferred")) || atw(&ts, j.clone(), "idempotent")) || atk(&ts, j.clone(), "[")) || atk(&ts, j.clone(), "(")) {
         if ati(&ts, j.clone(), "witnessed") {
             wit = true;
         }
@@ -23825,9 +23922,29 @@ fn ir_extern(ts: Vec<Token>, i: i64, decls: Vec<TaintDecl>, al: std::collections
         j = cp.i;
     }
     let mut isAsync = false;
-    if atw(&ts, j, "async") {
-        isAsync = true;
-        j = (j).checked_add(1i64).expect("revl: Int overflow");
+    let mut isDeferred = false;
+    let mut isIdem = false;
+    let mut idemKey = String::from("");
+    while ((atw(&ts, j, "async") || ati(&ts, j, "deferred")) || atw(&ts, j, "idempotent")) {
+        if atw(&ts, j, "async") {
+            isAsync = true;
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if ati(&ts, j, "deferred") {
+                isDeferred = true;
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            } else {
+                isIdem = true;
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+                if atk(&ts, j, "(") {
+                    if (!(((ati(&ts, (j).checked_add(1i64).expect("revl: Int overflow"), "key") && atk(&ts, (j).checked_add(2i64).expect("revl: Int overflow"), ":")) && atk(&ts, (j).checked_add(3i64).expect("revl: Int overflow"), "ident")) && atk(&ts, (j).checked_add(4i64).expect("revl: Int overflow"), ")"))) {
+                        return mk_irres(false, String::from(""));
+                    }
+                    idemKey = tkc(&ts, (j).checked_add(3i64).expect("revl: Int overflow")).text;
+                    j = (j).checked_add(5i64).expect("revl: Int overflow");
+                }
+            }
+        }
     }
     if (!atw(&ts, j, "fn")) {
         return mk_irres(false, String::from(""));
@@ -23927,11 +24044,21 @@ fn ir_extern(ts: Vec<Token>, i: i64, decls: Vec<TaintDecl>, al: std::collections
     if undoRead {
         js.push_str(", \"undo_read\": true");
     }
-    if (undoIdem || undoRead) {
-        js = (js.revl_concat(", \"register\": ")).revl_concat(&jstr(&(if undoRead { String::from("read") } else { String::from("declared") })));
+    if isIdem {
+        js.push_str(", \"idempotent\": true");
+    }
+    if (idemKey != "") {
+        js = (js.revl_concat(", \"idempotency_key\": ")).revl_concat(&jstr(&idemKey));
+    }
+    if ((undoIdem || undoRead) || isIdem) {
+        let reg = if undoRead { String::from("read") } else { if (idemKey != "") { String::from("keyed") } else { String::from("declared") } };
+        js = (js.revl_concat(", \"register\": ")).revl_concat(&jstr(&reg));
     }
     if isAsync {
         js.push_str(", \"async\": true");
+    }
+    if isDeferred {
+        js.push_str(", \"deferred\": true");
     }
     if (cls == "witnessed") {
         js = ((js.revl_concat(", \"entry_kind\": \"transactional\", \"revertible\": true")).revl_concat(", \"ok_conditional\": true, \"witness\": ")).revl_concat(&jstr(&taint_strip(type_arg1(&retDecl))));
