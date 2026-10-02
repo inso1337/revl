@@ -119,12 +119,18 @@ of the toolchain already trusts; the generator is the only new code.
   "obligations": [
     {"code": "T3", "expected": "AnalysisResource", "line": 15, "message": "…",
      "fillSpec": {"expected": "AnalysisResource",
-                  "capability": {"mayEmit": false, "bound": [], "reason": "…"},
+                  "capability": {"permitsCrossing": false, "mayEmit": false,
+                                 "bound": [], "reason": "…"},
+                  "crossing": {"permitted": false, "required": false, …},
                   "bindings": [], "reachableServices": []}},
     {"code": "T3", "expected": "Str", "line": 19, "message": "…",
      "fillSpec": {"expected": "Str",
-                  "capability": {"mayEmit": true, "bound": ["filesystem"],
+                  "capability": {"permitsCrossing": true, "mayEmit": true,
+                                 "bound": ["filesystem"],
                                  "reason": "an emission-declared provide-method scoped to filesystem"},
+                  "crossing": {"permitted": true, "required": false,
+                               "form": "emit <key>.<operation>(<args>) …",
+                               "calls": [ … ]},
                   "bindings": [{"name": "input", "type": "Str"}],
                   "reachableServices": []}}
   ]
