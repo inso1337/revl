@@ -256,10 +256,18 @@ happens to.
   `mcp/session.py::Session._live_fingerprint` claims the output shape
   `apply.py::fingerprint` produces, which it does, and the extra token is an
   input key `fingerprint` reads and the session copy reaches another way.
+  Since issue #1513 the session copy resolves each provision in its own realm
+  and reads `isolate`, so the two differ by two tokens (`isolate` only in the
+  session copy, `manifest` only in `fingerprint`). That is beyond the one-token
+  slack, the claim no longer anchors, and its ledger entry was deleted.
 * **The same ratchet.** Near misses live beside the classes in
   `tests/fixtures/vocabulary_mirror_ledger.json`, each with a written reason.
   An unrecorded near miss reds, a recorded one whose difference moved reds, and
-  a recorded one that resolves must have its entry DELETED.
+  a recorded one that resolves must have its entry DELETED. A recorded near miss
+  also stops being observed when the two sides drift further apart than the
+  slack. The finding says which case applies and shows the difference (issue
+  #1580): drift is not a resolution, so reconcile the vocabularies, or record
+  the divergence in the claiming prose before deleting the entry.
 
 ## What CI covers
 

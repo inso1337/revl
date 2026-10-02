@@ -248,10 +248,12 @@ work - and a needless disclosure about the peer.
 
 ## A flag that is ignored is not implemented
 
-`revl run` carries thirteen flags the LOCAL runner honours: `--backend`,
+`revl run` carries fourteen flags the LOCAL runner honours: `--backend`,
 `--config`, `--env`, `--policy`, `--watch`, `--record`, `--estop-latch`,
-`--wal`, `--trace`, `--withdraw`, `--plan`, `--placement` and `--once`. None of
-them can cross to a pool member, so `--pool private` refuses any of them by name
+`--wal`, `--trace`, `--withdraw`, `--plan`, `--placement`, `--once` and
+`--providers`. `--providers` binds model roles to endpoints and credential
+variables on this machine, and a loopback endpoint or an environment variable
+here is not one on the peer. None of them can cross to a pool member, so `--pool private` refuses any of them by name
 on `unsupported-with-pool` instead of dispatching work somewhere the flag does
 not reach. What the peer does with the artifact is `--pool-runner`, which is the
 peer's side of the decision and not the operator's.

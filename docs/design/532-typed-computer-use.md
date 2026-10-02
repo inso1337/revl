@@ -666,8 +666,17 @@ demonstration is item 525's; the substrate is upstream.
 
 Written down so a reader does not infer more than was measured.
 
-- The ladder's rung tokens (section 4.2) are a design, not code. Nothing in
-  the tree admits or checks them today; slice 1 refuses them. Still true.
+- The ladder's rung tokens (section 4.2) were a design and not code when this
+  was written, and slice 1 refused them. That is no longer true (corrected
+  2026-09-29, issue #1572): slice 3 admits `ui.<verb>.selector` and
+  `ui.<verb>.pixel` on the verbs that act on a target (`RUNG_DEPTH` in
+  `src/revl/ui_family.py`), refuses an invented rung, a rung on a verb that
+  does not act on a target, and a fourth level at the declaration site, and
+  refuses a component whose G8 reach holds a rung without its semantic verb,
+  pinned by `tests/test_ui_ladder_rungs_521.py`. What stays unverified is the
+  run-time half: which rung an agent loop tries first, and whether a target
+  matches its evidence when the action runs, both of which belong to the
+  substrate (item 539).
 - The taint classes of section 5 were a proposal when this was written and
   are not one now: slice 2 put `screen` in `_SOURCE_CLASS_SCOPES` and `ui` in
   `_SINK_CLASS_SCOPES`, and an observed value flowing into a click is a G9
