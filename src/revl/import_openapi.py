@@ -1788,7 +1788,11 @@ class _Generator:
                     f"{self._host_comment(f'{operation.method.upper()} {target} — send the request and decode the JSON response here')}"
                     f" }}")
             args = ", ".join(pname for pname, _ in operation.params)
-            methods.append(f"    fn {operation.name}({args}) = {extern}({args})")
+            # an emission crossing carries its `emit` marker at the call site,
+            # like every other carrier (issue #1437); a compensated forward
+            # extern is always an emission
+            mark = "emit " if (operation.compensate or operation.emission) else ""
+            methods.append(f"    fn {operation.name}({args}) = {mark}{extern}({args})")
 
         parts = [self.header(server)]
         if self.types.decls:
