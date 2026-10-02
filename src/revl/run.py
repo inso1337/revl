@@ -1235,6 +1235,21 @@ class _Driver:
         self.root.on("internal/status", self._on_fiber)
         self._baseline_hooks = self._hooks()
         self._baseline_disposables = self.root.fiber._disposables.length
+        # item 515 S2: an ambient model host is a consumer of the provisions of
+        # the managed roles it routes to. It is opened BEFORE it is provided,
+        # so the member is loaded on the scheduled device before any component
+        # can call it, and a refused load refuses the boot with nothing
+        # provided. It is closed in `_dispose_all`, after the withdrawal below.
+        # Hosts that route to no managed role load nothing and add no check.
+        self._model_hosts = {key: service for key, service
+                             in self._ambient_services.items()
+                             if hasattr(service, "_revl_open")}
+        if self._model_hosts:
+            from .providers import has_provisions, open_hosts  # noqa: PLC0415
+            if has_provisions(self._model_hosts):
+                open_hosts(self._model_hosts)
+            else:
+                self._model_hosts = {}
         for key, service in self._ambient_services.items():
             # `Reflect.provide` returns the effect, whose invocation returns the
             # disposer.  Drive that first synchronous leg now so requirements
@@ -1954,6 +1969,14 @@ class _Driver:
                 except BaseException as exc:
                     self._log("swap", "ambient", f"withdraw failed: {exc}")
             self._ambient_disposers.clear()
+            # item 515 S2: with every consumer component gone and the hosts
+            # withdrawn, release the model provisions. The last release of a
+            # role unloads its member; `_teardown` then proves it is gone.
+            # (`getattr`: a test may build a driver without `__init__`)
+            if getattr(self, "_model_hosts", None):
+                from .providers import close_hosts  # noqa: PLC0415 - lazy
+                for failure in close_hosts(self._model_hosts):
+                    self._log("swap", "model", f"release failed: {failure}")
             await self._flush()
             # item 541: components just disposed here may have been the last live
             # users of one or more generation modules (a swap/reload predecessor, a
@@ -2455,6 +2478,19 @@ class _Driver:
             ("inverse residue", not self._compensation_residue,
              f"{len(self._compensation_residue)} inverse failure(s) recorded"),
         ]
+        if getattr(self, "_model_hosts", None):
+            # item 515 S2: every loaded model member unloaded once, and the
+            # server no longer reports it loaded
+            from .providers import (provision_residue,  # noqa: PLC0415
+                                    provision_summaries)
+            for line in provision_summaries(self._model_hosts):
+                self._log("model", "provision", line)
+            residue = provision_residue(self._model_hosts)
+            checks.append((
+                "models", not residue,
+                "; ".join(f"`{role}`: {', '.join(problems)}"
+                          for role, problems in sorted(residue.items()))
+                or "every loaded member unloaded, none reported loaded"))
         for name, ok, detail in checks:
             self._log("ok" if ok else "FAIL", name, detail)
         print("  no residue — the composition left nothing behind"
@@ -2491,6 +2527,13 @@ def _fail(exc_text: str, stage: str, code: int = 1) -> int:
     return code
 
 
+def _is_model_refusal(exc: BaseException) -> bool:
+    from . import model_placement  # noqa: PLC0415 - lazy
+    from .providers import ProviderError, ProvisionRefused  # noqa: PLC0415
+    return isinstance(exc, (model_placement.ModelPlacementRefused,
+                            ProvisionRefused, ProviderError))
+
+
 def run_command(args, hold_once: bool = False) -> int:
     if getattr(args, "placement", None):
         # `--placement` splits the composition across processes, each with its
@@ -2510,7 +2553,8 @@ def run_command(args, hold_once: bool = False) -> int:
         # only the py tier honors the latch at its own seams.
         return run_placement(args.files, args.placement,
                              once=getattr(args, "once", False),
-                             estop_latch=getattr(args, "estop_latch", None))
+                             estop_latch=getattr(args, "estop_latch", None),
+                             providers=getattr(args, "providers", None))
 
     backend = getattr(args, "backend", "py")
     if backend not in KNOWN_BACKENDS:
@@ -2663,14 +2707,21 @@ def run_command(args, hold_once: bool = False) -> int:
         # structured output attaches a `validated` crossing's grammar through
         for host in model_hosts.values():
             host._revl_attach_runtime(runtime_mod)
-    driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
-                     record=bool(getattr(args, "record", False)),
-                     trace_path=getattr(args, "trace", None),
-                     withdraw=withdraw,
-                     wal_path=getattr(args, "wal", None),
-                     estop_latch=getattr(args, "estop_latch", None),
-                     root_dirs=root_dirs,
-                     ambient=ambient)
+    try:
+        driver = _Driver(ir, config, emit, runtime_mod, Context, FiberState,
+                         record=bool(getattr(args, "record", False)),
+                         trace_path=getattr(args, "trace", None),
+                         withdraw=withdraw,
+                         wal_path=getattr(args, "wal", None),
+                         estop_latch=getattr(args, "estop_latch", None),
+                         root_dirs=root_dirs,
+                         ambient=ambient)
+    except Exception as exc:
+        # item 515 S2: a model provision that cannot load its member where the
+        # schedule placed it refuses the boot, named, before anything loads
+        if model_hosts and _is_model_refusal(exc):
+            return _fail(str(exc), lifecycle.BOOT)
+        raise
     try:
         if withdraw is not None:
             return asyncio.run(driver.withdraw_once())

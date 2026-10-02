@@ -1,0 +1,806 @@
+{
+  "ir_version": 3,
+  "services": {
+    "Positions": {
+      "methods": {
+        "statement": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "binding": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "returned": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "argument": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "ifarm": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "nested": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        },
+        "boom": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    },
+    "Every": {
+      "methods": {
+        "run": {
+          "params": [],
+          "returns": "Int",
+          "emission": true
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "name": "Positions",
+      "source": "declared_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "positions": "Positions"
+      },
+      "body": [
+        {
+          "step": "provide",
+          "name": "positions",
+          "service": "Positions",
+          "methods": [
+            {
+              "name": "statement",
+              "params": [],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_statement",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 0
+                  }
+                }
+              ]
+            },
+            {
+              "name": "binding",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "a",
+                  "value": {
+                    "kind": "fn",
+                    "name": "put_let",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "a"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "returned",
+              "params": [],
+              "body": [
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_return",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "argument",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "s",
+                  "value": {
+                    "kind": "fn",
+                    "name": "double",
+                    "args": [
+                      {
+                        "kind": "fn",
+                        "name": "put_argument",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "s"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "ifarm",
+              "params": [],
+              "body": [
+                {
+                  "step": "if",
+                  "cond": {
+                    "kind": "lit",
+                    "value": true
+                  },
+                  "then": [
+                    {
+                      "step": "emit",
+                      "expr": {
+                        "kind": "fn",
+                        "name": "put_ifarm",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "else": null
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "lit",
+                    "value": 0
+                  }
+                }
+              ]
+            },
+            {
+              "name": "nested",
+              "params": [],
+              "body": [
+                {
+                  "step": "let",
+                  "name": "b",
+                  "value": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "fn",
+                      "name": "put_nested",
+                      "args": [
+                        {
+                          "kind": "lit",
+                          "value": "k"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "name",
+                    "id": "b"
+                  }
+                }
+              ]
+            },
+            {
+              "name": "boom",
+              "params": [],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_first",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_boom",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "Everything",
+      "source": "declared_compensate.rvl",
+      "config": [],
+      "requires": {},
+      "provides": {
+        "all": "Every"
+      },
+      "body": [
+        {
+          "step": "emit",
+          "expr": {
+            "kind": "fn",
+            "name": "put_act",
+            "args": [
+              {
+                "kind": "lit",
+                "value": "k"
+              }
+            ]
+          }
+        },
+        {
+          "step": "provide",
+          "name": "all",
+          "service": "Every",
+          "methods": [
+            {
+              "name": "run",
+              "params": [],
+              "body": [
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_statement",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "a",
+                  "value": {
+                    "kind": "fn",
+                    "name": "put_let",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "let",
+                  "name": "s",
+                  "value": {
+                    "kind": "fn",
+                    "name": "double",
+                    "args": [
+                      {
+                        "kind": "fn",
+                        "name": "put_argument",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "if",
+                  "cond": {
+                    "kind": "lit",
+                    "value": true
+                  },
+                  "then": [
+                    {
+                      "step": "emit",
+                      "expr": {
+                        "kind": "fn",
+                        "name": "put_ifarm",
+                        "args": [
+                          {
+                            "kind": "lit",
+                            "value": "k"
+                          }
+                        ]
+                      }
+                    }
+                  ],
+                  "else": null
+                },
+                {
+                  "step": "emit",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "plain",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  },
+                  "compensate": {
+                    "kind": "fn",
+                    "name": "undo_site",
+                    "args": []
+                  }
+                },
+                {
+                  "step": "let",
+                  "name": "b",
+                  "value": {
+                    "kind": "bin",
+                    "op": "+",
+                    "left": {
+                      "kind": "fn",
+                      "name": "put_nested",
+                      "args": [
+                        {
+                          "kind": "lit",
+                          "value": "k"
+                        }
+                      ]
+                    },
+                    "right": {
+                      "kind": "lit",
+                      "value": 1
+                    }
+                  },
+                  "mutable": false
+                },
+                {
+                  "step": "return",
+                  "expr": {
+                    "kind": "fn",
+                    "name": "put_return",
+                    "args": [
+                      {
+                        "kind": "lit",
+                        "value": "k"
+                      }
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ],
+  "manifest": {
+    "components": [
+      {
+        "name": "Positions",
+        "file": "declared_compensate.rvl",
+        "inject": [],
+        "provides": [
+          "positions"
+        ]
+      },
+      {
+        "name": "Everything",
+        "file": "declared_compensate.rvl",
+        "inject": [],
+        "provides": [
+          "all"
+        ]
+      }
+    ],
+    "loadOrder": [
+      "Positions",
+      "Everything"
+    ]
+  },
+  "functions": [
+    {
+      "name": "double",
+      "params": [
+        {
+          "name": "n",
+          "type": "Int"
+        }
+      ],
+      "returns": "Int",
+      "public": false,
+      "body": [
+        {
+          "step": "return",
+          "expr": {
+            "kind": "bin",
+            "op": "*",
+            "left": {
+              "kind": "var",
+              "name": "n"
+            },
+            "right": {
+              "kind": "lit",
+              "value": 2
+            },
+            "operands": "Int"
+          }
+        }
+      ]
+    }
+  ],
+  "externs": [
+    {
+      "name": "plain",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:site')\n  return 1n\n"
+      }
+    },
+    {
+      "name": "undo_site",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:site')\n"
+      }
+    },
+    {
+      "name": "undo_statement",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:statement')\n"
+      }
+    },
+    {
+      "name": "put_statement",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:statement')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_statement"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_let",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:let')\n"
+      }
+    },
+    {
+      "name": "put_let",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:let')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_let"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_return",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:return')\n"
+      }
+    },
+    {
+      "name": "put_return",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:return')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_return"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_argument",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:argument')\n"
+      }
+    },
+    {
+      "name": "put_argument",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:argument')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_argument"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_ifarm",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:ifarm')\n"
+      }
+    },
+    {
+      "name": "put_ifarm",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:ifarm')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_ifarm"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_nested",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:nested')\n"
+      }
+    },
+    {
+      "name": "put_nested",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:nested')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_nested"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_act",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:act')\n"
+      }
+    },
+    {
+      "name": "put_act",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:act')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_act"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_first",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:first')\n"
+      }
+    },
+    {
+      "name": "put_first",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:first')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_first"
+        },
+        "args": []
+      }
+    },
+    {
+      "name": "undo_boom",
+      "class": "pure",
+      "params": [],
+      "returns": "Unit",
+      "bodies": {
+        "ts": "\n  record('comp:boom')\n"
+      }
+    },
+    {
+      "name": "put_boom",
+      "class": "emission",
+      "params": [
+        {
+          "name": "k",
+          "type": "Str"
+        }
+      ],
+      "returns": "Int",
+      "bodies": {
+        "ts": "\n  record('put:boom')\n  throw new Error('put:boom failed')\n  return 1n\n"
+      },
+      "compensate": {
+        "kind": "call",
+        "callee": {
+          "kind": "var",
+          "name": "undo_boom"
+        },
+        "args": []
+      }
+    }
+  ]
+}
