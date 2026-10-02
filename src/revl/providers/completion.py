@@ -16,6 +16,9 @@ class CompletionRequest:
     temperature: float | None = None
     top_p: float | None = None
     seed: int | None = None
+    #: the constraint to attach (issue #1462), a `structured.Structured`, or
+    #: None for an unconstrained completion
+    structured: object = None
 
 
 @dataclass(frozen=True)
@@ -32,6 +35,10 @@ class Completion:
     reasoning_tokens: int | None = None
     latency_seconds: float | None = None
     provider: str = ""
+    #: a value the provider returned already decoded (the Anthropic adapter's
+    #: forced tool input), valid only when `has_value` is True
+    value: object = None
+    has_value: bool = False
 
     def usage(self) -> dict:
         """The host-usage mapping `runtime.revl_host_usage` reads."""

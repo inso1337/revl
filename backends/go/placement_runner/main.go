@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -46,6 +47,52 @@ type serveInfo struct {
 	Socket  string              `json:"socket"`
 	Keys    []string            `json:"keys"`
 	Methods map[string][]string `json:"methods"`
+}
+
+// exportedSurface is what this process serves: the keys other processes
+// consume from it (`serve.keys`) and, per key, the operations its service
+// declaration admits (`serve.methods`, the allowlist `placement.py` reads off
+// the IR). The generated `RevlInvoke` resolves EVERY key the document's
+// components provide, so without this check a raw call reached a key this
+// process provides but does not export, and any key it holds a proxy for
+// (issue #1599). A request outside the surface is refused with the py
+// bridge's wording and never dispatched.
+type exportedSurface struct {
+	keys    map[string]bool
+	methods map[string]map[string]bool
+}
+
+func newExportedSurface(s *serveInfo) exportedSurface {
+	out := exportedSurface{keys: map[string]bool{}, methods: map[string]map[string]bool{}}
+	for _, k := range s.Keys {
+		out.keys[k] = true
+	}
+	for k, ops := range s.Methods {
+		set := map[string]bool{}
+		for _, op := range ops {
+			set[op] = true
+		}
+		out.methods[k] = set
+	}
+	return out
+}
+
+// check returns the refusal for a request outside the surface, or nil. A key
+// with no `methods` entry is left to the generated dispatch, which admits only
+// the service's declared operations.
+func (e exportedSurface) check(key, method string, declared []string) error {
+	if !e.keys[key] {
+		return fmt.Errorf("key '%s' is not exported by this process", key)
+	}
+	ops, listed := e.methods[key]
+	if listed && !ops[method] {
+		names := "(none)"
+		if len(declared) > 0 {
+			names = strings.Join(declared, ", ")
+		}
+		return fmt.Errorf("method '%s' is not exported for key '%s' (exported: %s)", method, key, names)
+	}
+	return nil
 }
 
 type probe struct {
@@ -142,6 +189,12 @@ func fatalLine(name string, fatal any) {
 // when the defer statement runs, or a panic after boot would still be labelled
 // `proc` once the spec had named the placement. Same reason the java tier's
 // handler reads a `volatile` field rather than a captured local.
+func sortedOps(ops []string) []string {
+	out := append([]string(nil), ops...)
+	sort.Strings(out)
+	return out
+}
+
 func guard(name *string) func() {
 	return func() {
 		if fatal := recover(); fatal != nil {
@@ -277,6 +330,7 @@ func main() {
 			log("serve", strings.Join(s.Serve.Keys, ", "), "listen error: "+err.Error())
 		} else {
 			listener = ln
+			surface := newExportedSurface(s.Serve)
 			go bridge.Serve(ln, func(key, method string, args []json.RawMessage) (any, error) {
 				// The crossing goroutine's own funnel. `bridge.Serve` answers
 				// each connection on a goroutine of its own, so a panic raised
@@ -284,6 +338,9 @@ func main() {
 				// never main's defer. `args` is where a declared `Secret[T]`
 				// travels, and a panicking frame's value quotes what it held.
 				defer guard(&name)()
+				if err := surface.check(key, method, sortedOps(s.Serve.Methods[key])); err != nil {
+					return nil, err
+				}
 				return emitted.RevlInvoke(root, key, method, args)
 			})
 			log("serve", strings.Join(s.Serve.Keys, ", "), "-> "+s.Serve.Socket)
