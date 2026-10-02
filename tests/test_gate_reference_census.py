@@ -299,6 +299,30 @@ def test_every_value_crossing_bounds_a_spawned_child_in_both(measured):
     assert not wrong, "\n  ".join(["value-crossing documents moved:"] + wrong)
 
 
+# --- the model reach fold (item 519, issue #1193 slice 2, issue #1451) --------
+#
+# A role a component's crossing is placed on was outside the product unless a
+# `route model` block named it, and the gate did not decide the fold at all.
+# The gate now folds it on the held set its spawn attenuation builds and spells
+# the refusal byte for byte. `model_` documents both refuse under MODEL, `ok_`
+# both admit.
+MODEL_REACH_CROSSING = ROOT / "tests" / "fixtures" / "model_reach_crossing"
+
+
+def test_every_model_reach_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(MODEL_REACH_CROSSING.glob("*.rvl"))
+    assert len(docs) == 13, f"the model-reach corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["model-reach documents moved:"] + wrong)
+
+
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):
     """The vocabulary `tools/oracle_construct_reach.py`'s `gate_census` row
     calls its reference set is read STATICALLY out of `_classify`, so that the

@@ -1035,15 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**602 .rvl files -> 486 components -> 1226 statements = 351 modeled +
-222 componentless + 29 refused at parse**, and **6686 verdicts compared
-(351 files + 486 components + 147 provide methods + 37 spawn edges + 29
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1226
-confinements + 1226 surfaces + 371 teardowns + 357 provide-clause
-components + 83 config fields + 486 A2 bodies), 6686 agree, 0
+**615 .rvl files -> 499 components -> 1245 statements = 364 modeled +
+222 componentless + 29 refused at parse**, and **6789 verdicts compared
+(364 files + 499 components + 160 provide methods + 37 spawn edges + 29
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1245
+confinements + 1245 surfaces + 371 teardowns + 370 provide-clause
+components + 83 config fields + 499 A2 bodies), 6789 agree, 0
 mismatches**.
 
-Checker alignment over the 351 modeled files. Every bucket recording a
+Checker alignment over the 364 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1070,7 +1070,7 @@ layer.
 | `agree-G3` | 1 | informational |
 | `agree-G4` | 72 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 188 | informational |
+| `agree-accept` | 194 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1078,7 +1078,7 @@ layer.
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
-| `out-of-fragment` | 57 | informational |
+| `out-of-fragment` | 64 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 | `out-of-fragment-approval` | 15 | ratcheted |

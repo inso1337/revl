@@ -7519,15 +7519,16 @@ fn emit_caps_pairs(e: Expr, comp: CompD, cx: Ctx) -> List[Str] {
   }
 }
 
-fn emit_pairs_in(ss: List[Stmt], i: Int, comp: CompD, cx: Ctx,
+fn emit_pairs_in(ss: List[Stmt], i: Int, comp: CompD, cx: Ctx, nm: Bool,
                  acc: List[Str]) -> List[Str] {
   if (i >= ss.length()) { return acc }
   let s = ss[i]
-  let a2 = s.kind == "emit" ? union_into(acc, emit_caps_pairs(s.e, comp, cx)) : acc
+  let a2 = s.kind == "emit" && !nm
+    ? union_into(acc, emit_caps_pairs(s.e, comp, cx)) : acc
   // issue #1562: every crossing the statement makes, in every position (the
   // value form, an argument, a compensate slot), not only an `emit` step's
   // head. The reference reads every crossing call node of the lowered body.
-  return emit_pairs_in(ss, i + 1, comp, cx, cross_pairs_in(s.e, comp, cx, a2))
+  return emit_pairs_in(ss, i + 1, comp, cx, nm, cross_pairs_in(s.e, comp, cx, nm, a2))
 }
 
 // The crossings inside one expression, each resolved the way an `emit` step's
@@ -7535,54 +7536,69 @@ fn emit_pairs_in(ss: List[Stmt], i: Int, comp: CompD, cx: Ctx,
 // op, a provision call off a spawn handle to one, or a named call to an
 // emitting extern or fn (a `witnessed` extern is marked by `effect` and stays
 // out, as it does for the marker rule).
-fn cross_pairs_in(e: Expr, comp: CompD, cx: Ctx, acc: List[Str]) -> List[Str] {
+//
+// `nm` collects NAMES instead: the emitting extern or `fn` each named crossing
+// calls, so the model-reach fold can read the tokens that callable declares
+// (`lower.py` passes `named` to `_collect_emit_caps_pairs` for the same walk).
+fn cross_pairs_in(e: Expr, comp: CompD, cx: Ctx, nm: Bool,
+                  acc: List[Str]) -> List[Str] {
   return match e {
-    Call(c)    => cross_pairs_list(c.args, 0, comp, cx,
-                    cross_pairs_in(c.target, comp, cx,
+    Call(c)    => cross_pairs_list(c.args, 0, comp, cx, nm,
+                    cross_pairs_in(c.target, comp, cx, nm,
                       is_cross_call(c, comp, cx)
-                        ? union_into(acc, emit_caps_pairs(e, comp, cx)) : acc)),
-    Field(f)   => cross_pairs_in(f.target, comp, cx, acc),
-    OptField(f) => cross_pairs_in(f.target, comp, cx, acc),
-    OptCall(c) => cross_pairs_list(c.args, 0, comp, cx,
-                    cross_pairs_in(c.target, comp, cx, acc)),
-    Bin(b)     => cross_pairs_in(b.r, comp, cx, cross_pairs_in(b.l, comp, cx, acc)),
-    Un(u)      => cross_pairs_in(u.e, comp, cx, acc),
-    Emit(u)    => cross_pairs_in(u.e, comp, cx, acc),
-    Index(x)   => cross_pairs_in(x.idx, comp, cx, cross_pairs_in(x.target, comp, cx, acc)),
-    If(x)      => cross_pairs_in(x.els, comp, cx,
-                    cross_pairs_in(x.then_, comp, cx, cross_pairs_in(x.cond, comp, cx, acc))),
-    Lst(l)     => cross_pairs_list(l.items, 0, comp, cx, acc),
-    Rec(r)     => cross_pairs_inits(r.fields, 0, comp, cx, acc),
-    Arrow(ar)  => cross_pairs_in(ar.body, comp, cx, acc),
-    Match(m)   => cross_pairs_arms(m.arms, 0, comp, cx, cross_pairs_in(m.scrut, comp, cx, acc)),
-    Templ(t)   => cross_pairs_parts(t.parts, 0, comp, cx, acc),
-    RecUpd(r)  => cross_pairs_inits(r.upds, 0, comp, cx, cross_pairs_in(r.base, comp, cx, acc)),
+                        ? union_into(acc, nm ? cross_name(c)
+                                             : emit_caps_pairs(e, comp, cx))
+                        : acc)),
+    Field(f)   => cross_pairs_in(f.target, comp, cx, nm, acc),
+    OptField(f) => cross_pairs_in(f.target, comp, cx, nm, acc),
+    OptCall(c) => cross_pairs_list(c.args, 0, comp, cx, nm,
+                    cross_pairs_in(c.target, comp, cx, nm, acc)),
+    Bin(b)     => cross_pairs_in(b.r, comp, cx, nm, cross_pairs_in(b.l, comp, cx, nm, acc)),
+    Un(u)      => cross_pairs_in(u.e, comp, cx, nm, acc),
+    Emit(u)    => cross_pairs_in(u.e, comp, cx, nm, acc),
+    Index(x)   => cross_pairs_in(x.idx, comp, cx, nm, cross_pairs_in(x.target, comp, cx, nm, acc)),
+    If(x)      => cross_pairs_in(x.els, comp, cx, nm,
+                    cross_pairs_in(x.then_, comp, cx, nm, cross_pairs_in(x.cond, comp, cx, nm, acc))),
+    Lst(l)     => cross_pairs_list(l.items, 0, comp, cx, nm, acc),
+    Rec(r)     => cross_pairs_inits(r.fields, 0, comp, cx, nm, acc),
+    Arrow(ar)  => cross_pairs_in(ar.body, comp, cx, nm, acc),
+    Match(m)   => cross_pairs_arms(m.arms, 0, comp, cx, nm, cross_pairs_in(m.scrut, comp, cx, nm, acc)),
+    Templ(t)   => cross_pairs_parts(t.parts, 0, comp, cx, nm, acc),
+    RecUpd(r)  => cross_pairs_inits(r.upds, 0, comp, cx, nm, cross_pairs_in(r.base, comp, cx, nm, acc)),
     _          => acc,
   }
 }
 
-fn cross_pairs_parts(xs: List[PartN], i: Int, comp: CompD, cx: Ctx,
+fn cross_pairs_parts(xs: List[PartN], i: Int, comp: CompD, cx: Ctx, nm: Bool,
                      acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return cross_pairs_parts(xs, i + 1, comp, cx, cross_pairs_in(xs[i].e, comp, cx, acc))
+  return cross_pairs_parts(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i].e, comp, cx, nm, acc))
 }
 
-fn cross_pairs_list(xs: List[Expr], i: Int, comp: CompD, cx: Ctx,
+fn cross_pairs_list(xs: List[Expr], i: Int, comp: CompD, cx: Ctx, nm: Bool,
                     acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return cross_pairs_list(xs, i + 1, comp, cx, cross_pairs_in(xs[i], comp, cx, acc))
+  return cross_pairs_list(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i], comp, cx, nm, acc))
 }
 
-fn cross_pairs_inits(xs: List[InitN], i: Int, comp: CompD, cx: Ctx,
+fn cross_pairs_inits(xs: List[InitN], i: Int, comp: CompD, cx: Ctx, nm: Bool,
                      acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return cross_pairs_inits(xs, i + 1, comp, cx, cross_pairs_in(xs[i].value, comp, cx, acc))
+  return cross_pairs_inits(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i].value, comp, cx, nm, acc))
 }
 
-fn cross_pairs_arms(xs: List[ArmN], i: Int, comp: CompD, cx: Ctx,
+fn cross_pairs_arms(xs: List[ArmN], i: Int, comp: CompD, cx: Ctx, nm: Bool,
                     acc: List[Str]) -> List[Str] {
   if (i >= xs.length()) { return acc }
-  return cross_pairs_arms(xs, i + 1, comp, cx, cross_pairs_in(xs[i].body, comp, cx, acc))
+  return cross_pairs_arms(xs, i + 1, comp, cx, nm, cross_pairs_in(xs[i].body, comp, cx, nm, acc))
+}
+
+// The emitting callable one named crossing calls (the `nm` mode above).
+fn cross_name(c: CallN) -> List[Str] {
+  return match c.target {
+    Var(n) => [n],
+    _ => [],
+  }
 }
 
 // `_is_value_crossing`: whether one call is an emission crossing.
@@ -7611,13 +7627,31 @@ fn own_emit_pairs(comp: CompD, base: Ctx) -> List[Str] {
   // the per-component context: a spawn handle the component binds resolves
   // through its own `handles`, as the marker rule resolves it
   let cx = ctx_for(base, comp)
-  var out = emit_pairs_in(comp.setup, 0, comp, cx, [])
+  var out = emit_pairs_in(comp.setup, 0, comp, cx, false, [])
   var pi = 0
   while (pi < comp.provs.length()) {
     let pv = comp.provs[pi]
     var mi = 0
     while (mi < pv.methods.length()) {
-      out = emit_pairs_in(pv.methods[mi].body, 0, comp, cx, out)
+      out = emit_pairs_in(pv.methods[mi].body, 0, comp, cx, false, out)
+      mi += 1
+    }
+    pi += 1
+  }
+  return out
+}
+
+// The emitting externs and `fn`s a component crosses by name, in every
+// position (the walk above in its `nm` mode): the model-reach fold reads the
+// tokens each one declares, which its `*` fold element does not carry.
+fn own_cross_names(comp: CompD, cx: Ctx) -> List[Str] {
+  var out = emit_pairs_in(comp.setup, 0, comp, cx, true, [])
+  var pi = 0
+  while (pi < comp.provs.length()) {
+    let pv = comp.provs[pi]
+    var mi = 0
+    while (mi < pv.methods.length()) {
+      out = emit_pairs_in(pv.methods[mi].body, 0, comp, cx, true, out)
       mi += 1
     }
     pi += 1
@@ -13968,8 +14002,47 @@ type NoLink = { done: Bool, refs: List[Verd] }
 // role written against item 512 alone; the four fields after it are read only
 // when it is true. `rpline` is the `device` token's line, because that is the
 // line the reference's own refusal points at and not the role's head.
+//
+// `rreach` is the item-519 `reaches [...]` clause, each element in the
+// canonical spelling `cap_tok_at` renders (`*` as itself). `rrdecl` is false
+// when the clause is omitted, which is NOT an empty reach: an undeclared
+// reach is the unnameable `*` (`model_route.UNDECLARED_REACH`). `rrok` is
+// false for a clause this reader cannot canonicalize, which the reference
+// refuses at parse; the reach fold then carries no verdict at all.
 type MRole = { rname: Str, rres: Str, rline: Int, rprof: Bool,
-               rdev: Str, rmem: Int, rquant: Str, rpline: Int }
+               rdev: Str, rmem: Int, rquant: Str, rpline: Int,
+               rreach: List[Str], rrdecl: Bool, rrok: Bool }
+
+// One `reaches [...]` clause, read at `i` (the `reaches` word when written).
+type MReach = { mxs: List[Str], mdecl: Bool, mok: Bool }
+
+fn model_reach_at(ts: List[Token], i: Int) -> MReach {
+  if (!(at_word(ts, i, "reaches") && atk(ts, i + 1, "["))) {
+    return { mxs: [], mdecl: false, mok: true }
+  }
+  let end = match_bracket(ts, i + 1)
+  if (end == 0 - 1) { return { mxs: [], mdecl: true, mok: false } }
+  var out: List[Str] = []
+  var ok = true
+  var j = i + 2
+  while (j < end) {
+    var x = "?"
+    if (atk(ts, j, "*")) {
+      x = "*"
+      j += 1
+    } else {
+      let r = cap_tok_at(ts, j, end)
+      x = r.s
+      j = r.i > j ? r.i : j + 1
+    }
+    // the reference refuses an unreadable token and a duplicate at parse
+    if (x == "?" || contains(out, x)) { ok = false }
+    out = out.push(x)
+    if (atk(ts, j, ",")) { j += 1 }
+    else if (j < end) { ok = false  j += 1 }
+  }
+  return { mxs: out, mdecl: true, mok: ok }
+}
 
 // `arole` is the arm's HEAD, which is the placement item 514's ceiling reads.
 // `acands` is the whole ORDERED CANDIDATE SET (item 515), head included, so a
@@ -14197,20 +14270,23 @@ fn model_roles_of(ts: List[Token]) -> List[MRole] {
 // other way is a reference PARSE refusal, and this gate carries no verdict for
 // a parse refusal: `rprof` stays false, the two profile rules below do not run,
 // and the ordinary parse refusal stands. `reaches [...]` (item 519) sits in the
-// same slot and is skipped here for the same reason its fold is not ported -
-// see the section note above `model_roles_refusal`.
+// same slot, after the profile when both are written, and is read by
+// `model_reach_at` for the reach fold below `model_place_refusal`.
 fn model_role_at(ts: List[Token], i: Int) -> MRole {
   let name = tkc(ts, i + 2).text
   let res = tkc(ts, i + 3).text
   let line = tkc(ts, i).line
   let j = i + 4
+  let rr = model_reach_at(ts, j)
   let bare = { rname: name, rres: res, rline: line, rprof: false,
-               rdev: "", rmem: 0, rquant: "", rpline: line }
+               rdev: "", rmem: 0, rquant: "", rpline: line,
+               rreach: rr.mxs, rrdecl: rr.mdecl, rrok: rr.mok }
   if (!(at_word(ts, j, "device") && atk(ts, j + 1, "ident")
         && at_word(ts, j + 2, "memory") && atk(ts, j + 3, "int")
         && at_word(ts, j + 4, "quant") && atk(ts, j + 5, "ident"))) {
     return bare
   }
+  let pr = model_reach_at(ts, j + 6)
   // The memory floor is compared as a NUMBER, so the gate's "no placement can
   // fail to meet" refusal fires on the same values the reference's does. A
   // spelling this reader cannot turn into one (a radix or separator form the
@@ -14218,10 +14294,16 @@ fn model_role_at(ts: List[Token], i: Int) -> MRole {
   // refused at a guessed value: a wrong number in a message is worse than no
   // verdict, and no verdict is the direction this gate is allowed to take.
   let mem = match tkc(ts, j + 3).text.to_int() { Some(v) => v, None => 0 - 1 }
-  if (mem == 0 - 1) { return bare }
+  if (mem == 0 - 1) {
+    // the reach after an unread profile is not read either: no reach verdict
+    return { rname: name, rres: res, rline: line, rprof: false,
+             rdev: "", rmem: 0, rquant: "", rpline: line,
+             rreach: [], rrdecl: true, rrok: false }
+  }
   return { rname: name, rres: res, rline: line, rprof: true,
            rdev: tkc(ts, j + 1).text, rmem: mem,
-           rquant: tkc(ts, j + 5).text, rpline: tkc(ts, j).line }
+           rquant: tkc(ts, j + 5).text, rpline: tkc(ts, j).line,
+           rreach: pr.mxs, rrdecl: pr.mdecl, rrok: pr.mok }
 }
 
 fn mrole_at(rs: List[MRole], n: Str, i: Int) -> Int {
@@ -14629,6 +14711,307 @@ fn model_place_refusal(ts: List[Token]) -> Verd {
     let cv = model_comp_refusal(ts, sps[i], rs, cs)
     if (cv.v != "") { return cv }
     i += 1
+  }
+  return no_verd()
+}
+
+// ======================================================= the model reach fold
+//
+// Item 519 (`lower.py::_check_model_attenuation`, issue #1193 slice 2): a
+// model role is an authority surrogate, so a component's effective ceiling is
+// what it holds together with what every role it consults can reach, and a
+// role reaching past the component is refused with both sets named.
+//
+// This was the one item-519 rule the gate declined, on the grounds that it is
+// a product over a component's HELD set and the gate had none. It has one: the
+// spawn attenuation fold above (`held_caps_pairs`, `reach_surface_pairs`,
+// `cap_covers_set`) is that product, so the reach fold is ported onto it.
+//
+// The EDGES are the roles a component's `route model` block names (every
+// candidate of an ordered set, and a council arm's member roles), then the
+// roles its crossings are PLACED on by a `model.<role>` token (item 512 slice
+// 4), read off what it holds and off the tokens every extern or `fn` it
+// crosses declares. The second kind is slice 2: without it the fold ran only
+// for a component that wrote a block, so deleting the block took a role
+// reaching past the component out of the product.
+//
+// The held set is spelled in the reference's namespace for a boundary no
+// declaration names, the SERVICE (`svc:<Service>`, item 561), where the spawn
+// fold above keys it by the wiring key. The two agree on every verdict the
+// spawn fold reaches; the reach fold PRINTS the element, so it must be the
+// reference's.
+//
+// What this does not decide it leaves alone, never refuses: a `reaches`
+// clause it cannot canonicalize, a capability list the cap order does not
+// model, or a block this gate does not read (the placement phase above has
+// refused that one already).
+
+type MEdge = { eact: Str, eorig: Str, erole: Str, ecross: Str, eline: Int }
+
+// `key:K` (the spawn fold's spelling) as the reference's `svc:<service K
+// wires>`, for every element of a held set.
+fn model_svc_ns(xs: List[Str], comp: CompD) -> List[Str] {
+  var out: List[Str] = []
+  var i = 0
+  while (i < xs.length()) {
+    let x = xs[i]
+    if (starts_with(x, "key:")) {
+      let sv = req_svc_of(comp.reqMap, x.slice(4, x.length()), 0)
+      out = union_into(out, [sv == "" ? x : "svc:".concat(sv)])
+    } else {
+      out = union_into(out, [x])
+    }
+    i += 1
+  }
+  return out
+}
+
+// `_consults_a_model`: a held boundary counts unless its declared token PROVES
+// it is some other boundary.
+fn model_consults(held: List[Str]) -> Bool {
+  var i = 0
+  while (i < held.length()) {
+    let t = cap_parse(held[i]).token
+    if (t == "*" || starts_with(t, "svc:") || t == "model"
+        || starts_with(t, "model.")) { return true }
+    i += 1
+  }
+  return false
+}
+
+// `model_route.role_of_crossing`: the declared role a `model.<tail>` token
+// names, else "".
+fn model_role_of(tok: Str, rs: List[MRole]) -> Str {
+  if (!starts_with(tok, "model.")) { return "" }
+  let head = cap_parse(tok).token
+  let tail = head.slice(6, head.length())
+  if (tail == "") { return "" }
+  return mrole_at(rs, tail, 0) == 0 - 1 ? "" : tail
+}
+
+// `_model_held_render` / `_model_held_str` (issue #1451): an unscoped emission
+// reads as what it is, in `_cap_sorted_strs` order, and names the fix.
+fn model_held_render(x: Str) -> Str {
+  if (starts_with(x, "svc:")) {
+    return "service `".concat(x.slice(4, x.length())).concat("`'s unscoped emission")
+  }
+  return "`".concat(x).concat("`")
+}
+
+fn model_render_key(x: Str) -> Str {
+  return starts_with(x, "svc:") ? x.slice(4, x.length()) : x
+}
+
+fn model_held_str(held: List[Str]) -> Str {
+  // `sorted(held, key=_cap_render)`: ordered by the rendered spelling, which a
+  // `svc:` element shares with its bare service name
+  var keys: List[Str] = []
+  var i = 0
+  while (i < held.length()) {
+    keys = union_into(keys, [model_render_key(held[i])])
+    i += 1
+  }
+  let order = sort_strs(keys)
+  var text = ""
+  var folded = ""
+  var k = 0
+  while (k < order.length()) {
+    i = 0
+    while (i < held.length()) {
+      let x = held[i]
+      if (model_render_key(x) == order[k]) {
+        if (text != "") { text = text.concat(", ") }
+        text = text.concat(model_held_render(x))
+        if (starts_with(x, "svc:")) {
+          if (folded != "") { folded = folded.concat(", ") }
+          folded = folded.concat("`").concat(order[k]).concat("`")
+        }
+      }
+      i += 1
+    }
+    k += 1
+  }
+  if (text == "") { text = "no capabilities" }
+  if (folded != "") {
+    text = text.concat(" (an unscoped emission has no token a `reaches [...]` ")
+      .concat("list can name: give the `emission` methods of ").concat(folded)
+      .concat(" a scoped capability, such as `emission[model.complete]`, ")
+      .concat("and reach that)")
+  }
+  return text
+}
+
+// The roles one arm routes through: every candidate, and a council's member
+// roles in declaration order. "?" marks an arm this fold cannot resolve.
+fn model_arm_roles(a: MArm, rs: List[MRole], cs: List[CDecl]) -> List[Str] {
+  if (a.acands.length() == 1 && mrole_at(rs, a.acands[0], 0) == 0 - 1) {
+    let ci = ccl_at(cs, a.acands[0], 0)
+    if (ci == 0 - 1) { return ["?"] }
+    var out: List[Str] = []
+    var k = 0
+    while (k < cs[ci].cmems.length()) {
+      out = out.push(cs[ci].cmems[k].crole)
+      k += 1
+    }
+    return out
+  }
+  return a.acands
+}
+
+// `_model_reach_edges`: block edges sorted by action then origin, each arm's
+// roles in order, then crossing edges for the roles no block names, sorted.
+// One edge with role "?" means this fold does not decide the component.
+fn model_edges(bs: List[MBlock], rs: List[MRole], cs: List[CDecl],
+               crossed: List[Str], line: Int) -> List[MEdge] {
+  let undecided = [{ eact: "", eorig: "", erole: "?", ecross: "", eline: 0 }]
+  var acts: List[Str] = []
+  var bi = 0
+  while (bi < bs.length()) {
+    if (!bs[bi].bok) { return undecided }
+    acts = union_into(acts, [bs[bi].bact])
+    bi += 1
+  }
+  let actOrder = sort_strs(acts)
+  var out: List[MEdge] = []
+  var named: List[Str] = []
+  var ai = 0
+  while (ai < actOrder.length()) {
+    let act = actOrder[ai]
+    var origs: List[Str] = []
+    bi = 0
+    while (bi < bs.length()) {
+      if (bs[bi].bact == act) {
+        var k = 0
+        while (k < bs[bi].barms.length()) {
+          origs = union_into(origs, [bs[bi].barms[k].aorig])
+          k += 1
+        }
+      }
+      bi += 1
+    }
+    let origOrder = sort_strs(origs)
+    var oi = 0
+    while (oi < origOrder.length()) {
+      bi = 0
+      var done = false
+      while (bi < bs.length() && !done) {
+        if (bs[bi].bact == act) {
+          let at = marm_origin_at(bs[bi].barms, origOrder[oi], 0)
+          if (at != 0 - 1) {
+            done = true
+            let a = bs[bi].barms[at]
+            let roles = model_arm_roles(a, rs, cs)
+            var k = 0
+            while (k < roles.length()) {
+              if (roles[k] == "?") { return undecided }
+              named = union_into(named, [roles[k]])
+              out = out.push({ eact: act, eorig: a.aorig, erole: roles[k],
+                               ecross: "", eline: a.aline })
+              k += 1
+            }
+          }
+        }
+        bi += 1
+      }
+      oi += 1
+    }
+    ai += 1
+  }
+  var placed: List[Str] = []
+  var i = 0
+  while (i < crossed.length()) {
+    let r = model_role_of(crossed[i], rs)
+    if (r != "" && !contains(named, r)) { placed = union_into(placed, [r]) }
+    i += 1
+  }
+  let ps = sort_strs(placed)
+  i = 0
+  while (i < ps.length()) {
+    out = out.push({ eact: "*", eorig: "*", erole: ps[i],
+                     ecross: "model.".concat(ps[i]), eline: line })
+    i += 1
+  }
+  return out
+}
+
+fn model_reach_of(r: MRole) -> List[Str] {
+  return r.rrdecl ? cap_strip_all(r.rreach) : ["*"]
+}
+
+// One component's verdict, or "" when it is admitted or not decided here.
+fn model_reach_comp(comp: CompD, cx: Ctx, own: List[Str], bs: List[MBlock],
+                    rs: List[MRole], cs: List[CDecl]) -> Verd {
+  let held = cap_strip_all(model_svc_ns(held_caps_pairs(comp, cx, own), comp))
+  if (!model_consults(held)) { return no_verd() }
+  var crossed: List[Str] = []
+  var i = 0
+  while (i < held.length()) {
+    crossed = union_into(crossed, [cap_parse(held[i]).token])
+    i += 1
+  }
+  let names = own_cross_names(comp, cx)
+  i = 0
+  while (i < names.length()) {
+    crossed = union_into(crossed, caps_of(cx.appr.vcaps, names[i]))
+    i += 1
+  }
+  let es = model_edges(bs, rs, cs, crossed, comp.line)
+  if (es.length() > 0 && es[0].erole == "?") { return no_verd() }
+  i = 0
+  while (i < es.length()) {
+    let e = es[i]
+    let r = rs[mrole_at(rs, e.erole, 0)]
+    let extra = sort_strs(cap_covers_set(held, model_reach_of(r)))
+    if (extra.length() > 0) {
+      let lead = e.ecross == ""
+        ? "`".concat(comp.name).concat("` routes `").concat(e.eact)
+            .concat("` (").concat(e.eorig).concat(") through model role `")
+            .concat(r.rname).concat("`")
+        : "`".concat(comp.name).concat("` crosses `").concat(e.ecross)
+            .concat("`, placed on model role `").concat(r.rname).concat("`")
+      return mverd(lead.concat(", which reaches ").concat(cap_offending_join(extra))
+        .concat(", but `").concat(comp.name).concat("` holds only ")
+        .concat(model_held_str(held))
+        .concat(" - a component's effective ceiling is the pair's, so a model ")
+        .concat("may not reach past the component that consults it (G-MODEL-PLACE)"),
+        e.eline)
+    }
+    i += 1
+  }
+  return no_verd()
+}
+
+// The whole fold, run where `check_and_lower` collects it: after the spawn
+// attenuation, over the components the component loop did not poison, the
+// first refusal only (the reference raises once).
+fn model_reach_refusal(ts: List[Token], pg: Prog, base: Ctx,
+                       poisoned: List[Str]) -> Verd {
+  let rs = model_roles_of(ts)
+  if (rs.length() == 0) { return no_verd() }
+  var i = 0
+  while (i < rs.length()) {
+    if (!rs[i].rrok) { return no_verd() }
+    i += 1
+  }
+  if (!svc_caps_modelled(pg.svcs, 0)) { return no_verd() }
+  let cs = model_councils_of(ts)
+  let sps = model_comp_spans(ts)
+  let own = reach_surface_pairs(pg.comps, base)
+  var ci = 0
+  while (ci < pg.comps.length()) {
+    let comp = pg.comps[ci]
+    if (!contains(poisoned, comp.name)) {
+      var bs: List[MBlock] = []
+      var si = 0
+      while (si < sps.length()) {
+        if (sps[si].sname == comp.name) { bs = model_blocks_in(ts, sps[si].slo, sps[si].shi) }
+        si += 1
+      }
+      let v = model_reach_comp(comp, ctx_for(base, comp), surf_get(own, comp.name),
+                               bs, rs, cs)
+      if (v.v != "") { return v }
+    }
+    ci += 1
   }
   return no_verd()
 }
@@ -15388,6 +15771,11 @@ fn collect_nonlink(ts: List[Token], pg: Prog, hands: List[MHand],
   // order (`_check_spawn_emission_bounds`, `_check_spawn_attenuation`, `_link`).
   let sv = check_spawn(pg, base)
   if (sv.v != "") { refs = refs.push(sv) }
+  // the MODEL REACH fold (item 519, slice 2 of issue #1193): collected right
+  // after the spawn attenuation, which is where `check_and_lower` collects
+  // `_check_model_attenuation`, over the components the loop did not poison.
+  let mrv = model_reach_refusal(ts, pg, base, poisoned)
+  if (mrv.v != "") { refs = refs.push(mrv) }
   // item 350: AT MOST ONE `boot` component. The reference decides this in
   // `_link`, ahead of the G2 provision-conflict scan, so the gate collects it
   // at the head of the link, anchored at the SECOND boot component's line
@@ -25184,4 +25572,42 @@ component Classifier provides out: Answer {
   route model on classify { confidential -> cloud }
   provide out { fn classify(text) = text }
 }""") == "COUNCIL|model council `Release` declares 1 member"
+}
+
+// ---- item 519, the reach fold (issue #1193 slice 2, issue #1451) ----------
+
+test "a crossing placed on a role is folded with no route model block" {
+  // the fail-open slice 2 closes: the same program with
+  // `route model on classify { * -> tool }` was refused, and with the block
+  // deleted it was admitted
+  let v = admit_src("""model role tool on_device reaches [shell.exec]
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+component Classifier requires llm: Tools provides out: Answer {
+  provide out { fn classify(text) = emit llm.run(text) }
+}""")
+  assert v == "MODEL|`Classifier` crosses `model.tool`, placed on model role `tool`, which reaches `shell.exec`, but `Classifier` holds only `model.tool` - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"
+}
+
+test "a role reaching no further than its component is admitted with no block" {
+  let v = admit_src("""model role tool on_device reaches [model.tool]
+service Tools { emission[model.tool] fn run(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+component Classifier requires llm: Tools provides out: Answer {
+  provide out { fn classify(text) = emit llm.run(text) }
+}""")
+  assert v == ""
+}
+
+test "an unscoped emission is named as one, with the fix" {
+  // issue #1451: the held element of a bare `emission` is its service's, and
+  // printed as the bare name it read as the token `reaches [Model]` names
+  let v = admit_src("""model role local on_device reaches [Model]
+service Model { emission fn complete(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+component Classifier requires llm: Model provides out: Answer {
+  route model on classify { * -> local }
+  provide out { fn classify(text) = emit llm.complete(text) }
+}""")
+  assert v == "MODEL|`Classifier` routes `classify` (*) through model role `local`, which reaches `Model`, but `Classifier` holds only service `Model`'s unscoped emission (an unscoped emission has no token a `reaches [...]` list can name: give the `emission` methods of `Model` a scoped capability, such as `emission[model.complete]`, and reach that) - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"
 }

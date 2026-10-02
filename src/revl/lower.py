@@ -8493,9 +8493,18 @@ def _check_and_lower(program: Program, ambient: dict | None = None,
     # both sets named. Inert for a program that declares no `model role`, which
     # is every program that does not opt in (docs/design/541-model-in-
     # attenuation.md).
+    # Slice 2 (issue #1193): a crossing placed on a role by its `model.<role>`
+    # token is an edge whether or not a `route model` block names the role,
+    # and the held set reads every crossing in every position, as the spawn
+    # fold above does.
     model_product = _collect(_check_model_attenuation, live_components,
                              services, model_roles, model_routes,
-                             program.filename)
+                             program.filename,
+                             emitting=frozenset(emitting_fns
+                                                - witnessed_externs),
+                             emitting_caps=emitting_caps,
+                             lines={c.name: c.line
+                                    for c in program.components})
 
     # Emission budgets, static check (item 260 §3.2): a declared `budget.requests`
     # / `calls` ceiling that the proved cardinality max exceeds is a red compile,
@@ -15483,7 +15492,8 @@ def _emit_step_caps_pairs(node: dict, requires_map: dict, services: dict) -> lis
 
 def _collect_emit_caps_pairs(node, caps: set, requires_map: dict,
                              services: dict,
-                             emitting: "frozenset | None" = None) -> None:
+                             emitting: "frozenset | None" = None,
+                             named: "set | None" = None) -> None:
     """`_collect_emit_caps`, resolved to structured `Cap`s through the bridge.
 
     Every emission crossing the body makes, in every position (issue #1562):
@@ -15497,20 +15507,28 @@ def _collect_emit_caps_pairs(node, caps: set, requires_map: dict,
     to one (`_instance_get_decl`, the marker rule's resolver), or a named call
     to an `emission` extern or a `fn` reaching one (`emitting`); each resolves
     through `_emit_step_caps_pairs`, the per-crossing resolver the step uses.
-    `emitting` None reads steps alone, the behaviour before the fix."""
+    `emitting` None reads steps alone, the behaviour before the fix.
+
+    `named`, when given, collects the NAME of every emitting extern or `fn` the
+    body crosses, so a caller can read the tokens that crossing declares
+    (`_emitting_capabilities`); the fold element for one is the unnameable `*`
+    and carries no token of its own (issue #1193, the model-reach crossing
+    edge)."""
     if isinstance(node, dict):
         if node.get("step") == "emit":
             caps.update(_emit_step_caps_pairs(node, requires_map, services))
         elif _is_value_crossing(node, requires_map, services, emitting):
             caps.update(_emit_step_caps_pairs({"expr": node}, requires_map,
                                               services))
+            if named is not None and node.get("kind") == "fn":
+                named.add(node.get("name"))
         for value in node.values():
             _collect_emit_caps_pairs(value, caps, requires_map, services,
-                                     emitting)
+                                     emitting, named)
     elif isinstance(node, list):
         for value in node:
             _collect_emit_caps_pairs(value, caps, requires_map, services,
-                                     emitting)
+                                     emitting, named)
 
 
 def _is_value_crossing(node: dict, requires_map: dict, services: dict,
@@ -15536,21 +15554,26 @@ def _is_value_crossing(node: dict, requires_map: dict, services: dict,
 
 def _spawn_reached_surface_pairs(components: list[dict],
                                  services: dict,
-                                 emitting: "frozenset | None" = None
+                                 emitting: "frozenset | None" = None,
+                                 named: "dict | None" = None
                                  ) -> dict[str, set]:
     """Per-component actual capability reach as structured `(T, P)` pairs,
     resolved through the bridge: the boundaries a component's own code crosses
     (the key-and-valuation of every `emit` step, and with `emitting` of every
     crossing in value position too, `*` for a host emission), so a
     parameterized crossing survives into the attenuation fold as its valuation
-    rather than degrading to a bare wiring key."""
+    rather than degrading to a bare wiring key. `named`, when given, maps each
+    component to the emitting externs and `fn`s it crosses by name."""
     surface: dict[str, set] = {}
     for comp in components:
         requires_map = comp.get("requires") or {}
         caps: set = set()
+        names: "set | None" = None if named is None else set()
         _collect_emit_caps_pairs(comp.get("body") or [], caps, requires_map,
-                                 services, emitting)
+                                 services, emitting, names)
         surface[comp["name"]] = caps
+        if named is not None:
+            named[comp["name"]] = names
     return surface
 
 
@@ -16084,9 +16107,77 @@ def _consults_a_model(held: set) -> bool:
     return False
 
 
+def _model_held_render(cap: "object") -> str:
+    """One held element in a G-MODEL-PLACE refusal (issue #1451).
+
+    A method that declares a bare `emission` folds to its SERVICE's element
+    (`_undeclared_cap`), a token no `reaches [...]` list can spell. Rendered as
+    the bare service name, it read as the very name a `reaches [Model]` clause
+    writes, and the refusal named `Model` on both sides of its "but": two
+    different tokens under one name. It now reads as what it is."""
+    text = cap.to_str()
+    if text.startswith(_UNDECLARED_NS):
+        return f"service `{text[len(_UNDECLARED_NS):]}`'s unscoped emission"
+    return f"`{text}`"
+
+
+def _model_held_str(held: set) -> str:
+    """The held set of a G-MODEL-PLACE refusal, in `_cap_sorted_strs` order,
+    and, when it holds an unscoped emission, what that means and the fix."""
+    order = sorted(held, key=_cap_render)
+    text = ", ".join(_model_held_render(c) for c in order) or "no capabilities"
+    folded = [_cap_render(c) for c in order
+              if c.to_str().startswith(_UNDECLARED_NS)]
+    if folded:
+        text += (" (an unscoped emission has no token a `reaches [...]` list "
+                 "can name: give the `emission` methods of "
+                 + ", ".join(f"`{n}`" for n in folded)
+                 + " a scoped capability, such as `emission[model.complete]`, "
+                   "and reach that)")
+    return text
+
+
+def _model_reach_edges(comp: dict, actions: dict, held: set, roles: dict,
+                       crossed: set, line: int) -> list[dict]:
+    """Every (role, placement) pair a component's effective ceiling folds in.
+
+    BLOCK edges are the roles its `route model` block names, every candidate
+    of an ordered set (item 519 slice 1). CROSSING edges (slice 2, issue
+    #1193) are the roles its crossings are PLACED on by a `model.<role>` token
+    (item 512 slice 4, `model_route.role_of_crossing`), read off what it holds
+    and off the tokens every extern or `fn` it crosses declares. Without them
+    the fold ran only for a component that wrote a block, so deleting the
+    block took a role reaching past the component out of the product: a
+    declaration deleted, and the authority widened. A role the block already
+    names is folded once, as a block edge."""
+    edges: list[dict] = []
+    named: set = set()
+    for action in sorted(actions):
+        for origin in sorted(actions[action]):
+            placement = actions[action][origin]
+            # EVERY candidate of an item-515 ordered set, not just the head:
+            # a fallback the scheduler may pick is a role the component routes
+            # through, and a reach checked only on the head would be widened
+            # by the first fallback.
+            for name in placement.get("candidates", (placement["role"],)):
+                named.add(name)
+                edges.append({"action": action, "origin": origin,
+                              "role": name, "crossing": None,
+                              "line": placement.get("line", line)})
+    placed = {_model_route.role_of_crossing(t, roles) for t in crossed}
+    for name in sorted(placed - named - {None}):
+        edges.append({"action": "*", "origin": "*", "role": name,
+                      "crossing": f"{_model_route.MODEL_SCOPE}.{name}",
+                      "line": line})
+    return edges
+
+
 def _check_model_attenuation(components: list[dict], services: dict,
                              roles: dict, routes: dict,
-                             filename: str) -> list[dict]:
+                             filename: str,
+                             emitting: "frozenset | None" = None,
+                             emitting_caps: "dict | None" = None,
+                             lines: "dict | None" = None) -> list[dict]:
     """The model role in the capability attenuation product (item 519).
 
     A model is an AUTHORITY SURROGATE: it picks which capability the component
@@ -16105,108 +16196,120 @@ def _check_model_attenuation(components: list[dict], services: dict,
     compared and a role reaching `fs.write` under a component holding
     `fs.write(path="/tmp")` is refused.
 
-    WHICH WAY IT FAILS. Toward refusing, at both unknowns. A role that declares
+    WHICH WAY IT FAILS. Toward refusing, at every unknown. A role that declares
     no `reaches [...]` clause reaches the unnameable `*`
     (`model_route.UNDECLARED_REACH`), which no held set covers - reading
     silence as "reaches nothing" would make an unknown model inert in the
     product, and an unknown model is the whole reason the item exists. A
     crossing whose declared token does not PROVE it is some other boundary
-    counts as a model call (`_consults_a_model`).
+    counts as a model call (`_consults_a_model`). A crossing placed on a role
+    by its `model.<role>` token is an edge whether or not a `route model`
+    block names the role (`_model_reach_edges`), so leaving the block out is
+    not a way out of the product.
 
-    SCOPE. Slice 1 of `docs/design/541-model-in-attenuation.md`: the roles a
-    component's `route model` block NAMES, against what that component holds.
-    Which role a given crossing actually reaches is item 512's slice 4 (the
-    crossing carries a `model.<role>` token), and until it lands every named
-    role is folded in, which over-approximates in the refusing direction.
-    "Names" means every candidate of an item-515 ordered set and not only its
-    head: a fallback the scheduler may pick is a role the component routes
-    through, so folding only the head would let the first fallback widen a
-    ceiling the head respects.
+    SCOPE. The roles a component's `route model` block NAMES, and the roles
+    its crossings are placed on (slice 2), against what that component holds,
+    where what it holds includes every crossing its body makes in every
+    position (issue #1562's reading). A named role no crossing reaches is
+    still folded in, which over-approximates in the refusing direction.
 
     Returns the per-edge product record for the audit surface; raises on a
-    widening. Inert - not even a fold - for a program that declares no role,
-    which is every program on the tree today."""
-    if not roles or not routes:
+    widening. Inert - not even a fold - for a program that declares no role."""
+    if not roles:
         return []
     from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
-    base = _spawn_reached_surface_pairs(components, services)
+    crossed_names: dict = {}
+    base = _spawn_reached_surface_pairs(components, services, emitting,
+                                        crossed_names)
     product: list[dict] = []
     for comp in components:
-        actions = routes.get(comp["name"])
-        if not actions:
-            continue
+        actions = (routes or {}).get(comp["name"]) or {}
         own = base.get(comp["name"], set())
         held = _strip_ceilings(_held_capabilities_pairs(comp, own, services))
         if not _consults_a_model(held):
             continue
+        crossed = {c.token for c in held}
+        for name in crossed_names.get(comp["name"]) or ():
+            crossed.update((emitting_caps or {}).get(name) or ())
+        # a crossing edge has no arm to point at, so it cites the component's
+        # declaration line (`lines`), which the lowered dict does not carry
+        edges = _model_reach_edges(
+            comp, actions, held, roles, crossed,
+            (lines or {}).get(comp["name"], comp.get("line", 1)))
+        if not edges:
+            continue
         where = comp.get("source") or filename
-        held_str = ", ".join(f"`{s}`" for s in _cap_sorted_strs(held)) \
-            or "no capabilities"
-        for action in sorted(actions):
-            for origin in sorted(actions[action]):
-                placement = actions[action][origin]
-                # EVERY candidate of an item-515 ordered set, not just the
-                # head: a fallback the scheduler may pick is a role the
-                # component routes through, and a reach checked only on the
-                # head would be widened by the first fallback. A one-role arm
-                # has a one-tuple here, so a program written against item 512
-                # folds exactly what it folded before.
-                for name in placement.get("candidates", (placement["role"],)):
-                    role = roles[name]
-                    reach = _strip_ceilings(_model_reach_caps(role))
-                    extra = cap_order.covers_set(held, reach)
-                    if extra:
-                        extra = sorted(extra, key=lambda c: c.to_str())
-                        offending = ", ".join(_cap_offending(c) for c in extra)
-                        if role.reach_declared:
-                            why = (f"model role `{role.name}` declares "
-                                   f"`reaches [{', '.join(role.reach_tokens)}]` on "
-                                   f"line {role.line}")
-                            fix = (f"narrow `{role.name}`'s `reaches [...]` to what "
-                                   f"`{comp['name']}` holds, or add the matching "
-                                   f"`requires` to `{comp['name']}` so it holds what "
-                                   f"the model it consults can reach")
-                        else:
-                            why = (f"model role `{role.name}` (line {role.line}) "
-                                   f"declares no reach, so its reach is the "
-                                   f"unnameable `*`")
-                            fix = (f"declare it - `model role {role.name} "
-                                   f"{role.residence} reaches [...]` - naming the "
-                                   f"capabilities a call to it can reach; an "
-                                   f"undeclared reach is not an empty one, because "
-                                   f"a model that steers a component is exactly the "
-                                   f"one whose reach must be written down")
-                        raise RevlError(
-                            where, placement.get("line", comp.get("line", 1)),
-                            f"`{comp['name']}` routes `{action}` ({origin}) through "
-                            f"model role `{role.name}`, which reaches {offending}, "
-                            f"but `{comp['name']}` holds only {held_str} - a "
-                            f"component's effective ceiling is the pair's, so a "
-                            f"model may not reach past the component that consults "
-                            f"it (G-MODEL-PLACE)",
-                            hint=f"{why}. A model role is an authority surrogate: it "
-                                 f"chooses which capability the component reaches "
-                                 f"for, so routing through it widens the component's "
-                                 f"effective ceiling to the union "
-                                 f"(docs/capability-attenuation.md, item 519). "
-                                 f"{fix}",
-                            code=_model_route.CODE,
-                            category="capability-attenuation",
-                        )
-                    product.append({
-                        "component": comp["name"],
-                        "action": action,
-                        "origin": origin,
-                        "role": role.name,
-                        "residence": role.residence,
-                        "holds": _cap_sorted_strs(held),
-                        "reaches": _cap_sorted_strs(reach),
-                        "effective": _cap_sorted_strs(held),
-                        "attenuated": _cap_sorted_strs(
-                            {c for c in held
-                             if not cap_order.covered_by_any(reach, c)}),
-                        "reach_declared": role.reach_declared,
-                    })
+        held_str = _model_held_str(held)
+        for edge in edges:
+            role = roles[edge["role"]]
+            reach = _strip_ceilings(_model_reach_caps(role))
+            extra = cap_order.covers_set(held, reach)
+            if extra:
+                extra = sorted(extra, key=lambda c: c.to_str())
+                offending = ", ".join(_cap_offending(c) for c in extra)
+                if role.reach_declared:
+                    why = (f"model role `{role.name}` declares "
+                           f"`reaches [{', '.join(role.reach_tokens)}]` on "
+                           f"line {role.line}")
+                    fix = (f"narrow `{role.name}`'s `reaches [...]` to what "
+                           f"`{comp['name']}` holds, or add the matching "
+                           f"`requires` to `{comp['name']}` so it holds what "
+                           f"the model it consults can reach")
+                else:
+                    why = (f"model role `{role.name}` (line {role.line}) "
+                           f"declares no reach, so its reach is the "
+                           f"unnameable `*`")
+                    fix = (f"declare it - `model role {role.name} "
+                           f"{role.residence} reaches [...]` - naming the "
+                           f"capabilities a call to it can reach; an "
+                           f"undeclared reach is not an empty one, because "
+                           f"a model that steers a component is exactly the "
+                           f"one whose reach must be written down")
+                if edge["crossing"] is None:
+                    lead = (f"`{comp['name']}` routes `{edge['action']}` "
+                            f"({edge['origin']}) through model role "
+                            f"`{role.name}`")
+                else:
+                    lead = (f"`{comp['name']}` crosses `{edge['crossing']}`, "
+                            f"placed on model role `{role.name}`")
+                    fix += (". Leaving out the `route model` block does not "
+                            "take the role out of the product: a crossing "
+                            "placed on a role is held to the role's reach "
+                            "either way")
+                raise RevlError(
+                    where, edge["line"],
+                    f"{lead}, which reaches {offending}, but `{comp['name']}` "
+                    f"holds only {held_str} - a component's effective ceiling "
+                    f"is the pair's, so a model may not reach past the "
+                    f"component that consults it (G-MODEL-PLACE)",
+                    hint=f"{why}. A model role is an authority surrogate: it "
+                         f"chooses which capability the component reaches "
+                         f"for, so routing through it widens the component's "
+                         f"effective ceiling to the union "
+                         f"(docs/capability-attenuation.md, item 519). "
+                         f"{fix}",
+                    code=_model_route.CODE,
+                    category="capability-attenuation",
+                )
+            row = {
+                "component": comp["name"],
+                "action": edge["action"],
+                "origin": edge["origin"],
+                "role": role.name,
+                "residence": role.residence,
+                "holds": _cap_sorted_strs(held),
+                "reaches": _cap_sorted_strs(reach),
+                "effective": _cap_sorted_strs(held),
+                "attenuated": _cap_sorted_strs(
+                    {c for c in held
+                     if not cap_order.covered_by_any(reach, c)}),
+                "reach_declared": role.reach_declared,
+            }
+            if edge["crossing"] is not None:
+                # additive and crossing-only: a block row is byte-identical to
+                # the one slice 1 recorded, and `kernel_boundary` reads by key
+                row["crossing"] = edge["crossing"]
+            product.append(row)
     # `role` joins the sort key only to keep an ordered candidate set stable;
     # a one-role arm produces one record per (component, action, origin), so
     # the order is the one item 519 shipped.
