@@ -595,14 +595,24 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
     attempt = 0
     started = time.monotonic()
     while True:
-        value = make_call()
+        value = None
         try:
+            # issue #1462: a provider may itself report that its completion is
+            # outside the constraint it claimed (a byte-level grammar check it
+            # can run and `validate_response` cannot). That is the same
+            # response fault, so it is retried under the same budget.
+            value = make_call()
             validated = validate_response(value, schema, where, constructors,
                                           grammar)
-        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+        except ResponseValidationError as fault:  # noqa: PERF203 - retry is the point
+            _take_grammar_claim()
             if attempt >= budget:
-                _revl_record_model_call(started, attempt + 1, budget + 1, value,
-                                        validated=False)
+                # the raw return when there was one; a provider-raised fault
+                # carries its (redacted) completion instead
+                _revl_record_model_call(
+                    started, attempt + 1, budget + 1,
+                    value if value is not None else fault.value,
+                    validated=False)
                 raise
             attempt += 1
             continue
@@ -636,16 +646,22 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
     attempt = 0
     started = time.monotonic()
     while True:
-        result = make_call()
-        if inspect.isawaitable(result):
-            result = await result
+        result = None
         try:
+            # issue #1462: see `validate_retry`; a provider-reported response
+            # fault is retried like one found here
+            result = make_call()
+            if inspect.isawaitable(result):
+                result = await result
             validated = validate_response(result, schema, where, constructors,
                                           grammar)
-        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+        except ResponseValidationError as fault:  # noqa: PERF203 - retry is the point
+            _take_grammar_claim()
             if attempt >= budget:
-                _revl_record_model_call(started, attempt + 1, budget + 1, result,
-                                        validated=False)
+                _revl_record_model_call(
+                    started, attempt + 1, budget + 1,
+                    result if result is not None else fault.value,
+                    validated=False)
                 raise
             attempt += 1
             continue
