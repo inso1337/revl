@@ -21,7 +21,7 @@ fn an_undeclared_emission_is_refused_with_its_guarantee_tag() {
     let src = "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 } \
 service Cache { fn put(key: Str) } \
 component C provides cache: Cache { \
-  provide cache { fn put(key) { let n = audit_write(key) } } \
+  provide cache { fn put(key) { let n = emit audit_write(key) } } \
 }";
     match admit(src) {
         Verdict::Refused { code, message } => {
