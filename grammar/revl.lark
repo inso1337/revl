@@ -7,7 +7,7 @@ r__parse_program: (r__skip_semis (r_use_decl | r_service | "commutative" r_servi
 r__skip_semis: (";")*
 r_use_decl: "use" STRING ("{" (IDENT (",")?)* "}" | "as" IDENT)
 r_service: "service" IDENT "{" (("route" IDENT STRING)? ((("emission" | "async" | "commutative" | "idempotent" | "endorse" | "validated" | "retry") (r__capability_list)? | r__endorse_slot | "emission" | "async" | "commutative" | "idempotent" | "endorse" | "validated" | "retry" | ("emission" | "async" | "commutative" | "idempotent" | "endorse" | "validated" | "retry") r__retry_budget))* "fn" IDENT "(" (r__name ":" r_type_ (",")?)* ")" ("->" r_type_)? (r__cache_clause)? (r__within_clause)?)* "}"
-r_component: "component" IDENT (("requires" | "provides") (r__provision_key ":" r__capability_annotation ("carrying" r__carry_tokens)? ",")* r__provision_key ":" r__capability_annotation ("carrying" r__carry_tokens)?)* ("liveness" r__duration_literal)? "{" (r__skip_semis (r_config_block | r_stmt))* r__skip_semis "}"
+r_component: "component" IDENT (r__header_clause)* ("liveness" r__duration_literal)? "{" (r__skip_semis (r_config_block | r__misplaced_header_clause | r_stmt))* r__skip_semis "}"
 r_type_decl: "type" IDENT ("[" (IDENT (",")?)* "]")? "=" "{" (r__record_key_name ":" r_type_ (",")?)* "}" | "type" IDENT ("[" (IDENT (",")?)* "]")? "=" r_type_ | "type" IDENT ("[" (IDENT (",")?)* "]")? "=" (IDENT ("(" r_type_ ")")? "|")* IDENT r__type_suffix | "type" IDENT ("[" (IDENT (",")?)* "]")? "=" (IDENT ("(" r_type_ ")")? "|")* IDENT ("(" r_type_ ")")?
 r__endorse_slot: ("endorse" "[" IDENT ("," IDENT)* "]")*
 r_fn_decl: "fn" IDENT r__type_param_list "(" (r__name ":" r_type_ ("=" r_pure_expr)? (",")?)* ")" ("->" r_type_)? (r__cache_clause)? "=" r_pure_expr | "fn" IDENT r__type_param_list "(" (r__name ":" r_type_ ("=" r_pure_expr)? (",")?)* ")" ("->" r_type_)? (r__cache_clause)? "{" (r__skip_semis r_fn_stmt)* r__skip_semis "}"
@@ -28,11 +28,10 @@ r__name: IDENT | "in" | "intercept" | "isolate" | "realm" | "with"
 r_type_: "(" (r_type_ (",")?)* ")" "->" r_type_ | "(" (r_type_ (",")?)* ")" r__type_suffix_tail | IDENT r__type_suffix
 r__cache_clause: "cache" ("pure" | "capability" | "external") ("invalidated_by" r__capability_token ("," r__capability_token)*)? ("ttl" r__cache_duration)?
 r__within_clause: "within" r__clause_record r__interpret_within
-r__provision_key: IDENT ":" ":" IDENT | IDENT
-r__capability_annotation: IDENT | "Stream" "[" r_type_ "]" (r__parse_replay_qual)?
-r__carry_tokens: "(" (IDENT ("." IDENT)* (",")?)* ")"
+r__header_clause: ("requires" | "provides") (r__provision_key ":" r__capability_annotation ("carrying" r__carry_tokens)? ",")* r__provision_key ":" r__capability_annotation ("carrying" r__carry_tokens)?
 r__duration_literal: INT ("ms" | "s" | "m" | "h")?
 r_config_block: "config" "{" (r__name ":" r_type_ r__config_bound ("=" r_literal)? (",")?)* "}"
+r__misplaced_header_clause: ""
 r_stmt: IDENT ("=" | any_token any_token) r_pure_expr | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_effect_form | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_subscribe_form | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r__await_approval_expr | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_pure_expr (r__acting_clause)? | "verified" r_effect_form | r_effect_form | r_event_handler | r_stream_iter | r_timer | "fail" r_pure_expr | r__method_if | r_component_if | r__method_while | r__method_for | "emit" r__emit_stmt | "await" "emit" r__emit_stmt | "await" r_pure_expr | "return" | "return" r_pure_expr | "isolate" r__provision_key "in" r_realms_route | "isolate" r__provision_key "in" r_realm_label | r_model_route_stmt | "intercept" r__provision_key "with" r_record_literal | "handoff" r__provision_key ":" r_type_ | r_provide | "break" | "continue"
 r__record_key_name: IDENT | "component" | "config" | "in" | "intercept" | "isolate" | "realm" | "requires" | "with"
 r__type_suffix: "[" r__capability_token "]" r__type_suffix_tail | ("[" r_type_ ("," r_type_)* "]")? r__type_suffix_tail
@@ -66,7 +65,9 @@ r__capability_token: STRING | IDENT ("." IDENT)*
 r__cache_duration: r__duration_literal
 r__clause_record: "{" (r__record_key_name ":" r__clause_value (",")?)* "}"
 r__interpret_within: ""
-r__parse_replay_qual: ("replay" | "policy" | "buffer" | "drain") "(" (INT | "from" ":" r_pure_expr) ")"
+r__provision_key: IDENT ":" ":" IDENT | IDENT
+r__capability_annotation: IDENT | "Stream" "[" r_type_ "]" (r__parse_replay_qual)?
+r__carry_tokens: "(" (IDENT ("." IDENT)* (",")?)* ")"
 r__config_bound: (("under" | "in") STRING | ("under" | "in") "[" (r_literal (",")?)* "]")?
 r_effect_form: "effect" ("await")? r_spawn_expr "undo" r_pure_expr | "effect" ("await")? "lease" r__lease_acquire "undo" r_pure_expr | "effect" ("await")? ("shared" | "transfer")? ("{" (r__skip_semis r_fn_stmt)* r__skip_semis "}" | r_pure_expr) (r__parse_replay_qual)? | "effect" ("await")? ("shared" | "transfer")? ("{" (r__skip_semis r_fn_stmt)* r__skip_semis "}" | r_pure_expr) (r__parse_replay_qual)? "undo" r_pure_expr
 r_subscribe_form: "subscribe" (r__stream_merge r__stream_chain | IDENT r__stream_chain | r_pure_expr) r__subscribe_quals "undo" r_pure_expr
@@ -97,6 +98,7 @@ r__slo_qualifiers: (("over" | "min" | "of") (r__duration_literal | INT | any_tok
 r__slo_response: ("on" "breach" any_token | "on" "breach" any_token STRING)?
 r__layer_config_block: "{" (r__name ":" r_literal (",")?)* "}"
 r__clause_value: r__clause_capability | r__clause_capability_list | r__clause_verb_list | r__clause_verb | r__clause_tenant | r__clause_ceiling_map | r__clause_scope_map
+r__parse_replay_qual: ("replay" | "policy" | "buffer" | "drain") "(" (INT | "from" ":" r_pure_expr) ")"
 r_spawn_expr: "spawn" IDENT ("with" "{" (r__name ":" r_pure_expr (",")?)* "}")? ("as" STRING)?
 r__lease_acquire: IDENT ("." IDENT)* r__capability_params (("ttl" | "uses") (r__duration_ms | INT))*
 r__stream_merge: "merge" "(" r__stream_operand ("," r__stream_operand)* ")"
