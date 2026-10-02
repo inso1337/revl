@@ -18,6 +18,7 @@ The third is unique to this member and the honest hard part: a signature that
 `// UNRECOVERED` marker under `--mark-unrecovered`), never guessed.
 """
 
+import re
 import sys
 from pathlib import Path
 
@@ -527,6 +528,10 @@ def test_a_plain_op_backed_by_emission_is_rejected():
     source = import_cordis(PLAIN_PLUGIN, filename="probe.ts",
                            pure=["Probe.readOnlyLooking"])
     broken = source.replace("extern pure fn", "extern emission fn")
+    # The extern is now an emission, so its call carries the `emit` marker
+    # (issue #1437); the upper bound is what this test is about.
+    for name in re.findall(r"extern emission fn (\w+)\(", broken):
+        broken = broken.replace(f"= {name}(", f"= emit {name}(")
     with pytest.raises(RevlError) as excinfo:
         compile_source(broken, "broken.rvl")
     assert "declared plain, but this implementation reaches" in str(excinfo.value)

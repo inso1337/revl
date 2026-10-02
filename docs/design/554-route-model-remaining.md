@@ -245,7 +245,7 @@ component Classifier provides out: Answer {
   route model on classify { web -> local }
   provide out {
     fn classify(text) {
-      let r = ask(text)
+      let r = emit ask(text)
       return r
     }
   }

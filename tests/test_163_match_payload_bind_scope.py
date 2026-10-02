@@ -204,7 +204,7 @@ _RUN = (
     + 'service S { emission async fn go(n: Int) -> Int }\n'
     + 'component C provides s: S {\n'
     + '  provide s {\n'
-    + '    async fn go(n) { return shadow(n) + nested(n) + arrowed(n) }\n'
+    + '    async fn go(n) { return emit shadow(n) + emit nested(n) + emit arrowed(n) }\n'
     + '  }\n'
     + '}\n'
     + 'lifecycle test "an arm payload bind never clobbers an enclosing local" {\n'
