@@ -514,6 +514,18 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # `_REVL_REFS` header.
         "../emit_py_builtin_shadow.rvl",
         "../../../stdlib/fs.rvl",
+        # item 391: the in-file test sections. selfhost/emit_py.rvl emits all
+        # three byte-exact from the reference IR; the native IR producer
+        # carries no `tests` or `fault_tests` section at all, so the native
+        # chain emits each of these documents without its REVL_TESTS /
+        # lifecycle harness / REVL_FAULT_TESTS trailer and without the imports
+        # that trailer pulls in.
+        "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
+        "../../../examples/uxprobe2_jobs.rvl",
+        "../../../backends/go/scenarios/advance.rvl",
+        "../../../examples/model_store_sqlite.rvl",
+        "../../../examples/uxprobe2_fault.rvl",
+        "../emit_py_test_sections.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at

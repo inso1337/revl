@@ -59,12 +59,13 @@
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
 //   * async coloring (colored fns / async externs' await-seed / awaited call
-//     sites), spawn/instances, in-file `test`/`fault_test`/`lifecycle test`
-//     emission, and the ABI. A coloured fn, an `async` operation, a deferred
+//     sites), spawn/instances, and the ABI. A coloured fn, an `async` operation, a deferred
 //     emission, a `validated` call and a possible item-259 fan-out are each
 //     REFUSED by name (item 391), never emitted as a plausible sync body.
 //     Realm placements (`isolate`/`intercept`/`routes` and the router) are
-//     ported, and so are awaited activation-body effect/emit steps;
+//     ported, and so are awaited activation-body effect/emit steps, the
+//     activation-body `await` step, and the in-file `test` / `lifecycle test`
+//     / `fault test` sections;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
 //     yet cross-checked: admitted bound acquisitions use spawn or result-declared
 //     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
@@ -568,6 +569,14 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "size") { return `len(${target})` }
   if (method == "keys") { return `sorted(${target})` }
   if (method == "remove") {
+    // issue #1632: Python refuses an assignment expression in a comprehension's
+    // iterable, and a receiver that is not a bare name carries one (the `_fv :=`
+    // field temp, a bounded `_bi :=`). The receiver and key are then passed as
+    // arguments, outside the comprehension; a plain receiver keeps the one-frame
+    // form.
+    if (target.indexOf(":=") >= 0) {
+      return "(lambda _revl_m, _revl_k: {kk: vv for kk, vv in _revl_m.items() if kk != _revl_k})".concat(`(${target}, ${args[0]})`)
+    }
     return "{".concat(`kk: vv for kk, vv in ${target}.items() if kk != ${args[0]}`).concat("}")
   }
   if (method == "div_trunc") {
@@ -1599,10 +1608,10 @@ fn comp_names(ir: Any) -> Str {
 // Slice 4 (item 206) added the `config` cexpr, config (`ConfigSchema`), and the
 // method-body `effect`/`let-effect`/compensated-`emit` accumulator (the
 // `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
-// threaded through provides/methods). STILL DEFERRED to slice 5: async coloring
-// (async methods / await bodies / the
-// await-seed), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
-// `asyncio` driver), and the `spawn`/`instance-get` cexpr kinds. The
+// threaded through provides/methods). STILL DEFERRED: async coloring (async
+// methods and the await-seed), spawn/instances, and the `spawn`/`instance-get`
+// cexpr kinds. The activation-body `await` step and the lifecycle-test driver
+// are ported (item 391). The
 // component-body `${…}` template (the `format` cexpr, `_revl_fmt` + the `fmt`
 // runtime import) is ported — a fn body lowers `${…}` to `interp` instead, so
 // `format` is the component/method-body twin of the fn-body f-string concat.
@@ -2359,13 +2368,14 @@ fn inverse_lambda(step: Any, slot: Str, params: Str) -> Str {
 }
 
 // item 131: an activation body that suspends is an `async def` generator. The
-// reference decides it over the TOP-LEVEL steps: an effect/let-effect/emit
-// flagged `async`, or an `await` or `stream-iter` step. The last two are not
-// ported (`body_step` answers each with its marker), so a body that holds one
-// is refused whichever `def` it opens with; only the flag decides it here.
+// reference decides it over the TOP-LEVEL steps: an `await` step, an
+// effect/let-effect/emit flagged `async`, or a `stream-iter` step. The last is
+// not ported (`body_step` answers it with its marker), so a body that holds one
+// is refused whichever `def` it opens with.
 fn body_is_async(steps: List[Any]) -> Bool {
   for (s of steps) {
     let k = value_str(value_field(s, "step"))
+    if (k == "await") { return true }
     if ((k == "effect" || k == "let-effect" || k == "emit") && value_bool(value_field(s, "async"))) { return true }
   }
   return false
@@ -2467,6 +2477,15 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       out = out.push(line(indent, `${await_prefix(step)}${cexpr(value_field(step, "acquire"))}`))
       out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
     }
+    out = out.push("")
+    return { lines: out, counter: counter }
+  }
+  // A1: the await lands (inertia, paper §4.3.3), then the yield closes the
+  // iteration, so a divert during the await skips every later step instead of
+  // running on to the next yield.
+  if (kind == "await") {
+    var out = [line(indent, `await ${cexpr(value_field(step, "expr"))}`)]
+    out = out.push(line(indent, "yield None  # iteration boundary (A1)"))
     out = out.push("")
     return { lines: out, counter: counter }
   }
@@ -2790,9 +2809,8 @@ fn emit_services_table(services: Any) -> List[Str] {
 // LANDED in slice 4 (item 206): externs (`_emit_externs`, the verbatim `@py`
 // body via stdlib/str.rvl::dedent + local `splitlines`), component `config`/
 // `ConfigSchema`, and method-body `effect`/`let-effect`/compensated-`emit` (the
-// `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED
-// to slice 5: in-file `test`/`fault_test`/`lifecycle test` emission, async
-// coloring, realm placements, spawn/instances, and the canonical ABI.
+// `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED:
+// async coloring, spawn/instances, and the canonical ABI.
 
 // -------------------------------------------------------------- string utils
 // `trim` / `lstrip` / `last_index_of` / `ident_tokens` now come from
@@ -3378,40 +3396,278 @@ fn inline_pure_fns(ir: Any) -> Any {
 // PRIVATE decls no longer leak (item 228), but the merge still flattens both
 // modules' PUBLIC decls by bare name, so the two emitter entrypoints must differ
 // (roadmap item 230 — enables the fully-native `compile.rvl`).
-// ------------------------------------------ the deferred in-file test section
-// In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-// every self-host emitter slice. The reference emits a driver section for it;
-// this port does not. Emitting NOTHING made that divergence SILENT, which is
-// the one failure mode the marker convention exists to prevent: a deferred
-// family that answers with a named `<<UNSUPPORTED-...>>` marker is loud in the
-// emitted bytes and is pinned by a boundary test, while a section the port
-// simply skips is invisible to the byte oracle (no corpus document on any tier
-// carries a test section) and is counted as mirrored by
-// tools/selfhost_coverage.py. Measured across all six self-host emitters while
-// closing issue #1123: every one of them dropped the section in silence.
-//
-// Markers, not emission: porting the drivers is the separate, larger half.
-//
-// The marker names the IR SECTION and the test's name, and deliberately does
-// NOT read the per-test lifecycle discriminant to tell a `lifecycle test` from
-// a plain one. `tools/selfhost_coverage.py` reads "this tier ports construct X"
-// straight off the boolean-flag read spelling in the self-host source, so
-// branching on that flag here would claim a port of the lifecycle-driver arm
-// this slice does not have, and would move that tier/construct pair out of the
-// ledger's `unported` baseline on the strength of a marker. A marker is a
-// refusal, not an implementation; it says only what it knows. (That scan is
-// over the raw file text, comments included, so naming the spelling in prose
-// registers it too, which is why this note does not.)
-fn deferred_test_markers(ir: Any) -> List[Str] {
-  var out = []
+// ----------------------------------------------- the in-file test sections
+// In-file `test`, `lifecycle test` and `fault test` sections (item 391). The
+// ports used to drop them in silence and then, from issue #1123, to name each
+// test with a marker. This port now emits all three byte-for-byte: the plain
+// `REVL_TESTS` functions, the lifecycle harness and async drivers, and the
+// `REVL_FAULT_TESTS` manifest.
+// `_LIFECYCLE_HARNESS` verbatim (v2.0 §7.1): the residue probes (R4 and the
+// R1 half that makes `assert no_residue` falsifiable), the settle loop, the
+// idempotence-aware `_revl_call` dispatch and the inverse-residue collector a
+// lifecycle test drives. Emitted once, before the first test, only when the
+// document has a lifecycle test.
+fn lifecycle_harness() -> List[Str] {
+  var out = [
+    "_REVL_ACQUIRE = {'new': 'drop', 'open': 'close', 'schedule': 'cancel'}",
+    "_REVL_INVERSE_RESIDUE = []",
+    "",
+    "def _revl_residue(root):",
+    "    \"\"\"R4 (docs/backend-ir.md): what the host runtime holds for a composition.\"\"\"",
+    "    return {",
+    "        \"listeners\": {n: len(cbs) for n, cbs in root.events._hooks.items() if cbs},",
+    "        \"effects\": root.fiber._disposables.length,",
+    "        \"provisions\": sorted(impl.name for impl in root.reflect.store.values()),",
+    "        \"runtimes\": root.registry.size,",
+    "    }",
+    "",
+    "",
+    "def _revl_unreleased(events):",
+    "    \"\"\"Host resources acquired during the test and never released (R1).\"\"\"",
+    "    live = {}",
+    "    for event in events:",
+    "        tag, _, verb = event.split(\" \", 1)[0].rpartition(\".\")",
+    "        if not tag:",
+    "            continue",
+    "        if verb in _REVL_ACQUIRE:",
+    "            live[tag] = verb",
+    "        elif verb in _REVL_ACQUIRE.values():",
+    "            live.pop(tag, None)",
+    "    return sorted(",
+    "        \"{} ({}() with no {}())\".format(tag, verb, _REVL_ACQUIRE[verb])",
+    "        for tag, verb in live.items()",
+    "    )",
+    "",
+    "",
+    "def _revl_no_residue(root, baseline, events, where):",
+    "    \"\"\"`assert no_residue` — R4 plus the R1 property that makes it falsifiable.\"\"\"",
+    "    now = _revl_residue(root)",
+    "    changed = [\"{}: {!r} -> {!r}\".format(k, baseline[k], now[k])",
+    "               for k in now if now[k] != baseline[k]]",
+    "    unreleased = _revl_unreleased(events)",
+    "    inverse_residue = globals().get(\"_REVL_INVERSE_RESIDUE\", [])",
+    "    if not changed and not unreleased and not inverse_residue:",
+    "        return",
+    "    detail = []",
+    "    if changed:",
+    "        detail.append(\"host runtime still holds \" + \"; \".join(changed) + \" (R4)\")",
+    "    if unreleased:",
+    "        detail.append(\"host resources never released: \" + \", \".join(unreleased) + \" (R1)\")",
+    "    if inverse_residue:",
+    "        detail.append(\"inverse failures recorded: \" + \"; \".join(",
+    "            f\"{r.get('component', '<unknown>')}.{r.get('method', '<unknown>')}: \"",
+    "            f\"{r.get('error', {}).get('type', 'error')}: \"",
+    "            f\"{r.get('error', {}).get('message', '')}\"",
+    "            for r in inverse_residue",
+    "        ) + \" (R4)\")",
+    "    raise AssertionError(where + \": residue — \" + \" | \".join(detail))",
+    "",
+    "",
+    "async def _revl_settle():",
+    "    for _ in range(20):",
+    "        await _revl_asyncio.sleep(0)",
+    "",
+    "",
+    "async def _revl_call(root, key, method, args, where):",
+    "    impl = root.get(key)",
+    "    if impl is None:",
+    "        raise AssertionError(",
+    "            \"{}: no provider for key {!r} — its component is loaded but not ACTIVE; \"",
+    "            \"a component with an unmet `requires` stays PENDING (R2)\".format(where, key))",
+    "    # delivery semantics (item 44): the driver may auto-retry a transient",
+    "    # failure iff the checked property says this emission is idempotent. A",
+    "    # non-idempotent emission gets exactly one delivery attempt.",
+    "    idempotent = method in _REVL_IDEMPOTENT.get(key, ())",
+    "    return await _revl_retry_idempotent(",
+    "        lambda: getattr(impl, method)(*args),",
+    "        idempotent=idempotent, where=where)",
+    "",
+    "",
+    "def _revl_collect_inverse_residue(fiber):",
+    "    frame = _revl_frame_for_ctx(getattr(fiber, \"ctx\", None))",
+    "    return list(getattr(frame, \"compensation_residue\", ())) if frame is not None else []"]
+  out = out.push("")
+  out = out.push("")
+  return out
+}
+
+fn has_lifecycle_test(ir: Any) -> Bool {
   for (t of value_list(value_field(ir, "tests"))) {
-    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
+    if (value_bool(value_field(t, "lifecycle"))) { return true }
   }
-  for (t of value_list(value_field(ir, "fault_tests"))) {
-    out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
+  return false
+}
+
+// `_lifecycle_uses_clock` / `_lifecycle_uses_abort`: only a lifecycle test with
+// an `advance` step drives the clock coeffect, and only one with an `abort`
+// step registers the session-commit owner, so only those import their names.
+fn lifecycle_uses_step(ir: Any, kind: Str) -> Bool {
+  for (t of value_list(value_field(ir, "tests"))) {
+    if (value_bool(value_field(t, "lifecycle"))) {
+      for (st of value_list(value_field(t, "body"))) {
+        if (value_str(value_field(st, "step")) == kind) { return true }
+      }
+    }
+  }
+  return false
+}
+
+fn test_uses_step(t: Any, kind: Str) -> Bool {
+  for (st of value_list(value_field(t, "body"))) {
+    if (value_str(value_field(st, "step")) == kind) { return true }
+  }
+  return false
+}
+
+// `_REVL_IDEMPOTENT` (item 44): {provision key: its idempotent method names},
+// the retry eligibility the lifecycle driver's `_revl_call` consults. Keys and
+// names sorted, as the reference renders them.
+fn idempotent_map_line(ir: Any) -> Str {
+  var entries = []
+  for (c of value_list(value_field(ir, "components"))) {
+    let provs = value_field(c, "provides")
+    for (key of value_keys(provs)) {
+      let methods = value_field(value_field(value_field(ir, "services"), value_str(value_field(provs, key))), "methods")
+      var idem = []
+      for (mn of value_keys(methods)) {
+        if (value_bool(value_field(value_field(methods, mn), "idempotent"))) { idem = idem.push(py_repr(mn)) }
+      }
+      if (idem.length() > 0) { entries = entries.push(`${py_repr(key)}: {${list_sort(idem).join(", ")}}`) }
+    }
+  }
+  return `_REVL_IDEMPOTENT = {${list_sort(entries).join(", ")}}`
+}
+
+// `_lifecycle_step`: one statement of a lifecycle test's async driver.
+fn lifecycle_step(st: Any, indent: Int, where: Str) -> List[Str] {
+  let kind = value_str(value_field(st, "step"))
+  if (kind == "load") {
+    let comp = mangle(value_str(value_field(st, "component")))
+    let cfg = value_field(st, "config")
+    var parts = []
+    for (k of value_keys(cfg)) { parts = parts.push(`${py_repr(k)}: ${expr(value_field(cfg, k))}`) }
+    return [line(indent, `_revl_fibers[${py_repr(comp)}] = _revl_plug(root, ${comp}, {${parts.join(", ")}})`),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "unload") {
+    let comp = mangle(value_str(value_field(st, "component")))
+    return [line(indent, `_revl_fiber = _revl_fibers.pop(${py_repr(comp)})`),
+            line(indent, "await _revl_fiber.dispose()"),
+            line(indent, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(_revl_fiber))"),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "call") {
+    var args = []
+    for (a of value_list(value_field(st, "args"))) { args = args.push(expr(a)) }
+    let call = `await _revl_call(root, ${py_repr(value_field(st, "key"))}, ${py_repr(value_field(st, "method"))}, [${args.join(", ")}], ${py_repr(where)})`
+    let bind = value_field(st, "bind")
+    let first = value_is_null(bind) ? call : `${mangle(value_str(bind))} = ${call}`
+    return [line(indent, first), line(indent, "await _revl_settle()")]
+  }
+  if (kind == "advance") {
+    return [line(indent, `_revl_Clock.advance(${value_int(value_field(st, "ms"))})`),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "abort") {
+    return [line(indent, "_revl_owner.begin_abort()   # mark frames abort, drop queue"),
+            line(indent, "for _fiber in reversed(list(_revl_fibers.values())):"),
+            line(indent + 1, "try:"),
+            line(indent + 2, "await _fiber.dispose()   # replay inverses"),
+            line(indent + 1, "except Exception:"),
+            line(indent + 2, "pass"),
+            line(indent, "_revl_fibers.clear()"),
+            line(indent, "_revl_owner.finalize_abort()"),
+            line(indent, "_revl_owner = _revl_SessionOwner()"),
+            line(indent, "_revl_set_session_owner(_revl_owner)"),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "assert_no_residue") {
+    return [line(indent, `_revl_no_residue(root, baseline, events, ${py_repr(where)})`)]
+  }
+  if (kind == "assert") {
+    return [line(indent, `assert ${expr(value_field(st, "expr"))}, ${py_repr(where.concat(": assertion failed"))}`)]
+  }
+  return [line(indent, `<<UNSUPPORTED-LIFECYCLE-STEP:${kind}>>`)]
+}
+
+// `_emit_lifecycle_test`: the async driver over a live composition, run with
+// `asyncio.run` and registered in REVL_TESTS like any other test.
+fn emit_lifecycle_test(t: Any, fname: Str) -> List[Str] {
+  let where = `lifecycle test ${py_repr(value_field(t, "name"))}`
+  let uses_abort = test_uses_step(t, "abort")
+  var out = [`def ${fname}():`,
+    line(1, "# cordis-py is imported here, not at module scope: a document may"),
+    line(1, "# mix pure `test` blocks with lifecycle ones, and only the latter"),
+    line(1, "# need a runtime."),
+    line(1, "from cordis import Context"),
+    "",
+    line(1, "async def _run():"),
+    line(2, "root = Context()")]
+  if (test_uses_step(t, "advance")) { out = out.push(line(2, "_revl_Clock.reset()")) }
+  out = out.concat([line(2, "events = []"), line(2, "_REVL_INVERSE_RESIDUE.clear()"), line(2, "_revl_fibers = {}")])
+  if (uses_abort) {
+    out = out.concat([line(2, "_revl_owner = _revl_SessionOwner()"), line(2, "_revl_set_session_owner(_revl_owner)")])
+  }
+  out = out.concat([line(2, "_revl_set_trace(events.append)"), line(2, "try:"), line(3, "baseline = _revl_residue(root)")])
+  let body = value_list(value_field(t, "body"))
+  if (body.length() == 0) { out = out.push(line(3, "pass")) }
+  for (st of body) { out = out.concat(lifecycle_step(st, 3, where)) }
+  out = out.concat([line(2, "finally:"), line(3, "_revl_set_trace(None)")])
+  if (uses_abort) { out = out.push(line(3, "_revl_clear_session_owner()")) }
+  out = out.concat([line(3, "for fiber in reversed(list(_revl_fibers.values())):"),
+    line(4, "try:"), line(5, "await fiber.dispose()"),
+    line(4, "except Exception:"), line(5, "pass"),
+    line(4, "finally:"), line(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(fiber))"),
+    "", line(1, "_revl_asyncio.run(_run())"), ""])
+  return out
+}
+
+// `_emit_tests`: one `test_<i>` per block, registered in `REVL_TESTS` under the
+// block's name. A plain block's body goes through the module statement
+// emitter; a lifecycle block becomes its async driver, after the harness.
+// Emitted after the externs and before the SERVICES table.
+fn emit_tests(ir: Any, tests: List[Any]) -> List[Str] {
+  var out = ["REVL_TESTS = []", ""]
+  if (has_lifecycle_test(ir)) { out = out.concat(lifecycle_harness()) }
+  var i = 0
+  for (t of tests) {
+    let fname = `test_${i}`
+    if (value_bool(value_field(t, "lifecycle"))) {
+      out = out.concat(emit_lifecycle_test(t, fname))
+    } else {
+      out = out.push(`def ${fname}():`)
+      let body = value_list(value_field(t, "body"))
+      if (body.length() == 0) { out = out.push(line(1, "pass")) }
+      for (st of body) { out = out.concat(fn_stmt(st, 1)) }
+      out = out.push("")
+    }
+    out = out.push(`REVL_TESTS.append((${py_repr(value_field(t, "name"))}, ${fname}))`)
+    out = out.push("")
+    i = i + 1
   }
   return out
 }
+
+// `_emit_fault_tests`: the fault-test manifest (docs/fault-tests.md). The
+// module carries the declaration; the harness in src/revl/fault.py re-emits the
+// component with a `fail` step spliced in at the injection point.
+fn emit_fault_tests(units: List[Any]) -> List[Str] {
+  var out = ["REVL_FAULT_TESTS = ["]
+  for (u of units) {
+    let at = value_field(u, "at")
+    let entry = `{'name': ${py_repr(value_field(u, "name"))}, 'component': ${py_repr(value_field(u, "component"))}, 'step': ${py_repr(value_field(at, "step"))}, 'effect': ${py_repr(value_field(at, "effect"))}, 'assert': ${py_repr(value_list(value_field(u, "assert")))}, 'config': ${fault_config_repr(value_field(u, "config"))}}`
+    out = out.push(line(1, entry.concat(",")))
+  }
+  out = out.push("]")
+  return out
+}
+
+fn fault_config_repr(cfg: Any) -> Str {
+  var parts = []
+  for (k of value_keys(cfg)) { parts = parts.push(`${py_repr(k)}: ${py_repr(value_field(cfg, k))}`) }
+  return `{${parts.join(", ")}}`
+}
+
 
 pub fn emit_py_src(source_ir: Any) -> Str {
   let ir = inline_pure_fns(source_ir)
@@ -3482,6 +3738,19 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }
   if (ir_uses_host_root(ir, "Stream")) { imports = imports.push("Stream") }
   if (need_mark_secret) { imports = imports.push("mark_secret as _revl_mark_secret") }
+  // §7.1: the lifecycle driver loads components through the realm-aware `plug`,
+  // reads the host-builtin trace, may auto-retry an idempotent emission (item
+  // 44), and collects inverse residue off the frame. `advance` adds the clock
+  // coeffect (item 102), `abort` the session-commit owner (item 377).
+  if (has_lifecycle_test(ir)) {
+    imports = imports.concat(["plug as _revl_plug", "set_trace as _revl_set_trace",
+      "retry_idempotent as _revl_retry_idempotent", "_frame_for_ctx as _revl_frame_for_ctx"])
+    if (lifecycle_uses_step(ir, "advance")) { imports = imports.push("Clock as _revl_Clock") }
+    if (lifecycle_uses_step(ir, "abort")) {
+      imports = imports.concat(["SessionOwner as _revl_SessionOwner", "set_session_owner as _revl_set_session_owner",
+        "clear_session_owner as _revl_clear_session_owner"])
+    }
+  }
   // item 167: the router resolves each worker realm by label.
   if (ir_uses_routes(ir)) { imports = imports.push("realm_label") }
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
@@ -3503,6 +3772,12 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (any_ref) {
     out = out.push("import inspect as _inspect")
     out = out.push("_REVL_REFS = {}")
+    out = out.push("")
+  }
+  // The lifecycle driver runs under `asyncio.run`, and consults the retry map.
+  if (has_lifecycle_test(ir)) {
+    out = out.push("import asyncio as _revl_asyncio")
+    out = out.push(idempotent_map_line(ir))
     out = out.push("")
   }
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
@@ -3561,6 +3836,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // non-empty extern list, between the functions and the SERVICES table.
   let externs = value_list(value_field(ir, "externs"))
   if (externs.length() > 0) { out = out.concat(emit_externs(externs, components.length() > 0)) }
+  let tests = value_list(value_field(ir, "tests"))
+  if (tests.length() > 0) { out = out.concat(emit_tests(ir, tests)) }
+  let fault_tests = value_list(value_field(ir, "fault_tests"))
+  if (fault_tests.length() > 0) { out = out.concat(emit_fault_tests(fault_tests)) }
   out = out.concat(emit_services_table(value_field(ir, "services")))
   out = out.push("")
   out = out.push("")
@@ -3580,10 +3859,6 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     pairs = pairs.push(`${py_repr(nm)}: ${nm}`)
   }
   out = out.push("COMPONENTS = {".concat(pairs.join(", ")).concat("}"))
-  // The deferred in-file test section: one named marker per test instead of
-  // silence (issue #1123).
-  let test_markers = deferred_test_markers(ir)
-  if (test_markers.length() > 0) { out = out.concat(test_markers) }
   return out.join(newline()).concat(newline())
 }
 

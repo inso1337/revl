@@ -185,7 +185,6 @@
         "kind=stream-merge",
         "kind=subscribe",
         "stage=take",
-        "step=await",
         "step=stream-iter",
         "subscribe=<true>"
       ],
@@ -198,15 +197,6 @@
         "pattern=list",
         "pattern=record",
         "step=let_pattern"
-      ],
-      "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
-        "lifecycle=<true>",
-        "step=abort",
-        "step=advance",
-        "step=assert_no_residue",
-        "step=call",
-        "step=load",
-        "step=unload"
       ],
       "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
         "kind=hole"

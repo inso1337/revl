@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+    "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -750,16 +750,22 @@
                 "documents": []
               },
               "py": {
-                "residual": 9,
-                "corpus": 68,
-                "reproduced": 59,
+                "residual": 15,
+                "corpus": 76,
+                "reproduced": 61,
                 "documents": [
+                  "../../../backends/go/scenarios/advance.rvl",
                   "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
                   "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+                  "../../../examples/model_store_sqlite.rvl",
+                  "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
+                  "../../../examples/uxprobe2_fault.rvl",
+                  "../../../examples/uxprobe2_jobs.rvl",
                   "../../../src/revl/truc/components/cli.rvl",
                   "../../../stdlib/fs.rvl",
                   "../emit_py_builtin_shadow.rvl",
                   "../emit_py_placement.rvl",
+                  "../emit_py_test_sections.rvl",
                   "branches.rvl",
                   "services_control_flow.rvl",
                   "services_host_stream.rvl"
@@ -792,8 +798,8 @@
                 "documents": []
               }
             },
-            "total_residual": 18,
-            "total_corpus": 287,
+            "total_residual": 24,
+            "total_corpus": 295,
             "clean_tiers": [
               "java",
               "wasm"
@@ -945,15 +951,14 @@
                 }
               },
               "py": {
-                "unported_constructs": 24,
-                "unported_reasons": 8,
+                "unported_constructs": 16,
+                "unported_reasons": 7,
                 "blind_constructs": 1,
                 "reasons": {
                   "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
                     "kind=stream-merge",
                     "kind=subscribe",
                     "stage=take",
-                    "step=await",
                     "step=stream-iter",
                     "subscribe=<true>"
                   ],
@@ -966,15 +971,6 @@
                     "pattern=list",
                     "pattern=record",
                     "step=let_pattern"
-                  ],
-                  "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
-                    "lifecycle=<true>",
-                    "step=abort",
-                    "step=advance",
-                    "step=assert_no_residue",
-                    "step=call",
-                    "step=load",
-                    "step=unload"
                   ],
                   "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
                     "kind=hole"
@@ -1147,7 +1143,7 @@
                 }
               }
             },
-            "total_unported": 184
+            "total_unported": 176
           },
           "unreached-constructs": {
             "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -1157,14 +1153,14 @@
               "compile": 1,
               "emit_go": 49,
               "emit_java": 36,
-              "emit_py": 25,
+              "emit_py": 17,
               "emit_rust": 34,
               "emit_ts": 20,
               "emit_wasm": 50,
               "gate_census": 5,
               "lower_ir": 5
             },
-            "total_unreached": 225
+            "total_unreached": 217
           },
           "gate-reference-divergence": {
             "source": "tools/gate_reference_census_baseline.json",
@@ -1179,13 +1175,13 @@
         "unavailable": {}
       },
       "headline": {
-        "documents_refused": 18,
-        "corpus": 287,
-        "n": 287,
+        "documents_refused": 24,
+        "corpus": 295,
+        "n": 295,
         "per_tier": {
           "go": 3,
           "java": 0,
-          "py": 9,
+          "py": 15,
           "rust": 2,
           "ts": 4,
           "wasm": 0
@@ -1197,7 +1193,7 @@
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
-      "unported_constructs": 184,
+      "unported_constructs": 176,
       "fail_open_programs": 0
     },
     "unload-paths": {
@@ -2559,11 +2555,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 18 of 287 corpus documents that the reference compiler accepts (n=287)",
+      "text": "the fully-native revl chain does not reproduce 24 of 295 corpus documents that the reference compiler accepts (n=295)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2573,7 +2569,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2583,7 +2579,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2593,7 +2589,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2603,7 +2599,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2613,7 +2609,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2623,7 +2619,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2633,7 +2629,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "73ba749cdc972cde8717bcaa5d33272cc0d41911-dirty",
+        "compiler_commit": "2cccea122e55cbb31915722c67044246e0743ba0-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }

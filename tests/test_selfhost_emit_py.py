@@ -63,10 +63,10 @@ Slice 4 (item 206) adds three more byte-identical forms:
     ``_effect_N`` / ``_emit_N`` closure names and the ``{comp}.{provide}.{method}
     #{n}`` ``_label``).
 
-Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
-in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
-(async methods / async externs' await-seed / ``await`` bodies), spawn/instances,
-and the canonical ABI. Realm placements (``isolate``/``intercept``/``routes``)
+Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+): async
+coloring (async methods and async externs' await-seed), spawn/instances, and the
+canonical ABI. The activation-body ``await`` step and the in-file ``test`` /
+``lifecycle test`` / ``fault test`` sections are ported since item 391. Realm placements (``isolate``/``intercept``/``routes``)
 are ported since item 391's placement slice. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
 ``spawn`` or result-declared host acquisitions there, whose ``cexpr`` lands in
@@ -199,6 +199,33 @@ CORPUS = [
     "maps.rvl",
     "extern_config.rvl",
     "../../../stdlib/fs.rvl",
+    # item 391: the activation-body `await` step and the in-file test sections,
+    # the two largest refused families in the whole-tree py survey (59 and 37
+    # documents refused for nothing else). Each document below failed against
+    # the port that named these instead of emitting them:
+    #   components_await.rvl - `await <expr>` plus the A1 iteration yield, in
+    #     the `async def` body it forces;
+    #   fuzz_go_e6afacd3.rvl - plain `test` blocks: the `REVL_TESTS` section;
+    #   uxprobe2_jobs.rvl - plain and lifecycle tests in one document: the
+    #     lifecycle harness, the `asyncio` import, `_REVL_IDEMPOTENT`, and the
+    #     load/call/unload/assert/`assert no residue` driver steps;
+    #   advance.rvl - a lifecycle `advance` (the clock coeffect and its import);
+    #   model_store_sqlite.rvl - a lifecycle `abort` (the session-commit owner);
+    #   uxprobe2_fault.rvl - the `REVL_FAULT_TESTS` manifest.
+    "../emit_ts_corpus/components_await.rvl",
+    "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
+    "../../../examples/uxprobe2_jobs.rvl",
+    "../../../backends/go/scenarios/advance.rvl",
+    "../../../examples/model_store_sqlite.rvl",
+    "../../../examples/uxprobe2_fault.rvl",
+    #   emit_py_test_sections.rvl - the section shapes those documents leave
+    #     out: empty test bodies, `load ... with`, a bound call through an
+    #     `idempotent` provider (the `_REVL_IDEMPOTENT` map), a fault test's
+    #     config.
+    "../emit_py_test_sections.rvl",
+    # Reference fix followed by the port, issue #1632: a `Map.remove` whose
+    # receiver carries a `:=` temp is evaluated through a lambda.
+    "../emit_py_map_remove_nested.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -634,17 +661,8 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     # unvalidated model response.
     ("tests/fixtures/emit_ts_refusals/validated_emission_operation.rvl",
      "_revl_validate(", "<<UNSUPPORTED-COMPONENT:validated Model.complete>>"),
-    ("examples/lifecycle_wasm.rvl", "REVL_TESTS = []", None),
-    ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
     ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
      "<<UNSUPPORTED-CEXPR:spawn>>"),
-    # advance.rvl's component-body `${…}` (`format`) and its `host` builtin
-    # `Map.new()` are both ported now (`services_interp.rvl` and
-    # `services_host.rvl` in the CORPUS above), so this document is pinned on
-    # its REMAINING deferred boundary: the lifecycle tests that drive the
-    # clock coeffect with `advance`, which the port names instead of emitting.
-    ("backends/go/scenarios/advance.rvl", "_revl_Clock.advance(",
-     "<<UNSUPPORTED-TEST:an every-timer fires on each advanced tick>>"),
     # item 130 (issue #81): a stream document reaches this port at TWO
     # boundaries, and the row below covered only the first. The `subscribe`
     # acquisition is one; the `every … in` loop the reference lowers as a
@@ -812,18 +830,12 @@ def test_a_declared_stream_replay_is_named_not_dropped(emitted, reference, tmp_p
 
 
 # ---------------------------------------------------------------------------
-# The deferred in-file test section stays LOUD (issue #1123).
+# The in-file test sections (issue #1123, then item 391).
 #
-# The self-host emitters' safety argument is that an unported construct answers
-# with a named `<<UNSUPPORTED-...>>` marker rather than with silence: a marker is
-# visible in the emitted bytes and is pinned here, while a section the port
-# simply skips is invisible to the byte oracle (no corpus document on any tier
-# carries a test section) and is counted as mirrored by
-# tools/selfhost_coverage.py.
-#
-# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-# every self-host slice, and all six ports used to emit NOTHING for it. Each now
-# emits one named marker per test, per section.
+# The ports used to emit NOTHING for in-file `test` / `lifecycle test` /
+# `fault test` sections, then one named marker per test. The py port now emits
+# all three sections byte-for-byte; these minimal sources keep each section's
+# smallest shape pinned beside the CORPUS documents that carry the larger ones.
 IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
 
 LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
@@ -847,21 +859,15 @@ fault test "probe" for P {
 }
 """
 
-@pytest.mark.parametrize("source, reference_token, port_token", [
-    pytest.param(IN_FILE_TEST_SRC, "REVL_TESTS.append(('probe', test_0))",
-                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
-    pytest.param(LIFECYCLE_TEST_SRC, "lifecycle test 'probe': assertion failed",
-                 "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
-    pytest.param(FAULT_TEST_SRC, "REVL_FAULT_TESTS = [",
-                 "<<UNSUPPORTED-FAULT-TEST:probe>>", id="fault-tests"),
+@pytest.mark.parametrize("source, reference_token", [
+    pytest.param(IN_FILE_TEST_SRC, "REVL_TESTS.append(('probe', test_0))", id="in-file-tests"),
+    pytest.param(LIFECYCLE_TEST_SRC, "lifecycle test 'probe': assertion failed", id="lifecycle-tests"),
+    pytest.param(FAULT_TEST_SRC, "REVL_FAULT_TESTS = [", id="fault-tests"),
 ])
-def test_deferred_test_sections_are_named(emitted, reference, tmp_path, source,
-                                          reference_token, port_token):
-    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
-    path = tmp_path / "boundary.rvl"
+def test_in_file_test_sections_agree(emitted, reference, tmp_path, source, reference_token):
+    path = tmp_path / "sections.rvl"
     path.write_text(source)
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_py_src"](ir)
     assert reference_token in want
-    assert port_token in got
-    assert got != want, "boundary is stale: move its witness into CORPUS"
+    assert got == want
