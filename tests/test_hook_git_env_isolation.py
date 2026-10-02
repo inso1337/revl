@@ -196,7 +196,7 @@ def test_the_hook_clears_them_after_selecting_and_before_any_pytest_run():
     select = first(lambda s: "tools/affected_tests.py" in s and s.startswith("SEL="))
     unset = first(lambda s: s == "unset $(git rev-parse --local-env-vars)")
     identity = first(lambda s: s.startswith("unset GIT_AUTHOR_NAME"))
-    pytest_step = first(lambda s: s.startswith("step ") and '"$PYTEST"' in s)
+    pytest_step = first(lambda s: s.startswith("step ") and '"$PY" -P -m pytest' in s)
     assert select < unset < pytest_step, (select, unset, pytest_step)
     assert select < identity < pytest_step, (select, identity, pytest_step)
 
@@ -210,10 +210,10 @@ def test_the_hook_runs_no_tests_for_a_commit_that_stages_nothing():
     lines = [line.strip() for line in HOOK.read_text(encoding="utf-8").splitlines()]
     check = lines.index("if git diff --cached --quiet 2>/dev/null; then")
     assert lines[check + 1] == "NOTHING_STAGED=1"
-    assert lines[check + 2] == 'elif [ -n "$PYTEST" ]; then'
-    assert lines[check + 3].startswith("SEL=$(python3 tools/affected_tests.py")
+    assert lines[check + 2] == 'else'
+    assert lines[check + 3].startswith('SEL=$("$PY" tools/affected_tests.py')
     assert check < lines.index("unset $(git rev-parse --local-env-vars)")
     skip = lines.index('if [ -n "$NOTHING_STAGED" ]; then')
     first_pytest = next(i for i, s in enumerate(lines)
-                        if s.startswith("step ") and '"$PYTEST"' in s)
+                        if s.startswith("step ") and '"$PY" -P -m pytest' in s)
     assert skip < first_pytest

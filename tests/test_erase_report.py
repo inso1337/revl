@@ -221,8 +221,11 @@ def test_star_widening_crossing_is_enumerated(realms_ir):
     assert widen["capability"] == "*" and widen["actionClass"] == "c"
     # a `*` widening is irreversible and bare, folded into the totals.
     assert widen["compensated"] is False
-    assert cross["total"] == 1 and cross["bareCount"] == 1
+    # the value also names `ship`, and the checker's reach says so: the report
+    # lists the extern beside the widening (issue #1458; this used to be 1).
+    assert cross["total"] == 2 and cross["bareCount"] == 2
     assert "widen:Widener:*" in cross["bareTokens"]
+    assert "host:Widener:ship" in cross["bareTokens"]
     # and it shows up in the human render as a bare crossing.
     assert "widen `*`" in erase_report.render(
         erase_report.build_report(ir, "alpha", prove_residue=False))

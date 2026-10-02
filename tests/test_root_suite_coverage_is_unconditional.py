@@ -34,6 +34,12 @@ runs the matrix. The assertions below read ci.yml's own routing:
     `tools/affected_tests.py` already computes and cannot report `skipping`, so
     coverage does not depend on the allow-list being complete.
 
+Issue #1678 moved the matrix pair off pull requests entirely: `frontend` and
+`frontend-cordis` carry `if: github.event_name != 'pull_request'` and run on the
+merge-queue candidate, push to main, nightly, dispatch and the tag build. On a
+pull request the root suite is collected by `root-suite-affected` alone, which
+is why that job is ungated. The model below reads both kinds of gate.
+
 Hermetic: one real YAML parse of the workflow plus control assertions that keep
 the scan from passing vacuously.
 """
@@ -72,20 +78,19 @@ JOB = "root-suite-affected"
 # bootstraps the root itself, so it cannot fail this way and it costs ~36s.
 _ROOT_IMPORT_PROBE = "tests/test_274_navigable_slice2.py"
 
-# The jobs that run the WHOLE root suite (`pytest tests/`) behind the fast-path
-# routing condition. A new `needs.changes.outputs.frontend` gate on another
-# root-suite runner would be the shape #854 exists to remove.
+# The jobs that run the WHOLE root suite (`pytest tests/`) with every
+# interpreter and the cordis-py runtime. Since issue #1678 they never run on a
+# pull request; they run on the merge-queue candidate and on every other event.
 MATRIX_JOBS = ("frontend", "frontend-cordis")
 
-# Every job allowed to carry the fast-path routing condition at all: the matrix
-# pair above, plus `frontend-assets`. That job installs the exemplary app's node
-# tree and compiles the frontend (gap G5 of docs/webapp-competitiveness-report.md,
-# roadmap item 459), and it runs two NAMED root-suite files rather than
-# `pytest tests/` — so it is not a root-suite runner and is deliberately not in
-# MATRIX_JOBS above. It carries the gate for the same reason the matrix does, to
-# keep an `npm ci` off documentation-only pull requests, and it is re-costed here
-# rather than inheriting the pin silently.
-FAST_PATH_JOBS = MATRIX_JOBS + ("frontend-assets",)
+# Every job allowed to carry the fast-path routing condition
+# (`needs.changes.outputs.frontend`). Only `frontend-assets` is left: it
+# installs the exemplary app's node tree and compiles the frontend (gap G5 of
+# docs/webapp-competitiveness-report.md, roadmap item 459), and it runs two
+# NAMED root-suite files rather than `pytest tests/`, so it is not a root-suite
+# runner. It carries the gate to keep an `npm ci` off documentation-only pull
+# requests, and it is re-costed here rather than inheriting the pin silently.
+FAST_PATH_JOBS = ("frontend-assets",)
 
 # The real change set of PR #850 (`9bc752d5`), the merge that put `main` red
 # because the root suite was skipped. `backends/python/emit.py` is the reference
@@ -424,6 +429,14 @@ def _routed_on_the_fast_path(spec):
     return "pull_request" in cond and "needs.changes.outputs.frontend" in cond
 
 
+def _never_on_pull_request(spec):
+    """Whether a job's `if` is the plain heavy-job gate of issue #1678,
+    `github.event_name != 'pull_request'`, so no pull request runs it."""
+    cond = str(spec.get("if") or "")
+    return ("github.event_name != 'pull_request'" in cond
+            and "||" not in cond and "&&" not in cond)
+
+
 def _selected_jobs(diff, jobs):
     """Job ids that would RUN for a pull request with this diff.
 
@@ -435,7 +448,8 @@ def _selected_jobs(diff, jobs):
     skipped = {
         job
         for job, spec in jobs.items()
-        if skippable and _routed_on_the_fast_path(spec)
+        if (skippable and _routed_on_the_fast_path(spec))
+        or _never_on_pull_request(spec)
     }
     changed = True
     while changed:
@@ -520,7 +534,9 @@ def test_the_backends_only_diff_that_broke_main_selects_the_matrix():
     `test_selfhosted_emitter_is_byte_identical[../policy_agents.rvl]` since.
 
     So: this exact change set must not be classified as suite-skippable, and it
-    must select both matrix jobs.
+    must select a root-suite runner on the pull request. Since issue #1678 that
+    runner is `root-suite-affected`; the matrix pair runs on the merge-queue
+    candidate instead.
     """
     jobs = _jobs()
     selected = _selected_jobs(PR_850_DIFF, jobs)
@@ -529,11 +545,9 @@ def test_the_backends_only_diff_that_broke_main_selects_the_matrix():
         "path, so the only jobs that collect the selfhost emitter twin check "
         "would be skipped again:\n" + _report(PR_850_DIFF, selected)
     )
-    missing = sorted(set(MATRIX_JOBS) - selected)
-    assert not missing, (
-        f"{missing} are not selected for PR #850's change set; before the fix "
-        "the diff matched nothing in `^(src/revl/|selfhost/|stdlib/)` and both "
-        "reported skipping:\n" + _report(PR_850_DIFF, selected)
+    assert JOB in selected, (
+        f"{JOB} is not selected for PR #850's change set, so no job collects "
+        "the root suite on that pull request:\n" + _report(PR_850_DIFF, selected)
     )
     assert sorted(selected & _root_suite_jobs(jobs)), (
         "PR #850's change set selects no root-suite runner:\n"
@@ -583,7 +597,9 @@ def test_the_unconditional_job_cannot_report_skipping():
         "passing one to branch protection, so the coverage job must be "
         "unconditional"
     )
-    skipped_prone = {j for j in jobs if _routed_on_the_fast_path(_spec(jobs, j))}
+    skipped_prone = {j for j in jobs
+                     if _routed_on_the_fast_path(_spec(jobs, j))
+                     or _never_on_pull_request(_spec(jobs, j))}
     assert not set(_needs(spec)) & skipped_prone, (
         f"{JOB} needs {list(_needs(spec))}, which overlaps the skippable "
         f"{sorted(set(_needs(spec)) & skipped_prone)}, so the coverage job can be "
@@ -930,17 +946,24 @@ def test_a_documentation_only_diff_does_not_pay_for_the_matrix():
         )
 
 
-def test_the_matrix_jobs_are_still_routed_on_the_fast_path():
-    """The companion to the test above: the matrix is still gated, and only the
-    enumerated jobs carry that gate. The 3-version matrix stays expensive, which
-    is why the ungated job below exists rather than the gate being removed."""
+def test_the_matrix_jobs_never_run_on_a_pull_request():
+    """The companion to the test above. Since issue #1678 the 3-version matrix
+    and cordis-py pair never run on a pull request (they run on the merge-queue
+    candidate), and `frontend-assets` is the only job still routed on the
+    documentation-only filter. The ungated job below is why a pull request
+    still collects the root suite."""
     jobs = _jobs()
     routed = {j for j, spec in jobs.items() if _routed_on_the_fast_path(spec)}
     assert routed == set(FAST_PATH_JOBS), (
         f"the jobs gated on needs.changes.outputs.frontend are {sorted(routed)}, "
-        f"not {sorted(FAST_PATH_JOBS)}. Removing that gate would put the "
-        "3-version matrix plus cordis-py on documentation-only pull requests; "
-        "if that is now the intent, change this pin deliberately and re-cost it."
+        f"not {sorted(FAST_PATH_JOBS)}. Change this pin deliberately and "
+        "re-cost it."
+    )
+    off_pr = sorted(j for j in MATRIX_JOBS if not _never_on_pull_request(jobs[j]))
+    assert not off_pr, (
+        f"{off_pr} can run on a pull request again; issue #1678 runs the matrix "
+        "on the merge-queue candidate. If that is now the intent, change this "
+        "pin deliberately and re-cost it."
     )
     assert JOB not in routed, (
         f"{JOB} is routed on the fast-path filter, which is the bug #854 fixes"

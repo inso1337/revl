@@ -46,8 +46,6 @@ import argparse
 import json
 import sys
 import time
-import urllib.error
-import urllib.request
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -56,6 +54,7 @@ sys.path.insert(0, str(ROOT / "backends" / "python"))
 
 from revl.decode_grammar import decode_grammar_for, json_schema_grammar_for  # noqa: E402
 from revl.mcp.schema import json_schema_for  # noqa: E402
+from revl.providers import ProviderError, request_json  # noqa: E402
 
 from runtime import (  # noqa: E402
     ResponseValidationError,
@@ -306,14 +305,6 @@ def accepts(grammar_text, candidate):
 # the endpoint
 # --------------------------------------------------------------------------
 
-class _NoRedirect(urllib.request.HTTPRedirectHandler):
-    """A probe that silently measured a different server is not a probe. Same
-    policy `bench/run.py` applies to its own runner."""
-
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        raise RuntimeError(f"probe: HTTP {code} redirect refused")
-
-
 def call(base_url, model, system, prompt, arm, grammar, schema, timeout):
     """One completion. Returns `(text, meta)`; `text` is the content, which for
     a reasoning model is the part after the reasoning trace, never the trace."""
@@ -335,23 +326,15 @@ def call(base_url, model, system, prompt, arm, grammar, schema, timeout):
     elif arm == "json_schema":
         payload["format"] = schema
 
-    req = urllib.request.Request(
-        base_url.rstrip("/") + "/api/chat",
-        data=json.dumps(payload).encode("utf-8"), method="POST",
-        headers={"Content-Type": "application/json"})
-    opener = urllib.request.build_opener(_NoRedirect)
+    # revl's model-endpoint client (issue #1461): it refuses redirects, because
+    # a probe that silently measured a different server is not a probe.
     started = time.monotonic()
     try:
-        with opener.open(req, timeout=timeout) as resp:
-            raw = resp.read()
-    except urllib.error.HTTPError as exc:
-        detail = exc.read()[:400].decode("utf-8", "replace")
-        return None, {"error": f"HTTP {exc.code}: {detail}",
-                      "secs": round(time.monotonic() - started, 1)}
-    except (urllib.error.URLError, TimeoutError) as exc:
+        body = request_json(base_url.rstrip("/") + "/api/chat", body=payload,
+                            timeout=timeout, label="probe")
+    except ProviderError as exc:
         return None, {"error": str(exc),
                       "secs": round(time.monotonic() - started, 1)}
-    body = json.loads(raw.decode("utf-8"))
     message = body.get("message") or {}
     return message.get("content"), {
         "secs": round(time.monotonic() - started, 1),

@@ -265,6 +265,12 @@ component you just loaded. Returns the result and the trace it produced.
 
 - Inputs: `key` (provided key, required), `method` (operation name, required),
   `args` (positional arguments).
+- Realms: a key resolves where its provider publishes it. A shared-realm
+  provider (a router included) answers first. A key provided only by a
+  component placed with `isolate <key> in realm("<label>")` resolves in that
+  realm. A key isolated into two or more realms has no single provider, and the
+  call is refused with every provider and its realm named. The approval ticket
+  for the call carries the realm of the provider it reached.
 
 ### `revl_state`
 

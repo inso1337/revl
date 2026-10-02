@@ -140,15 +140,35 @@ revl explain t3 --json
 
 ### `revl grammar`
 
-Print the language surface, sized for a prompt. No sources; it renders the
-built-in grammar.
+Print the language surface, sized for a prompt, or a machine-readable grammar
+of revl source for a grammar-constrained decoder. No sources.
 
 - `--prompt` - the dense, complete, prompt-pinnable grammar (also shipped as
   `docs/syntax-2.0.prompt.txt`) instead of the short human summary.
+- `--format lark|gbnf|ebnf` - a grammar derived from `src/revl/parser.py` by
+  reading the parser's code (`src/revl/source_grammar.py`), not copied by hand.
+  `lark` is llguidance's Lark dialect, `gbnf` the character-level GBNF the
+  llama.cpp server and XGrammar read, `ebnf` a plain form for reading. The
+  grammar is an over-approximation of the parser: every document the parser
+  accepts is in its language, and semantic checks stay with the checker. It
+  still refuses shapes the parser refuses, such as a requirement written in a
+  component body (`component C { requires k: S }`) instead of on the header.
+- `--category program|component-body|statements|expression|type` - scope the
+  grammar to one syntactic slot, so a generator filling a hole is held to that
+  slot. Defaults to `program`.
+- `--notes` - where the derivation is looser than the parser: each read it
+  models as any token, and each backtracking construct.
+- `--write` / `--check` - regenerate, or check, the committed `grammar/revl.lark`,
+  `grammar/revl.gbnf` and `grammar/revl.ebnf` (run from a checkout). A parser
+  change that alters the grammar fails `tests/test_source_grammar_1661.py` until
+  `revl grammar --write` is run.
 
 ```bash
-revl grammar              # the short summary
-revl grammar --prompt     # the full surface, to pin in a system prompt
+revl grammar                                      # the short summary
+revl grammar --prompt                             # the full surface, to pin in a system prompt
+revl grammar --format gbnf                        # a whole program, as GBNF
+revl grammar --format lark --category expression  # one expression, for llguidance
+revl grammar --check                              # is grammar/ current?
 ```
 
 ### `revl doctor`
@@ -515,6 +535,12 @@ question.
 - `--mcp-scope COMPONENT` - treat `COMPONENT` as MCP/agent-admitted so the
   policy's `mcp` sandbox allow-list applies to it; repeatable, `*` = every
   component.
+- `--placement PLACEMENT` - a TOML/JSON placement map. Also prints the item-411
+  sandbox envelope per sandboxed process, and each model role's binding per
+  host with the model bindings digest (item 515,
+  [model-scheduling.md](model-scheduling.md)). A placement whose routed model
+  actions cannot be scheduled exits nonzero with the scheduler's refusal.
+  Human output only; the `--json` body is unchanged.
 
 ### `revl goal audit`
 
@@ -854,6 +880,14 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   value outside a declared `under "<prefix>"` / `in [...]` bound each refuse the
   boot before any runtime is imported. See
   [environment-binding.md](environment-binding.md).
+- `--providers FILE` - JSON/TOML provider configuration binding each
+  `model role` to a runtime adapter (OpenAI-compatible, Anthropic Messages,
+  Gemini). The composition's model `requires` keys are then served by those
+  adapters. Checked before any runtime is imported: an `on_device` role bound
+  to an endpoint off the device, a crossing on an unbound or undeclared role, a
+  binding that reaches past its role, a credential written into the file, or
+  an unset credential variable each refuse the boot. py tier only. `--plan`
+  prints the bindings. See [model-providers.md](model-providers.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
   refused and the run keeps going.
 - `--record` - record the effect accumulator so the REPL can step backwards

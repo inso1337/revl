@@ -754,6 +754,26 @@ def _run_audit(args, ir: dict) -> int:
             print()
             for line in lines:
                 print(line)
+        # item 515 S5: each model role's binding per host and the bindings
+        # digest. Prints nothing for a composition with no routed model action.
+        from .placement import model_binding_view  # noqa: PLC0415
+        if _wiring_documents(list(args.files))[0]:
+            # A composition document's rows are resolved, not parsed as
+            # modules, and this view reads modules; say so rather than print
+            # nothing, which would read as "no bindings".
+            lines, mb_err = (["model bindings (item 515): not computed for a "
+                              "composition document; run `revl audit` over "
+                              "its modules with --placement"], None)
+        else:
+            lines, mb_err = model_binding_view(
+                list(args.files), _load_placement(args.placement))
+        if mb_err:
+            print(f"\nmodel bindings: error: {mb_err}")
+            return 1
+        if lines:
+            print()
+            for line in lines:
+                print(line)
     # item 309: `revl audit --recovery` — the replay-class view. Every inverse,
     # deferred emission, and compensation with its replay class (`replay: free`
     # for a declared/keyed idempotent entry, `replay: fenced` for an undeclared
@@ -901,7 +921,42 @@ def _run_grammar(args) -> int:
     `grammar_summary.py`, not duplicated here."""
     from .grammar_summary import PROMPT_GRAMMAR, PROSE_GRAMMAR
 
+    if (getattr(args, "format", None) or getattr(args, "notes", False)
+            or getattr(args, "write", False) or getattr(args, "check", False)):
+        return _run_source_grammar(args)
     sys.stdout.write(PROMPT_GRAMMAR if args.prompt else PROSE_GRAMMAR)
+    return 0
+
+
+def _run_source_grammar(args) -> int:
+    """`revl grammar --format/--notes/--write/--check`: the grammar of revl
+    source derived from the parser (issue #1661, `revl.source_grammar`)."""
+    from pathlib import Path  # noqa: PLC0415
+
+    from . import source_grammar  # noqa: PLC0415 - lazy: reads the parser's source
+
+    root = Path(__file__).resolve().parents[2]
+    if args.check:
+        stale = source_grammar.drifted(root)
+        for path in stale:
+            print(f"stale: {path}", file=sys.stderr)
+        if stale:
+            print("regenerate with: revl grammar --write", file=sys.stderr)
+            return 1
+        print(f"{source_grammar.COMMITTED_DIR}/ matches a fresh derivation from the parser")
+        return 0
+    if args.write:
+        for path in source_grammar.write(root):
+            print(f"wrote {path}")
+        return 0
+    if args.notes:
+        sys.stdout.write(source_grammar.notes_text())
+        return 0
+    try:
+        sys.stdout.write(source_grammar.render(args.format, args.category))
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 2
     return 0
 
 

@@ -439,10 +439,30 @@ step N (`fault._inject`, section 2). What differs is how residue is *observed*:
   (`[run] NO-RESIDUE`). This is the same boot → LIFO teardown → no-residue
   round-trip the cross-tier suite already runs, now with the fault armed.
 
+  The program's extern bodies run in that same child and share its stdout,
+  so the proof is authenticated (issue #1621). The runner draws a per-run
+  token, sends it as the child's first stdin line, and sets only a
+  `proofOnStdin` flag in the spec. The child reads the token before any
+  component loads and tags its `UP`, `NO-RESIDUE`, `RESIDUE-LEFT` and `DOWN`
+  lines with it. The runner counts only tagged lines and shows them as the
+  usual `[run] ...`. A program that prints `[run] NO-RESIDUE` itself is shown
+  as program output and counts for nothing. The sweep reads the runner's
+  verified proof (`proof_out`), never the text. This does not cover host
+  code that reads the runner's own memory, and on the in-process py tier a
+  body that calls `os._exit(0)` still ends the checker with status 0.
+
 Faulting a *provider* would strand its dependents on the `--once` runner (they
 wait on a provision that never arrives). So the compiled-tier sweep prunes the
 target's transitive dependents before the boot — the same hold-out the py
 reference applies (section 9.2), so the two sweep the same fault points.
+
+**What the program prints.** The py leg runs in process with nothing captured,
+so an extern body's prints reach the terminal as they happen. Each compiled-tier
+`--once` run is captured, because the verdict is read from it. The program's own
+lines in that capture (everything after `== load composition` that is not a
+`[run]` line or the runner's closing `error: the <tier> composition …`) are kept
+on the fault point as `hostOutput` and replayed under the tier's line, labelled
+`[<tier>] host output at <point>:`. They never feed the verdict (issue #1614).
 
 ### 10.2 Agreement, and what a skip means
 
