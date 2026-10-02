@@ -700,6 +700,15 @@ _SOP_CLAUSES = [
 ]
 
 
+# item 309: one emission extern whose modifier slot is `{mods}`, crossed once.
+_IDEM = """extern emission {mods} fn deliver(id: Str, body: Str, n: Int, xs: List[Str], s: Secret[Str]) = @py {{ return }}
+service Ops {{ fn ping() -> Int }}
+component Mailer provides ops: Ops {{
+  emit deliver("k1", "hi", 1, [], "x")
+  provide ops {{ fn ping() = 1 }}
+}}
+"""
+
 ACCEPTED_PROGRAMS = [
     # ---- the qualified test heads (item 391) -------------------------------
     # `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
@@ -1725,6 +1734,30 @@ component Supervisor requires net: Kv provides sup: Sup {
                            return 0 } }
 }
 """),
+    # ---- item 309: `idempotent` in the extern modifier slot -----------------
+    # The gate's extern reader had no case for the keyword, so every one of
+    # these drew `BAD|expected fn after extern` on a program the reference
+    # admits. Bare and keyed, with and without `deferred`, in either order, on
+    # a scoped emission, and with a key whose type is an alias of `Str` (the
+    # reference resolves aliases before the scalar check).
+    ("item 309: the checked-in deferred idempotent fixture",
+     (ROOT / "tests" / "fixtures" /
+      "extern_idempotent_deferred.rvl").read_text()),
+    ("item 309: a bare idempotent emission", _IDEM.format(mods="idempotent")),
+    ("item 309: a keyed idempotent emission",
+     _IDEM.format(mods="idempotent(key: id)")),
+    ("item 309: keyed idempotent after deferred",
+     _IDEM.format(mods="deferred idempotent(key: id)")),
+    ("item 309: keyed idempotent before deferred",
+     _IDEM.format(mods="idempotent(key: id) deferred")),
+    ("item 309: an Int key", _IDEM.format(mods="idempotent(key: n)")),
+    ("item 309: a Secret[Str] key, past the qualifier",
+     _IDEM.format(mods="idempotent(key: s)")),
+    ("item 309: a keyed idempotent scoped emission",
+     _IDEM.replace("extern emission", "extern emission[net]")
+     .format(mods="idempotent(key: id)")),
+    ("item 309: a key typed by an alias of Str", "type Id = Str\n"
+     + _IDEM.replace("id: Str", "id: Id").format(mods="idempotent(key: id)")),
 ]
 
 
@@ -3511,6 +3544,66 @@ component Supervisor requires net: Kv provides sup: Sup {
   provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
                            let r = emit w.task.go()
                            return 0 } }
+}
+""", "G4"),
+    # ---- item 309: the `idempotent` validity block, in its reference order --
+    # Emission-only, then a keyed role must name a declared parameter whose
+    # type is a serializable scalar. The class rules come first, so an
+    # idempotent emission with an `undo` meets the class rule. Each was a
+    # parse `BAD` from the gate before the modifier was read.
+    ("item 309: an acquire extern declared idempotent", """type H = opaque
+extern pure fn shut(h: H) = @py { return }
+extern acquire idempotent fn grab(n: Int) -> H undo shut(result) = @py { return 1 }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a pure extern declared idempotent", """
+extern pure idempotent fn f(n: Int) -> Int = @py { return 1 }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a witnessed extern declared idempotent", """
+type Stash = { path: Str }
+type FsError = { code: Str }
+extern pure fn unstash(w: Stash) -> Unit = @py { return }
+extern witnessed[fs] idempotent fn stash(p: Str) -> Result[Stash, FsError] undo unstash(result) = @py { return }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: an idempotent emission with an undo meets the class rule", """
+extern pure fn back(n: Int) = @py { return }
+extern emission idempotent fn go(n: Int) -> Int undo back(result) = @py { return 1 }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a key naming no parameter",
+     _IDEM.format(mods="idempotent(key: nope)"), "G4"),
+    ("item 309: a key naming no parameter, after deferred",
+     _IDEM.format(mods="deferred idempotent(key: nope)"), "G4"),
+    ("item 309: a key on an extern with no parameters", """
+extern emission idempotent(key: k) fn go() = @py { return }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  emit go()
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a key whose type is not a scalar",
+     _IDEM.format(mods="deferred idempotent(key: xs)"), "G4"),
+    ("item 309: a key typed by an alias of a list", """type Ids = List[Str]
+extern emission idempotent(key: ids) fn go(ids: Ids) = @py { return }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  emit go([])
+  provide ops { fn ping() = 1 }
 }
 """, "G4"),
 ]
