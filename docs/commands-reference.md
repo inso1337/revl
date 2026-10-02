@@ -140,15 +140,35 @@ revl explain t3 --json
 
 ### `revl grammar`
 
-Print the language surface, sized for a prompt. No sources; it renders the
-built-in grammar.
+Print the language surface, sized for a prompt, or a machine-readable grammar
+of revl source for a grammar-constrained decoder. No sources.
 
 - `--prompt` - the dense, complete, prompt-pinnable grammar (also shipped as
   `docs/syntax-2.0.prompt.txt`) instead of the short human summary.
+- `--format lark|gbnf|ebnf` - a grammar derived from `src/revl/parser.py` by
+  reading the parser's code (`src/revl/source_grammar.py`), not copied by hand.
+  `lark` is llguidance's Lark dialect, `gbnf` the character-level GBNF the
+  llama.cpp server and XGrammar read, `ebnf` a plain form for reading. The
+  grammar is an over-approximation of the parser: every document the parser
+  accepts is in its language, and semantic checks stay with the checker. It
+  still refuses shapes the parser refuses, such as a requirement written in a
+  component body (`component C { requires k: S }`) instead of on the header.
+- `--category program|component-body|statements|expression|type` - scope the
+  grammar to one syntactic slot, so a generator filling a hole is held to that
+  slot. Defaults to `program`.
+- `--notes` - where the derivation is looser than the parser: each read it
+  models as any token, and each backtracking construct.
+- `--write` / `--check` - regenerate, or check, the committed `grammar/revl.lark`,
+  `grammar/revl.gbnf` and `grammar/revl.ebnf` (run from a checkout). A parser
+  change that alters the grammar fails `tests/test_source_grammar_1661.py` until
+  `revl grammar --write` is run.
 
 ```bash
-revl grammar              # the short summary
-revl grammar --prompt     # the full surface, to pin in a system prompt
+revl grammar                                      # the short summary
+revl grammar --prompt                             # the full surface, to pin in a system prompt
+revl grammar --format gbnf                        # a whole program, as GBNF
+revl grammar --format lark --category expression  # one expression, for llguidance
+revl grammar --check                              # is grammar/ current?
 ```
 
 ### `revl doctor`
