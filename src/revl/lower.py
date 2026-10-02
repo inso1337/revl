@@ -309,12 +309,19 @@ APPROVAL_KEY = "__approval__"
 
 def _approval_index(externs: list) -> dict:
     """The declaration-owned approval facts (item 246). `required` is the set of
-    capability tokens whose crossing needs a covering `with e` edge — a host
-    emission extern contributes its NAME (the token the G8 audit and the boundary
-    policy already use for it). `externs` indexes the lowered entries so a single
-    emit's crossed capabilities can be resolved at the crossing site."""
+    capability tokens whose crossing needs a covering `with e` edge. An extern
+    that declares `requires approval` contributes its capability TOKENS: its
+    declared scope when it has one, else its name. That is the token
+    `_emit_crossed_caps` returns for the same crossing, and the one the G8 audit
+    and a policy `capability C requires approval` rule use for it
+    (docs/capabilities.md section 2: "a scope replaces the name; it does not
+    join it"). Keying this set by NAME while the crossing is resolved to its
+    TOKEN let every scoped `emission[...] ... requires approval` extern cross
+    with no edge. `externs` indexes the lowered entries so a single emit's
+    crossed capabilities can be resolved at the crossing site."""
     by_name = {e["name"]: e for e in externs}
-    required = {e["name"] for e in externs if e.get("requires_approval")}
+    required = {token for e in externs if e.get("requires_approval")
+                for token in (e.get("capabilities") or [e["name"]])}
     return {"required": required, "externs": by_name}
 
 
@@ -8879,40 +8886,48 @@ def _lower_component_block_arm(expr, env: Env, scope: dict[str, str],
 
 def _refuse_unmarked_emission_call(node: dict, name: str, env: Env,
                                    filename: str, line: int) -> None:
-    """The marker demand inside an `emit` head's argument list, for the HOST
-    EXTERN carrier (issue #1427).
+    """The `emit` marker demand for the HOST EXTERN carrier: a named call to an
+    `emission` extern, or to a module `fn` that reaches one (issues #1427,
+    #1437, docs/design/1437-emit-marks-every-crossing.md).
 
-    `emit` marks one crossing. The head's arguments lower in the enclosing mode
-    (`_emit_head_args`), and every carrier that can cross there has to be held
-    to the same rule, or "one marker per crossing" reads as a property of the
-    required-service spelling rather than of the rule. The `req` and
-    spawn-handle carriers were already held to it — `_lower_postfix` and the
-    `instance-get` arm each refuse an unmarked emission in the argument list.
-    A direct call to an emission extern reaches neither, so `emit send(charge(1))`
-    put a second crossing under one marker and was admitted.
+    `_is_emission_call` states the rule: such a call "is a boundary crossing
+    exactly as a service emission is, so `emit` marks it too". The `req`
+    carrier (`_component_req_call`, `_lower_postfix`) and the spawn-handle
+    carrier (the `instance-get` arm) were already held to it in every
+    setup-mode position. This carrier was held to it only inside an `emit`
+    head's argument list (#1427), so an unmarked `charge(n)` anywhere else in
+    an activation or provide-method body compiled, and the least reversible
+    crossings were the least visible ones. It is now held to it wherever the
+    other two are: `_expr_mode == "setup"`. A teardown slot (`undo`,
+    `compensate`) keeps its documented bare-emission exception, and a marked
+    head's arguments lower in the enclosing mode (`_emit_head_args`), so they
+    are judged here as that mode judges them.
 
-    Scope is deliberately the argument list and nothing wider. Outside it, an
-    unmarked extern call is judged by the provider upper bound
-    (`_method_emissions`: a plain-declared method that reaches an emission
-    extern is refused by name), and this does not touch that judgment. What it
-    fixes is the one position where the reference already promised the
-    arguments are judged as the enclosing position judges them.
+    A `witnessed` extern is not held to it. It is in the emission-reach set
+    for G4's evidence and G8, but it is reversible by construction and legal
+    only in effect position (docs/design/243-witnessed-externs.md), where
+    `effect` is its marker.
 
     The refusal is the `req` carrier's verbatim, tag and message, because it is
-    the same rule: a crossing the author has not marked."""
-    if not getattr(env, "_in_emit_args", False):
-        return
+    the same rule: a crossing the author has not marked. The diagnostic order
+    follows from where it is raised: during lowering, so ahead of A1's async
+    fences and the provider upper bound (`_method_emissions`), exactly as the
+    `req` carrier's refusal already was."""
     if getattr(env, "_expr_mode", "setup") != "setup":
+        return
+    if name in getattr(env, "witnessed_externs", ()):
         return
     if not _is_emission_call(node, env):
         return
+    hint = ("an emission crosses the system boundary and cannot be reverted; "
+            "`emit` makes that visible at the call site")
+    if getattr(env, "_in_emit_args", False):
+        hint += (". One marker admits one crossing, so hoist this call into an "
+                 "`emit` step of its own")
     raise RevlError(
         filename, line,
         f"call to emission `{name}` must be marked `emit` (G4)",
-        hint="an emission crosses the system boundary and cannot be reverted; "
-             "`emit` makes that visible at the call site. One marker admits one "
-             "crossing, so hoist this call into an `emit` step of its own",
-        code="G4", category="emission",
+        hint=hint, code="G4", category="emission",
     )
 
 
@@ -9017,6 +9032,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                      "drop the `emit` marker (G4)",
                 code="G4", category="emission",
             )
+        _require_declared_approval(node, None, env, expr.line, value_form=True)
         return node
     if isinstance(expr, ExprMatch):
         # the ADT eliminator, available in component and method bodies too:
@@ -13858,7 +13874,6 @@ def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> No
         that edge, else lowering refuses — the declaration-owned floor that holds
         with no policy file. Policy-owned requirements are the same shape, checked
         at admission over the recorded edge (the policy is not known here)."""
-    crossed = _emit_crossed_caps(node, env)
     edge_scope = None
     if stmt.approval is not None:
         appr_node = _lower_expr(stmt.approval, env, mode="pure")
@@ -13873,21 +13888,59 @@ def _lower_emit_approval(stmt: EmitStmt, node: dict, step: dict, env: Env) -> No
                      "(or an `Approval[C]` parameter) — nothing else produces an "
                      "approval (item 246)")
         step["approval"] = {"capability": edge_scope, "expr": appr_node}
+    _require_declared_approval(node, edge_scope, env, stmt.line)
+
+
+def _approval_crossed_caps(node: dict, env: Env) -> list:
+    """The capability tokens one marked crossing reaches, for the approval
+    floor. `_emit_crossed_caps` resolves the HEAD: a `req` service emission or a
+    direct host emission extern. A marked call to a module `fn` that reaches an
+    emission extern crosses what that `fn` reaches, so its tokens come from the
+    emission fixed point (`env.emitting_caps`). Without this, `emit helper(1)`
+    carried `charge`'s crossing past the floor that `emit charge(1)` meets.
+
+    Kept apart from `_emit_crossed_caps` on purpose: item 470's refinement reads
+    that function and refuses a crossing it cannot name, and widening it would
+    change that judgment too."""
+    crossed = _emit_crossed_caps(node, env)
+    if not crossed and node.get("kind") == "fn":
+        reached = (getattr(env, "emitting_caps", None) or {}).get(node.get("name"))
+        crossed = sorted(reached or ())
+    return crossed
+
+
+def _require_declared_approval(node: dict, edge_scope: str | None, env: Env,
+                               line: int, value_form: bool = False) -> None:
+    """The declaration-owned approval floor over one marked crossing (item 246,
+    Decision 3): every token it crosses that an extern declared `requires
+    approval` for must be covered by the crossing's `with` edge.
+
+    Both marked spellings meet it. The `emit` STEP passes its edge. The `emit`
+    VALUE form (`let r = emit charge(1)`, `return emit charge(1)`, a method
+    body `= emit charge(1)`) has no `with` clause, so it passes `None` and an
+    approval-required crossing written that way is refused. Before this, only
+    the step was checked, so the value form crossed with no edge at all, from a
+    provide method and from anywhere else a value is written."""
     required = (env.types.get(APPROVAL_KEY) or {}).get("required") or set()
-    for token in crossed:
+    if not required:
+        return
+    for token in _approval_crossed_caps(node, env):
         if token not in required:
             continue
         if edge_scope is None or not _approval_covers(edge_scope, token):
             from . import navigate as _nav  # noqa: PLC0415 — lazy, additive
             _prof = _UntrustedMark if env.untrusted else None
+            hint = (f"acquire an approval — `let a = await approval[{token}] "
+                    f"{{ ... }}` — and thread it: `emit … with a` (item 246, "
+                    f"Decision 3, unreachable-without)")
+            if value_form:
+                hint += (". The value form `emit <call>` has no `with` clause, "
+                         "so write this crossing as an `emit … with a` step")
             raise RevlError(
-                env.filename, stmt.line,
+                env.filename, line,
                 f"crossing capability `{token}` requires approval, but this "
                 f"`emit` carries no covering `with` edge",
-                hint=f"acquire an approval — `let a = await approval[{token}] "
-                     f"{{ ... }}` — and thread it: `emit … with a` (item 246, "
-                     f"Decision 3, unreachable-without)",
-                code="G4", category="approval",
+                hint=hint, code="G4", category="approval",
                 navigate=_nav.approval_navigate(token=token, profile=_prof))
 
 

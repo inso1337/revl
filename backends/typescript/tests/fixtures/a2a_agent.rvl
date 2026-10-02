@@ -505,7 +505,7 @@ extern emission[net.billing_internal] async fn a2a_invoice_agent_draft_reminder(
 
 component InvoiceAgentProvider provides invoice_agent: InvoiceAgent {
   provide invoice_agent {
-    async fn invoice_lookup(message) = a2a_invoice_agent_invoice_lookup(message)
-    async fn draft_reminder(message) = a2a_invoice_agent_draft_reminder(message)
+    async fn invoice_lookup(message) = emit a2a_invoice_agent_invoice_lookup(message)
+    async fn draft_reminder(message) = emit a2a_invoice_agent_draft_reminder(message)
   }
 }
