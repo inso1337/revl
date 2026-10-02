@@ -547,6 +547,9 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "../../../backends/go/testdata/stream_event_130.rvl",
         "../../../backends/rust/scenarios/stream.rvl",
         "../emit_rust_corpus/comp_stream.rvl",
+        # issue #1646 follow-up: emitter-exact; the native IR producer drops
+        # the body's stream steps, as for the stream slice's documents above.
+        "../emit_py_stream_builtin_bind.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at

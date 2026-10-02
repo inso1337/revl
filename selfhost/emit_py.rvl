@@ -2826,12 +2826,11 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
 // `on <Event> as <x> in <sub>`. The await lands, the A1 yield closes the
 // iteration, a `Closed` terminal ends the loop, and (for an event) the
 // contract built once above the loop gates each item before the body runs.
-// The item is mangled TWICE, as the reference's `_mangle(_ident(bind))` does
-// (`_ident` already mangles). Body reads are mangled once, so a builtin-named
-// item (`every len in sub`) binds `len___` and reads `len__` on both sides.
-// That is a reference defect, mirrored here for byte parity rather than fixed.
+// The item is mangled once, as every name the body reads is (issue #1646: a
+// second rename bound a builtin-named item as `len___` while the body read
+// `len__`).
 fn stream_iter(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
-  let item = mangle(mangle(value_str(value_field(step, "bind"))))
+  let item = mangle(value_str(value_field(step, "bind")))
   let subject = cexpr(value_field(step, "subject"))
   let contract = value_field(step, "event")
   var out = []

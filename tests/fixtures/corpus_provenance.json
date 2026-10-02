@@ -847,6 +847,7 @@
    "tests/fixtures/emit_py_map_remove_nested.rvl",
    "tests/fixtures/emit_py_placement.rvl",
    "tests/fixtures/emit_py_spawn_shapes.rvl",
+   "tests/fixtures/emit_py_stream_builtin_bind.rvl",
    "tests/fixtures/emit_py_test_sections.rvl",
    "tests/fixtures/emit_rust_corpus/arith.rvl",
    "tests/fixtures/emit_rust_corpus/bitwise.rvl",
