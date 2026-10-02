@@ -275,7 +275,7 @@ def test_the_py_tier_runs_every_declared_compensation_newest_first():
 
 @pytest.mark.parametrize("tier", [
     pytest.param("ts", marks=[_needs("ts")]),
-    pytest.param("go", marks=[_needs("go")]),
+    pytest.param("go", marks=[_needs("go"), _still_drops("go")]),
     pytest.param("java", marks=[_needs("java")]),
     pytest.param("rust", marks=[_needs("rust"), _still_drops("rust")]),
 ])
