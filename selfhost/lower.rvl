@@ -7524,10 +7524,93 @@ fn emit_pairs_in(ss: List[Stmt], i: Int, comp: CompD, cx: Ctx,
   if (i >= ss.length()) { return acc }
   let s = ss[i]
   let a2 = s.kind == "emit" ? union_into(acc, emit_caps_pairs(s.e, comp, cx)) : acc
-  return emit_pairs_in(ss, i + 1, comp, cx, a2)
+  // issue #1562: every crossing the statement makes, in every position (the
+  // value form, an argument, a compensate slot), not only an `emit` step's
+  // head. The reference reads every crossing call node of the lowered body.
+  return emit_pairs_in(ss, i + 1, comp, cx, cross_pairs_in(s.e, comp, cx, a2))
 }
 
-fn own_emit_pairs(comp: CompD, cx: Ctx) -> List[Str] {
+// The crossings inside one expression, each resolved the way an `emit` step's
+// head is (`emit_caps_pairs`): a call through a requirement to an `emission`
+// op, a provision call off a spawn handle to one, or a named call to an
+// emitting extern or fn (a `witnessed` extern is marked by `effect` and stays
+// out, as it does for the marker rule).
+fn cross_pairs_in(e: Expr, comp: CompD, cx: Ctx, acc: List[Str]) -> List[Str] {
+  return match e {
+    Call(c)    => cross_pairs_list(c.args, 0, comp, cx,
+                    cross_pairs_in(c.target, comp, cx,
+                      is_cross_call(c, comp, cx)
+                        ? union_into(acc, emit_caps_pairs(e, comp, cx)) : acc)),
+    Field(f)   => cross_pairs_in(f.target, comp, cx, acc),
+    OptField(f) => cross_pairs_in(f.target, comp, cx, acc),
+    OptCall(c) => cross_pairs_list(c.args, 0, comp, cx,
+                    cross_pairs_in(c.target, comp, cx, acc)),
+    Bin(b)     => cross_pairs_in(b.r, comp, cx, cross_pairs_in(b.l, comp, cx, acc)),
+    Un(u)      => cross_pairs_in(u.e, comp, cx, acc),
+    Emit(u)    => cross_pairs_in(u.e, comp, cx, acc),
+    Index(x)   => cross_pairs_in(x.idx, comp, cx, cross_pairs_in(x.target, comp, cx, acc)),
+    If(x)      => cross_pairs_in(x.els, comp, cx,
+                    cross_pairs_in(x.then_, comp, cx, cross_pairs_in(x.cond, comp, cx, acc))),
+    Lst(l)     => cross_pairs_list(l.items, 0, comp, cx, acc),
+    Rec(r)     => cross_pairs_inits(r.fields, 0, comp, cx, acc),
+    Arrow(ar)  => cross_pairs_in(ar.body, comp, cx, acc),
+    Match(m)   => cross_pairs_arms(m.arms, 0, comp, cx, cross_pairs_in(m.scrut, comp, cx, acc)),
+    Templ(t)   => cross_pairs_parts(t.parts, 0, comp, cx, acc),
+    RecUpd(r)  => cross_pairs_inits(r.upds, 0, comp, cx, cross_pairs_in(r.base, comp, cx, acc)),
+    _          => acc,
+  }
+}
+
+fn cross_pairs_parts(xs: List[PartN], i: Int, comp: CompD, cx: Ctx,
+                     acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_parts(xs, i + 1, comp, cx, cross_pairs_in(xs[i].e, comp, cx, acc))
+}
+
+fn cross_pairs_list(xs: List[Expr], i: Int, comp: CompD, cx: Ctx,
+                    acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_list(xs, i + 1, comp, cx, cross_pairs_in(xs[i], comp, cx, acc))
+}
+
+fn cross_pairs_inits(xs: List[InitN], i: Int, comp: CompD, cx: Ctx,
+                     acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_inits(xs, i + 1, comp, cx, cross_pairs_in(xs[i].value, comp, cx, acc))
+}
+
+fn cross_pairs_arms(xs: List[ArmN], i: Int, comp: CompD, cx: Ctx,
+                    acc: List[Str]) -> List[Str] {
+  if (i >= xs.length()) { return acc }
+  return cross_pairs_arms(xs, i + 1, comp, cx, cross_pairs_in(xs[i].body, comp, cx, acc))
+}
+
+// `_is_value_crossing`: whether one call is an emission crossing.
+fn is_cross_call(c: CallN, comp: CompD, cx: Ctx) -> Bool {
+  return match c.target {
+    Var(n) => contains(cx.emittingNames, n) && !contains(cx.appr.wit, n),
+    Field(fl) => match fl.target {
+      Var(v) => req_op_is_em(v, fl.name, comp, cx),
+      Field(inner) => match inner.target {
+        Var(h) => cx.handles.has(h) && handle_msig(h, inner.name, fl.name, cx).isEm,
+        _ => false,
+      },
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
+fn req_op_is_em(key: Str, meth: Str, comp: CompD, cx: Ctx) -> Bool {
+  let sv = req_svc_of(comp.reqMap, key, 0)
+  if (sv == "") { return false }
+  return find_msig(svc_of(cx, sv), meth, 0).isEm
+}
+
+fn own_emit_pairs(comp: CompD, base: Ctx) -> List[Str] {
+  // the per-component context: a spawn handle the component binds resolves
+  // through its own `handles`, as the marker rule resolves it
+  let cx = ctx_for(base, comp)
   var out = emit_pairs_in(comp.setup, 0, comp, cx, [])
   var pi = 0
   while (pi < comp.provs.length()) {
