@@ -19,6 +19,12 @@ from __future__ import annotations
 
 from .completion import Completion, CompletionRequest
 
+#: The `provider` value a binding names to use this wire format, and the
+#: fields it accepts beyond the common ones. `revl.providers.config` builds
+#: its closed vocabulary from these, so the format list is declared once.
+PROVIDER = "gemini"
+FIELDS = frozenset({"api", "project", "location"})
+
 
 def _url(binding) -> str:
     model = binding.model.removeprefix("models/")
