@@ -53,8 +53,11 @@ classifiers = [
 # tests/test_1460_signing_backend.py asserts that; the differentials pin that
 # backend off so they still compare two implementations.
 # `llguidance`: a TEST dependency too, so the grammar-engine checks in
-# tests/test_constrained_decoding_1462.py run in CI instead of skipping. At run
-# time it is the optional `constrain` extra below and never required.
+# tests/test_constrained_decoding_1462.py run in CI instead of skipping, and
+# tests/test_source_grammar_1661.py runs the grammar `revl grammar --format
+# lark` exports over every parseable `.rvl` in the tree with it (imported hard,
+# so that check cannot skip). At run time it is the optional `constrain` extra
+# below and never required; `src/revl` never imports it for the grammar export.
 test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=44.0",
         "llguidance>=1.0"]
 # `crypto`: constant-time ECDSA SIGNING (issue #1460). The pure-Python signer in

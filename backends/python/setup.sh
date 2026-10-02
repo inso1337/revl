@@ -64,8 +64,13 @@ uv pip install --python .venv/bin/python pip
 # crypto cannot report SKIPPED. Without it here, that file ERRORS in this job
 # instead of running. `revl` itself imports nothing from it; the differential
 # asserts that too.
+#
+# `llguidance` likewise: tests/test_source_grammar_1661.py runs the exported
+# source grammar over the whole corpus with it and imports it hard, so without
+# it here that file ERRORS in this job (issue #1661), and the grammar-engine
+# checks in tests/test_constrained_decoding_1462.py skip.
 uv pip install --python .venv/bin/python pytest pytest-asyncio pyyaml watchdog coverage \
-    cryptography --editable "$CORDIS_PY"
+    cryptography llguidance --editable "$CORDIS_PY"
 # Re-install revl through stock pip so `[project.scripts]` (the `revl` and
 # `truc` console-script entries) are written to .venv/bin/. `uv pip install -e`
 # resolves the editable to a `.pth` and skips the entry-point step; issue #336.

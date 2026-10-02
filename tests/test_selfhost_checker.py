@@ -544,7 +544,7 @@ component S provides sink: Sink {
     ("an async extern and the async provide method implementing it",
      _DS_ASYNC_EXTERN + """service Http { emission async fn post(url: Str, body: Str) -> Str }
 component Poster provides http: Http {
-  provide http { async fn post(url, body) = http_post(url, body) }
+  provide http { async fn post(url, body) = emit http_post(url, body) }
 }
 """),
     ("the rest of the extern modifier slot",
@@ -772,14 +772,6 @@ component Biller provides ops: Ops {
   provide ops { fn ping() = 1 }
 }
 """),
-    ("a scoped extern crosses its scope, not its name", """
-extern emission[pay.card] fn charge(sink: Str, msg: Str) requires approval = @py { return }
-service Ops { fn ping() -> Int }
-component Biller provides ops: Ops {
-  emit charge("s", "m")
-  provide ops { fn ping() = 1 }
-}
-"""),
     ("a service crossing scoped to the floor, covered", _AP_HEAD + """
 service Pay { emission[charge] fn go() -> Int }
 component B requires pay: Pay provides ops: Ops {
@@ -800,6 +792,17 @@ def _fixture(name: str) -> str:
 
 
 REJECTED_PROGRAMS = [
+    # A scoped extern that declares the floor is required under its SCOPE token
+    # (issue #1437): the reference's required set and `crossed_caps` both key
+    # by `capabilities or [name]`, so this crossing needs a `pay.card` edge.
+    ("a scoped extern crosses its scope, not its name", """
+extern emission[pay.card] fn charge(sink: Str, msg: Str) requires approval = @py { return }
+service Ops { fn ping() -> Int }
+component Biller provides ops: Ops {
+  emit charge("s", "m")
+  provide ops { fn ping() = 1 }
+}
+""", "crossing capability `pay.card` requires approval, but this `emit` carries no covering `with` edge"),
     # ---- the top-level heads, negative controls (item 391) -----------------
     # The same head in front of a component the checker must still REFUSE.
     # Every one of these drew a parse `(bad)` before, which a verdict-direction
@@ -882,7 +885,7 @@ service Store { async fn get(k: Str) -> Int }
 extern emission fn w(k: Str) -> Int = @py { return 1 }
 fn through(k: Str) -> Int { return w(k) }
 component C provides store: Store {
-  provide store { async fn get(k) { let n = through(k) return n } }
+  provide store { async fn get(k) { let n = emit through(k) return n } }
 }
 """,
      "`Store.get` is declared plain, but this implementation reaches "
@@ -987,7 +990,7 @@ component LyingCache provides cache: Cache {
     fn put(key, value) {
       effect store.insert(key, value)
       undo   store.remove(key)
-      let n = write_through(key)
+      let n = emit write_through(key)
     }
   }
 }
@@ -1157,7 +1160,7 @@ service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let r = pg_write(row) + audit_log(row)
+      let r = emit pg_write(row) + emit audit_log(row)
       return r
     }
   }
@@ -1173,7 +1176,7 @@ service Ledger { fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let r = pg_write(row) + audit_log(row)
+      let r = emit pg_write(row) + emit audit_log(row)
       return r
     }
   }
@@ -1190,7 +1193,7 @@ service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let r = row == "x" ? pg_write(row) : audit_log(row)
+      let r = row == "x" ? emit pg_write(row) : emit audit_log(row)
       return r
     }
   }
@@ -1208,8 +1211,8 @@ service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let a = pg_write(row)
-      let b = audit_log(row)
+      let a = emit pg_write(row)
+      let b = emit audit_log(row)
       return a + b
     }
   }
@@ -1239,7 +1242,7 @@ service K { fn f(k: Str) -> Int }
 component C provides k: K {
   provide k {
     fn f(k) {
-      if (k == "a") return 1 else return zz_write(k)
+      if (k == "a") return 1 else return emit zz_write(k)
       return 0
     }
   }
@@ -1260,7 +1263,7 @@ service K { fn f(k: Str) -> Int }
 component C provides k: K {
   provide k {
     fn f(k) {
-      return mid(k)
+      return emit mid(k)
     }
   }
 }

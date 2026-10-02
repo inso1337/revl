@@ -1,0 +1,19 @@
+// REFUSED G4 (approval floor, item 246): `zz_charge` requires approval for
+// `pay`, and the crossing carries no covering `with` edge.
+//
+// The crossing is the braceless arm of an `if`.
+//
+// One document per rule and block form, so the gate/reference census measures
+// each (tools/gate_reference_census.py). The file name's prefix is the
+// expected verdict; tests/test_gate_reference_census.py holds it.
+
+extern emission[pay] fn zz_charge(t: Str) -> Int requires approval = @py { return 1 }
+service K { emission fn f(k: Str) -> Int }
+component C provides k: K {
+  provide k {
+    fn f(k) {
+      if (k == "a") return emit zz_charge(k)
+      return 0
+    }
+  }
+}
