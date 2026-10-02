@@ -2,7 +2,12 @@
 
 A rejection already carries its *prose* fix: `revl.diagnostics.classify()` puts
 `record["fix"]` beside the guarantee, so an agent reads a rule, a call chain,
-and a sentence describing the repair without a second call. This document is
+and a sentence describing the repair without a second call. The fix is the
+per-code entry in `diagnostics.FIXES` unless the rejection carries its own
+(`RevlError.fix`): a `requires`/`provides` clause written inside a component
+body carries the corrected header line, because the per-code sentence for its
+old classification (G6, "bind the value with `let`") was the repair for a
+different mistake. This document is
 the next step: turning that sentence into a **concrete, applyable edit** — a
 text range and its replacement — for the diagnostics whose rewrite is
 unambiguous.

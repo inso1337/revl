@@ -6,11 +6,12 @@
       "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
       "tiers": {
         "go": {
-          "residual": 2,
-          "corpus": 37,
+          "residual": 3,
+          "corpus": 38,
           "reproduced": 35,
           "documents": [
             "../../../backends/go/testdata/opt_gaps_280.rvl",
+            "../../../backends/go/testdata/result_erased_1631.rvl",
             "in_file_tests.rvl"
           ]
         },
@@ -22,8 +23,8 @@
         },
         "py": {
           "residual": 6,
-          "corpus": 59,
-          "reproduced": 53,
+          "corpus": 60,
+          "reproduced": 54,
           "documents": [
             "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
@@ -60,8 +61,8 @@
           "documents": []
         }
       },
-      "total_residual": 14,
-      "total_corpus": 277,
+      "total_residual": 15,
+      "total_corpus": 279,
       "clean_tiers": [
         "java",
         "wasm"

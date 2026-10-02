@@ -263,16 +263,28 @@ happens to.
 * **The same ratchet.** Near misses live beside the classes in
   `tests/fixtures/vocabulary_mirror_ledger.json`, each with a written reason.
   An unrecorded near miss reds, a recorded one whose difference moved reds, and
-  a recorded one that resolves must have its entry DELETED.
+  a recorded one that resolves must have its entry DELETED. A recorded near miss
+  also stops being observed when the two sides drift further apart than the
+  slack. The finding says which case applies and shows the difference (issue
+  #1580): drift is not a resolution, so reconcile the vocabularies, or record
+  the divergence in the claiming prose before deleting the entry.
 
 ## What CI covers
 
-`lint`, `frontend`, `backend-python`, `frontend-cordis`, `sandbox-container`,
-`backend-typescript`, `backend-wasm`, `backend-rust`, `gate-wasm`,
-`backend-java`, `backend-go`, `backend-roots-combined`, `conformance`,
-`temporal-exit`, `formal`. `pull_request` carries no branch filter, so every PR
-gets all fifteen. `ci.yml` is also exposed as a `workflow_call`, so the PyPI
-publish gates on the same matrix that gates main.
+A pull request runs the light jobs: `changes`, `lint`, the six `backend-*`
+jobs, `root-suite-affected`, `merged-prs-landed`, `held-out`,
+`census-artifact`, `frontend-assets`, `gate-wasm` and `backend-roots-combined`.
+The seven required checks (`lint` and the six `backend-*` jobs) are among
+them, and on a pull request `root-suite-affected` is the job that collects the
+root suite.
+
+The heavy jobs never run on a pull request (issue #1678): `frontend` (the
+3.11/3.12/3.13 matrix), `frontend-cordis`, `conformance`, `formal`,
+`temporal-exit`, `sandbox-container` and `sandbox-microvm`. They run on the
+merge queue (`merge_group`), against the merged result that lands, and on push
+to main, the nightly schedule and `workflow_dispatch`. `ci.yml` is also exposed
+as a `workflow_call`, so the PyPI publish gates on the full matrix too.
+`tests/test_ci_pr_queue_split_1678.py` pins the split.
 
 **CodeQL is not part of that.** `codeql.yml` runs on push to main, on a weekly
 schedule, and on `workflow_dispatch`. It deliberately does NOT run on

@@ -55,7 +55,7 @@ _REPRO = (
     + '      let raw = match engine_by_name(name) {\n'
     + '        Some(argv) => {\n'
     + '          let full = argv + "!"\n'
-    + '          engine_run(full, config.cwd)\n'
+    + '          emit engine_run(full, config.cwd)\n'
     + '        },\n'
     + '        None => "engine-error:not an engine",\n'
     + '      }\n'
@@ -94,10 +94,10 @@ def test_block_arm_with_a_loop_is_refused_clearly():
     with a clear message rather than mis-compiled."""
     loop_src = _REPRO.replace(
         '          let full = argv + "!"\n'
-        '          engine_run(full, config.cwd)\n',
+        '          emit engine_run(full, config.cwd)\n',
         '          var full = argv\n'
         '          full = full + "!"\n'
-        '          engine_run(full, config.cwd)\n',
+        '          emit engine_run(full, config.cwd)\n',
     )
     with pytest.raises(RevlError) as exc:
         compile_source(loop_src, "engine_model.rvl")
@@ -125,7 +125,9 @@ def test_block_arm_py_emits_awaited_call():
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     out = m.emit(compile_source(_REPRO, "engine_model.rvl"))
-    assert "await engine_run(" in out
+    # an emission in value position fires through the recording seam (issue
+    # #1603); the `await` stays outside it, so the call is still awaited
+    assert "await _revl_extern_emit(_revl_ctx, 'engine_run', engine_run, " in out
 
 
 # -- execution: the harness repro RUNS on py and ts -------------------------

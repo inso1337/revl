@@ -47,7 +47,11 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    (may this fill cross a boundary, and within which named bound), the
    bindings in scope, and the reachable services with full signatures
    ([holes.md](holes.md) §8, `fillspec.enrich` in
-   `src/revl/mcp/fillspec.py`). Fill one hole against its spec, re-check,
+   `src/revl/mcp/fillspec.py`). A crossing is a permission, never an
+   obligation: `crossing.required` is always false, so do not spend effort
+   deciding whether a hole "is an emission position". If the fill needs a
+   crossing, `crossing.calls` lists the ones allowed there, already written
+   as `emit db.put(<k: Str>, <v: Str>)`. Fill one hole against its spec, re-check,
    repeat. This is the step that turns generate-whole/refuse/regenerate into
    scaffold/fill/fill: most wrong answers become unrepresentable before they
    are written.

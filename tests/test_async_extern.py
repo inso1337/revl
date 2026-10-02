@@ -38,7 +38,7 @@ def _program(service_op: str, method_decl: str) -> str:
         _EXT
         + f'service Http {{ {service_op} }}\n'
         + 'component Poster provides http: Http {\n'
-        + f'  provide http {{ {method_decl} = http_post(url, body) }}\n'
+        + f'  provide http {{ {method_decl} = emit http_post(url, body) }}\n'
         + '}\n'
     )
 
@@ -170,7 +170,7 @@ def test_sync_provide_method_reaching_a_colored_fn_refused():
             + 'fn helper(u: Str, b: Str) -> Str { return http_post(u, b) }\n'
             + 'service Http { emission fn post(url: Str, body: Str) -> Str }\n'
             + 'component Poster provides http: Http {\n'
-            + '  provide http { fn post(url, body) = helper(url, body) }\n'
+            + '  provide http { fn post(url, body) = emit helper(url, body) }\n'
             + '}\n', 't.rvl')
     msg = str(exc.value)
     assert "declared sync, but this implementation reaches async function `helper`" in msg
@@ -185,7 +185,7 @@ def test_async_fn_provide_method_may_call_a_colored_fn():
         + 'fn helper(u: Str, b: Str) -> Str { return http_post(u, b) }\n'
         + 'service Http { emission async fn post(url: Str, body: Str) -> Str }\n'
         + 'component Poster provides http: Http {\n'
-        + '  provide http { async fn post(url, body) = helper(url, body) }\n'
+        + '  provide http { async fn post(url, body) = emit helper(url, body) }\n'
         + '}\n', 't.rvl')
     assert ir["ir_version"] == 3  # compiled cleanly
 
@@ -259,13 +259,16 @@ def test_py_emits_async_extern_as_async_def_and_awaited_call():
         _EXT_PY
         + 'service Loader { emission async fn unload(handle: Str) -> Str }\n'
         + 'component Plugin provides loader: Loader {\n'
-        + '  provide loader { async fn unload(handle) = host_dispose(handle) }\n'
+        + '  provide loader { async fn unload(handle) = emit host_dispose(handle) }\n'
         + '}\n', 't.rvl')
     out = _emit_py(ir)
     # the extern is an `async def`, so its verbatim `await` body is legal python
     assert "async def host_dispose(handle):" in out
-    # the async provide method awaits the async extern — no coroutine leak
-    assert "return (await host_dispose(handle))" in out
+    # the async provide method awaits the async extern — no coroutine leak.
+    # It is an emission in value position, so it fires through the recording
+    # seam (issue #1603) and the `await` stays outside the seam.
+    assert ("return (await _revl_extern_emit(_revl_ctx, 'host_dispose', "
+            "host_dispose, (handle,)))") in out
     # and the whole module is syntactically valid python (the erased `def`
     # holding an `await` used to be a SyntaxError here)
     compile(out, "<emitted>", "exec")
@@ -276,14 +279,17 @@ def test_py_non_async_extern_stays_a_blocking_def_and_is_not_awaited():
         'extern emission fn tag(x: Str) -> Str = @py { return x + "!" }\n'
         + 'service Tagger { emission async fn go(x: Str) -> Str }\n'
         + 'component Tag provides tagger: Tagger {\n'
-        + '  provide tagger { async fn go(x) = tag(x) }\n'
+        + '  provide tagger { async fn go(x) = emit tag(x) }\n'
         + '}\n', 't.rvl')
     out = _emit_py(ir)
     # a NON-async extern is unchanged: a blocking `def`, never awaited
     assert "def tag(x):" in out
     assert "async def tag(" not in out
-    assert "return tag(x)" in out
+    # an emission in value position fires through the recording seam (issue
+    # #1603), and nothing awaits it
+    assert "return _revl_extern_emit(_revl_ctx, 'tag', tag, (x,))" in out
     assert "await tag(" not in out
+    assert "await _revl_extern_emit(_revl_ctx, 'tag'" not in out
 
 
 def test_py_colored_module_fn_awaits_the_async_extern():
@@ -315,7 +321,7 @@ def test_exit_py_async_extern_await_runs_with_no_coroutine_leak(tmp_path):
         _EXT_PY
         + 'service Loader { emission async fn unload(handle: Str) -> Str }\n'
         + 'component Plugin provides loader: Loader {\n'
-        + '  provide loader { async fn unload(handle) = host_dispose(handle) }\n'
+        + '  provide loader { async fn unload(handle) = emit host_dispose(handle) }\n'
         + '}\n'
         + 'lifecycle test "async extern awaited in unload" {\n'
         + '  load Plugin\n'
