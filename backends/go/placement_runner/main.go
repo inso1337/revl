@@ -25,6 +25,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"sort"
 	"strings"
 	"syscall"
 	"time"
@@ -46,6 +47,52 @@ type serveInfo struct {
 	Socket  string              `json:"socket"`
 	Keys    []string            `json:"keys"`
 	Methods map[string][]string `json:"methods"`
+}
+
+// exportedSurface is what this process serves: the keys other processes
+// consume from it (`serve.keys`) and, per key, the operations its service
+// declaration admits (`serve.methods`, the allowlist `placement.py` reads off
+// the IR). The generated `RevlInvoke` resolves EVERY key the document's
+// components provide, so without this check a raw call reached a key this
+// process provides but does not export, and any key it holds a proxy for
+// (issue #1599). A request outside the surface is refused with the py
+// bridge's wording and never dispatched.
+type exportedSurface struct {
+	keys    map[string]bool
+	methods map[string]map[string]bool
+}
+
+func newExportedSurface(s *serveInfo) exportedSurface {
+	out := exportedSurface{keys: map[string]bool{}, methods: map[string]map[string]bool{}}
+	for _, k := range s.Keys {
+		out.keys[k] = true
+	}
+	for k, ops := range s.Methods {
+		set := map[string]bool{}
+		for _, op := range ops {
+			set[op] = true
+		}
+		out.methods[k] = set
+	}
+	return out
+}
+
+// check returns the refusal for a request outside the surface, or nil. A key
+// with no `methods` entry is left to the generated dispatch, which admits only
+// the service's declared operations.
+func (e exportedSurface) check(key, method string, declared []string) error {
+	if !e.keys[key] {
+		return fmt.Errorf("key '%s' is not exported by this process", key)
+	}
+	ops, listed := e.methods[key]
+	if listed && !ops[method] {
+		names := "(none)"
+		if len(declared) > 0 {
+			names = strings.Join(declared, ", ")
+		}
+		return fmt.Errorf("method '%s' is not exported for key '%s' (exported: %s)", method, key, names)
+	}
+	return nil
 }
 
 type probe struct {
@@ -85,6 +132,34 @@ type spec struct {
 	// travels in the spec and the runner publishes it to the ambient variable the
 	// seams already read. Empty when the placement was never armed.
 	EstopLatch string `json:"estopLatch"`
+	// ProofOnStdin (issue #1621): the `--once` runner hands this process a
+	// per-run token as the first line of stdin, and the four proof lines
+	// (`UP`, `NO-RESIDUE`, `RESIDUE-LEFT`, `DOWN`) carry it, so a program's own
+	// output cannot forge them. A flag here, never the token: the spec is a
+	// file the program could read.
+	ProofOnStdin bool `json:"proofOnStdin"`
+}
+
+// readProofToken reads the first line of stdin one byte at a time, so nothing
+// past it is buffered away from the stop-on-EOF reader below. It runs before
+// any component loads, so no host code has run yet, and the token lives only
+// in main's locals: the emitted package cannot name it (issue #1621).
+func readProofToken() string {
+	var token []byte
+	buf := make([]byte, 1)
+	for {
+		n, err := os.Stdin.Read(buf)
+		if n == 1 {
+			if buf[0] == '\n' {
+				break
+			}
+			token = append(token, buf[0])
+		}
+		if err != nil {
+			break
+		}
+	}
+	return strings.TrimSpace(string(token))
 }
 
 type labeledFiber struct {
@@ -123,6 +198,12 @@ func fatalLine(name string, fatal any) {
 // when the defer statement runs, or a panic after boot would still be labelled
 // `proc` once the spec had named the placement. Same reason the java tier's
 // handler reads a `volatile` field rather than a captured local.
+func sortedOps(ops []string) []string {
+	out := append([]string(nil), ops...)
+	sort.Strings(out)
+	return out
+}
+
 func guard(name *string) func() {
 	return func() {
 		if fatal := recover(); fatal != nil {
@@ -173,6 +254,12 @@ func main() {
 	}
 	if s.Name != "" {
 		name = s.Name
+	}
+	// the proof lines' prefix: `[name#token]` when the runner sent a token,
+	// which it rewrites to `[name]` for people (issue #1621)
+	proofName := name
+	if s.ProofOnStdin {
+		proofName = name + "#" + readProofToken()
 	}
 	log := func(channel, subject, detail string) {
 		// item 421 F5 — the runner's single log choke point. Probe results,
@@ -252,6 +339,7 @@ func main() {
 			log("serve", strings.Join(s.Serve.Keys, ", "), "listen error: "+err.Error())
 		} else {
 			listener = ln
+			surface := newExportedSurface(s.Serve)
 			go bridge.Serve(ln, func(key, method string, args []json.RawMessage) (any, error) {
 				// The crossing goroutine's own funnel. `bridge.Serve` answers
 				// each connection on a goroutine of its own, so a panic raised
@@ -259,6 +347,9 @@ func main() {
 				// never main's defer. `args` is where a declared `Secret[T]`
 				// travels, and a panicking frame's value quotes what it held.
 				defer guard(&name)()
+				if err := surface.check(key, method, sortedOps(s.Serve.Methods[key])); err != nil {
+					return nil, err
+				}
 				return invokeIn(root, s.Placements, key, method, args)
 			})
 			log("serve", strings.Join(s.Serve.Keys, ", "), "-> "+s.Serve.Socket)
@@ -309,7 +400,7 @@ func main() {
 	go func() { <-sig; stop <- struct{}{} }()
 	go func() { io.Copy(io.Discard, os.Stdin); stop <- struct{}{} }()
 
-	fmt.Printf("[%s] UP\n", name)
+	fmt.Printf("[%s] UP\n", proofName)
 
 	// 5a. item 443 / issue #122 — the idle watcher. The seams refuse lazily, at
 	//     the NEXT crossing, which is useless for a process parked in the select
@@ -407,12 +498,12 @@ func main() {
 		}
 		log("residue", "provisions", fmt.Sprintf("%d service(s) still provided", still))
 		if live == 0 && still == 0 {
-			fmt.Printf("[%s] NO-RESIDUE — the composition left nothing behind\n", name)
+			fmt.Printf("[%s] NO-RESIDUE — the composition left nothing behind\n", proofName)
 		} else {
-			fmt.Printf("[%s] RESIDUE-LEFT — see the residue lines above\n", name)
+			fmt.Printf("[%s] RESIDUE-LEFT — see the residue lines above\n", proofName)
 		}
 	}
-	fmt.Printf("[%s] DOWN\n", name)
+	fmt.Printf("[%s] DOWN\n", proofName)
 }
 
 // invokeIn dispatches a served or probed call against the provision `key`

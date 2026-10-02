@@ -103,26 +103,52 @@ def test_prune_dependents_holds_out_the_targets_consumers():
 
 
 class _FakeRunner:
-    """A stand-in `--once` runner: returns a fixed (code, printed output)."""
+    """A stand-in `--once` runner: returns a fixed (code, printed output) and
+    reports the proof lines it VERIFIED (token-tagged, issue #1621), which is
+    all the verdict may read. Printed text is only output."""
 
-    def __init__(self, code: int, output: str):
+    def __init__(self, code: int, output: str, verified=()):
         self.code, self.output = code, output
+        self.verified = {"up": "UP" in verified, "down": "DOWN" in verified,
+                         "noResidue": "NO-RESIDUE" in verified,
+                         "residueLeft": "RESIDUE-LEFT" in verified}
 
-    def __call__(self, ir, config, files, once=False, interactive=False):
+    def __call__(self, ir, config, files, once=False, interactive=False,
+                 proof_out=None):
         print(self.output)
+        if proof_out is not None:
+            proof_out.update(self.verified)
         return self.code
 
 
 def test_once_verdict_reads_a_no_residue_proof_as_clean():
     kind, _ = fault_mod._once_verdict(
-        _FakeRunner(0, "[run] UP\n[run] NO-RESIDUE\n[run] DOWN"), {}, {}, [])
+        _FakeRunner(0, "[run] UP\n[run] NO-RESIDUE\n[run] DOWN",
+                    verified=("UP", "NO-RESIDUE", "DOWN")), {}, {}, [])
     assert kind == "clean"
 
 
 def test_once_verdict_reads_residue_left_as_a_real_leak():
     kind, detail = fault_mod._once_verdict(
-        _FakeRunner(1, "[run] RESIDUE-LEFT — a live pool"), {}, {}, [])
+        _FakeRunner(1, "[run] RESIDUE-LEFT — a live pool",
+                    verified=("UP", "RESIDUE-LEFT", "DOWN")), {}, {}, [])
     assert kind == "residue" and "RESIDUE-LEFT" in detail
+
+
+def test_once_verdict_does_not_read_a_proof_the_program_printed():
+    """Issue #1621: a program can print `[run] NO-RESIDUE` itself and exit 0
+    before teardown. Only a proof the runner verified against its token
+    counts, so printed text alone is a gap, never clean."""
+    kind, _ = fault_mod._once_verdict(
+        _FakeRunner(0, "[run] UP\n[run] NO-RESIDUE\n[run] DOWN"), {}, {}, [])
+    assert kind == "gap"
+
+
+def test_once_verdict_does_not_read_a_residue_line_the_program_printed():
+    kind, _ = fault_mod._once_verdict(
+        _FakeRunner(0, "[run] RESIDUE-LEFT — printed by the program\n[run] DOWN",
+                    verified=("UP", "NO-RESIDUE", "DOWN")), {}, {}, [])
+    assert kind == "clean"
 
 
 def test_once_verdict_reads_exit_three_as_a_toolchain_skip():
@@ -140,7 +166,7 @@ def test_once_verdict_names_a_capability_gap_rather_than_passing_it():
 
 
 def test_once_verdict_treats_a_runner_exception_as_a_gap():
-    def boom(ir, config, files, once=False, interactive=False):
+    def boom(ir, config, files, once=False, interactive=False, proof_out=None):
         raise RuntimeError("emitter refused")
 
     kind, detail = fault_mod._once_verdict(boom, {}, {}, [])
@@ -178,9 +204,16 @@ def test_host_lines_keep_the_programs_output_and_drop_runner_protocol():
     assert fault_mod._host_lines("error: could not build the go composition") == []
 
 
-def _fake_once_tier(monkeypatch, output: str, code: int = 0):
-    def runner(ir, config, files, once=False, interactive=False):
+def _fake_once_tier(monkeypatch, output: str, code: int = 0,
+                    verified=("UP", "NO-RESIDUE", "DOWN")):
+    # `verified` is the proof the runner checked against its token (#1621):
+    # the verdict reads it, and `output` is only what was printed
+    fake = _FakeRunner(code, output, verified=verified)
+
+    def runner(ir, config, files, once=False, interactive=False, proof_out=None):
         print(output, end="")
+        if proof_out is not None:
+            proof_out.update(fake.verified)
         return code
 
     monkeypatch.setattr(fault_mod, "_once_runner",
@@ -396,8 +429,13 @@ def test_go_host_output_reaches_the_sweep_report(capfd):
     assert "HOST-PRINT py open 1" in capfd.readouterr().out  # py passes through
 
 
+# Measured 71s and 100s in two local runs on a loaded laptop (load average up
+# to about 57): a go build plus `--once` boot per fault point, four points,
+# beside the py sweep. Slow by nature, not re-deriving anything a session could
+# share, so it outlives the hook's `--timeout=60` (issue #1621 touched this file).
 @needs_cordis
 @needs_go
+@pytest.mark.timeout(400)
 def test_py_and_go_sweep_the_same_faults_and_agree():
     failures, dossier = fault_mod.cross_tier_sweep(
         _two_phase(), out=lambda _line: None)

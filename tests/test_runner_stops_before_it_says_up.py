@@ -168,7 +168,9 @@ def test_ts_installs_its_stop_handlers_before_the_up_line():
     installed while that binding was still in its temporal dead zone would
     throw instead of tearing down."""
     code = strip_comments(TS_RUNNER.read_text(encoding="utf-8"))
-    up = only_offset(r"^[ \t]*console\.log\(`\[\$\{name\}\] UP`\)$", code,
+    # `proofName` is `name`, plus the `--once` proof token when the runner sent
+    # one (issue #1621)
+    up = only_offset(r"^[ \t]*console\.log\(`\[\$\{proofName\}\] UP`\)$", code,
                      "`UP` print")
     for sig in ("SIGTERM", "SIGINT"):
         handler = only_offset(rf"^[ \t]*process\.on\('{sig}', teardown\)$", code,
@@ -190,7 +192,7 @@ def test_go_installs_its_stop_handler_before_the_up_line():
     assert_stop_installed_before_up(
         GO_RUNNER,
         r"^\t*signal\.Notify\(sig, syscall\.SIGTERM, syscall\.SIGINT\)$",
-        r'^\t*fmt\.Printf\("\[%s\] UP\\n", name\)$',
+        r'^\t*fmt\.Printf\("\[%s\] UP\\n", proofName\)$',  # issue #1621
         "signal.Notify(SIGTERM, SIGINT)")
 
 
