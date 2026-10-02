@@ -36,7 +36,7 @@ import json
 
 from .. import cap_order
 from ..policy import TAINT_FOLD_ORIGINS, component_realms
-from ..query import Composition, SHARED_REALM, _walk
+from ..query import Composition, SHARED_REALM, _channels, _walk
 from ..taint import REDACTED_SECRET
 
 # worst-class ordering: (c) > (b) > (a) > none. One prompt covers the whole call
@@ -71,17 +71,6 @@ def _semantic(entry: dict) -> dict:
     `operator._changed_targets` use). Two compiles of the same component compare
     equal, so the reach-closure hash is stable across an edit elsewhere."""
     return {k: v for k, v in entry.items() if k != "source"}
-
-
-def _called_names(nodes) -> set:
-    """Callable names a lowered tree references, both call encodings (the same
-    walk `query._called_names` uses). Used to close the candidate hash over the
-    host bodies a component actually reaches (item 427 F4)."""
-    from ..lower import _calls_in  # noqa: PLC0415
-
-    found: set = set()
-    _calls_in(nodes, found)
-    return found
 
 
 def _rebound_names(nodes) -> set:
@@ -387,15 +376,26 @@ class ClassMap:
 
     def _reached_host_code(self, component: str) -> tuple:
         """The externs and pure functions this component's scopes reach, directly
-        or through the pure-fn call graph. The candidate hash folds their SEMANTIC
+        or through the pure-fn graph. The candidate hash folds their SEMANTIC
         entries in (item 427 F4) so a swap that changes only an `@py` host body -
         the thing that actually crosses the boundary - recomputes a different hash
-        and every standing token pinned to the old closure fails closed."""
+        and every standing token pinned to the old closure fails closed.
+
+        The graph is the one the G4 fixed point folds: `query._channels`' call
+        AND value channels, at the scope and in every fn body on the way. An
+        extern reached as a function value (`let g = x`, `apply(x, n)`, a
+        helper returning or forwarding it) has no call site naming it, and
+        walking called names alone left its body out of the hash, so a swap that
+        rewrote only that body kept every standing token valid (issue #1545).
+        This closure is a superset of `Composition._host_routes`: that one names
+        only the `emission`/`witnessed` externs, while every `@py` body the
+        call can run belongs in the hash."""
         work: list = []
         for sid in self.index.scopes_of.get(component) or []:
             scope = self.index.scopes.get(sid)
             if scope is not None:
-                work += sorted(_called_names(scope["nodes"]))
+                called, values = _channels(scope["nodes"])
+                work += sorted(called | values)
         externs: set = set()
         fns: set = set()
         while work:
@@ -404,8 +404,9 @@ class ClassMap:
                 externs.add(name)
             elif name in self.index.functions and name not in fns:
                 fns.add(name)
-                body = self.index.functions[name].get("body") or []
-                work += sorted(_called_names(body))
+                called, values = _channels(
+                    self.index.functions[name].get("body") or [])
+                work += sorted(called | values)
         return frozenset(externs), frozenset(fns)
 
     def _fold_closure(self, sid: str) -> dict:
@@ -699,6 +700,15 @@ class ClassMap:
                     f"`{token}` was not resource-scoped: `{ext.get('name')}` is "
                     f"reached through {helpers}, so revl cannot trace "
                     f"{dimensions} to this call's arguments. "
+                    + self._NO_DATAFLOW_HINT), False
+            # nor is one handed on as a FUNCTION VALUE: whoever receives it
+            # calls it with arguments no site here shows, even when this scope
+            # also calls it directly (issue #1458).
+            if fact["name"] == ext.get("name") and fact.get("asValue"):
+                return None, (
+                    f"`{token}` was not resource-scoped: `{ext.get('name')}` is "
+                    f"also passed as a function value, so revl cannot trace "
+                    f"{dimensions} to the arguments it is called with. "
                     + self._NO_DATAFLOW_HINT), False
         sites = _call_arg_lists(scope["nodes"], ext.get("name"))
         if not sites:

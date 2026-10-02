@@ -95,10 +95,29 @@ public final class RunOnce {
         return b.toString();
     }
 
+    // The first line of stdin, read a byte at a time (issue #1621).
+    private static String readProofToken() throws java.io.IOException {
+        StringBuilder token = new StringBuilder();
+        int b;
+        while ((b = System.in.read()) != -1 && b != '\n') {
+            token.append((char) b);
+        }
+        return token.toString().trim();
+    }
+
     @SuppressWarnings("unchecked")
     public static void main(String[] argv) throws Exception {
         Map<String, Object> spec = (Map<String, Object>) PlacementRunner.Json.parse(Files.readString(Path.of(argv[0])));
         name = (String) spec.getOrDefault("name", "run");
+        // issue #1621: the `--once` runner hands this process a per-run token as
+        // the first line of stdin, and the four proof lines (UP, NO-RESIDUE,
+        // RESIDUE-LEFT, DOWN) carry it, so a program's own output cannot forge
+        // them. Read before any component loads (so before any host code runs),
+        // into a local of main that no other class can name. The spec carries
+        // only the flag: it is a file the program could read.
+        String proofName = Boolean.TRUE.equals(spec.get("proofOnStdin"))
+                ? name + "#" + readProofToken()
+                : name;
         String container = (String) spec.getOrDefault("module", "revl.Components");
         PlacementRunner.bindSecretRegistry(container); // before the first line is printed
         Map<String, Object> config = (Map<String, Object>) spec.getOrDefault("config", Map.of());
@@ -162,7 +181,7 @@ public final class RunOnce {
             log("provide", label(p), "live [" + simple(iface) + "]");
         }
 
-        System.out.println("[" + name + "] UP");
+        System.out.println("[" + proofName + "] UP");
         System.out.flush();
 
         // 3. teardown, consumers before providers (reverse load order) — the
@@ -190,11 +209,11 @@ public final class RunOnce {
             // discharge + terminal marker so `revl recover` rolls this activation
             // FORWARD (a crash before this point leaves no marker -> roll-back).
             recordCleanUnload(container);
-            System.out.println("[" + name + "] NO-RESIDUE — the composition left nothing behind");
+            System.out.println("[" + proofName + "] NO-RESIDUE — the composition left nothing behind");
         } else {
-            System.out.println("[" + name + "] RESIDUE-LEFT — see the residue lines above");
+            System.out.println("[" + proofName + "] RESIDUE-LEFT — see the residue lines above");
         }
-        System.out.println("[" + name + "] DOWN");
+        System.out.println("[" + proofName + "] DOWN");
         System.out.flush();
     }
 

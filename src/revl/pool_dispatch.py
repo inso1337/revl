@@ -274,6 +274,12 @@ LOCAL_ONLY_RUN_FLAGS: tuple[tuple[str, str, Any], ...] = (
     ("plan", "--plan", False),
     ("placement", "--placement", None),
     ("once", "--once", False),
+    # issue #1461: a provider configuration binds model roles to endpoints and
+    # names environment variables on THIS machine. A loopback endpoint here is
+    # not one on the peer, and the peer's environment does not hold these
+    # variables, so the placement the check judged would not be the one the
+    # work reached.
+    ("providers", "--providers", None),
 )
 
 # ---------------------------------------------------------------------------
