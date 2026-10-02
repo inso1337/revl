@@ -16,7 +16,7 @@ component C provides k: K {
       for (x of [1, 2]) {
         let y = x
       }
-      let q = zz_write(k)
+      let q = emit zz_write(k)
       return 0
     }
   }

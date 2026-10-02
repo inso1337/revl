@@ -51,8 +51,11 @@ classifiers = [
 # machine that happens not to have the library (issue #266). Nothing in
 # `src/revl` imports it, and tests/test_ecdsa_differential.py asserts that.
 # `llguidance`: a TEST dependency too, so the grammar-engine checks in
-# tests/test_constrained_decoding_1462.py run in CI instead of skipping. At run
-# time it is the optional `constrain` extra below and never required.
+# tests/test_constrained_decoding_1462.py run in CI instead of skipping, and
+# tests/test_source_grammar_1661.py runs the grammar `revl grammar --format
+# lark` exports over every parseable `.rvl` in the tree with it (imported hard,
+# so that check cannot skip). At run time it is the optional `constrain` extra
+# below and never required; `src/revl` never imports it for the grammar export.
 test = ["pytest>=8.0", "pytest-asyncio", "coverage>=7.0", "pyyaml", "cryptography>=42.0",
         "llguidance>=1.0"]
 # Constrained decoding's local grammar engine (issue #1462). When installed,
