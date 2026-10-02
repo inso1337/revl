@@ -678,7 +678,7 @@ fn arm_body_mentions(node: Any, bind: Str) -> Bool {
 // stamping a match whose arms reach a coroutine as `__awaited__`. The caller's
 // IR is never mutated; every rebuilt node is a fresh map or list.
 type Colour = {
-  colored: List[Str], async_ext: List[Str], async_ops: List[Str],
+  colored: List[Str], async_ext: List[Str], async_ops: List[Str], validated_ops: List[Str],
   reqs: Any, locals: List[Str], comp: Bool
 }
 
@@ -760,6 +760,14 @@ fn colour(node: Any, cx: Colour, in_async: Bool, in_arrow: Bool) -> Any {
   if (cx.comp && value_str(value_field(node, "step")) == "emit" && reaches_co(value_field(node, "expr"), cx)) {
     fields = fields.set("__reaches__", true)
   }
+  // issue #1647: an activation-body `await emit` of a `validated` operation
+  // validates the SETTLED response, so its expression is rendered as an async
+  // context (the await lands inside the seam) and the step's own `await` is
+  // dropped (`__seam_await__`, read by `await_prefix`).
+  if (cx.comp && !in_async && value_str(value_field(node, "step")) == "emit" && value_bool(value_field(node, "async"))
+      && value_is_null(value_field(node, "approval")) && is_validated_op(value_field(node, "expr"), cx)) {
+    fields = fields.set("expr", colour(value_field(node, "expr"), cx, true, in_arrow)).set("__seam_await__", true)
+  }
   if (k == "match" && in_async) {
     var aw = false
     for (arm of value_list(value_field(node, "arms"))) { if (reaches_co(value_field(arm, "body"), cx)) { aw = true } }
@@ -787,14 +795,24 @@ fn doc_colour(ir: Any, reqs: Any, locals: List[Str], comp: Bool) -> Colour {
     if (value_bool(value_field(e, "async"))) { async_ext = async_ext.push(value_str(value_field(e, "name"))) }
   }
   var ops = []
+  var validated = []
   let services = value_field(ir, "services")
   for (sname of value_keys(services)) {
     let methods = value_field(value_field(services, sname), "methods")
     for (mname of value_keys(methods)) {
       if (value_bool(value_field(value_field(methods, mname), "async"))) { ops = ops.push(`${sname}.${mname}`) }
+      if (value_bool(value_field(value_field(methods, mname), "validated"))) { validated = validated.push(`${sname}.${mname}`) }
     }
   }
-  return { colored: colored, async_ext: async_ext, async_ops: ops, reqs: reqs, locals: locals, comp: comp }
+  return { colored: colored, async_ext: async_ext, async_ops: ops, validated_ops: validated, reqs: reqs, locals: locals, comp: comp }
+}
+
+// A call through a required key to a `validated` operation (the colour pass's
+// view of `validated_spec`, by `Service.method`).
+fn is_validated_op(node: Any, cx: Colour) -> Bool {
+  let svc = value_str(value_field(cx.reqs, value_str(value_field(value_field(node, "target"), "name"))))
+  return node_kind(node) == "call" && node_kind(value_field(node, "target")) == "req"
+    && list_contains(cx.validated_ops, `${svc}.${value_str(value_field(node, "method"))}`)
 }
 
 // `_is_async_fn_type`: a function type whose declared return is `Async[...]`,
@@ -2945,7 +2963,7 @@ fn body_may_fan_out(steps: List[Any]) -> Bool {
 }
 
 fn await_prefix(step: Any) -> Str {
-  return value_bool(value_field(step, "async")) ? "await " : ""
+  return value_bool(value_field(step, "async")) && !value_bool(value_field(step, "__seam_await__")) ? "await " : ""
 }
 
 fn transactional_scope_kwargs(ext: Any) -> Str {

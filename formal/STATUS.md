@@ -1035,12 +1035,12 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**565 .rvl files -> 437 components -> 1145 statements = 312 modeled +
-224 componentless + 29 refused at parse**, and **6292 verdicts compared
+**565 .rvl files -> 437 components -> 1146 statements = 312 modeled +
+224 componentless + 29 refused at parse**, and **6294 verdicts compared
 (312 files + 437 components + 114 provide methods + 20 spawn edges + 29
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1145
-confinements + 1145 surfaces + 361 teardowns + 320 provide-clause
-components + 85 config fields + 437 A2 bodies), 6292 agree, 0
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1146
+confinements + 1146 surfaces + 361 teardowns + 320 provide-clause
+components + 85 config fields + 437 A2 bodies), 6294 agree, 0
 mismatches**.
 
 Checker alignment over the 312 modeled files. Every bucket recording a

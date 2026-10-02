@@ -7,8 +7,9 @@
 //   - a record response with an `Opt`, a `List` and a `Bytes` field, so the
 //     registry's `json-schema` dialect rewrites a `nullable`, closes an object
 //     and drops a `contentEncoding`;
-//   - an `async` operation called from an async provide method, whose
-//     response is awaited INSIDE the seam;
+//   - an `async` operation, called from an async provide method and with
+//     `await emit` from the activation body: either way the response is
+//     awaited INSIDE the seam (issue #1647 fixed the activation-body form);
 //   - a crossing in a provide method (inside an arrow, too), where the seam's
 //     `where` is `<component>.<method>`;
 //   - a validated operation declared and never called: it is still registered.
@@ -41,6 +42,7 @@ service Loop {
 
 component Agent requires model: Model provides agent: Loop {
   emit model.note("boot")
+  await emit model.later("boot")
   provide agent {
     fn run(session_id) {
       let msgs = ["prompt"]

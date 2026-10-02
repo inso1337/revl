@@ -302,7 +302,8 @@ CORPUS = [
     # validated_emission_operation.rvl is the tree's plain shape (every tier's
     # refusal fixture holds the same code); emit_py_validated_shapes.rvl adds a
     # tagged-union response, a record whose wire schema is rewritten, an async
-    # operation awaited inside the seam, the provide-method site and an
+    # operation awaited inside the seam (from an async provide method and from
+    # an activation-body `await emit`, issue #1647), the provide-method site and an
     # uncalled validated operation that is still registered.
     "../emit_ts_refusals/validated_emission_operation.rvl",
     "../emit_py_validated_shapes.rvl",
