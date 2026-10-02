@@ -32,7 +32,7 @@ better one.
 | gate API | 1.0.0 |
 | language | 2.0.0 |
 | checker frontier | `reference-full:2.0.0` |
-| compiler commit | `1beb0633cce1a8a56eb0f1cc3732b9149261ea3e` |
+| compiler commit | `6942e3b8973e53b2a318abfc21f78821d97a4f3f` |
 | report schema | EVAL-REPORT-1 |
 
 Measured throughput: **24.3 t/s** generation (sd 1.0, n=5 warm samples), 83.9 t/s prompt.
