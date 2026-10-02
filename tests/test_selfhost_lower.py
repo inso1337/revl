@@ -207,10 +207,7 @@ def _classify(e: RevlError) -> str:
             # ---- item 515: the device profile and the candidate set --------
             # Seven more sentences the gate now spells byte for byte, added on
             # the same terms as every marker above: a marker here is a CLAIM
-            # of byte agreement, so only a ported refusal gets one. Item 519's
-            # reach fold is deliberately absent - it is a capability product
-            # over a component's HELD set, the gate has none, and it stays
-            # out for the same reason the item-514 value side does.
+            # of byte agreement, so only a ported refusal gets one.
             or m.startswith("unknown device class `")
             or (m.startswith("model role `") and " declares `memory " in m)
             or m.endswith(") places the origin on any available role")
@@ -220,7 +217,16 @@ def _classify(e: RevlError) -> str:
             or (m.startswith("the candidates for `")
                 and " do not agree on residence: " in m)
             or m.endswith(" declare no device profile, so the candidate set "
-                          "cannot be ordered")):
+                          "cannot be ordered")
+            # ---- item 519: the reach fold ----------------------------------
+            # Both edge kinds (a role the `route model` block names, and the
+            # role a crossing is placed on, issue #1193 slice 2) end in this
+            # one sentence. The gate folds the role's reach against the held
+            # set its spawn attenuation already builds, and spells the refusal
+            # byte for byte, the unscoped-emission rendering of issue #1451
+            # included.
+            or m.endswith(" a model may not reach past the component that "
+                          "consults it (G-MODEL-PLACE)")):
         return "MODEL"
     # ---- item 516: the model COUNCIL declaration ---------------------------
     # `selfhost/lower.rvl`'s model-council section decides `model council` and

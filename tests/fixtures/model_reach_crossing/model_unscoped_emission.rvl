@@ -1,0 +1,17 @@
+// REFUSED G-MODEL-PLACE (item 519, issue #1451): service `Model` declares a
+// bare `emission`, which folds to an element of service `Model` that no
+// `reaches [...]` list can name, so `reaches [Model]` names a different token.
+// The refusal printed `Model` on both sides of its "but"; it now names the
+// unscoped emission and the fix. The file name's prefix is the expected verdict
+// (`model_` refused under G-MODEL-PLACE, `ok_` admitted);
+// tests/test_model_reach_crossing.py holds it.
+
+model role local on_device reaches [Model]
+
+service Model { emission fn complete(p: Str) -> Str }
+service Answer { emission[llm] fn classify(text: Str) -> Str }
+
+component Classifier requires llm: Model provides out: Answer {
+  route model on classify { * -> local }
+  provide out { fn classify(text) = emit llm.complete(text) }
+}

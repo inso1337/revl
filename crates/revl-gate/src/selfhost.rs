@@ -592,6 +592,16 @@ pub struct MRole {
     rmem: i64,
     rquant: String,
     rpline: i64,
+    rreach: Vec<String>,
+    rrdecl: bool,
+    rrok: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MReach {
+    mxs: Vec<String>,
+    mdecl: bool,
+    mok: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -621,6 +631,15 @@ pub struct MSpan {
     sname: String,
     slo: i64,
     shi: i64,
+}
+
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct MEdge {
+    eact: String,
+    eorig: String,
+    erole: String,
+    ecross: String,
+    eline: i64,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -12158,62 +12177,69 @@ fn emit_caps_pairs(e: Expr, comp: CompD, cx: Ctx__m2) -> Vec<String> {
 };
 }
 
-fn emit_pairs_in(ss: Vec<Stmt>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+fn emit_pairs_in(ss: Vec<Stmt>, i: i64, comp: CompD, cx: Ctx__m2, nm: bool, acc: Vec<String>) -> Vec<String> {
     if (i >= ss.revl_length()) {
         return acc;
     }
     let s = (ss)[(i) as usize].clone();
-    let a2 = if (s.kind == "emit") { union_into(acc.clone(), emit_caps_pairs(s.e.clone(), comp.clone(), cx.clone())) } else { acc.clone() };
-    return emit_pairs_in(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in(s.e.clone(), comp.clone(), cx.clone(), a2));
+    let a2 = if ((s.kind == "emit") && (!nm)) { union_into(acc.clone(), emit_caps_pairs(s.e.clone(), comp.clone(), cx.clone())) } else { acc.clone() };
+    return emit_pairs_in(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), nm, cross_pairs_in(s.e.clone(), comp.clone(), cx.clone(), nm, a2));
 }
 
-fn cross_pairs_in(e: Expr, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+fn cross_pairs_in(e: Expr, comp: CompD, cx: Ctx__m2, nm: bool, acc: Vec<String>) -> Vec<String> {
     return match e.clone() {
-    Expr::Call(c) => { let c = *c; cross_pairs_list(c.args.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(c.target.clone(), comp.clone(), cx.clone(), if is_cross_call(c.clone(), comp.clone(), cx.clone()) { union_into(acc.clone(), emit_caps_pairs(e.clone(), comp.clone(), cx.clone())) } else { acc.clone() })) },
-    Expr::Field(f) => { let f = *f; cross_pairs_in(f.target.clone(), comp.clone(), cx.clone(), acc.clone()) },
-    Expr::OptField(f) => { let f = *f; cross_pairs_in(f.target.clone(), comp.clone(), cx.clone(), acc.clone()) },
-    Expr::OptCall(c) => { let c = *c; cross_pairs_list(c.args.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(c.target.clone(), comp.clone(), cx.clone(), acc.clone())) },
-    Expr::Bin(b) => { let b = *b; cross_pairs_in(b.r.clone(), comp.clone(), cx.clone(), cross_pairs_in(b.l.clone(), comp.clone(), cx.clone(), acc.clone())) },
-    Expr::Un(u) => { let u = *u; cross_pairs_in(u.e.clone(), comp.clone(), cx.clone(), acc.clone()) },
-    Expr::Emit(u) => { let u = *u; cross_pairs_in(u.e.clone(), comp.clone(), cx.clone(), acc.clone()) },
-    Expr::Index(x) => { let x = *x; cross_pairs_in(x.idx.clone(), comp.clone(), cx.clone(), cross_pairs_in(x.target.clone(), comp.clone(), cx.clone(), acc.clone())) },
-    Expr::If(x) => { let x = *x; cross_pairs_in(x.els.clone(), comp.clone(), cx.clone(), cross_pairs_in(x.then_.clone(), comp.clone(), cx.clone(), cross_pairs_in(x.cond.clone(), comp.clone(), cx.clone(), acc.clone()))) },
-    Expr::Lst(l) => cross_pairs_list(l.items, 0i64, comp.clone(), cx.clone(), acc.clone()),
-    Expr::Rec(r) => cross_pairs_inits(r.fields.clone(), 0i64, comp.clone(), cx.clone(), acc.clone()),
-    Expr::Arrow(ar) => { let ar = *ar; cross_pairs_in(ar.body, comp.clone(), cx.clone(), acc.clone()) },
-    Expr::Match(m) => { let m = *m; cross_pairs_arms(m.arms.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(m.scrut.clone(), comp.clone(), cx.clone(), acc.clone())) },
-    Expr::Templ(t) => cross_pairs_parts(t.parts, 0i64, comp.clone(), cx.clone(), acc.clone()),
-    Expr::RecUpd(r) => { let r = *r; cross_pairs_inits(r.upds.clone(), 0i64, comp.clone(), cx.clone(), cross_pairs_in(r.base.clone(), comp.clone(), cx.clone(), acc.clone())) },
+    Expr::Call(c) => { let c = *c; cross_pairs_list(c.args.clone(), 0i64, comp.clone(), cx.clone(), nm, cross_pairs_in(c.target.clone(), comp.clone(), cx.clone(), nm, if is_cross_call(c.clone(), comp.clone(), cx.clone()) { union_into(acc.clone(), if nm { cross_name(c.clone()) } else { emit_caps_pairs(e.clone(), comp.clone(), cx.clone()) }) } else { acc.clone() })) },
+    Expr::Field(f) => { let f = *f; cross_pairs_in(f.target.clone(), comp.clone(), cx.clone(), nm, acc.clone()) },
+    Expr::OptField(f) => { let f = *f; cross_pairs_in(f.target.clone(), comp.clone(), cx.clone(), nm, acc.clone()) },
+    Expr::OptCall(c) => { let c = *c; cross_pairs_list(c.args.clone(), 0i64, comp.clone(), cx.clone(), nm, cross_pairs_in(c.target.clone(), comp.clone(), cx.clone(), nm, acc.clone())) },
+    Expr::Bin(b) => { let b = *b; cross_pairs_in(b.r.clone(), comp.clone(), cx.clone(), nm, cross_pairs_in(b.l.clone(), comp.clone(), cx.clone(), nm, acc.clone())) },
+    Expr::Un(u) => { let u = *u; cross_pairs_in(u.e.clone(), comp.clone(), cx.clone(), nm, acc.clone()) },
+    Expr::Emit(u) => { let u = *u; cross_pairs_in(u.e.clone(), comp.clone(), cx.clone(), nm, acc.clone()) },
+    Expr::Index(x) => { let x = *x; cross_pairs_in(x.idx.clone(), comp.clone(), cx.clone(), nm, cross_pairs_in(x.target.clone(), comp.clone(), cx.clone(), nm, acc.clone())) },
+    Expr::If(x) => { let x = *x; cross_pairs_in(x.els.clone(), comp.clone(), cx.clone(), nm, cross_pairs_in(x.then_.clone(), comp.clone(), cx.clone(), nm, cross_pairs_in(x.cond.clone(), comp.clone(), cx.clone(), nm, acc.clone()))) },
+    Expr::Lst(l) => cross_pairs_list(l.items, 0i64, comp.clone(), cx.clone(), nm, acc.clone()),
+    Expr::Rec(r) => cross_pairs_inits(r.fields.clone(), 0i64, comp.clone(), cx.clone(), nm, acc.clone()),
+    Expr::Arrow(ar) => { let ar = *ar; cross_pairs_in(ar.body, comp.clone(), cx.clone(), nm, acc.clone()) },
+    Expr::Match(m) => { let m = *m; cross_pairs_arms(m.arms.clone(), 0i64, comp.clone(), cx.clone(), nm, cross_pairs_in(m.scrut.clone(), comp.clone(), cx.clone(), nm, acc.clone())) },
+    Expr::Templ(t) => cross_pairs_parts(t.parts, 0i64, comp.clone(), cx.clone(), nm, acc.clone()),
+    Expr::RecUpd(r) => { let r = *r; cross_pairs_inits(r.upds.clone(), 0i64, comp.clone(), cx.clone(), nm, cross_pairs_in(r.base.clone(), comp.clone(), cx.clone(), nm, acc.clone())) },
     _ => acc,
 };
 }
 
-fn cross_pairs_parts(xs: Vec<PartN>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+fn cross_pairs_parts(xs: Vec<PartN>, i: i64, comp: CompD, cx: Ctx__m2, nm: bool, acc: Vec<String>) -> Vec<String> {
     if (i >= xs.revl_length()) {
         return acc;
     }
-    return cross_pairs_parts(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].e.clone(), comp.clone(), cx.clone(), acc.clone()));
+    return cross_pairs_parts(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), nm, cross_pairs_in((xs)[(i) as usize].e.clone(), comp.clone(), cx.clone(), nm, acc.clone()));
 }
 
-fn cross_pairs_list(xs: Vec<Expr>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+fn cross_pairs_list(xs: Vec<Expr>, i: i64, comp: CompD, cx: Ctx__m2, nm: bool, acc: Vec<String>) -> Vec<String> {
     if (i >= xs.revl_length()) {
         return acc;
     }
-    return cross_pairs_list(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].clone(), comp.clone(), cx.clone(), acc.clone()));
+    return cross_pairs_list(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), nm, cross_pairs_in((xs)[(i) as usize].clone(), comp.clone(), cx.clone(), nm, acc.clone()));
 }
 
-fn cross_pairs_inits(xs: Vec<InitN>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+fn cross_pairs_inits(xs: Vec<InitN>, i: i64, comp: CompD, cx: Ctx__m2, nm: bool, acc: Vec<String>) -> Vec<String> {
     if (i >= xs.revl_length()) {
         return acc;
     }
-    return cross_pairs_inits(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].value.clone(), comp.clone(), cx.clone(), acc.clone()));
+    return cross_pairs_inits(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), nm, cross_pairs_in((xs)[(i) as usize].value.clone(), comp.clone(), cx.clone(), nm, acc.clone()));
 }
 
-fn cross_pairs_arms(xs: Vec<ArmN>, i: i64, comp: CompD, cx: Ctx__m2, acc: Vec<String>) -> Vec<String> {
+fn cross_pairs_arms(xs: Vec<ArmN>, i: i64, comp: CompD, cx: Ctx__m2, nm: bool, acc: Vec<String>) -> Vec<String> {
     if (i >= xs.revl_length()) {
         return acc;
     }
-    return cross_pairs_arms(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), cross_pairs_in((xs)[(i) as usize].body.clone(), comp.clone(), cx.clone(), acc.clone()));
+    return cross_pairs_arms(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), comp.clone(), cx.clone(), nm, cross_pairs_in((xs)[(i) as usize].body.clone(), comp.clone(), cx.clone(), nm, acc.clone()));
+}
+
+fn cross_name(c: CallN) -> Vec<String> {
+    return match c.target {
+    Expr::Var(n) => vec![n],
+    _ => vec![],
+};
 }
 
 fn is_cross_call(c: CallN, comp: CompD, cx: Ctx__m2) -> bool {
@@ -12241,13 +12267,28 @@ fn req_op_is_em(key: &str, meth: &str, comp: CompD, cx: Ctx__m2) -> bool {
 
 fn own_emit_pairs(comp: CompD, base: Ctx__m2) -> Vec<String> {
     let cx = ctx_for(base.clone(), comp.clone());
-    let mut out = emit_pairs_in(comp.setup.clone(), 0i64, comp.clone(), cx.clone(), vec![]);
+    let mut out = emit_pairs_in(comp.setup.clone(), 0i64, comp.clone(), cx.clone(), false, vec![]);
     let mut pi = 0i64;
     while (pi < comp.provs.revl_length()) {
         let pv = (comp.provs)[(pi) as usize].clone();
         let mut mi = 0i64;
         while (mi < pv.methods.revl_length()) {
-            out = emit_pairs_in((pv.methods)[(mi) as usize].body.clone(), 0i64, comp.clone(), cx.clone(), out.clone());
+            out = emit_pairs_in((pv.methods)[(mi) as usize].body.clone(), 0i64, comp.clone(), cx.clone(), false, out.clone());
+            mi = (mi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        pi = (pi).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn own_cross_names(comp: CompD, cx: Ctx__m2) -> Vec<String> {
+    let mut out = emit_pairs_in(comp.setup.clone(), 0i64, comp.clone(), cx.clone(), true, vec![]);
+    let mut pi = 0i64;
+    while (pi < comp.provs.revl_length()) {
+        let pv = (comp.provs)[(pi) as usize].clone();
+        let mut mi = 0i64;
+        while (mi < pv.methods.revl_length()) {
+            out = emit_pairs_in((pv.methods)[(mi) as usize].body.clone(), 0i64, comp.clone(), cx.clone(), true, out.clone());
             mi = (mi).checked_add(1i64).expect("revl: Int overflow");
         }
         pi = (pi).checked_add(1i64).expect("revl: Int overflow");
@@ -17641,6 +17682,43 @@ fn closure_assign_scan(ts: &[Token]) -> Verd {
     return no_verd();
 }
 
+fn model_reach_at(ts: &[Token], i: i64) -> MReach {
+    if (!(at_word(ts, i, "reaches") && atk(ts, (i).checked_add(1i64).expect("revl: Int overflow"), "["))) {
+        return MReach { mxs: vec![], mdecl: false, mok: true };
+    }
+    let end = match_bracket(ts, (i).checked_add(1i64).expect("revl: Int overflow"));
+    if (end == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return MReach { mxs: vec![], mdecl: true, mok: false };
+    }
+    let mut out: Vec<String> = vec![];
+    let mut ok = true;
+    let mut j = (i).checked_add(2i64).expect("revl: Int overflow");
+    while (j < end) {
+        let mut x = String::from("?");
+        if atk(ts, j.clone(), "*") {
+            x = String::from("*");
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            let r = cap_tok_at(ts, j.clone(), end);
+            x = r.s;
+            j = if (r.i > j) { r.i } else { (j).checked_add(1i64).expect("revl: Int overflow") };
+        }
+        if ((x == "?") || contains__m2(&out, &x)) {
+            ok = false;
+        }
+        out.push(x.clone());
+        if atk(ts, j.clone(), ",") {
+            j = (j).checked_add(1i64).expect("revl: Int overflow");
+        } else {
+            if (j < end) {
+                ok = false;
+                j = (j).checked_add(1i64).expect("revl: Int overflow");
+            }
+        }
+    }
+    return MReach { mxs: out.clone(), mdecl: true, mok: ok };
+}
+
 fn model_residences() -> Vec<String> {
     return vec![String::from("on_device"), String::from("off_device")];
 }
@@ -17765,19 +17843,21 @@ fn model_role_at(ts: &[Token], i: i64) -> MRole {
     let res = tkc(ts, (i).checked_add(3i64).expect("revl: Int overflow")).text;
     let line = tkc(ts, i).line;
     let j = (i).checked_add(4i64).expect("revl: Int overflow");
-    let bare = MRole { rname: name.clone(), rres: res.clone(), rline: line, rprof: false, rdev: String::from(""), rmem: 0i64, rquant: String::from(""), rpline: line };
+    let rr = model_reach_at(ts, j.clone());
+    let bare = MRole { rname: name.clone(), rres: res.clone(), rline: line, rprof: false, rdev: String::from(""), rmem: 0i64, rquant: String::from(""), rpline: line, rreach: rr.mxs.clone(), rrdecl: rr.mdecl, rrok: rr.mok };
     if (!(((((at_word(ts, j.clone(), "device") && atk(ts, (j).checked_add(1i64).expect("revl: Int overflow"), "ident")) && at_word(ts, (j).checked_add(2i64).expect("revl: Int overflow"), "memory")) && atk(ts, (j).checked_add(3i64).expect("revl: Int overflow"), "int")) && at_word(ts, (j).checked_add(4i64).expect("revl: Int overflow"), "quant")) && atk(ts, (j).checked_add(5i64).expect("revl: Int overflow"), "ident"))) {
         return bare;
     }
+    let pr = model_reach_at(ts, (j).checked_add(6i64).expect("revl: Int overflow"));
     let mem = match { let _s = (tkc(ts, (j).checked_add(3i64).expect("revl: Int overflow")).text); if _s.starts_with('+') { None } else { _s.parse::<i64>().ok() } } {
     Some(v) => v,
     None => (0i64).checked_sub(1i64).expect("revl: Int overflow"),
     _ => unreachable!(),
 };
     if (mem == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
-        return bare;
+        return MRole { rname: name.clone(), rres: res.clone(), rline: line, rprof: false, rdev: String::from(""), rmem: 0i64, rquant: String::from(""), rpline: line, rreach: vec![], rrdecl: true, rrok: false };
     }
-    return MRole { rname: name.clone(), rres: res.clone(), rline: line, rprof: true, rdev: tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text, rmem: mem.clone(), rquant: tkc(ts, (j).checked_add(5i64).expect("revl: Int overflow")).text, rpline: tkc(ts, j.clone()).line };
+    return MRole { rname: name.clone(), rres: res.clone(), rline: line, rprof: true, rdev: tkc(ts, (j).checked_add(1i64).expect("revl: Int overflow")).text, rmem: mem.clone(), rquant: tkc(ts, (j).checked_add(5i64).expect("revl: Int overflow")).text, rpline: tkc(ts, j.clone()).line, rreach: pr.mxs.clone(), rrdecl: pr.mdecl, rrok: pr.mok };
 }
 
 fn mrole_at(rs: &[MRole], n: &str, i: i64) -> i64 {
@@ -18138,6 +18218,269 @@ fn model_place_refusal(ts: Vec<Token>) -> Verd {
             return cv;
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn model_svc_ns(xs: &[String], comp: CompD) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < xs.revl_length()) {
+        let x = (xs)[(i) as usize].clone();
+        if starts_with__m2(&x, "key:") {
+            let sv = req_svc_of(&comp.reqMap, &(x.revl_slice(4i64, x.revl_length())), 0i64);
+            out = union_into(out.clone(), vec![if (sv == "") { x.clone() } else { String::from("svc:").revl_concat(&sv) }]);
+        } else {
+            out = union_into(out.clone(), vec![x.clone()]);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn model_consults(held: &[String]) -> bool {
+    let mut i = 0i64;
+    while (i < held.revl_length()) {
+        let t = cap_parse((held)[(i) as usize].clone()).token;
+        if ((((t == "*") || starts_with__m2(&t, "svc:")) || (t == "model")) || starts_with__m2(&t, "model.")) {
+            return true;
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn model_role_of(tok: String, rs: &[MRole]) -> String {
+    if (!starts_with__m2(&tok, "model.")) {
+        return String::from("");
+    }
+    let head = cap_parse(tok.clone()).token;
+    let tail = head.revl_slice(6i64, head.revl_length());
+    if (tail == "") {
+        return String::from("");
+    }
+    return if (mrole_at(rs, &tail, 0i64) == (0i64).checked_sub(1i64).expect("revl: Int overflow")) { String::from("") } else { tail.clone() };
+}
+
+fn model_held_render(x: &str) -> String {
+    if starts_with__m2(x, "svc:") {
+        return (String::from("service `").revl_concat(&x.revl_slice(4i64, x.revl_length()))).revl_concat("`'s unscoped emission");
+    }
+    return (String::from("`").revl_concat(&x)).revl_concat("`");
+}
+
+fn model_render_key(x: String) -> String {
+    return if starts_with__m2(&x, "svc:") { x.revl_slice(4i64, x.revl_length()) } else { x.clone() };
+}
+
+fn model_held_str(held: &[String]) -> String {
+    let mut keys: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < held.revl_length()) {
+        keys = union_into(keys.clone(), vec![model_render_key((held)[(i) as usize].clone())]);
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let order = sort_strs(&keys);
+    let mut text = String::from("");
+    let mut folded = String::from("");
+    let mut k = 0i64;
+    while (k < order.revl_length()) {
+        i = 0i64;
+        while (i < held.revl_length()) {
+            let x = (held)[(i) as usize].clone();
+            if (model_render_key(x.clone()) == (order)[(k) as usize]) {
+                if (text != "") {
+                    text.push_str(", ");
+                }
+                text.push_str(&model_held_render(&x));
+                if starts_with__m2(&x, "svc:") {
+                    if (folded != "") {
+                        folded.push_str(", ");
+                    }
+                    folded = ((folded.revl_concat("`")).revl_concat(&(order)[(k) as usize])).revl_concat("`");
+                }
+            }
+            i = (i).checked_add(1i64).expect("revl: Int overflow");
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (text == "") {
+        text = String::from("no capabilities");
+    }
+    if (folded != "") {
+        text = ((((text.revl_concat(" (an unscoped emission has no token a `reaches [...]` ")).revl_concat("list can name: give the `emission` methods of ")).revl_concat(&folded)).revl_concat(" a scoped capability, such as `emission[model.complete]`, ")).revl_concat("and reach that)");
+    }
+    return text;
+}
+
+fn model_arm_roles(a: MArm, rs: &[MRole], cs: &[CDecl]) -> Vec<String> {
+    if ((a.acands.revl_length() == 1i64) && (mrole_at(rs, &(a.acands)[(0i64) as usize], 0i64) == (0i64).checked_sub(1i64).expect("revl: Int overflow"))) {
+        let ci = ccl_at(cs, &(a.acands)[(0i64) as usize], 0i64);
+        if (ci == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+            return vec![String::from("?")];
+        }
+        let mut out: Vec<String> = vec![];
+        let mut k = 0i64;
+        while (k < (cs)[(ci) as usize].cmems.revl_length()) {
+            out.push(((cs)[(ci) as usize].cmems.clone())[(k) as usize].crole.clone());
+            k = (k).checked_add(1i64).expect("revl: Int overflow");
+        }
+        return out;
+    }
+    return a.acands;
+}
+
+fn model_edges(bs: &[MBlock], rs: &[MRole], cs: &[CDecl], crossed: &[String], line: i64) -> Vec<MEdge> {
+    let undecided = vec![MEdge { eact: String::from(""), eorig: String::from(""), erole: String::from("?"), ecross: String::from(""), eline: 0i64 }];
+    let mut acts: Vec<String> = vec![];
+    let mut bi = 0i64;
+    while (bi < bs.revl_length()) {
+        if (!(bs)[(bi) as usize].bok.clone()) {
+            return undecided;
+        }
+        acts = union_into(acts.clone(), vec![(bs)[(bi) as usize].bact.clone()]);
+        bi = (bi).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let actOrder = sort_strs(&acts);
+    let mut out: Vec<MEdge> = vec![];
+    let mut named: Vec<String> = vec![];
+    let mut ai = 0i64;
+    while (ai < actOrder.revl_length()) {
+        let act = (actOrder)[(ai) as usize].clone();
+        let mut origs: Vec<String> = vec![];
+        bi = 0i64;
+        while (bi < bs.revl_length()) {
+            if ((bs)[(bi) as usize].bact == act) {
+                let mut k = 0i64;
+                while (k < (bs)[(bi) as usize].barms.revl_length()) {
+                    origs = union_into(origs.clone(), vec![((bs)[(bi) as usize].barms.clone())[(k) as usize].aorig.clone()]);
+                    k = (k).checked_add(1i64).expect("revl: Int overflow");
+                }
+            }
+            bi = (bi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        let origOrder = sort_strs(&origs);
+        let mut oi = 0i64;
+        while (oi < origOrder.revl_length()) {
+            bi = 0i64;
+            let mut done = false;
+            while ((bi < bs.revl_length()) && (!done)) {
+                if ((bs)[(bi) as usize].bact == act) {
+                    let at = marm_origin_at(&(bs)[(bi) as usize].barms, &(origOrder)[(oi) as usize], 0i64);
+                    if (at != (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+                        done = true;
+                        let a = ((bs)[(bi) as usize].barms.clone())[(at) as usize].clone();
+                        let roles = model_arm_roles(a.clone(), rs, cs);
+                        let mut k = 0i64;
+                        while (k < roles.revl_length()) {
+                            if ((roles)[(k) as usize] == "?") {
+                                return undecided;
+                            }
+                            named = union_into(named.clone(), vec![(roles)[(k) as usize].clone()]);
+                            out.push(MEdge { eact: act.clone(), eorig: a.aorig.clone(), erole: (roles)[(k) as usize].clone(), ecross: String::from(""), eline: a.aline });
+                            k = (k).checked_add(1i64).expect("revl: Int overflow");
+                        }
+                    }
+                }
+                bi = (bi).checked_add(1i64).expect("revl: Int overflow");
+            }
+            oi = (oi).checked_add(1i64).expect("revl: Int overflow");
+        }
+        ai = (ai).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let mut placed: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < crossed.revl_length()) {
+        let r = model_role_of((crossed)[(i) as usize].clone(), rs);
+        if ((r != "") && (!contains__m2(&named, &r))) {
+            placed = union_into(placed.clone(), vec![r.clone()]);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let ps = sort_strs(&placed);
+    i = 0i64;
+    while (i < ps.revl_length()) {
+        out.push(MEdge { eact: String::from("*"), eorig: String::from("*"), erole: (ps)[(i) as usize].clone(), ecross: String::from("model.").revl_concat(&(ps)[(i) as usize]), eline: line });
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn model_reach_of(r: MRole) -> Vec<String> {
+    return if r.rrdecl { cap_strip_all(&r.rreach) } else { vec![String::from("*")] };
+}
+
+fn model_reach_comp(comp: CompD, cx: Ctx__m2, own: Vec<String>, bs: Vec<MBlock>, rs: Vec<MRole>, cs: Vec<CDecl>) -> Verd {
+    let held = cap_strip_all(&model_svc_ns(&held_caps_pairs(comp.clone(), cx.clone(), own.clone()), comp.clone()));
+    if (!model_consults(&held)) {
+        return no_verd();
+    }
+    let mut crossed: Vec<String> = vec![];
+    let mut i = 0i64;
+    while (i < held.revl_length()) {
+        crossed = union_into(crossed.clone(), vec![cap_parse((held)[(i) as usize].clone()).token]);
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let names = own_cross_names(comp.clone(), cx.clone());
+    i = 0i64;
+    while (i < names.revl_length()) {
+        crossed = union_into(crossed.clone(), caps_of(cx.appr.vcaps.clone(), (names)[(i) as usize].clone()));
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    let es = model_edges(&bs, &rs, &cs, &crossed, comp.line);
+    if ((es.revl_length() > 0i64) && ((es)[(0i64) as usize].erole == "?")) {
+        return no_verd();
+    }
+    i = 0i64;
+    while (i < es.revl_length()) {
+        let e = (es)[(i) as usize].clone();
+        let r = (rs)[(mrole_at(&rs, &e.erole, 0i64)) as usize].clone();
+        let extra = sort_strs(&cap_covers_set(&held, &model_reach_of(r.clone())));
+        if (extra.revl_length() > 0i64) {
+            let lead = if (e.ecross == "") { (((((((String::from("`").revl_concat(&comp.name)).revl_concat("` routes `")).revl_concat(&e.eact)).revl_concat("` (")).revl_concat(&e.eorig)).revl_concat(") through model role `")).revl_concat(&r.rname)).revl_concat("`") } else { (((((String::from("`").revl_concat(&comp.name)).revl_concat("` crosses `")).revl_concat(&e.ecross)).revl_concat("`, placed on model role `")).revl_concat(&r.rname)).revl_concat("`") };
+            return mverd(&((((((((lead.revl_concat(", which reaches ")).revl_concat(&cap_offending_join(&extra))).revl_concat(", but `")).revl_concat(&comp.name)).revl_concat("` holds only ")).revl_concat(&model_held_str(&held))).revl_concat(" - a component's effective ceiling is the pair's, so a model ")).revl_concat("may not reach past the component that consults it (G-MODEL-PLACE)")), e.eline);
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return no_verd();
+}
+
+fn model_reach_refusal(ts: &[Token], pg: Prog, base: Ctx__m2, poisoned: &[String]) -> Verd {
+    let rs = model_roles_of(ts);
+    if (rs.revl_length() == 0i64) {
+        return no_verd();
+    }
+    let mut i = 0i64;
+    while (i < rs.revl_length()) {
+        if (!(rs)[(i) as usize].rrok.clone()) {
+            return no_verd();
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    if (!svc_caps_modelled(&pg.svcs, 0i64)) {
+        return no_verd();
+    }
+    let cs = model_councils_of(ts);
+    let sps = model_comp_spans(ts);
+    let own = reach_surface_pairs(&pg.comps, base.clone());
+    let mut ci = 0i64;
+    while (ci < pg.comps.revl_length()) {
+        let comp = (pg.comps)[(ci) as usize].clone();
+        if (!contains__m2(poisoned, &comp.name)) {
+            let mut bs: Vec<MBlock> = vec![];
+            let mut si = 0i64;
+            while (si < sps.revl_length()) {
+                if ((sps)[(si) as usize].sname == comp.name) {
+                    bs = model_blocks_in(ts, (sps)[(si) as usize].slo.clone(), (sps)[(si) as usize].shi.clone());
+                }
+                si = (si).checked_add(1i64).expect("revl: Int overflow");
+            }
+            let v = model_reach_comp(comp.clone(), ctx_for(base.clone(), comp.clone()), surf_get(own.clone(), comp.name.clone()), bs.clone(), rs.clone(), cs.clone());
+            if (v.v != "") {
+                return v;
+            }
+        }
+        ci = (ci).checked_add(1i64).expect("revl: Int overflow");
     }
     return no_verd();
 }
@@ -18648,6 +18991,10 @@ fn collect_nonlink(ts: Vec<Token>, pg: Prog, hands: Vec<MHand>, wrefs: Vec<Verd>
     let sv = check_spawn(pg.clone(), base.clone());
     if (sv.v != "") {
         refs.push(sv.clone());
+    }
+    let mrv = model_reach_refusal(&ts, pg.clone(), base.clone(), &poisoned);
+    if (mrv.v != "") {
+        refs.push(mrv.clone());
     }
     let boots = boot_names(&ts);
     if (boots.revl_length() > 1i64) {
@@ -29434,6 +29781,24 @@ fn a_council_and_a_route_model_block_are_decided_in_the_same_compilation() {
     let v = admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, adversary -> local, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> local, * -> cloud }\n  provide out { fn classify(text) = text }\n}"));
     assert!((v == ""));
     assert!((admit_src(String::from("model role local on_device\nmodel role cloud off_device\nmodel council Release { proposer -> cloud, aggregate unanimous }\nservice Answer { fn classify(text: Str) -> Str }\ncomponent Classifier provides out: Answer {\n  route model on classify { confidential -> cloud }\n  provide out { fn classify(text) = text }\n}")) == "COUNCIL|model council `Release` declares 1 member"));
+}
+
+#[test]
+fn a_crossing_placed_on_a_role_is_folded_with_no_route_model_block() {
+    let v = admit_src(String::from("model role tool on_device reaches [shell.exec]\nservice Tools { emission[model.tool] fn run(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Tools provides out: Answer {\n  provide out { fn classify(text) = emit llm.run(text) }\n}"));
+    assert!((v == "MODEL|`Classifier` crosses `model.tool`, placed on model role `tool`, which reaches `shell.exec`, but `Classifier` holds only `model.tool` - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"));
+}
+
+#[test]
+fn a_role_reaching_no_further_than_its_component_is_admitted_with_no_block() {
+    let v = admit_src(String::from("model role tool on_device reaches [model.tool]\nservice Tools { emission[model.tool] fn run(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Tools provides out: Answer {\n  provide out { fn classify(text) = emit llm.run(text) }\n}"));
+    assert!((v == ""));
+}
+
+#[test]
+fn an_unscoped_emission_is_named_as_one__with_the_fix() {
+    let v = admit_src(String::from("model role local on_device reaches [Model]\nservice Model { emission fn complete(p: Str) -> Str }\nservice Answer { emission[llm] fn classify(text: Str) -> Str }\ncomponent Classifier requires llm: Model provides out: Answer {\n  route model on classify { * -> local }\n  provide out { fn classify(text) = emit llm.complete(text) }\n}"));
+    assert!((v == "MODEL|`Classifier` routes `classify` (*) through model role `local`, which reaches `Model`, but `Classifier` holds only service `Model`'s unscoped emission (an unscoped emission has no token a `reaches [...]` list can name: give the `emission` methods of `Model` a scoped capability, such as `emission[model.complete]`, and reach that) - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"));
 }
 
 #[test]
