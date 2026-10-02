@@ -49,7 +49,7 @@
   ],
   "_budget": {
     "reference": {
-      "go": 2821,
+      "go": 2822,
       "java": 986,
       "py": 661,
       "rust": 1200,
@@ -57,7 +57,7 @@
       "wasm": 1558
     },
     "selfhost": {
-      "go": 103,
+      "go": 104,
       "java": 175,
       "py": 103,
       "rust": 286,
@@ -297,6 +297,9 @@
           "_method_ret": 1,
           "_method_returns_value": 1,
           "_needs_sync": 1
+        },
+        "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
+          "_v3_fill_erased": 1
         }
       },
       "uncovered_statements": 3190
@@ -1527,6 +1530,9 @@
         },
         "`has_any_word` tests the neighbours of an `any` only when the left one is not a word character; an erased `any` is always inside brackets and a user type name that contains the letters starts with a capital, so the empty neighbour and a digit right after a non-word left neighbour do not occur.": {
           "is_word_char": 2
+        },
+        "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
+          "fill_erased": 1
         }
       },
       "uncovered_statements": 86

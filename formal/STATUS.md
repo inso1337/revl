@@ -1064,13 +1064,13 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**590 .rvl files -> 460 components -> 1192 statements = 340 modeled +
-222 componentless + 28 refused at parse**, and **6522 verdicts compared
-(340 files + 460 components + 133 provide methods + 20 spawn edges + 28
+**591 .rvl files -> 460 components -> 1192 statements = 340 modeled +
+222 componentless + 29 refused at parse**, and **6523 verdicts compared
+(340 files + 460 components + 133 provide methods + 20 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1192
 confinements + 1192 surfaces + 356 teardowns + 346 provide-clause
 components + 83 config fields + 460 A2 bodies + 25 approval crossings),
-6522 agree, 0 mismatches**.
+6523 agree, 0 mismatches**.
 
 Checker alignment over the 340 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model

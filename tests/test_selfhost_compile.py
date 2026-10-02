@@ -564,6 +564,8 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "in_file_tests.rvl",
         # the same `tests` section gap, on the item 280 Opt-gap document
         "../../../backends/go/testdata/opt_gaps_280.rvl",
+        # ... and on the issue #1631 erased-Result document
+        "../../../backends/go/testdata/result_erased_1631.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two

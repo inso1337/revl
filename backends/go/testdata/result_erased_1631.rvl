@@ -1,0 +1,78 @@
+// issue #1631: a built-in Ok/Err/None whose type the argument does not fully
+// say. The go tier cannot leave a type argument open, so the side the
+// argument is silent about used to become `any`: a `let` that is later
+// returned did not build, and an `==` across two partly erased values
+// compared two different generic instantiations and answered false.
+
+fn takes(r: Result[Int, Str]) -> Bool { return r == Ok(1) }
+
+// the payload is a call through a function VALUE
+fn ok_through(g: (Int) -> Int) -> Result[Int, Str] {
+  let r = Ok(g(1))
+  return r
+}
+
+// the side the argument cannot say comes from the declared return
+fn ok_lit() -> Result[Int, Str] {
+  let r = Ok(1)
+  return r
+}
+fn err_lit() -> Result[Int, Str] {
+  let e = Err("bad")
+  return e
+}
+fn none_lit() -> Opt[Str] {
+  let n = None
+  return n
+}
+
+// ... or from the declared parameter the binding is handed to
+fn handed_on() -> Bool {
+  let r = Ok(1)
+  return takes(r)
+}
+
+// both sides of an `==` partly erased: one instantiation, the right answer
+fn eq_through(g: (Int) -> Int) -> Bool { return Ok(g(2)) == Ok(2) }
+fn eq_list_call(fs: List[(Int) -> Int]) -> Bool { return Ok(fs[0](2)) == Ok(2) }
+fn err_ne() -> Bool { return Err("x") != Err("y") }
+
+// no flow to take a type from: the binding keeps its erased side, which is
+// sound for a value that never leaves the function
+fn kept_local() -> Int {
+  let r = Ok(1)
+  return match r { Ok(v) => v, Err(e) => 0 }
+}
+
+// a call through a local arrow, whose type the emitter does not track: the
+// payload comes from the other operand
+fn through_arrow() -> Bool {
+  let f = (x: Int) => x + 1
+  return Ok(f(1)) == Ok(2)
+}
+
+// both sides erased the same way inside a List: nothing to fill, one
+// instantiation already
+fn lists_of_erased() -> Bool {
+  let f = (x: Int) => x
+  return [Some(f(1))] == [Some(f(1))]
+}
+
+fn id(x: Int) -> Int { return x }
+
+test "a returned Ok is the declared Result" {
+  assert ok_through(id) == Ok(1)
+  assert ok_lit() == Ok(1)
+  assert err_lit() == Err("bad")
+  assert none_lit() == None
+  assert handed_on()
+}
+
+test "equal values compare equal across a partly erased Result" {
+  assert eq_through(id)
+  assert eq_list_call([id])
+  assert err_ne()
+  assert through_arrow()
+  assert kept_local() == 1
+  assert lists_of_erased()
+}
