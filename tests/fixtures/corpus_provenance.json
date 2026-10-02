@@ -851,6 +851,8 @@
    "tests/fixtures/emit_py_corpus/witnessed.rvl",
    "tests/fixtures/emit_py_corpus/witnessed_secret.rvl",
    "tests/fixtures/emit_py_corpus/witnessed_secret_unused.rvl",
+   "tests/fixtures/emit_py_deferred_register.rvl",
+   "tests/fixtures/emit_py_deferred_shapes.rvl",
    "tests/fixtures/emit_py_map_remove_nested.rvl",
    "tests/fixtures/emit_py_placement.rvl",
    "tests/fixtures/emit_py_spawn_shapes.rvl",

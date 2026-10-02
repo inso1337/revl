@@ -122,7 +122,6 @@
     "subscribe=<true>"
   ],
   "emit_py": [
-    "deferred=<true>",
     "kind=__rendered__",
     "kind=hole",
     "kind=lease-acquire",

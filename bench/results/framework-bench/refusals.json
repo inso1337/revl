@@ -23,8 +23,8 @@
         },
         "py": {
           "residual": 23,
-          "corpus": 96,
-          "reproduced": 73,
+          "corpus": 99,
+          "reproduced": 76,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
             "../../../backends/go/testdata/stream_130.rvl",
@@ -79,7 +79,7 @@
         }
       },
       "total_residual": 32,
-      "total_corpus": 315,
+      "total_corpus": 318,
       "clean_tiers": [
         "java",
         "wasm"
@@ -233,7 +233,7 @@
         "py": {
           "unported_constructs": 6,
           "unported_reasons": 4,
-          "blind_constructs": 1,
+          "blind_constructs": 0,
           "reasons": {
             "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
               "kind=lease-acquire",
@@ -417,14 +417,14 @@
         "compile": 1,
         "emit_go": 49,
         "emit_java": 36,
-        "emit_py": 7,
+        "emit_py": 6,
         "emit_rust": 34,
         "emit_ts": 20,
         "emit_wasm": 50,
         "gate_census": 5,
         "lower_ir": 1
       },
-      "total_unreached": 203
+      "total_unreached": 202
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

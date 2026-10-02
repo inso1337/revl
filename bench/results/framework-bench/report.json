@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+    "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -751,8 +751,8 @@
               },
               "py": {
                 "residual": 23,
-                "corpus": 96,
-                "reproduced": 73,
+                "corpus": 99,
+                "reproduced": 76,
                 "documents": [
                   "../../../backends/go/scenarios/advance.rvl",
                   "../../../backends/go/testdata/stream_130.rvl",
@@ -807,7 +807,7 @@
               }
             },
             "total_residual": 32,
-            "total_corpus": 315,
+            "total_corpus": 318,
             "clean_tiers": [
               "java",
               "wasm"
@@ -961,7 +961,7 @@
               "py": {
                 "unported_constructs": 6,
                 "unported_reasons": 4,
-                "blind_constructs": 1,
+                "blind_constructs": 0,
                 "reasons": {
                   "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
                     "kind=lease-acquire",
@@ -1145,14 +1145,14 @@
               "compile": 1,
               "emit_go": 49,
               "emit_java": 36,
-              "emit_py": 7,
+              "emit_py": 6,
               "emit_rust": 34,
               "emit_ts": 20,
               "emit_wasm": 50,
               "gate_census": 5,
               "lower_ir": 1
             },
-            "total_unreached": 203
+            "total_unreached": 202
           },
           "gate-reference-divergence": {
             "source": "tools/gate_reference_census_baseline.json",
@@ -1168,8 +1168,8 @@
       },
       "headline": {
         "documents_refused": 32,
-        "corpus": 315,
-        "n": 315,
+        "corpus": 318,
+        "n": 318,
         "per_tier": {
           "go": 3,
           "java": 0,
@@ -2547,11 +2547,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 32 of 315 corpus documents that the reference compiler accepts (n=315)",
+      "text": "the fully-native revl chain does not reproduce 32 of 318 corpus documents that the reference compiler accepts (n=318)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2561,7 +2561,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2571,7 +2571,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2581,7 +2581,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2591,7 +2591,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2601,7 +2601,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2611,7 +2611,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2621,7 +2621,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "e2b380ca9b1d0f29f209a745e288de0a36f5235b-dirty",
+        "compiler_commit": "6fbd837b7fe8201fd876d5a6b4131b8c820d6233-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }

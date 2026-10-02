@@ -75,16 +75,16 @@ Measured over each tier's own emitter corpus, the enumerated document list
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     96 |                   96 (100%) |             73 (76.0%) |
+| py   |     99 |                   99 (100%) |             76 (76.8%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
 | go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **315** | **315 (100%)** | **283 (89.8%)** |
+| **total** | **318** | **318 (100%)** | **286 (89.9%)** |
 
-Every one of the 315 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 283 of
+Every one of the 318 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 286 of
 them survive the **fully-native** chain, so all 32 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.

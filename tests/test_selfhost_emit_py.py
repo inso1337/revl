@@ -277,11 +277,24 @@ CORPUS = [
     "../../../backends/go/testdata/stream_event_130.rvl",
     "../../../backends/rust/scenarios/stream.rvl",
     "../emit_rust_corpus/comp_stream.rvl",
-    # Reference fix followed by the port, issue #1632: a `Map.remove` whose
-    # receiver carries a `:=` temp is evaluated through a lambda.
+    # item 391: a `deferred` emission (item 245) is enqueued on the session's
+    # deferral queue, never fired at the call site; the port refused it by
+    # name at both sites before. deferred_emission_call.rvl is the tree's
+    # provide-method shape (every tier's refusal fixture holds the same code).
+    # emit_py_deferred_shapes.rvl adds the activation-body site, the item-440
+    # `keyed` and `declared` registers, and a deferred extern beside one that
+    # fires through the `extern_emit` seam.
+    "../emit_ts_refusals/deferred_emission_call.rvl",
+    "../emit_py_deferred_shapes.rvl",
+    # emit_py_deferred_register.rvl: the item-440 `keyed` and `declared`
+    # registers on the enqueue (an inline test until #1651 let the self-host
+    # gate read the `idempotent` modifier).
+    "../emit_py_deferred_register.rvl",
+    # Reference fixes followed by the port. emit_py_map_remove_nested.rvl
+    # (issue #1632): a `Map.remove` whose receiver carries a `:=` temp is
+    # evaluated through a lambda. emit_py_stream_builtin_bind.rvl (issue
+    # #1646): an `every ... in` item named after a builtin is renamed once.
     "../emit_py_map_remove_nested.rvl",
-    # Reference fix followed by the port, issue #1646: an `every ... in` item
-    # named after a builtin is renamed once.
     "../emit_py_stream_builtin_bind.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
@@ -700,10 +713,6 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
 
 
 @pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
-    # item 245: a deferred emission is enqueued on the session, never fired at
-    # the call site. The port used to fire the host body directly.
-    ("tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl",
-     "_revl_frame.enqueue_deferred(", "<<UNSUPPORTED-METHODSTEP:deferred-emit>>"),
     # item 257: a call to a `validated` operation goes through the response
     # validation seam. The port used to emit the raw call, handing the body an
     # unvalidated model response.
@@ -802,29 +811,6 @@ def test_a_py_ref_extern_is_named_not_emitted_empty(emitted, reference, tmp_path
     assert "<<UNSUPPORTED-EXTERN:py-ref engine>>" in got
     assert "def engine(" not in got
     reason = shared_witness_token_reason(want, "<<UNSUPPORTED-EXTERN:py-ref engine>>")
-    assert reason is None, reason
-
-
-# The activation-body half of the deferred-emission refusal (the method-body
-# half is the boundary row above): no document in the tree fires a deferred
-# extern straight from an activation body, so the source is inline.
-DEFERRED_BODY_SRC = """extern emission deferred fn deliver(msg: Str) = @py { return }
-component Mailer {
-  emit deliver("hi")
-}
-"""
-
-
-def test_a_deferred_emission_in_an_activation_body_is_named_not_fired(emitted, reference, tmp_path):
-    path = tmp_path / "deferred.rvl"
-    path.write_text(DEFERRED_BODY_SRC)
-    ir = compile_files([str(path)])
-    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
-    assert "_revl_frame.enqueue_deferred('deliver'" in want
-    assert "enqueue_deferred" not in got
-    assert "deliver('hi')" not in got
-    assert "<<UNSUPPORTED-BODYSTEP:deferred-emit>>" in got
-    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-BODYSTEP:deferred-emit>>")
     assert reason is None, reason
 
 
