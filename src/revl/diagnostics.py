@@ -224,7 +224,11 @@ def classify(error: RevlError) -> dict:
         record["actual"] = actual
     if code in GUARANTEES:
         record["guarantee"] = GUARANTEES[code]
-    if code in FIXES:
+    if getattr(error, "fix", None):
+        # a rewrite specific to this rejection (a corrected line) outranks the
+        # per-code one: the code's fix is written for its commonest shape
+        record["fix"] = error.fix
+    elif code in FIXES:
         # the exact rewrite, beside the guarantee, so an agent gets the fix
         # without a second `explain` call or parsing the prose hint
         record["fix"] = FIXES[code]

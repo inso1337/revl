@@ -22,7 +22,9 @@ Lowering summary (see REPORT.md for the reasoning):
   is the runtime's own (R5); yielding the wrapper reparents it into the body
   effect at the correct LIFO position.
 - `emit` steps -> plain calls; a `compensate` clause additionally registers a
-  compensation entry (see above).
+  compensation entry (see above). So does an emitted extern that DECLARES its
+  own `compensate` (item 254), at every site: the activation body, a
+  provide-method body and a timer firing (issue #1592).
 - `req` expressions -> `ctx.<name>` (the fiber's committed view; stays
   readable during teardown).
 - `effect` steps inside provide-method bodies -> `ctx.effect(() => ...)`,
@@ -1416,44 +1418,25 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
                 lines.append(f"{indent}  return {inverse}")
             lines.append(f"{indent}}})")
         elif kind == "emit":
-            if step.get("compensate") is not None:
-                # item 247 (method-body compensate remainder): a method-body `emit ... compensate ...` is a first-
-                # class COMPENSATION on the component's activation frame (the
-                # method-body analog of item 247's activation-body site), NOT a
-                # bare `ctx.effect(() => { ...; return () => <offset> })` bracket.
-                # A bare bracket is disposed by cordis BEFORE the body `drain`, so
-                # it fires the offset on a CLEAN unload (destroying the
-                # deliverable), interleaves with proof inverses, and is unguarded.
-                # `frame.compensationMethod` makes it abort-only: discharged on a
-                # commit, drained in Phase 2 after every proof inverse, guarded
-                # and residue-collected. Fire the emission first, then register —
-                # mirrors the activation-body site and py's `_method_step`. Args
-                # are bound to temps HERE, at registration (the "no data hazard"
-                # reason for the phase split).
-                lines.append(f"{indent}{_expr(step['expr'], ctx)}")
-                ctx._counter[0] += 1
-                n = ctx._counter[0]
-                site = f"{provide_name or 'provide'}.{method_name or 'method'}#{n}"
-                comp_node = step["compensate"]
-                bound_call = _bind_call_temps(comp_node, ctx, lines, indent, f"$revl_comp{n}")
-                if bound_call is not None:
-                    target_ts, key_str, method, temps = bound_call
-                    run_ts = _replay_call(comp_node, target_ts, method, temps)
-                    crossing = _crossing_literal(key_str, method, temps, site)
-                    args_list = f"[{', '.join(temps)}]"
-                else:
-                    snap = f"$revl_comp{n}"
-                    lines.append(f"{indent}const {snap} = {_expr(comp_node, ctx)}")
-                    run_ts = snap
-                    crossing = _crossing_literal(provide_name or "provide", "compensate", [], site)
-                    args_list = "[]"
-                lines.append(
-                    f"{indent}{frame_var}.compensationMethod({crossing}, "
-                    f"{_string(method if bound_call is not None else 'compensate')}, "
-                    f"{args_list}, () => {run_ts})"
-                )
-            else:
-                lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+            # item 247 (method-body compensate remainder): a method-body
+            # compensation is a first-class COMPENSATION on the component's
+            # activation frame (the method-body analog of item 247's
+            # activation-body site), NOT a bare `ctx.effect(() => { ...; return
+            # () => <offset> })` bracket. A bare bracket is disposed by cordis
+            # BEFORE the body `drain`, so it fires the offset on a CLEAN unload
+            # (destroying the deliverable), interleaves with proof inverses, and
+            # is unguarded. `frame.compensationMethod` makes it abort-only:
+            # discharged on a commit, drained in Phase 2 after every proof
+            # inverse, guarded and residue-collected. Fire the emission first,
+            # then register: the site-spelled clause, then the extern's own
+            # declared one (item 254, issue #1592).
+            lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+            for comp_node in _emit_compensations(step, ctx):
+                _register_compensation(
+                    comp_node, ctx, lines, indent, frame_var,
+                    f"{provide_name or 'provide'}.{method_name or 'method'}",
+                    provide_name or "provide",
+                    f"{frame_var}.compensationMethod")
         elif kind == "await":
             # A1: legal only in an `async` provide-method (services 2.0 §5); a
             # sync method has no in-flight window. The await lands, then control
@@ -1744,6 +1727,82 @@ def _witnessed_extern(acquire: Any, ctx: "_Ctx") -> Optional[dict]:
     return ctx.witnessed.get(acquire.get("name"))
 
 
+def _compensated_extern(expr: Any, ctx: "_Ctx") -> Optional[dict]:
+    """The emission extern an `emit`'s expression calls when that extern
+    DECLARES its own `compensate` (item 254), or `None`. Mirrors
+    backends/python/emit.py `_ComponentEmitter._compensated_extern`: the call is
+    a `fn`-kind node naming the extern."""
+    if not ctx.compensated or not isinstance(expr, dict):
+        return None
+    if expr.get("kind") != "fn":
+        return None
+    return ctx.compensated.get(expr.get("name"))
+
+
+def _emit_compensations(step: dict, ctx: "_Ctx") -> list:
+    """The compensation expressions an `emit` step registers, in order: the
+    site-spelled `compensate` clause, then the extern's own declared one. The
+    same order the py reference registers them in."""
+    out = []
+    if step.get("compensate") is not None:
+        out.append(step["compensate"])
+    ext = _compensated_extern(step.get("expr"), ctx)
+    if ext is not None:
+        out.append(_as_fn_call(ext["compensate"]))
+    return out
+
+
+def _as_fn_call(node: Any) -> Any:
+    """An extern's declared slot is lowered in the pure-expression dialect
+    (`{"kind": "call", "callee": {"kind": "var", ...}}`, see
+    `_call_method_name`). Re-spell a bare named call as the component-site
+    `fn` node, so `_bind_call_temps` binds its arguments at registration and
+    the Phase-2 closure replays the call. Anything else is returned as is."""
+    if isinstance(node, dict) and node.get("kind") == "call" and "target" not in node:
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            return {"kind": "fn", "name": callee.get("name"),
+                    "args": list(node.get("args") or [])}
+    return node
+
+
+def _register_compensation(comp_node: Any, ctx: "_Ctx", lines: list[str],
+                           indent: str, frame_var: str, site: str,
+                           fallback_key: str, prefix: str) -> None:
+    """Render one compensation registration after its emission fired.
+
+    `prefix` is the registration call: `yield <frame>.compensation` on an
+    activation body (the generator's LIFO) or `<frame>.compensationMethod` where
+    there is no generator to yield into (a provide-method body, a timer firing).
+    Args are bound to temps HERE, at registration, per the contract's "no data
+    hazard": a deferred Phase-2 closure never re-reads a variable that a later
+    step in the same body might have reassigned."""
+    ctx._counter[0] += 1
+    n = ctx._counter[0]
+    site = f"{site}#{n}"
+    bound_call = _bind_call_temps(comp_node, ctx, lines, indent, f"$revl_comp{n}")
+    if bound_call is not None:
+        target_ts, key_str, method, temps = bound_call
+        run_ts = _replay_call(comp_node, target_ts, method, temps)
+        crossing = _crossing_literal(key_str, method, temps, site)
+        args_list = f"[{', '.join(temps)}]"
+    else:
+        # unrecognised compensate shape: eagerly snapshot its value now
+        # (registration time) rather than close over a live binding. See this
+        # module's doc on the fallback's documented limitation for a non-call
+        # compensate expression.
+        snap = f"$revl_comp{n}"
+        lines.append(f"{indent}const {snap} = {_expr(comp_node, ctx)}")
+        run_ts = snap
+        crossing = _crossing_literal(fallback_key, "compensate", [], site)
+        args_list = "[]"
+    lines.append(
+        f"{indent}{prefix}({crossing}, "
+        f"{_string(method if bound_call is not None else 'compensate')}, "
+        f"{args_list}, () => {run_ts})"
+    )
+
+
 def _witnessed_step(step: dict, ext: dict, ctx: "_Ctx", indent: str,
                     lines: list[str], frame_var: str, bind: Optional[str],
                     site: str) -> None:
@@ -1852,7 +1911,7 @@ def _method_body_needs_frame(steps: list, ctx: "_Ctx") -> bool:
         if kind in ("let-effect", "effect") \
                 and _witnessed_extern(step.get("acquire"), ctx) is not None:
             return True
-        if kind == "emit" and step.get("compensate") is not None:
+        if kind == "emit" and _emit_compensations(step, ctx):
             return True
     return False
 
@@ -1868,18 +1927,22 @@ def _needs_frame(component: dict, ctx: "_Ctx") -> bool:
     a document with no such component at all, must emit with NO `Frame`
     construction and no `begin`/`drain` sentinels — byte-identical to before
     this slice. Walks `if` branches (the only nesting an activation-body step
-    reaches in this document's `body` list), but does NOT descend into a
-    `timer` step's nested body: a timer body is emission-only (item 57 —
-    `_component_step`'s own invariant check refuses anything else), so it can
-    never carry a `compensate`, and a witnessed call is refused outside
-    activation effect position, so a timer body never contributes either
-    way."""
+    reaches in this document's `body` list) and a `timer` step's emissions: a
+    timer body cannot spell `compensate` (the parser refuses it), but an
+    emitted extern that declares its own registers it on every firing (issue
+    #1592). A witnessed call is refused outside activation effect position, so
+    a timer body never contributes one."""
     def walk(steps: list) -> bool:
         for step in steps or []:
             kind = step.get("step")
             if kind in ("let-effect", "effect") and _witnessed_extern(step.get("acquire"), ctx) is not None:
                 return True
-            if kind == "emit" and step.get("compensate") is not None:
+            if kind == "emit" and _emit_compensations(step, ctx):
+                return True
+            # a timer firing that emits an extern declaring its own
+            # `compensate` registers it on the activation frame (issue #1592)
+            if kind == "timer" and any(_emit_compensations(e, ctx)
+                                       for e in step.get("body") or []):
                 return True
             if kind == "if":
                 if walk(step.get("then") or []) or walk(step.get("else") or []):
@@ -2076,37 +2139,15 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             lines.append(f"{indent}{_await_statement(step['expr'], ctx)}")
         else:
             lines.append(f"{indent}{_expr(step['expr'], ctx)}")
-        if step.get("compensate") is not None:
-            # item 247: a compensation entry — audit-facing, best-effort,
-            # ABORT-ONLY, Phase 2 (never on a clean unload). Args are bound to
-            # temps HERE, at registration, per the contract's "no data
-            # hazard" — a deferred Phase-2 closure never re-reads a variable
-            # that a later step in this same body might have reassigned.
-            ctx._counter[0] += 1
-            n = ctx._counter[0]
-            site = f"{component['name']}.body#{n}"
-            comp_node = step["compensate"]
-            bound_call = _bind_call_temps(comp_node, ctx, lines, indent, f"$revl_comp{n}")
-            if bound_call is not None:
-                target_ts, key_str, method, temps = bound_call
-                run_ts = _replay_call(comp_node, target_ts, method, temps)
-                crossing = _crossing_literal(key_str, method, temps, site)
-                args_list = f"[{', '.join(temps)}]"
-            else:
-                # unrecognised compensate shape: eagerly snapshot its value
-                # now (registration time) rather than close over a live
-                # binding — see this function's module doc on the fallback's
-                # documented limitation for a non-call compensate expression.
-                snap = f"$revl_comp{n}"
-                lines.append(f"{indent}const {snap} = {_expr(comp_node, ctx)}")
-                run_ts = snap
-                crossing = _crossing_literal(component["name"], "compensate", [], site)
-                args_list = "[]"
-            lines.append(
-                f"{indent}yield {frame_var}.compensation({crossing}, "
-                f"{_string(method if bound_call is not None else 'compensate')}, "
-                f"{args_list}, () => {run_ts})"
-            )
+        # item 247: a compensation entry: audit-facing, best-effort,
+        # ABORT-ONLY, Phase 2 (never on a clean unload). Both the site-spelled
+        # clause and the extern's own declared one (item 254, issue #1592)
+        # register here, in that order.
+        for comp_node in _emit_compensations(step, ctx):
+            _register_compensation(
+                comp_node, ctx, lines, indent, frame_var,
+                f"{component['name']}.body", component["name"],
+                f"yield {frame_var}.compensation")
     elif kind == "await":
         # v1/A1: the await lands (inertia), then the yield closes the
         # iteration so a divert during the await skips every later step.
@@ -2173,10 +2214,19 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
                 raise EmitError(f"a timer body carries emissions only, "
                                 f"found {emission.get('step')!r}")
         interval = int(step["interval_ms"])
+        # an emitted extern that declares its own `compensate` registers it on
+        # every firing, after the fire (item 254, issue #1592). A firing has no
+        # generator to yield into, so it uses the provide-method form.
+        timer_site = f"{component['name']}.timer{n}"
         if not step.get("async"):
             lines.append(f"{indent}const {fn} = () => {{")
             for emission in emissions:
                 lines.append(f"{indent}  {_expr(emission['expr'], ctx)}")
+                for comp_node in _emit_compensations(emission, ctx):
+                    _register_compensation(
+                        comp_node, ctx, lines, indent + "  ", frame_var,
+                        timer_site, component["name"],
+                        f"{frame_var}.compensationMethod")
             lines.append(f"{indent}}}")
             lines.append(f"{indent}const {handle} = host.{verb}({interval}, {fn})")
             lines.append(indent + _bracket_yield(
@@ -2215,6 +2265,11 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
             else:
                 # a sync emission in a mixed body still fires inline
                 lines.append(f"{indent}  {rendered}")
+                for comp_node in _emit_compensations(emission, ctx):
+                    _register_compensation(
+                        comp_node, ctx, lines, indent + "  ", frame_var,
+                        timer_site, component["name"],
+                        f"{frame_var}.compensationMethod")
         lines.append(f"{indent}}}")
         lines.append(f"{indent}const {handle} = host.{verb}({interval}, {fn})")
         lines.append(indent + _bracket_yield(
@@ -2731,6 +2786,15 @@ class _Ctx:
             ext["name"]: ext for ext in (externs or [])
             if ext.get("class") == "witnessed"
         }
+        # item 254: emission externs that DECLARE their own `compensate`, by
+        # name. Every `emit` of one registers that compensation, at whatever
+        # site the emit sits (issue #1592). Mirrors backends/python/emit.py's
+        # `_ComponentEmitter.compensated`; empty for a document with no such
+        # extern, so its emission is unaffected.
+        self.compensated = {
+            ext["name"]: ext for ext in (externs or [])
+            if ext.get("class") == "emission" and ext.get("compensate") is not None
+        }
         # async callables (roadmap item 80): call sites naming one are awaited
         # (docs/design/async-extern.md §5). Seeded from async externs *and*
         # phase-2 async-colored module fns (both carry `"async": True` on their
@@ -2778,6 +2842,7 @@ class _Ctx:
         view.empty_list_types = (self.empty_list_types
                                  if empty_list_types is None else empty_list_types)
         view.witnessed = self.witnessed
+        view.compensated = self.compensated
         view.async_names = self.async_names
         view.async_ops = self.async_ops
         view.async_locals = self.async_locals if async_locals is None else async_locals

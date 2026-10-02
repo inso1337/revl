@@ -6,10 +6,14 @@
       "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
       "tiers": {
         "go": {
-          "residual": 0,
-          "corpus": 23,
-          "reproduced": 23,
-          "documents": []
+          "residual": 3,
+          "corpus": 38,
+          "reproduced": 35,
+          "documents": [
+            "../../../backends/go/testdata/opt_gaps_280.rvl",
+            "../../../backends/go/testdata/result_erased_1631.rvl",
+            "in_file_tests.rvl"
+          ]
         },
         "java": {
           "residual": 0,
@@ -19,8 +23,8 @@
         },
         "py": {
           "residual": 22,
-          "corpus": 94,
-          "reproduced": 72,
+          "corpus": 95,
+          "reproduced": 73,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
             "../../../backends/go/testdata/stream_130.rvl",
@@ -73,10 +77,9 @@
           "documents": []
         }
       },
-      "total_residual": 28,
-      "total_corpus": 298,
+      "total_residual": 31,
+      "total_corpus": 314,
       "clean_tiers": [
-        "go",
         "java",
         "wasm"
       ]
@@ -87,36 +90,10 @@
       "means": "constructs the reference emitter implements and the self-host port does not",
       "tiers": {
         "go": {
-          "unported_constructs": 65,
+          "unported_constructs": 48,
           "unported_reasons": 10,
-          "blind_constructs": 4,
+          "blind_constructs": 1,
           "reasons": {
-            "Builtin Opt/Result constructors, matching, coalescing and optional chaining need the absent tagged generic preambles/payload renderer. Declared user variants are implemented and covered; the static case/name/pattern markers here refer to builtin Some/None/Ok/Err, not all ADTs.": [
-              "case=Err",
-              "case=None",
-              "case=Ok",
-              "case=Some",
-              "kind=optcall",
-              "kind=optfield",
-              "name=Err",
-              "name=None",
-              "name=Ok",
-              "name=Some",
-              "pattern=Err",
-              "pattern=None",
-              "pattern=Ok",
-              "pattern=Some"
-            ],
-            "General Str/List/Map stdlib and checked-division helpers are explicitly deferred by the Go oracle/scaffold. Arithmetic conversion builtins are handled separately and covered; those do not supply length/concat/collection helper bodies or Map/Result preambles.": [
-              "fn=Map.new",
-              "kind=len",
-              "kind=maplit",
-              "method=checked_div_trunc",
-              "method=length",
-              "method=push",
-              "method=set",
-              "name=length"
-            ],
             "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
               "kind=bool",
               "kind=fn",
@@ -159,11 +136,20 @@
               "step=var",
               "subscribe=<true>"
             ],
+            "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err`).": [
+              "case=None",
+              "case=Some",
+              "name=Err",
+              "name=Ok"
+            ],
             "Surviving service/config/extern secret markings select runtime redaction through _declares_secret only after Go's pure-module early return. The corpus already covers a Secret extern return wrapper, but it does not establish parameter/call-descriptor or secret-witness WAL redaction parity (roadmap 421F6).": [
               "secret=<true>"
             ],
             "The Go reference explicitly raises for v3 record_update; this is a backend refusal, not a missing supported port corpus family.": [
               "kind=record_update"
+            ],
+            "The dotted `fn` spelling of the component tier's host arm (`_expr`'s `host` node), which only a live stc-go component carries. issue #106 ported the stdlib builtins, `len`, `Map.empty()` and the total division forms, and the pure-fn host constructor (`Map.new()` as `MapNew[string]`) is ported in `host_constructor` and reached by emit_py_corpus/hostroots.rvl; the live-tier host arm stays with the component world this port does not emit.": [
+              "fn=Map.new"
             ],
             "Unresolved holes are rejected by the reference's pre-emission _refuse_holes pass; successful source corpus documents cannot exercise hole emission.": [
               "kind=hole"
@@ -420,7 +406,7 @@
           }
         }
       },
-      "total_unported": 183
+      "total_unported": 166
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -428,7 +414,7 @@
       "means": "dispatch arms an oracle's reference implementation can take that no corpus document exhibits; an unexercised path, not a refusal",
       "oracles": {
         "compile": 1,
-        "emit_go": 69,
+        "emit_go": 49,
         "emit_java": 36,
         "emit_py": 7,
         "emit_rust": 34,
@@ -437,7 +423,7 @@
         "gate_census": 5,
         "lower_ir": 1
       },
-      "total_unreached": 223
+      "total_unreached": 203
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

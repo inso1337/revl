@@ -157,6 +157,10 @@ Rules that will reject you if you forget them:
   marker is an error (G4). An emission is irreversible; it must be *visible*.
 - **Undeclared access**, a component reaches the world only through its
   `requires` (G1). Using an undeclared name won't compile.
+- **`requires` and `provides` go on the header line**, `component C requires
+  db: Database provides cache: Cache {`, never as statements inside the body.
+  Written in the body, the refusal says so and its `fix` is the corrected
+  header line.
 - **No acquisition after `provide`** (A2); **no `await` in a provide-method
   body unless the operation is declared `async fn`** (A1).
 - **`fail "msg"`**, deliberate L-Raise: reverts accumulated effects and lands
