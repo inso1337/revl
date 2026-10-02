@@ -60,10 +60,73 @@ fn resolve_key(root: &cordis::Context, placements: &J, key: &str) -> Resolved {
         at.len(), where_.join(", ")))
 }
 
+/// What this process serves: the keys other processes consume from it
+/// (`serve.keys`) and, per key, the operations its service declaration admits
+/// (`serve.methods`, the allowlist `placement.py` reads off the IR).
+///
+/// The generated `_revl_invoke` resolves EVERY key the document's components
+/// provide, and answers a key or method it does not know with `null`, which
+/// `handle_conn` used to wrap in `"ok": true` (issue #1599). So a raw call
+/// reached a key this process provides but does not export, and a refused call
+/// read as an answer. A request outside this surface is now refused with the
+/// py bridge's wording and never dispatched.
+struct Exported {
+    keys: std::collections::BTreeSet<String>,
+    methods: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+impl Exported {
+    fn from_spec(serve: &serde_json::Map<String, J>) -> Exported {
+        let names = |v: &J| -> std::collections::BTreeSet<String> {
+            v.as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let keys = serve.get("keys").map(names).unwrap_or_default();
+        let methods = serve
+            .get("methods")
+            .and_then(|m| m.as_object())
+            .map(|m| m.iter().map(|(k, v)| (k.clone(), names(v))).collect())
+            .unwrap_or_default();
+        Exported { keys, methods }
+    }
+
+    /// The refusal for a request outside the surface, or `None`. A key with
+    /// no `methods` entry is left to the generated dispatch.
+    fn refusal(&self, key: &str, method: &str) -> Option<String> {
+        if !self.keys.contains(key) {
+            return Some(format!("key '{key}' is not exported by this process"));
+        }
+        match self.methods.get(key) {
+            Some(ops) if !ops.contains(method) => {
+                let listed = if ops.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    ops.iter().cloned().collect::<Vec<_>>().join(", ")
+                };
+                Some(format!(
+                    "method '{method}' is not exported for key '{key}' (exported: {listed})"
+                ))
+            }
+            _ => None,
+        }
+    }
+}
+
 /// Provider side: dispatch one connection's requests to locally-provided
-/// services via the generated `_revl_invoke`, each in the context its key
-/// resolves in.
-fn handle_conn(stream: UnixStream, served: &Served, refused: &std::collections::HashMap<String, String>) {
+/// services via the generated `_revl_invoke`, inside the exported surface and
+/// each in the context its key resolves in. The allowlist is checked first, so
+/// a request outside the surface never reaches realm resolution.
+fn handle_conn(
+    stream: UnixStream,
+    served: &Served,
+    refused: &std::collections::HashMap<String, String>,
+    exported: &Exported,
+) {
     let reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -98,6 +161,15 @@ fn handle_conn(stream: UnixStream, served: &Served, refused: &std::collections::
                     "revl E-Stop engaged: this process is HALTED and refuses new \
                      crossings (key {key}, method {method}) — docs/design/443-estop.md"),
             });
+            let mut out = serde_json::to_string(&reply).unwrap_or_else(|_| "{\"ok\":false}".into());
+            out.push('\n');
+            if writer.write_all(out.as_bytes()).is_err() {
+                break;
+            }
+            continue;
+        }
+        if let Some(error) = exported.refusal(key, method) {
+            let reply = serde_json::json!({ "ok": false, "error": error });
             let mut out = serde_json::to_string(&reply).unwrap_or_else(|_| "{\"ok\":false}".into());
             out.push('\n');
             if writer.write_all(out.as_bytes()).is_err() {
@@ -144,8 +216,14 @@ fn serve_plugin(key: String, served: Served) -> cordis::PluginHandle {
 }
 
 /// The blocking accept loop that serves every key, each in its own context.
-fn spawn_listener(socket: String, served: Served, refused: std::collections::HashMap<String, String>) {
+fn spawn_listener(
+    socket: String,
+    served: Served,
+    refused: std::collections::HashMap<String, String>,
+    exported: Exported,
+) {
     let refused = std::sync::Arc::new(refused);
+    let exported = std::sync::Arc::new(exported);
     std::thread::spawn(move || {
         let _ = std::fs::remove_file(&socket);
         let listener = match UnixListener::bind(&socket) {
@@ -156,7 +234,8 @@ fn spawn_listener(socket: String, served: Served, refused: std::collections::Has
             if let Ok(stream) = conn {
                 let served = served.clone();
                 let refused = refused.clone();
-                std::thread::spawn(move || handle_conn(stream, &served, &refused));
+                let exported = exported.clone();
+                std::thread::spawn(move || handle_conn(stream, &served, &refused, &exported));
             }
         }
     });
@@ -359,7 +438,7 @@ fn main() {
                 }
             }
         }
-        spawn_listener(socket.clone(), served, refused);
+        spawn_listener(socket.clone(), served, refused, Exported::from_spec(serve));
         log("serve", &keys.join(", "), &format!("-> {socket}"));
     }
 
