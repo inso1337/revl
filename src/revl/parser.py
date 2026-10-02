@@ -2328,6 +2328,18 @@ def _found(tok) -> str:
     return repr(tok.value) if tok.value is not None else "end of file"
 
 
+def _component_header(name: str, requires: list, provides: list,
+                      boot: bool = False) -> str:
+    """`component C requires a: A, b: B provides c: C {` — a component's
+    header line rendered from its parsed clauses, `requires` first."""
+    parts = [("boot " if boot else "") + f"component {name}"]
+    for kw, clause in (("requires", requires), ("provides", provides)):
+        if clause:
+            parts.append(kw + " " + ", ".join(f"{key}: {svc}"
+                                              for key, svc, _ in clause))
+    return " ".join(parts) + " {"
+
+
 class Parser:
     def __init__(self, source: str, filename: str, line_offset: int = 0):
         self.filename = filename
@@ -4461,28 +4473,7 @@ class Parser:
         # declaration a stream REQUIREMENT carries. key -> ReplaySpec.
         require_replay: dict = {}
         while self.at("kw", "requires") or self.at("kw", "provides"):
-            kw = self.next().value
-            target = requires if kw == "requires" else provides
-            while True:
-                bline = self.peek().line
-                local = self._provision_key(what="a requirement or provision key")
-                self.expect(":")
-                svc, replay_decl = self._capability_annotation(kw, local)
-                target.append((local, svc, bline))
-                if replay_decl is not None:
-                    require_replay[local] = replay_decl
-                # item 296: an optional `carrying(tok, ...)` clause on a
-                # *require* binding declares the capability tokens this alias's
-                # emission crossings contribute (alias token carry-over). A
-                # contextual ident so no keyword is added.
-                if kw == "requires" and self.at("ident", "carrying"):
-                    self.next()
-                    require_carry[local] = self._carry_tokens()
-                # a comma continues the same clause; `requires`/`provides`/`{` end it
-                if self.at(","):
-                    self.next()
-                else:
-                    break
+            self._header_clause(requires, provides, require_carry, require_replay)
         # item 477 (follow-up 1): an optional `liveness <dur>` header clause — the
         # declared silence ceiling for this activation. Contextual: recognised only
         # in this trailing header slot (after requires/provides, before `{`), so
@@ -4511,6 +4502,8 @@ class Parser:
                 if config:
                     raise self.err(self.peek().line, f"duplicate `config` block in component {name}")
                 config = self.config_block(boot=boot, owner=name)
+            elif self.at("kw", "requires") or self.at("kw", "provides"):
+                self._misplaced_header_clause(name, requires, provides, boot)
             else:
                 body.append(self.stmt(in_method=False))
         self.expect("}")
@@ -4518,6 +4511,63 @@ class Parser:
                              require_carry=require_carry, boot=boot,
                              liveness_ms=liveness_ms,
                              require_replay=require_replay)
+
+    def _header_clause(self, requires: list, provides: list, require_carry: dict,
+                       require_replay: dict) -> None:
+        """One `requires`/`provides` clause of a component header, the keyword
+        included: `requires a: A, b: B`. Appends to `requires` or `provides`."""
+        kw = self.next().value
+        target = requires if kw == "requires" else provides
+        while True:
+            bline = self.peek().line
+            local = self._provision_key(what="a requirement or provision key")
+            self.expect(":")
+            svc, replay_decl = self._capability_annotation(kw, local)
+            target.append((local, svc, bline))
+            if replay_decl is not None:
+                require_replay[local] = replay_decl
+            # item 296: an optional `carrying(tok, ...)` clause on a
+            # *require* binding declares the capability tokens this alias's
+            # emission crossings contribute (alias token carry-over). A
+            # contextual ident so no keyword is added.
+            if kw == "requires" and self.at("ident", "carrying"):
+                self.next()
+                require_carry[local] = self._carry_tokens()
+            # a comma continues the same clause; `requires`/`provides`/`{` end it
+            if self.at(","):
+                self.next()
+            else:
+                break
+
+    def _misplaced_header_clause(self, name: str, requires: list, provides: list,
+                                 boot: bool) -> None:
+        """`requires`/`provides` written as a statement in a component body.
+
+        Both are clauses of the component HEADER, the line that opens the
+        component, and a body holds statements. The generic statement refusal
+        named the purity rule (G6) and its fix, `let` or `effect`, which is the
+        rewrite for a different mistake. This names the actual one and gives
+        the corrected header, built from the header that was written plus the
+        clauses found in the body, so the rewrite can be applied as it stands."""
+        line = self.peek().line
+        kw = self.peek().value
+        extra_req: list = []
+        extra_prov: list = []
+        while self.at("kw", "requires") or self.at("kw", "provides"):
+            self._header_clause(extra_req, extra_prov, {}, {})
+            self._skip_semis()
+        header = _component_header(name, requires + extra_req,
+                                   provides + extra_prov, boot)
+        message = (f"`{kw}` is part of the component header, not a statement "
+                   f"in the body of {name}")
+        raise RevlError(
+            self.filename, line, message,
+            hint=(f"declare it on the line that opens the component, before the "
+                  f"`{{`: {header}"),
+            code="SYNTAX", category="header",
+            fix=(f"move the clause onto the component header: `{header}` "
+                 f"(`requires` and `provides` are written after the component "
+                 f"name, never inside its body)"))
 
     # -- item 426 S1: the composition document -----------------------------
 
