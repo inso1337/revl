@@ -23,8 +23,8 @@
         },
         "py": {
           "residual": 6,
-          "corpus": 59,
-          "reproduced": 53,
+          "corpus": 60,
+          "reproduced": 54,
           "documents": [
             "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
@@ -62,7 +62,7 @@
         }
       },
       "total_residual": 15,
-      "total_corpus": 278,
+      "total_corpus": 279,
       "clean_tiers": [
         "java",
         "wasm"

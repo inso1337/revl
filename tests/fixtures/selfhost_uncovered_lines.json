@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 104,
       "java": 175,
-      "py": 103,
+      "py": 106,
       "rust": 286,
       "ts": 97,
       "wasm": 63
@@ -1848,9 +1848,13 @@
         },
         "witnessed_extern final miss after a nonempty table: legal matching fn acquires are covered, and unknown fn names are frontend-rejected. The lookup's None fallback mirrors the reference dictionary miss.": {
           "witnessed_extern": 1
+        },
+        "A value emission NESTED inside a larger provide-method expression (`return \"x\" + emit f(t)`): the reference fires it through `_revl_extern_emit` wherever it sits in the method body (`_route_value_emissions`), while this port routes only the whole-value shapes (`return emit f(x)`, `let r = emit f(x)`, an assignment, a branch condition) that services_value_emission.rvl covers, because `cexpr` carries no emitter state to route a nested call with. `reaches_value_emission` finds the nested call and `method_value` renders `<<UNSUPPORTED-NESTED-VALUE-EMISSION>>` instead of the bare call the WAL would never see, so the divergence is loud. A corpus document with the nested shape would turn the byte oracle red rather than close the gap; porting it (threading the routing state through `cexpr`) is what deletes this entry.": {
+          "method_value": 1,
+          "reaches_value_emission": 2
         }
       },
-      "uncovered_statements": 103
+      "uncovered_statements": 106
     },
     "rust": {
       "statements": 4092,
