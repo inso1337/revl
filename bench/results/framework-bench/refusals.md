@@ -19,15 +19,15 @@ them. That is the cost, stated first.
 
 | tier | residual | corpus | reproduced |
 |---|---:|---:|---:|
-| go | **0** | 23 | 23 |
+| go | **3** | 38 | 35 |
 | java | **0** | 59 | 59 |
-| py | **17** | 89 | 72 |
+| py | **17** | 90 | 73 |
 | rust | **2** | 40 | 38 |
 | ts | **4** | 61 | 57 |
 | wasm | **0** | 21 | 21 |
-| **total** | **23** | 293 | 270 |
+| **total** | **26** | 309 | 283 |
 
-Tiers with no residual: go, java, wasm.
+Tiers with no residual: java, wasm.
 
 ## Constructs the self-host port does not implement
 
@@ -36,13 +36,13 @@ Gate: `python3 tools/selfhost_coverage.py --check`
 
 | tier | unported constructs | distinct reasons | blind |
 |---|---:|---:|---:|
-| go | **65** | 10 | 4 |
+| go | **48** | 10 | 1 |
 | java | **30** | 14 | 6 |
 | py | **11** | 5 | 1 |
 | rust | **20** | 7 | 14 |
 | ts | **16** | 8 | 4 |
 | wasm | **46** | 11 | 4 |
-| **total** | **188** | | |
+| **total** | **171** | | |
 
 ## Dispatch arms no corpus document exercises
 
@@ -55,8 +55,8 @@ known-broken.
 
 | oracle | unreached arms |
 |---|---:|
-| emit_go | 69 |
 | emit_wasm | 50 |
+| emit_go | 49 |
 | emit_java | 36 |
 | emit_rust | 34 |
 | emit_ts | 20 |
@@ -64,7 +64,7 @@ known-broken.
 | gate_census | 5 |
 | lower_ir | 3 |
 | compile | 1 |
-| **total** | **230** |
+| **total** | **210** |
 
 ## Where the gate is more permissive than the reference
 

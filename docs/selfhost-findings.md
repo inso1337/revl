@@ -1739,17 +1739,17 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     89 |                   89 (100%) |             72 (80.9%) |
+| py   |     90 |                   90 (100%) |             73 (81.1%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
-| go   |     23 |                   23 (100%) |            23 (100.0%) |
+| go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **293** | **293 (100%)** | **270 (92.2%)** |
+| **total** | **309** | **309 (100%)** | **283 (91.6%)** |
 
-Every one of the 293 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 270 of
-them survive the **fully-native** chain, so all 23 residual documents
+Every one of the 309 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 283 of
+them survive the **fully-native** chain, so all 26 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1779,7 +1779,7 @@ in `tests/test_selfhost_compile.py` asserts both halves per document). Paths are
 relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/`:
 
 <!-- docgen:selfhost-residual-docs begin -->
-`py`, 17 residual of 89:
+`py`, 17 residual of 90:
 
 - `services_control_flow.rvl`
 - `services_host_stream.rvl`
@@ -1806,9 +1806,11 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `component_edges.rvl`
 - `../emit_py_corpus/services_control_flow.rvl`
 
-`go`, 0 residual of 23:
+`go`, 3 residual of 38:
 
-- none; the fully-native chain reproduces the whole corpus.
+- `in_file_tests.rvl`
+- `../../../backends/go/testdata/opt_gaps_280.rvl`
+- `../../../backends/go/testdata/result_erased_1631.rvl`
 
 `java`, 0 residual of 59:
 
