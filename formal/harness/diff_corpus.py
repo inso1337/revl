@@ -130,6 +130,10 @@ from revl.parser import (
     ExprArrow,
     ExprCall,
     ExprField,
+    ExprIf,
+    ExprIndex,
+    ExprList,
+    ExprRecord,
     ExprVar,
     IsolateStmt,
     LetEffect,
@@ -175,6 +179,23 @@ def _route(callee: object) -> tuple[str, str] | None:
     if isinstance(callee, ExprVar):
         return callee.name, ""
     return None
+
+
+def _route_values(callee: object) -> tuple[str, str] | None:
+    """`_route`, reading through a list element as well: `ps[0].charge(...)`
+    is `("ps", "[].charge")`. Used only where a call is resolved against the
+    provision aliases (`_resolve_emission`), whose list entries are keyed
+    `<name>[]` (issue #1509)."""
+    if isinstance(callee, ExprField):
+        parts: list[str] = []
+        cur = callee
+        while isinstance(cur, (ExprField, ExprIndex)):
+            parts.append(cur.name if isinstance(cur, ExprField) else "[]")
+            cur = cur.target
+        if isinstance(cur, ExprVar):
+            return cur.name, ".".join(reversed(parts))
+        return None
+    return _route(callee)
 
 
 # ---------------------------------------------------------------- caps
@@ -604,10 +625,28 @@ def _resolve_emission(root: str, chain: str, requires: dict, handles: dict,
             return None
         svc = psvc.get(handles[root], {}).get(head)
         return (svc, rest) if svc else None
-    if aliases and root in aliases and chain and "." not in chain:
-        comp, key = aliases[root]
+    hit = _alias_hit(root, chain, aliases)
+    if hit is not None:
+        (comp, key), meth = hit
         svc = psvc.get(comp, {}).get(key)
-        return (svc, chain) if svc else None
+        return (svc, meth) if svc else None
+    return None
+
+
+def _alias_hit(root: str, chain: str, aliases: dict | None):
+    """`((component, key), method)` when the receiver of `root.chain` is a
+    provision alias, else None. The receiver is `root` itself (`t.run`), or a
+    field or element read off it (`r.p.run`, `ps[0].run`), whose alias is
+    keyed by the path (`r.p`, `ps[]`, issue #1509)."""
+    if not aliases or not chain:
+        return None
+    parts = chain.split(".")
+    name = root
+    for part in parts[:-1]:
+        name += part if part == "[]" else f".{part}"
+    held = aliases.get(name)
+    if isinstance(held, tuple):
+        return held, parts[-1]
     return None
 
 
@@ -617,15 +656,9 @@ def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
     `handles` it reads."""
     if node is None or isinstance(node, (str, int, float, bool)):
         return
-    if type(node).__name__ == "LetStmt":
-        value = getattr(node, "value", None)
-        name = getattr(node, "name", None)
-        if isinstance(value, ExprField) and isinstance(value.target, ExprVar) \
-                and value.target.name in handles and isinstance(name, str):
-            aliases[name] = (handles[value.target.name], value.name)
-        elif isinstance(value, ExprVar) and value.name in aliases \
-                and isinstance(name, str):
-            aliases[name] = aliases[value.name]  # a second hop
+    if type(node).__name__ == "LetStmt" and isinstance(getattr(node, "name", None), str):
+        _note_value_aliases(node.name, getattr(node, "value", None), handles,
+                            aliases)
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
             collect_provision_aliases(getattr(node, f.name), handles, aliases)
@@ -633,6 +666,64 @@ def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
     if isinstance(node, (list, tuple)):
         for x in node:
             collect_provision_aliases(x, handles, aliases)
+
+
+def _alias_path(e) -> str | None:
+    """`r`, `r.p`, `ps[]` for a value written as a name read through fields
+    and elements, else None."""
+    if isinstance(e, ExprVar):
+        return e.name
+    if isinstance(e, ExprField):
+        base = _alias_path(e.target)
+        return None if base is None else f"{base}.{e.name}"
+    if isinstance(e, ExprIndex):
+        base = _alias_path(e.target)
+        return None if base is None else f"{base}[]"
+    return None
+
+
+def _value_provision(value, handles: dict, aliases: dict):
+    """The (component, provide key) a value holds: the direct read off a
+    spawn handle, a name (or a field or element read off one) that already
+    aliases one, or an `if` whose two arms hold the same one. The checker
+    reads the same thing as the value's static type (issue #1509)."""
+    if isinstance(value, ExprField) and isinstance(value.target, ExprVar) \
+            and value.target.name in handles:
+        return (handles[value.target.name], value.name)
+    if isinstance(value, ExprIf):
+        then = _value_provision(value.then, handles, aliases)
+        return then if then is not None and then == _value_provision(
+            value.otherwise, handles, aliases) else None
+    path = _alias_path(value)
+    held = aliases.get(path) if path is not None else None
+    return held if isinstance(held, tuple) else None
+
+
+def _note_value_aliases(name: str, value, handles: dict, aliases: dict) -> None:
+    """Record what a `let name = value` binding holds: the provision itself
+    (`let t = w.task`, a second hop, an `if` of one), or a record field or
+    list element holding one, keyed `name.field` / `name[]` (issue #1509), and
+    what a copy of such a record or list holds (`let r2 = r`)."""
+    held = _value_provision(value, handles, aliases)
+    if held is not None:
+        aliases[name] = held
+        return
+    if isinstance(value, ExprRecord):
+        for key, item in value.fields:
+            held = _value_provision(item, handles, aliases)
+            if held is not None:
+                aliases[f"{name}.{key}"] = held
+        return
+    if isinstance(value, ExprList):
+        items = [_value_provision(i, handles, aliases) for i in value.items]
+        if items and items[0] is not None and all(i == items[0] for i in items):
+            aliases[f"{name}[]"] = items[0]
+        return
+    path = _alias_path(value)
+    if path is not None:
+        for key in [k for k in aliases if k.startswith(f"{path}.")
+                    or k.startswith(f"{path}[]")]:
+            aliases[name + key[len(path):]] = aliases[key]
 
 
 def _arg_provision(arg, handles: dict, aliases: dict) -> "tuple[str, str] | None":
@@ -724,7 +815,7 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
     """The crossing ONE call head contributes (see `walk_reach`). The
     arguments are the caller's to walk, under whatever region encloses them:
     a call evaluated to produce an argument is not the marked crossing."""
-    rt = _route(node.callee)
+    rt = _route_values(node.callee)
     if not rt:
         return
     root, chain = rt
@@ -732,7 +823,7 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
     if res is not None and region == "all":
         svc, meth = res
         if (svc, meth) in em_set:
-            if root in handles or (aliases and root in aliases):
+            if root in handles or _alias_hit(root, chain, aliases) is not None:
                 out.add(("*", "*"))
             else:
                 mode, entries = bounds[(svc, meth)]
@@ -874,7 +965,7 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
             head_ctx = "emitnested" if ctx == "emitarg" else "emit"
             expr = getattr(node, "expr", None)
             if isinstance(expr, ExprCall):
-                route = _route(expr.callee)
+                route = _route_values(expr.callee)
                 if route is not None:
                     out.append((*route, head_ctx))
                 for a in expr.args:
@@ -886,7 +977,7 @@ def walk_calls(node: object, out: list[tuple[str, str, str]], ctx: str) -> None:
                     walk_calls(getattr(node, f.name), out, "emit")
         return
     if isinstance(node, ExprCall):
-        route = _route(node.callee)
+        route = _route_values(node.callee)
         if route is not None:
             out.append((*route, ctx))
         for a in node.args:

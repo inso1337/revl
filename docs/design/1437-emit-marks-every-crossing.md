@@ -229,17 +229,77 @@ refuses it under G5, outside the gate's slice; the gate now refuses the
 unmarked host emission in its `undo` slot, as it already did for the `req`
 carrier. The direction is the fail-closed one.
 
+## The compensate slot and spawn-handle crossings
+
+Two carriers the floor did not see, decided by the product owner after the
+change above.
+
+**A compensation meets the floor.** A `compensate` slot keeps its
+bare-emission exception for the MARKER (a teardown slot has no room for one),
+but a compensation runs during rollback, when there is nobody to ask, so it is
+the last place an approval could be exempted. Every emission crossing in the
+slot (`_compensate_crossings`, outermost first) meets the floor under the step's
+own `with` edge: `emit notify(1) compensate charge(2)` is refused when `charge`
+requires approval, and `… compensate charge(2) with a` is admitted when `a`
+covers `charge`. An edge that covers the head but not the compensation's token
+does not cover the compensation.
+
+**A spawn-handle crossing meets the floor.** The floor resolves a provision
+method off a spawn handle (`emit w.task.run(1)`, and the same through a local
+aliasing `w.task`) to the op's declared `emission[...]` scope, `*` when bare.
+It reads the handle through `_instance_get_call`, the resolver the marker rule
+already uses for this carrier, rather than a second one. The resolution lives
+in `_approval_crossed_caps`, not in `_emit_crossed_caps`: item 470's intent
+refinement reads `_emit_crossed_caps` and refuses a handle crossing as
+unnameable, and resolving it there would have turned that refusal into an
+admission for a handle op whose scope the intent names. That is a loosening of
+a different rule, so it is left for its own decision.
+
+The gate carries both: `appr_group` walks the step's `compensate` slot after
+the head, and `appr_crossed` resolves a handle head through `handle_msig`, the
+gate's twin of `_instance_get_call`.
+
+## Service-typed locals (issue #1509)
+
+A provision can be held by a local in more ways than the direct read and its
+plain alias: chosen by an `if`, stored in a record field or a list element, or
+read back out of one. Measured before this change, with the crossing's token
+requiring approval:
+
+- `let t = if (n > 0) { w.pay } else { w.pay }`, then `emit t.charge(n)`: the
+  marker rule read `t` as a crossing through its service type, but the floor
+  never resolved a call whose receiver is a local, so it crossed with no edge.
+- `let r = { p: w.pay }`, then `r.p.charge(n)`: admitted UNMARKED and
+  unapproved. Neither rule saw through the field; marked, the call was refused
+  as "not declared `emission`".
+- `let ps = [w.pay]`, then `ps[0].charge(n)`: the same as the record field.
+
+One resolver now answers both rules, `_service_receiver_decl`: a call whose
+receiver is rooted at a `let`-bound local of the body being lowered
+(`Env.let_locals`), read through fields and elements, and whose static type
+(`infer_ir`) is a service. `_is_emission_call` reads it for a field or element
+receiver, the unmarked demand is raised at both call sites (spelled as
+written, `t.charge` / `r.p.charge`, the operation alone for a receiver that is
+not names and fields), and `_approval_crossed_caps` reads it for the floor.
+
+An arrow PARAMETER is not a `let`-bound local (`Env._arrow_params`): what
+flows into one is decided at the application (`_check_arrow_param_crossings`),
+and an arrow never applied to a provision must still compile. A provide
+method's own service-typed parameter is likewise outside the resolver.
+
+The gate keeps a per-body typing environment (`Ctx.svcTys`) built with its
+`infer` over a seed that types a spawn-handle read (`@spawn:C` and
+`field @spawn:C.<key>`), and reads it through `svc_recv_msig` for the marker
+(`svc_local_refusal`) and the floor (`appr_local_caps`).
+
 ## What is not covered
 
-- **Teardown slots and approval.** A `compensate` slot that calls an
-  approval-required extern (`emit notify(1) compensate charge(2)`) is admitted:
-  the slot keeps its bare-emission exception and has no place for a `with`
-  edge. Whether a compensation may cross an approval-required capability is a
-  question about the teardown contract, left open here.
-- **Spawn-handle and service-typed-local carriers.** `_emit_crossed_caps`
-  resolves only a `req` target and a direct extern, so a crossing through a
-  spawn handle meets the floor only if its token is reached some other way.
-- **The formal model** carries no fact about approvals. The fifteen approval
+- **A service-typed method parameter.** A provide method whose service
+  declares a parameter of a service type is not resolved: whether a provision
+  reaches it is a question about the caller.
+- **`undo` slots.** A bracket's `undo` that reaches an emission is refused
+  under G5 before any approval question arises.
+- **The formal model** carries no fact about approvals. The approval
   documents sit in the ratcheted `out-of-fragment-approval` bucket
   (`formal/out_of_fragment_ledger.json`) rather than being judged against the
   marker rule's `G` row. Modelling approval is its own issue.

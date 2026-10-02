@@ -1035,15 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**615 .rvl files -> 499 components -> 1245 statements = 364 modeled +
-222 componentless + 29 refused at parse**, and **6789 verdicts compared
-(364 files + 499 components + 160 provide methods + 37 spawn edges + 29
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1245
-confinements + 1245 surfaces + 371 teardowns + 370 provide-clause
-components + 83 config fields + 499 A2 bodies), 6789 agree, 0
+**639 .rvl files -> 544 components -> 1360 statements = 388 modeled +
+222 componentless + 29 refused at parse**, and **7220 verdicts compared
+(388 files + 544 components + 180 provide methods + 38 spawn edges + 29
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1360
+confinements + 1360 surfaces + 392 teardowns + 415 provide-clause
+components + 83 config fields + 544 A2 bodies), 7220 agree, 0
 mismatches**.
 
-Checker alignment over the 364 modeled files. Every bucket recording a
+Checker alignment over the 388 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1068,9 +1068,9 @@ layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 72 | informational |
+| `agree-G4` | 75 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 194 | informational |
+| `agree-accept` | 201 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1081,7 +1081,7 @@ layer.
 | `out-of-fragment` | 64 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
-| `out-of-fragment-approval` | 15 | ratcheted |
+| `out-of-fragment-approval` | 29 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1097,9 +1097,23 @@ buckets are:
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_match_arm.rvl`
 - `out-of-fragment-G5`: `examples/rejections/g5_undo_method_ref_record.rvl`
 - `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_method.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_compensate_other_edge.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_helper_reach.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_scoped_extern.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_alias.rvl`
+- `out-of-fragment-approval`: `examples/rejections/g4_approval_spawn_handle_method.rvl`
 - `out-of-fragment-approval`: `examples/rejections/g4_approval_value_form_method.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_alias_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_arrow_param_applied.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_handle_direct_value.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_if_local_value.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_list_element_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_alias_step.rvl`
+- `out-of-fragment-approval`: `tests/fixtures/approval_service_locals/g4_record_field_step.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl`
