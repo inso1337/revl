@@ -1,0 +1,24 @@
+// REJECTED, G4: an unmarked call to a module `fn` that reaches a host
+// `emission` extern.
+//
+// A `fn` whose body reaches an emission is itself an emission call (the
+// emission fixed point, docs/capabilities.md), so the marker goes on the
+// component-body call to it (issue #1437). The `fn` body itself has no
+// `emit`: a module `fn` is not a component body.
+//
+// `fn ring(cents) = emit bill(cents)` is admitted.
+//
+// expected error:
+//   call to emission `bill` must be marked `emit` (G4)
+
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+fn bill(cents: Int) -> Int { return charge(cents) }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) = bill(cents)
+  }
+}

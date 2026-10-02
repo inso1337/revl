@@ -680,7 +680,7 @@ component Summarizer provides out: Answer {
   route model on summarize { * -> Release }
   provide out {
     fn summarize(d) {
-      let r = prompt(config.doc)
+      let r = emit prompt(config.doc)
       return 0
     }
   }
@@ -1320,7 +1320,7 @@ def _ceiling_program(members: str) -> str:
         + "  config { doc: Secret[Str] }\n"
         + "  route model on summarize { confidential -> Release }\n"
         + "  provide out {\n    fn summarize(d) {\n"
-        + "      let r = prompt(config.doc)\n      return 0\n    }\n  }\n}\n")
+        + "      let r = emit prompt(config.doc)\n      return 0\n    }\n  }\n}\n")
 
 
 SCOPED_VALUE = _ceiling_program(

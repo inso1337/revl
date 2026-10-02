@@ -107,7 +107,7 @@ def test_first_class_arrow_is_a_barrier_between_disjoint_emissions():
     # name). Barrier B hard-breaks the run: the two disjoint emissions land in
     # SEPARATE groups, so the hidden crossing is never reordered around.
     plan = _plan("m: Mailer, d: Db",
-                 'emit m.send("a") let b = dispatch(x) emit d.write("c")')
+                 'emit m.send("a") let b = emit dispatch(x) emit d.write("c")')
     assert plan == [[0], [1]]
 
 
@@ -169,6 +169,6 @@ def test_audit_surface_carries_the_wrapped_plan_when_parallelizable():
 def test_audit_surface_lists_only_components_with_a_real_group():
     # A component whose plan is all singletons is elided from the surface even
     # when another component in the same program does parallelize.
-    audit = _audit("m: Mailer, d: Db", 'emit d.write("a") let b = dispatch(x) emit m.send("c")')
+    audit = _audit("m: Mailer, d: Db", 'emit d.write("a") let b = emit dispatch(x) emit m.send("c")')
     # both emissions are singletons here (barrier B), so no key at all.
     assert "parallel_plan" not in audit

@@ -11,7 +11,7 @@ service K { fn f(k: Str) -> Int }
 component C provides k: K {
   provide k {
     fn f(k) {
-      while (zz_write(k) == 1) {
+      while (emit zz_write(k) == 1) {
         return 1
       }
       return 0
