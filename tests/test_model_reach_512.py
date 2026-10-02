@@ -51,7 +51,7 @@ def _program(cap: str, arms: str, roles: str = ROLES, action: str = "classify",
         f"{clause}"
         "  provide out {\n"
         "    fn classify(text) {\n"
-        "      let r = ask(text)\n"
+        "      let r = emit ask(text)\n"
         "      return r\n"
         "    }\n"
         "  }\n"
@@ -150,7 +150,7 @@ def test_a_sibling_action_block_does_not_place_this_one():
         "component Classifier provides out: Answer {\n"
         "  route model on summarize { web -> local }\n"
         "  provide out {\n"
-        "    fn classify(text) { let r = ask(text) return r }\n"
+        "    fn classify(text) { let r = emit ask(text) return r }\n"
         "    fn summarize(doc) { return 0 }\n"
         "  }\n"
         "}\n")

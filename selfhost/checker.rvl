@@ -3220,13 +3220,24 @@ fn floor_tokens(toks: List[Str], i: Int, scope: Str, ck: Ck) -> Ck {
   return floor_tokens(toks, i + 1, scope, ck)
 }
 
-// The required set is the NAMES of the externs that declared the floor, as
-// the reference's `_approval_index` builds it.
+// The required set is the capability TOKENS of the externs that declared the
+// floor, as the reference's `_approval_index` builds it (issue #1437): an
+// extern's declared scope, else its name. That is the token `crossed_caps`
+// resolves the crossing to, so a scoped `emission[pay.card] ... requires
+// approval` extern is required under `pay.card`; keyed by name, the two never
+// met and such a crossing needed no edge.
 fn approval_required(token: Str, ck: Ck) -> Bool {
-  return match ck.ctx.fns.lookup(token) {
-    Some(f) => f.appr,
+  return appr_token_in(ck.ctx.fns.keys(), 0, token, ck)
+}
+
+fn appr_token_in(names: List[Str], i: Int, token: Str, ck: Ck) -> Bool {
+  if (i >= names.length()) { return false }
+  let hit = match ck.ctx.fns.lookup(names[i]) {
+    Some(f) => f.appr && f.extEm && list_contains(f.extCaps, token),
     None    => false,
   }
+  if (hit) { return true }
+  return appr_token_in(names, i + 1, token, ck)
 }
 
 // `_emit_crossed_caps`: the token(s) ONE emit step crosses. A required-service

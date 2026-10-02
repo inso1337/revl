@@ -1,0 +1,26 @@
+// REJECTED, G4: an unmarked call to a host `emission` extern in a provide
+// method.
+//
+// Every emission crossing carries `emit` at its call site, whatever carries
+// it (issue #1437, docs/design/1437-emit-marks-every-crossing.md). A host
+// extern crosses the boundary exactly as a required service's `emission fn`
+// does, so it gets the same marker and the same refusal. Before #1437 this
+// call was refused only inside another `emit`'s argument list.
+//
+// `let paid = emit charge(cents)` is admitted.
+//
+// expected error:
+//   call to emission `charge` must be marked `emit` (G4)
+
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) {
+      let paid = charge(cents)
+      return paid
+    }
+  }
+}

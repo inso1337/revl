@@ -1,0 +1,22 @@
+// REJECTED, G4: an approval-required host emission nested unmarked in the
+// arguments of another `emit`.
+//
+// The marker covers the head call alone (issue #1175), and the per-crossing
+// approval obligation reads the head. A crossing nested in the head's
+// arguments had no step to bind an approval edge to, so `charge` fired with
+// no approval while `emit charge(...)` on its own was refused. It is refused
+// now by the marker rule (issue #1427): the nested crossing must be hoisted
+// into its own `emit` step, where the approval floor applies to it.
+//
+// expected error:
+//   call to emission `charge` must be marked `emit` (G4)
+
+extern emission fn charge(sink: Str, msg: Str) -> Int requires approval = @py { return 7 }
+extern emission fn log_line(x: Int) -> Int = @py { return x }
+
+service Ops { fn ping() -> Int }
+
+component Biller provides ops: Ops {
+  emit log_line(charge("s", "m"))
+  provide ops { fn ping() = 1 }
+}
