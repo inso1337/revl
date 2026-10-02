@@ -332,3 +332,17 @@ import RevL
 #print axioms RevL.A2.fixture_release_before_withdrawal
 #print axioms RevL.A2.fixture_opens_the_window
 #print axioms RevL.A2.a2_not_vacuous
+
+-- Issue #1455: the approval floor (item 246, Decision 3). The capability
+-- token, the approval edge and the refusal, decided per marked crossing by
+-- the differential oracle's `AP` row.
+#print axioms RevL.G4Approval.coversB_iff
+#print axioms RevL.G4Approval.edgeCoversB_iff
+#print axioms RevL.G4Approval.crossingB_iff
+#print axioms RevL.G4Approval.no_edge_iff_nothing_required
+#print axioms RevL.G4Approval.uncovered_required_refused
+#print axioms RevL.G4Approval.unrequired_needs_no_edge
+#print axioms RevL.G4Approval.covering_edge_admits
+#print axioms RevL.G4Approval.globMatch_star_any
+#print axioms RevL.G4Approval.approval_not_vacuous
+#print axioms RevL.G4Approval.approval_row_not_vacuous
