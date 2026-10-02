@@ -307,7 +307,8 @@ type Ctx = {
   variants: List[Str], tnames: List[Str],
   rt: Str, builders: Map[Str, Str], builder_seq: Int,
   reserved: Map[Str, Str], strings_alias: Str,
-  sc: Map[Str, Str], scan_seq: Int, body: List[Any], tn: Str
+  sc: Map[Str, Str], scan_seq: Int, body: List[Any], tn: Str,
+  fh: Map[Str, Str]
 }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds one `_V3GoCtx` for the function list,
@@ -333,7 +334,8 @@ fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
     tnames: ctx.tnames, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
-    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
   }
 }
 
@@ -347,7 +349,8 @@ fn with_scan(ctx: Ctx, sc: Map[Str, Str], seq: Int) -> Ctx {
     tnames: ctx.tnames, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
-    sc: sc, scan_seq: seq, body: ctx.body, tn: ctx.tn
+    sc: sc, scan_seq: seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
   }
 }
 
@@ -603,7 +606,9 @@ fn infer_type(node: Any, ctx: Ctx) -> Str {
       if (is_builtin_ctor(nm)) { return infer_ctor(nm, value_list(value_field(node, "args")), ctx) }
       let fr = map_get(ctx.fr, nm)
       if (fr != "") { return fr }
-      return map_get(ctx.er, nm)
+      let er = map_get(ctx.er, nm)
+      if (er != "") { return er }
+      return fn_value_ret(map_get(ctx.vt, nm))
     }
     return ""
   }
@@ -783,6 +788,13 @@ fn render_bin(node: Any, ctx: Ctx) -> Str {
       var exp = ""
       if (lt != "" && !has_any_word(lt)) { exp = lt }
       else { if (rt != "" && !has_any_word(rt)) { exp = rt } }
+      if (exp == "") {
+        // Neither side is fully concrete (`Ok(g(2)) == Ok(2)`): fill each
+        // side's erased type arguments from the other, so both emit as ONE
+        // instantiation (issue #1631).
+        let merged = fill_erased(lt, rt)
+        if (merged != lt || merged != rt) { exp = merged }
+      }
       let el = render_expr(value_field(node, "left"), ctx, exp)
       let er = render_expr(value_field(node, "right"), ctx, exp)
       let call = `revlEq(${el}, ${er})`
@@ -1350,6 +1362,100 @@ fn match_two_value(node: Any, ctx: Ctx, expected: Str, scrutinee: Str, st: Str,
   return lines.push("}()").join(newline())
 }
 
+// ----------------------------------------------- erased type arguments (#1631)
+// `_v3_fn_value_ret`: the declared return of a function-typed binding
+// (`g: (Int) -> Int` -> `Int`), or "". Calling a function VALUE answers its
+// declared return just as calling a module fn does.
+fn fn_value_ret(surface: Str) -> Str {
+  let ft = split_fn_type(surface)
+  if (ft.length() == 0) { return "" }
+  return erase_async(ft[ft.length() - 1])
+}
+
+// `_v3_fill_erased`: `surface` with each erased top-level `any` type argument
+// of a built-in Opt/Result filled from `declared`, a type of the same family
+// (else `surface` unchanged).
+fn fill_erased(surface: Str, declared: Str) -> Str {
+  if (surface == "" || declared == "") { return surface }
+  for (head of ["Opt[", "Result["]) {
+    if (surface.startsWith(head) && surface.endsWith("]")
+        && declared.startsWith(head) && declared.endsWith("]")) {
+      let have = split_top(surface.slice(head.length(), surface.length() - 1), ",")
+      let want = split_top(declared.slice(head.length(), declared.length() - 1), ",")
+      if (have.length() != want.length()) { return surface }
+      var merged = []
+      var i = 0
+      while (i < have.length()) {
+        merged = merged.push(have[i] == "any" ? want[i] : have[i])
+        i = i + 1
+      }
+      return `${head}${merged.join(", ")}]`
+    }
+  }
+  return surface
+}
+
+// The `let` arm's flow refinement: a bare `None` infers nothing and is an `Opt`
+// of what it flows into; an Opt/Result value with an erased type argument
+// takes the missing part from the binding's flow hint.
+fn flow_typed(valnode: Any, inferred: Str, hint: Str) -> Str {
+  var t = inferred
+  let vk = node_kind(valnode)
+  if (t == "" && (vk == "var" || vk == "name") && ref_name(valnode) == "None") {
+    let filled = fill_erased("Opt[any]", hint)
+    if (filled != "Opt[any]") { t = filled }
+  }
+  if (has_any_word(t)) { t = fill_erased(t, hint) }
+  return t
+}
+
+// The declared parameter types a call hands an argument to: the module fn's,
+// else the extern's (the reference's `function_params or extern_params`).
+fn declared_params(signatures: List[Any], name: Str) -> List[Str] {
+  var fn_params = []
+  var ext_params = []
+  for (sig of signatures) {
+    if (value_str(value_field(sig, "name")) == name) {
+      var ps = []
+      for (p of value_list(value_field(sig, "params"))) { ps = ps.push(value_str(value_field(p, "type"))) }
+      if (value_is_null(value_field(sig, "bodies"))) { fn_params = ps } else { ext_params = ps }
+    }
+  }
+  return fn_params.length() > 0 ? fn_params : ext_params
+}
+
+// `_v3_flow_hints`: `{binding: declared type}` for each local a body hands on
+// whole. `return x` flows into the declared return, `f(x)` into `f`'s declared
+// parameter; the first occurrence in document order wins.
+fn flow_hints(body: List[Any], ret_type: Str, signatures: List[Any]) -> Map[Str, Str] {
+  var hints: Map[Str, Str] = Map.empty()
+  for (n of walk_nodes(body)) {
+    if (node_step(n) == "return" && ret_type != "") {
+      let e = value_field(n, "expr")
+      if (node_kind(e) == "var") {
+        let x = value_str(value_field(e, "name"))
+        if (!hints.has(x)) { hints = hints.set(x, ret_type) }
+      }
+    }
+    if (node_kind(n) == "call") {
+      let callee = value_field(n, "callee")
+      if (node_kind(callee) == "var") {
+        let params = declared_params(signatures, value_str(value_field(callee, "name")))
+        let args = value_list(value_field(n, "args"))
+        var i = 0
+        while (i < args.length() && i < params.length()) {
+          if (node_kind(args[i]) == "var" && params[i] != "") {
+            let x = value_str(value_field(args[i], "name"))
+            if (!hints.has(x)) { hints = hints.set(x, params[i]) }
+          }
+          i = i + 1
+        }
+      }
+    }
+  }
+  return hints
+}
+
 // The kind dispatch, mirroring `_go_v3_expr`'s branch order (post-widen).
 fn render_inner(node: Any, ctx: Ctx, expected: Str) -> Str {
   let kind = node_kind(node)
@@ -1766,7 +1872,8 @@ fn with_builders(ctx: Ctx, builders: Map[Str, Str], seq: Int) -> Ctx {
     tnames: ctx.tnames, rt: ctx.rt,
     builders: builders, builder_seq: seq,
     reserved: ctx.reserved, strings_alias: ctx.strings_alias,
-    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
   }
 }
 
@@ -1780,7 +1887,8 @@ fn with_reserved(ctx: Ctx, reserved: Map[Str, Str]) -> Ctx {
     tnames: ctx.tnames, rt: ctx.rt,
     builders: ctx.builders, builder_seq: ctx.builder_seq,
     reserved: reserved, strings_alias: ctx.strings_alias,
-    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn
+    sc: ctx.sc, scan_seq: ctx.scan_seq, body: ctx.body, tn: ctx.tn,
+    fh: ctx.fh
   }
 }
 
@@ -1825,7 +1933,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     let raw = value_str(value_field(node, "name"))
     let nm = v3_ident(raw)
     let valnode = value_field(node, "value")
-    let inferred = infer_type(valnode, ctx)
+    let inferred = flow_typed(valnode, infer_type(valnode, ctx), map_get(ctx.fh, raw))
     var nctx = ctx
     if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
     let value = render_expr(valnode, ctx, inferred)
@@ -1901,9 +2009,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int, preceding: List[Any]) -> Sout {
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
     let closed = close_builders(ctx, bodyR.ctx, indent)
-    let cctx = closed.ctx
-    let cursors = cctx.sc
-    let done = with_scan(cctx, cursors.remove(key), cctx.scan_seq)
+    let done = with_scan(closed.ctx, closed.ctx.sc.remove(key), closed.ctx.scan_seq)
     return { lines: out.concat(closed.lines), ctx: done }
   }
   if (step == "for") {
@@ -2165,7 +2271,8 @@ fn emit_functions(functions: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t:
       ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
       rt: rt, builders: Map.empty(), builder_seq: 0,
       reserved: reserved, strings_alias: strings_alias,
-      sc: Map.empty(), scan_seq: 0, body: body, tn: ""
+      sc: Map.empty(), scan_seq: 0, body: body, tn: "",
+      fh: flow_hints(body, rt, signatures)
     }
     var ps = []
     for (p of params) {
@@ -2241,7 +2348,8 @@ fn emit_tests(tests: List[Any], fr: Map[Str, Str], er: Map[Str, Str], t: TypeTab
       ca: t.ca, cp: t.cp, rbf: t.rbf, rf: t.rf, variants: t.variants, tnames: t.tnames,
       rt: "", builders: Map.empty(), builder_seq: 0,
       reserved: res, strings_alias: strings_alias,
-      sc: Map.empty(), scan_seq: 0, body: body, tn: "revlT"
+      sc: Map.empty(), scan_seq: 0, body: body, tn: "revlT",
+      fh: flow_hints(body, "", signatures)
     }
     // `revlT` (not `t`) so a user binding named `t` can't shadow it.
     out = out.push(`func ${tname}(revlT *testing.T) {`)
@@ -3400,7 +3508,8 @@ fn typed_ctx() -> Ctx {
     rt: "", signatures: [],
     builders: Map.empty(), builder_seq: 0,
     reserved: Map.empty(), strings_alias: "strings",
-    sc: Map.empty(), scan_seq: 0, body: [], tn: ""
+    sc: Map.empty(), scan_seq: 0, body: [], tn: "",
+    fh: Map.empty()
   }
 }
 

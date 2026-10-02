@@ -144,8 +144,11 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   Str pointers back from the module's memory and RELAYS one `[wal] {…}` frame per
   registration; `revl.run_wasm` DRAINS those frames and writes+fsyncs them into
   the durable host WAL in the tier-agnostic py JSONL schema (`revl.wal`), so
-  `revl recover` reads a wasm-produced WAL with no wasm runtime on the path. A
-  crash after a descriptor is drained+fsynced but before the terminal
+  `revl recover` reads a wasm-produced WAL with no wasm runtime on the path.
+  `run_harness.py` tags each frame with the run's proof token (`[wal#<token>]
+  {…}`, issue #1621), the same token as the `--once` proof lines, and the drain
+  takes only tagged frames: the frames share stdout with the program, and a
+  descriptor that reached the WAL is what recover replays. A crash after a descriptor is drained+fsynced but before the terminal
   `activation-complete` marker is the roll-back case; a clean unload stamps
   `discharge` + `activation-complete` and rolls forward. ADDITIVE and gated: a
   module emitted without `--record`, and any module with no witnessed
