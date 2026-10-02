@@ -564,6 +564,8 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "in_file_tests.rvl",
         # the same `tests` section gap, on the item 280 Opt-gap document
         "../../../backends/go/testdata/opt_gaps_280.rvl",
+        # ... and on the issue #1631 erased-Result document
+        "../../../backends/go/testdata/result_erased_1631.rvl",
     ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
@@ -900,7 +902,7 @@ _REJECTED = [
      "extern emission fn audit_write(msg: Str) -> Int = @py { return 1 }\n"
      "service Cache { fn put(key: Str) }\n"
      "component C provides cache: Cache {\n"
-     "  provide cache { fn put(key) { let n = audit_write(key) } }\n"
+     "  provide cache { fn put(key) { let n = emit audit_write(key) } }\n"
      "}\n", "G4"),
     ("g2 two components provide one key",
      "service S { fn op(x: Str) -> Str }\n"
@@ -910,7 +912,7 @@ _REJECTED = [
      "extern emission async fn http_post(url: Str, body: Str) -> Str = @py { return url }\n"
      "service Http { emission fn post(url: Str, body: Str) -> Str }\n"
      "component Poster provides http: Http {\n"
-     "  provide http { fn post(url, body) = http_post(url, body) }\n"
+     "  provide http { fn post(url, body) = emit http_post(url, body) }\n"
      "}\n", "A1"),
 ]
 

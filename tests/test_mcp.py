@@ -104,7 +104,7 @@ service S { fn quiet(a: Str) -> Str
 component C provides s: S {
   provide s {
     fn quiet(a) = a
-    fn loud(a) = ship(a)
+    fn loud(a) = emit ship(a)
   }
 }
 """)
@@ -123,7 +123,7 @@ fn middle(x: Str) -> Str { return ship(x) }
 fn outer(x: Str) -> Str { return middle(x) }
 service S { emission fn go(a: Str) -> Str }
 component C provides s: S {
-  provide s { fn go(a) = outer(a) }
+  provide s { fn go(a) = emit outer(a) }
 }
 """)
     assert tools["revl.s.go"]["x-revl"]["effects"]["reachesHostCode"] == ["ship"]
