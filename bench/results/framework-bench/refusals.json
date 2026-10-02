@@ -6,11 +6,12 @@
       "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
       "tiers": {
         "go": {
-          "residual": 2,
-          "corpus": 37,
+          "residual": 3,
+          "corpus": 38,
           "reproduced": 35,
           "documents": [
             "../../../backends/go/testdata/opt_gaps_280.rvl",
+            "../../../backends/go/testdata/result_erased_1631.rvl",
             "in_file_tests.rvl"
           ]
         },
@@ -43,8 +44,8 @@
           ]
         },
         "ts": {
-          "residual": 16,
-          "corpus": 76,
+          "residual": 15,
+          "corpus": 75,
           "reproduced": 60,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
@@ -60,7 +61,6 @@
             "../emit_py_corpus/services_control_flow.rvl",
             "../emit_rust_corpus/comp_stream.rvl",
             "component_edges.rvl",
-            "extern_compensate.rvl",
             "ref_externs.rvl",
             "routed_timers.rvl"
           ]

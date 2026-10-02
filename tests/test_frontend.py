@@ -86,6 +86,11 @@ REJECTIONS = {
     "foreign_bool_true.rvl": "use `true`, not `True`",
     "foreign_bool_false.rvl": "use `false`, not `False`",
     "foreign_const.rvl": "revl has no `const`",
+    # a header clause written as a body statement: named as the header
+    # mistake it is, not as the generic G6 statement refusal
+    "requires_in_component_body.rvl":
+        "`requires` is part of the component header, not a statement in the "
+        "body of Front",
     "foreign_len_builtin.rvl": "revl has no `len(...)`",
     "foreign_print_builtin.rvl": "revl has no `print`",
     "foreign_throw.rvl": "revl has no `throw`",

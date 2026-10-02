@@ -263,7 +263,11 @@ happens to.
 * **The same ratchet.** Near misses live beside the classes in
   `tests/fixtures/vocabulary_mirror_ledger.json`, each with a written reason.
   An unrecorded near miss reds, a recorded one whose difference moved reds, and
-  a recorded one that resolves must have its entry DELETED.
+  a recorded one that resolves must have its entry DELETED. A recorded near miss
+  also stops being observed when the two sides drift further apart than the
+  slack. The finding says which case applies and shows the difference (issue
+  #1580): drift is not a resolution, so reconcile the vocabularies, or record
+  the divergence in the claiming prose before deleting the entry.
 
 ## What CI covers
 
