@@ -175,7 +175,7 @@ extern emission async fn ho_fail(u: Str) -> Str = @py { raise RuntimeError("acq 
 fn bad_open(u: Str) -> Str { return ho_fail(u) }
 component Consumer requires db: Database {
   let la = effect db.query("ACQ A") undo db.query("UNDO A")
-  let lb = effect await bad_open("x") undo db.query("UNDO B")
+  let lb = effect await emit bad_open("x") undo db.query("UNDO B")
 }
 """
     module = _module(src, "aec_failed")

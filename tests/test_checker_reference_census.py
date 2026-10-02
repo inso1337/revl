@@ -377,13 +377,23 @@ def test_the_unmasked_documents_are_refused_and_undecided(verdicts, rel):
 #   * `g1_`: the reference refuses G1 and the checker raises no objection. An
 #     undeclared requirement is outside this slice (`req_call` passes a root
 #     that is not a requirement through unjudged), with or without a block.
+#   * `g4_host_marker_` and `g4_approval_` (issue #1437): the reference and the
+#     gate refuse, and the checker raises no objection. This checker holds the
+#     `req` carrier to the marker but not the host extern carrier, and its
+#     approval floor (#1612) judges only an `emit` STATEMENT, not the value
+#     form these method documents use. Held undecided by name, so the day it
+#     grows either rule this reds and the documents move to the `g4_` rule.
+#     The one exception is the activation guard document: its crossing is an
+#     `emit` statement, so the checker's floor decides it and must agree.
 BLOCK_NESTING = ROOT / "tests" / "fixtures" / "gate_block_nesting"
+CHECKER_UNDECIDED_PREFIXES = ("g4_host_marker_", "g4_approval_")
+CHECKER_DECIDES = {"g4_approval_after_guard_setup"}
 G1_MESSAGE = "`db` is not a declared requirement of C"
 
 
 def test_every_block_nesting_document_is_held_by_name(verdicts):
     docs = sorted(BLOCK_NESTING.glob("*.rvl"))
-    assert len(docs) == 42, f"the block-nesting corpus has {len(docs)} documents"
+    assert len(docs) == 66, f"the block-nesting corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         rel = str(doc.relative_to(ROOT))
@@ -392,7 +402,10 @@ def test_every_block_nesting_document_is_held_by_name(verdicts):
             continue
         want, got = verdicts[rel]
         prefix = doc.stem.split("_", 1)[0]
-        if prefix == "ok":
+        if doc.stem.startswith(CHECKER_UNDECIDED_PREFIXES) \
+                and doc.stem not in CHECKER_DECIDES:
+            ok = want != "" and got == ""
+        elif prefix == "ok":
             ok = want == "" and got == ""
         elif prefix == "g4":
             ok = want != "" and got == want
