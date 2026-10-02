@@ -9262,7 +9262,11 @@ fn appr_crossed(head: Expr, cx: Ctx__m2) -> Vec<String> {
     return match head {
     Expr::Call(c) => { let c = *c; match c.target {
     Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
-    Expr::Var(v) => if (cx.reqMap.contains_key(&v) && (!cx.provAlias.contains_key(&v))) { appr_req_caps(v.clone(), &fl.name, cx.clone()) } else { vec![] },
+    Expr::Var(v) => if cx.provAlias.contains_key(&v) { appr_alias_caps(v.clone(), &fl.name, cx.clone()) } else { if cx.reqMap.contains_key(&v) { appr_req_caps(v.clone(), &fl.name, cx.clone()) } else { vec![] } },
+    Expr::Field(inner) => { let inner = *inner; match inner.target.clone() {
+    Expr::Var(h) => if cx.handles.contains_key(&h) { appr_handle_caps(h.clone(), &inner.name, &fl.name, cx.clone()) } else { vec![] },
+    _ => vec![],
+} },
     _ => vec![],
 } },
     Expr::Var(n) => appr_name_caps(n, cx.clone()),
@@ -9270,6 +9274,27 @@ fn appr_crossed(head: Expr, cx: Ctx__m2) -> Vec<String> {
 } },
     _ => vec![],
 };
+}
+
+fn appr_handle_caps(h: String, key: &str, op: &str, cx: Ctx__m2) -> Vec<String> {
+    let decl = handle_msig(h.clone(), key, op, cx.clone());
+    if (decl.name == "") {
+        return vec![];
+    }
+    return if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] };
+}
+
+fn appr_alias_caps(v: String, op: &str, cx: Ctx__m2) -> Vec<String> {
+    let ref_ = match cx.provAlias.get(&v).cloned() {
+    Some(r) => r,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+    let cut = ref_.revl_index_of("#");
+    if (cut == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return vec![];
+    }
+    return appr_handle_caps(ref_.revl_slice(0i64, cut), &(ref_.revl_slice((cut).checked_add(1i64).expect("revl: Int overflow"), ref_.revl_length())), op, cx.clone());
 }
 
 fn appr_req_caps(key: String, op: &str, cx: Ctx__m2) -> Vec<String> {
@@ -9336,7 +9361,86 @@ fn appr_group(ss: &[Stmt], i: i64, cx: Ctx__m2, a: Ac) -> Ac {
     if ((a.msg != "") || ((ss)[(i) as usize].kind != "emit")) {
         return a;
     }
-    return appr_check((ss)[(i) as usize].e.clone(), &(if ((ss)[(i) as usize].bind == "") { (ss)[(i) as usize].edge.clone() } else { String::from("") }), cx.clone(), a.clone());
+    let edge = if ((ss)[(i) as usize].bind == "") { (ss)[(i) as usize].edge.clone() } else { String::from("") };
+    let ha = appr_check((ss)[(i) as usize].e.clone(), &edge, cx.clone(), a.clone());
+    if (((ha.msg != "") || ((i).checked_add(1i64).expect("revl: Int overflow") >= ss.revl_length())) || ((ss)[((i).checked_add(1i64).expect("revl: Int overflow")) as usize].kind != "compensate")) {
+        return ha;
+    }
+    let xs = em_calls((ss)[((i).checked_add(1i64).expect("revl: Int overflow")) as usize].e.clone(), cx.clone());
+    let mut ca = ha.clone();
+    let mut k = 0i64;
+    while ((k < xs.revl_length()) && (ca.msg == "")) {
+        ca = appr_check((xs)[(k) as usize].clone(), &edge, cx.clone(), ca.clone());
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return ca;
+}
+
+fn em_calls(e: Expr, cx: Ctx__m2) -> Vec<Expr> {
+    return em_calls_in(e.clone(), cx.clone(), vec![]);
+}
+
+fn em_calls_in(e: Expr, cx: Ctx__m2, acc: Vec<Expr>) -> Vec<Expr> {
+    return match e.clone() {
+    Expr::Call(c) => { let c = *c; em_calls_list(c.args.clone(), 0i64, cx.clone(), em_calls_in(c.target.clone(), cx.clone(), if is_em_call(e.clone(), cx.clone()) { acc.revl_push(e.clone()) } else { acc.clone() })) },
+    Expr::Field(f) => { let f = *f; em_calls_in(f.target.clone(), cx.clone(), acc.clone()) },
+    Expr::OptField(f) => { let f = *f; em_calls_in(f.target.clone(), cx.clone(), acc.clone()) },
+    Expr::OptCall(c) => { let c = *c; em_calls_list(c.args.clone(), 0i64, cx.clone(), em_calls_in(c.target.clone(), cx.clone(), acc.clone())) },
+    Expr::Bin(b) => { let b = *b; em_calls_in(b.r.clone(), cx.clone(), em_calls_in(b.l.clone(), cx.clone(), acc.clone())) },
+    Expr::Un(u) => { let u = *u; em_calls_in(u.e.clone(), cx.clone(), acc.clone()) },
+    Expr::Emit(u) => { let u = *u; em_calls_in(u.e.clone(), cx.clone(), acc.clone()) },
+    Expr::Index(x) => { let x = *x; em_calls_in(x.idx.clone(), cx.clone(), em_calls_in(x.target.clone(), cx.clone(), acc.clone())) },
+    Expr::If(x) => { let x = *x; em_calls_in(x.els.clone(), cx.clone(), em_calls_in(x.then_.clone(), cx.clone(), em_calls_in(x.cond.clone(), cx.clone(), acc.clone()))) },
+    Expr::Lst(l) => em_calls_list(l.items, 0i64, cx.clone(), acc.clone()),
+    _ => acc,
+};
+}
+
+fn em_calls_list(xs: Vec<Expr>, i: i64, cx: Ctx__m2, acc: Vec<Expr>) -> Vec<Expr> {
+    if (i >= xs.revl_length()) {
+        return acc;
+    }
+    return em_calls_list(xs.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone(), em_calls_in((xs)[(i) as usize].clone(), cx.clone(), acc.clone()));
+}
+
+fn is_em_call(e: Expr, cx: Ctx__m2) -> bool {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Var(n) => contains__m2(&cx.emittingNames, &n),
+    Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
+    Expr::Var(v) => if cx.provAlias.contains_key(&v) { alias_is_em(v.clone(), &fl.name, cx.clone()) } else { (cx.reqMap.contains_key(&v) && req_is_em(v.clone(), &fl.name, cx.clone())) },
+    Expr::Field(inner) => { let inner = *inner; match inner.target.clone() {
+    Expr::Var(h) => (cx.handles.contains_key(&h) && handle_msig(h.clone(), &inner.name, &fl.name, cx.clone()).isEm),
+    _ => false,
+} },
+    _ => false,
+} },
+    _ => false,
+} },
+    _ => false,
+};
+}
+
+fn req_is_em(key: String, op: &str, cx: Ctx__m2) -> bool {
+    let svcName = match cx.reqMap.get(&key).cloned() {
+    Some(s) => s,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+    return find_msig(svc_of(cx.clone(), svcName.clone()), op, 0i64).isEm;
+}
+
+fn alias_is_em(v: String, op: &str, cx: Ctx__m2) -> bool {
+    let ref_ = match cx.provAlias.get(&v).cloned() {
+    Some(r) => r,
+    None => String::from(""),
+    _ => unreachable!(),
+};
+    let cut = ref_.revl_index_of("#");
+    if (cut == (0i64).checked_sub(1i64).expect("revl: Int overflow")) {
+        return false;
+    }
+    return handle_msig(ref_.revl_slice(0i64, cut), &(ref_.revl_slice((cut).checked_add(1i64).expect("revl: Int overflow"), ref_.revl_length())), op, cx.clone()).isEm;
 }
 
 fn ctx_emit_pos(cx: Ctx__m2, pos: String) -> Ctx__m2 {
@@ -27910,6 +28014,19 @@ fn the_approval_floor_is_keyed_by_token_and_reaches_every_marked_crossing__item_
     assert!((admit_src(sc.revl_concat("service O { fn ping() -> Int } component C provides o: O { let a = await approval[staging.payment] { reason: \"pay\" } emit charge(1) with a provide o { fn ping() = 1 } }")) == msg));
     assert!((admit_src(sc.revl_concat("service O { fn ping() -> Int } component C provides o: O { let a = await approval[production.*] { reason: \"pay\" } emit charge(1) with a provide o { fn ping() = 1 } }")) == ""));
     assert!((admit_src(String::from("extern emission fn charge(n: Int) -> Int requires approval = @py { return 1 } service O { fn ping() -> Int } component C provides o: O { emit charge(1) provide o { fn ping() = 1 } }")) == "G4|crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge"));
+}
+
+#[test]
+fn the_approval_floor_reaches_a_compensation_and_a_spawn_handle_crossing__item_246_() {
+    let ex = String::from("extern emission fn charge(n: Int) -> Int requires approval = @py { return 1 } extern emission fn notify(n: Int) -> Int = @py { return 1 } service O { fn ping() -> Int } ");
+    let cmsg = String::from("G4|crossing capability `charge` requires approval, but this `emit` carries no covering `with` edge");
+    assert!((admit_src(ex.revl_concat("component C provides o: O { emit notify(1) compensate charge(2) provide o { fn ping() = 1 } }")) == cmsg));
+    assert!((admit_src(ex.revl_concat("component C provides o: O { let a = await approval[charge] { reason: \"r\" } emit notify(1) compensate charge(2) with a provide o { fn ping() = 1 } }")) == ""));
+    let wk = String::from("extern emission[pay] fn charge(n: Int) -> Int requires approval = @py { return 1 } service Pay { emission[pay] fn run(n: Int) -> Int } component Worker provides task: Pay { let a = await approval[pay] { reason: \"c\" } provide task { fn run(n) { emit charge(n) with a return 1 } } } service Sup { emission fn go(n: Int) -> Int } ");
+    let pmsg = String::from("G4|crossing capability `pay` requires approval, but this `emit` carries no covering `with` edge");
+    assert!((admit_src(wk.revl_concat("component Supervisor provides sup: Sup { let w = effect spawn Worker with { } undo w.dispose() emit w.task.run(1) provide sup { fn go(n) = 0 } }")) == pmsg));
+    assert!((admit_src(wk.revl_concat("component Supervisor provides sup: Sup { let w = effect spawn Worker with { } undo w.dispose() let b = await approval[pay] { reason: \"p\" } emit w.task.run(1) with b provide sup { fn go(n) = 0 } }")) == ""));
+    assert!((admit_src(wk.revl_concat("component Supervisor provides sup: Sup { provide sup { fn go(n) { let w = effect spawn Worker with { } undo w.dispose() let t = w.task let r = emit t.run(n) return r } } }")) == pmsg));
 }
 
 #[test]
