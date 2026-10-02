@@ -21,44 +21,11 @@
   ],
   "go": {
     "blind": {
-      "Builtin Opt/Result constructors, matching, coalescing and optional chaining need the absent tagged generic preambles/payload renderer. Declared user variants are implemented and covered; the static case/name/pattern markers here refer to builtin Some/None/Ok/Err, not all ADTs.": [
-        "op=??"
-      ],
-      "General Str/List/Map stdlib and checked-division helpers are explicitly deferred by the Go oracle/scaffold. Arithmetic conversion builtins are handled separately and covered; those do not supply length/concat/collection helper bodies or Map/Result preambles.": [
-        "kind=builtin",
-        "method=concat"
-      ],
       "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
         "kind=name"
       ]
     },
     "unported": {
-      "Builtin Opt/Result constructors, matching, coalescing and optional chaining need the absent tagged generic preambles/payload renderer. Declared user variants are implemented and covered; the static case/name/pattern markers here refer to builtin Some/None/Ok/Err, not all ADTs.": [
-        "case=Err",
-        "case=None",
-        "case=Ok",
-        "case=Some",
-        "kind=optcall",
-        "kind=optfield",
-        "name=Err",
-        "name=None",
-        "name=Ok",
-        "name=Some",
-        "pattern=Err",
-        "pattern=None",
-        "pattern=Ok",
-        "pattern=Some"
-      ],
-      "General Str/List/Map stdlib and checked-division helpers are explicitly deferred by the Go oracle/scaffold. Arithmetic conversion builtins are handled separately and covered; those do not supply length/concat/collection helper bodies or Map/Result preambles.": [
-        "fn=Map.new",
-        "kind=len",
-        "kind=maplit",
-        "method=checked_div_trunc",
-        "method=length",
-        "method=push",
-        "method=set",
-        "name=length"
-      ],
       "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
         "kind=bool",
         "kind=fn",
@@ -101,11 +68,20 @@
         "step=var",
         "subscribe=<true>"
       ],
+      "Spellings of the built-in constructors the frontend never produces in pure v3 IR, so the reference's arms for them are unreachable and the port does not branch on them (issue #106 ported the built-in Opt/Result surface itself: construction, `??`, `match` on the two-value structs and optional chaining are all in the corpus). `Some`/`None` never lower to a tagged `adt` node (src/revl/lower.py keeps Opt untagged, so there is no `case=Some`/`case=None`), and `Ok`/`Err` always lower to a tagged `adt` node, never to a call on a bare `var` callee (so there is no `name=Ok`/`name=Err`).": [
+        "case=None",
+        "case=Some",
+        "name=Err",
+        "name=Ok"
+      ],
       "Surviving service/config/extern secret markings select runtime redaction through _declares_secret only after Go's pure-module early return. The corpus already covers a Secret extern return wrapper, but it does not establish parameter/call-descriptor or secret-witness WAL redaction parity (roadmap 421F6).": [
         "secret=<true>"
       ],
       "The Go reference explicitly raises for v3 record_update; this is a backend refusal, not a missing supported port corpus family.": [
         "kind=record_update"
+      ],
+      "The dotted `fn` spelling of the component tier's host arm (`_expr`'s `host` node), which only a live stc-go component carries. issue #106 ported the stdlib builtins, `len`, `Map.empty()` and the total division forms, and the pure-fn host constructor (`Map.new()` as `MapNew[string]`) is ported in `host_constructor` and reached by emit_py_corpus/hostroots.rvl; the live-tier host arm stays with the component world this port does not emit.": [
+        "fn=Map.new"
       ],
       "Unresolved holes are rejected by the reference's pre-emission _refuse_holes pass; successful source corpus documents cannot exercise hole emission.": [
         "kind=hole"
@@ -222,9 +198,6 @@
         "kind=lease-revoke",
         "step=approval"
       ],
-      "Component host-runtime boundary from the port banner: emit.py::_ComponentEmitter._expr lowers host roots via runtime imports; emit_py.rvl::cexpr returns a named marker for kind=host. backends/go/scenarios/advance.rvl reproduces host, pinned by test_named_runtime_and_harness_boundaries. Module builtins and interpolation are supported and not included; component-body kind=format (the `${\u2026}` template) is now ported and covered by emit_py_corpus/services_interp.rvl.": [
-        "kind=host"
-      ],
       "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
         "deferred=<true>"
       ],
@@ -254,6 +227,9 @@
       ],
       "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
         "validated=<true>"
+      ],
+      "UI transaction unit boundary (item 522): emit.py::_ui_units groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and _emit_externs decorates each such extern with `ui_crossing`. emit_py.rvl::emit_externs/method_step carries no UI transaction unit at all. tests/test_ui_transaction_runtime_1369.py reproduces the family; a corpus document would need a computer-use capability the port cannot emit.": [
+        "key=<activation>"
       ]
     }
   },

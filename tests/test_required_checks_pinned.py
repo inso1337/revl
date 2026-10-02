@@ -110,6 +110,14 @@ NOT_REQUIRED_CHECKS = {
     # this is enforced: `tools/evolution_reward.py` carries it as the `held-out`
     # component, and a conjunction there admits no advisory verdict.
     "held-out": "item 537 held-out scoring; a scorer-touching diff is REFUSED by design, so it is advisory here and enforced in the promotion reward",
+    # Issue #1572: keeps `docs/census-artifact.{md,json}` current. It runs the
+    # census only when a pull request moves an input of the artifact, so on
+    # most pull requests it passes having checked nothing, and a check context
+    # that is green for "not applicable" is a poor thing to pin in branch
+    # protection. It fails loudly on the pull requests it does check, and it
+    # always runs on push to main, so a stale artifact is red where the merge
+    # lands. Not a merge gate until it has run for a while on real traffic.
+    "census-artifact": "issue #1572 census artifact currency; runs only when a PR moves an artifact input, always on push to main; advisory until it has a track record",
     # Container/privilege smoke that needs a Docker-capable runner; flaky as a
     # hard merge gate, run for signal not enforcement.
     "sandbox-container": "container smoke; not a hard merge gate",

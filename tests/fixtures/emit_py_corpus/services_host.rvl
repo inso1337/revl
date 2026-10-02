@@ -1,0 +1,42 @@
+// item 391: a HOST BUILTIN in a component body (`kind=host`). `hostroots.rvl`
+// reaches the roots only from a module fn body, where they lower to plain `var`
+// nodes; in a component or method body the frontend lowers `Map.new()`,
+// `Pool.open(..)`, `Job.run(..)` and `Stream.source()` to a `host` node, which
+// the reference `_ComponentEmitter._expr` renders as the dotted call and whose
+// root it adds to the `from runtime import` line. The self-host `cexpr` had no
+// `host` arm and answered `<<UNSUPPORTED-CEXPR:host>>`; the whole-tree survey
+// counted 242 documents refused for that marker and nothing else.
+//
+// One component per root:
+//
+//   Kv      - `Map.new()`, the zero-argument call (and the commonest host root
+//             in the tree by far).
+//   Pooled  - `Pool.open(..)` with argument expressions: a config read and an
+//             arithmetic `bin`, so the arguments go through the component
+//             expression renderer rather than being copied.
+//   Jobs    - `Job.run(..)` in all three positions a host call is legal in an
+//             activation body: the effect, its undo, and a saga compensation.
+//
+// The three roots appear together, so the import line exercises their sorted
+// order (`Job, Map, Pool`) beside the aliased `_revl_*` imports. The fourth
+// root, `Stream`, is in services_host_stream.rvl, because selfhost/lower.rvl
+// does not lower it yet and this document is also a fully-native one
+// (tests/test_selfhost_compile.py).
+
+service Log {
+  emission fn write(msg: Str) -> Int
+}
+
+component Kv {
+  let store = effect Map.new() undo store.drop()
+}
+
+component Pooled {
+  config { url: Str, size: Int = 4 }
+  let pool = effect Pool.open(config.url, config.size * 2) undo pool.close()
+}
+
+component Jobs requires log: Log {
+  effect Job.run("start") undo Job.run("stop")
+  emit log.write("flush") compensate Job.run("rollback")
+}

@@ -374,6 +374,9 @@ GO_DOCS = [
     "arrow_captures.rvl",
     "../emit_java_corpus/records.rvl", "../emit_rust_corpus/perf_shapes.rvl",
     "../emit_wasm_corpus/loopctrl.rvl", "../emit_wasm_corpus/strlit.rvl",
+    # issue #106: the stdlib / Opt / Result / Map surface and the extern
+    # `config` / `//revl:import` shapes, byte-exact through the native chain
+    "stdlib_surface.rvl", "extern_config.rvl", "loop_shapes.rvl", "blob_probes.rvl",
 ]
 JAVA_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
@@ -485,6 +488,13 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # carries `method_control`, so this is a `selfhost/lower.rvl` gap: the
         # native IR producer does not lower a method-body control-flow step.
         "services_control_flow.rvl",
+        # item 391: a component-body `Stream.source()` acquisition (a `host`
+        # node). The EMITTER half is byte-exact on the reference IR; the native
+        # IR producer drops the whole `let src = effect Stream.source() undo
+        # src.close()` step, so the component emits an empty body and the
+        # module loses its `Stream` import. The `Map`/`Pool`/`Job` host calls
+        # in services_host.rvl go through the native chain byte-exact.
+        "services_host_stream.rvl",
         # component branch shapes. What is left here is ONE form: a
         # statement-block match arm (`Some(n) => { let doubled = n * 2
         # doubled + 1 }`), which the shared self-host PARSER has no node for at
@@ -544,8 +554,19 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # from the reference IR, and the fully-native chain does not.
         "../emit_py_corpus/services_control_flow.rvl",
     ),
-    # no residual: the fully-native chain reproduces the whole go corpus.
-    "go": (),
+    "go": (
+        # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the
+        # reference bytes from the reference IR, and selfhost/lower.rvl does not
+        # produce the IR `tests` section, so the fully-native chain emits the
+        # functions without the test functions or the `testing` import. Every
+        # other go corpus document, the stdlib/Opt/Result/Map surface included,
+        # is byte-exact through the native chain.
+        "in_file_tests.rvl",
+        # the same `tests` section gap, on the item 280 Opt-gap document
+        "../../../backends/go/testdata/opt_gaps_280.rvl",
+        # ... and on the issue #1631 erased-Result document
+        "../../../backends/go/testdata/result_erased_1631.rvl",
+    ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
         # bench documents went with the `await` activation step;
