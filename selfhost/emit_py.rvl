@@ -569,6 +569,14 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "size") { return `len(${target})` }
   if (method == "keys") { return `sorted(${target})` }
   if (method == "remove") {
+    // issue #1632: Python refuses an assignment expression in a comprehension's
+    // iterable, and a receiver that is not a bare name carries one (the `_fv :=`
+    // field temp, a bounded `_bi :=`). The receiver and key are then passed as
+    // arguments, outside the comprehension; a plain receiver keeps the one-frame
+    // form.
+    if (target.indexOf(":=") >= 0) {
+      return "(lambda _revl_m, _revl_k: {kk: vv for kk, vv in _revl_m.items() if kk != _revl_k})".concat(`(${target}, ${args[0]})`)
+    }
     return "{".concat(`kk: vv for kk, vv in ${target}.items() if kk != ${args[0]}`).concat("}")
   }
   if (method == "div_trunc") {

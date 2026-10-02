@@ -51,7 +51,7 @@
     "reference": {
       "go": 2824,
       "java": 986,
-      "py": 463,
+      "py": 462,
       "rust": 1200,
       "ts": 552,
       "wasm": 1558
@@ -827,11 +827,11 @@
           "_method_access": 1,
           "_method_def_name": 2
         },
-        "Reviewed Map.has branch plus unknown-method rejection: _render_builtin renders key in map exactly like selfhost render_builtin; existing map corpus uses lookup/set/size/keys/remove but not has. Unknown builtin names are frontend-invalid and produce an explicit port marker. This is not a deferred supported map operation. Issue #1632 adds one statement to `_render_builtin`: a `Map.remove` receiver that carries an assignment expression (a nested field read such as `o.ctx.sc`) is evaluated as an argument outside the dict comprehension, because Python refuses a walrus in a comprehension's iterable. selfhost/emit_py.rvl does not mirror it yet and no py corpus document removes through a nested field; tests/test_py_nested_field_remove_1632.py executes it.": {
-          "_render_builtin": 3
+        "Reviewed Map.has branch plus unknown-method rejection: _render_builtin renders key in map exactly like selfhost render_builtin; existing map corpus uses lookup/set/size/keys/remove but not has. Unknown builtin names are frontend-invalid and produce an explicit port marker. This is not a deferred supported map operation. Issue #1632's `Map.remove` through a receiver that carries an assignment expression (evaluated as a lambda argument, outside the comprehension) is mirrored by selfhost/emit_py.rvl and exercised by emit_py_map_remove_nested.rvl.": {
+          "_render_builtin": 2
         }
       },
-      "uncovered_statements": 463
+      "uncovered_statements": 462
     },
     "rust": {
       "statements": 3771,
@@ -1713,7 +1713,7 @@
       "uncovered_statements": 175
     },
     "py": {
-      "statements": 2463,
+      "statements": 2465,
       "uncovered": {
         "Activation body_step residuals: non-witnessed setup iteration and if-else rendering match the reference; current supported setup is witnessed and guards exclude nested effects. Final three statements return an explicit unsupported-step marker for runtime await/stream/approval (stream_130.rvl reproduces await) or invalid kinds; a fourth is the named refusal of a deferred emission (`<<UNSUPPORTED-BODYSTEP:deferred-emit>>`), which only a document the port refuses reaches. Supported effect/witnessed/saga behavior is pinned by services_body and witnessed fixtures.": {
           "body_step": 9

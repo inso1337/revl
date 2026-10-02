@@ -223,6 +223,9 @@ CORPUS = [
     #     `idempotent` provider (the `_REVL_IDEMPOTENT` map), a fault test's
     #     config.
     "../emit_py_test_sections.rvl",
+    # Reference fix followed by the port, issue #1632: a `Map.remove` whose
+    # receiver carries a `:=` temp is evaluated through a lambda.
+    "../emit_py_map_remove_nested.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
