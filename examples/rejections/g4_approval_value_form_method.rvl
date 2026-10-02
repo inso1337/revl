@@ -1,0 +1,28 @@
+// REJECTED, G4: an approval-required emission written in VALUE position in a
+// provide method.
+//
+// The `emit` value form (`let r = emit charge(n)`, `return emit charge(n)`,
+// `fn m() = emit charge(n)`) has no `with` clause, so it can carry no
+// approval edge. The declaration-owned floor used to be checked only on the
+// `emit` STEP, so this spelling crossed with no approval. It is judged now,
+// and refused, because nothing in it can cover the crossing.
+//
+// The step form is admitted with an approval minted in the activation body:
+// `emit charge(cents) with a`.
+//
+// expected error:
+//   crossing capability `charge` requires approval, but this `emit` carries
+//     no covering `with` edge
+
+extern emission fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) {
+      let paid = emit charge(cents)
+      return paid
+    }
+  }
+}

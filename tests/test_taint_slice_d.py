@@ -459,7 +459,7 @@ _BASE_TOOLS = (
     "service Fs { emission[fs, host_read] fn read(p: Str) -> Str }\n"
     "service Sh { emission[shell, host_exec] fn exec(cmd: Str) }\n"
     "component Tools provides fs: Fs, sh: Sh {\n"
-    "  provide fs { fn read(p) = host_read(p) }\n"
+    "  provide fs { fn read(p) = emit host_read(p) }\n"
     "  provide sh { fn exec(cmd) { emit host_exec(cmd) } }\n"
     "}\n"
 )
