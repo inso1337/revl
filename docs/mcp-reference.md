@@ -508,6 +508,15 @@ proposer or an approver the rule names may close it; a bystander is refused and
 the refusal recorded. A pending question and a minted grant are two different
 objects, so they are two branches of one verb and not two spellings of one.
 
+The same `hash` on a SINGLE-PARTY ticket (no rule names its approvers) is the
+operator's NO (issue #1553): the next re-issue of the crossing that ticket holds
+is refused (`ApprovalRefused`, outcome `refused`) and fires nothing, and a yes
+minted for it and not yet spent is withdrawn (`approval-revoked`). The revoke
+closes that round, so a later `revl_approve` of it is refused. One no refuses
+one re-issue; asking again after that is a new question. This is how an
+operator refuses a ticket an app request raised on `revl serve --http`
+(`--operator-listen`). `asToken`, `asSecret` and `asProof` do not apply to it.
+
 - Inputs: `capability`; `requestId`; `hash`; `reason`; `asToken`; `asSecret`;
   `asProof`.
 
