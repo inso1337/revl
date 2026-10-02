@@ -58,7 +58,7 @@ component Store provides ops: Ops {{
   provide ops {{
     fn go(k) {{
       let row = load(k)
-      let n = sink(row)
+      let n = emit sink(row)
       return n
     }}
   }}
