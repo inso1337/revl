@@ -374,6 +374,9 @@ GO_DOCS = [
     "arrow_captures.rvl",
     "../emit_java_corpus/records.rvl", "../emit_rust_corpus/perf_shapes.rvl",
     "../emit_wasm_corpus/loopctrl.rvl", "../emit_wasm_corpus/strlit.rvl",
+    # issue #106: the stdlib / Opt / Result / Map surface and the extern
+    # `config` / `//revl:import` shapes, byte-exact through the native chain
+    "stdlib_surface.rvl", "extern_config.rvl", "loop_shapes.rvl", "blob_probes.rvl",
 ]
 JAVA_DOCS = [
     "arith.rvl", "bitwise.rvl", "control.rvl", "calls.rvl", "strings.rvl",
@@ -611,8 +614,19 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # from the reference IR, and the fully-native chain does not.
         "../emit_py_corpus/services_control_flow.rvl",
     ),
-    # no residual: the fully-native chain reproduces the whole go corpus.
-    "go": (),
+    "go": (
+        # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the
+        # reference bytes from the reference IR, and selfhost/lower.rvl does not
+        # produce the IR `tests` section, so the fully-native chain emits the
+        # functions without the test functions or the `testing` import. Every
+        # other go corpus document, the stdlib/Opt/Result/Map surface included,
+        # is byte-exact through the native chain.
+        "in_file_tests.rvl",
+        # the same `tests` section gap, on the item 280 Opt-gap document
+        "../../../backends/go/testdata/opt_gaps_280.rvl",
+        # ... and on the issue #1631 erased-Result document
+        "../../../backends/go/testdata/result_erased_1631.rvl",
+    ),
     "java": (
         # (async coloring left this list entirely. `comp_await.rvl` and the two
         # bench documents went with the `await` activation step;

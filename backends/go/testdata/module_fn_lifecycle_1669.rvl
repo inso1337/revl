@@ -1,0 +1,29 @@
+// issue #1669: a module `fn` called from component code in a document that
+// also carries a `lifecycle test`. The lifecycle test kept the document on the
+// live stc-go path, which never rendered module fns, so the provide method's
+// call to `double` was undefined in the emitted package.
+fn double(x: Int) -> Int { return x + x }
+fn label(n: Int) -> Str { return `n=${n}` }
+
+service Calc { fn twice(n: Int) -> Int }
+service Sink { emission fn write(v: Str) }
+
+component Writer requires sink: Sink {
+  emit sink.write(label(double(3)))
+}
+
+component C provides calc: Calc {
+  provide calc { fn twice(n) = double(n) }
+}
+
+test "the module fn is ordinary code" {
+  assert double(2) == 4
+}
+
+lifecycle test "a provide method calls the module fn" {
+  load C
+  let r = call calc.twice(21)
+  assert r == 42
+  unload C
+  assert no_residue
+}
