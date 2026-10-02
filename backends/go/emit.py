@@ -4855,6 +4855,9 @@ class _V3GoCtx:
         self.case_payload: dict[str, str | None] = {}
         self.record_by_fields: dict[tuple, str | None] = {}
         self.ret_type: str | None = None
+        # `{binding: declared type}` the current body hands each local on to;
+        # see `_v3_flow_hints`.
+        self.flow_hints: dict = {}
         # feature flags set during rendering / used at module assembly
         self.needs_fmt = False
         self.used_stdlib = False
@@ -5026,7 +5029,8 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             nm = callee.get("name")
             if nm in ("Some", "None", "Ok", "Err"):
                 return _go_v3_infer_ctor(nm, node.get("args") or [], ctx)
-            return ctx.function_ret.get(nm) or ctx.extern_ret.get(nm)
+            return (ctx.function_ret.get(nm) or ctx.extern_ret.get(nm)
+                    or _v3_fn_value_ret(ctx.var_types.get(nm)))
         return None
     if kind == "bin":
         op = node.get("op")
@@ -5077,6 +5081,63 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             return _go_v3_infer_ctor(case, node.get("args") or [], ctx)
         return ctx.case_adt.get(case)
     return None
+
+
+def _v3_fn_value_ret(surface):
+    """The declared return of a function-typed binding (`g: (Int) -> Int` ->
+    `Int`), or None. Calling a function VALUE (a parameter, a let-bound arrow)
+    answers its declared return just as calling a module fn does; without this
+    `Ok(g(1))` could not type its payload and erased it to `any`."""
+    fn = _v3_split_fn_type(surface) if isinstance(surface, str) else None
+    if fn is None:
+        return None
+    return _erase_async(fn[1]) or None
+
+
+def _v3_fill_erased(surface, declared):
+    """`surface` with each erased top-level `any` type argument of a built-in
+    Opt/Result filled from `declared`, a type of the same family (else
+    `surface` unchanged). `Ok(1)` infers `Result[Int, any]`: the error side is
+    unknowable from the argument, and Go cannot leave a type argument open, so
+    it is taken from where the value flows (a declared return or parameter, or
+    the other operand of an `==`)."""
+    if not (isinstance(surface, str) and isinstance(declared, str)):
+        return surface
+    for head in ("Opt[", "Result["):
+        if (surface.startswith(head) and surface.endswith("]")
+                and declared.startswith(head) and declared.endswith("]")):
+            have = _v3_split_generic(surface[len(head):-1])
+            want = _v3_split_generic(declared[len(head):-1])
+            if len(have) != len(want):
+                return surface
+            merged = [w if h == "any" else h for h, w in zip(have, want)]
+            return f"{head}{', '.join(merged)}]"
+    return surface
+
+
+def _v3_flow_hints(body, ret_type, ctx) -> dict:
+    """`{binding: declared type}` for each local a function body hands on
+    whole: `return x` flows into the declared return, and `f(x)` into `f`'s
+    declared parameter. A `let` whose built-in Opt/Result value left a type
+    argument erased fills it from here, so `let r = Ok(1); return r` declares
+    `r` as the function's `RevlResult[int64, string]` rather than the
+    `RevlResult[int64, any]` Go would refuse to return."""
+    hints: dict = {}
+    for node in _v3_walk_nodes(body):
+        if node.get("step") == "return" and ret_type:
+            expr = node.get("expr")
+            if isinstance(expr, dict) and expr.get("kind") == "var":
+                hints.setdefault(expr.get("name"), ret_type)
+        if node.get("kind") == "call":
+            callee = node.get("callee") or {}
+            name = callee.get("name") if callee.get("kind") == "var" else None
+            params = (ctx.function_params.get(name)
+                      or ctx.extern_params.get(name) or [])
+            for arg, declared in zip(node.get("args") or [], params):
+                if (isinstance(arg, dict) and arg.get("kind") == "var"
+                        and isinstance(declared, str)):
+                    hints.setdefault(arg.get("name"), declared)
+    return hints
 
 
 def _go_v3_infer_ctor(case, arg_nodes, ctx):
@@ -5324,6 +5385,13 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                     if isinstance(cand, str) and not _v3_has_any(cand):
                         exp = cand
                         break
+                if exp is None:
+                    # Neither side is fully concrete (`Ok(g(2)) == Ok(2)`):
+                    # fill each side's erased type arguments from the other,
+                    # so both still emit as ONE instantiation.
+                    merged = _v3_fill_erased(lt, rt)
+                    if merged != lt or merged != rt:
+                        exp = merged
                 left = _go_v3_expr(node["left"], ctx, exp)
                 right = _go_v3_expr(node["right"], ctx, exp)
                 ctx.needs_reflect = True
@@ -6553,6 +6621,15 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
     if step == "let":
         name = _v3_ident(node.get("name"), "binding")
         inferred = _go_v3_infer_type(node.get("value"), ctx)
+        value_node = node.get("value") or {}
+        if inferred is None and value_node.get("kind") in ("var", "name") \
+                and (value_node.get("name") or value_node.get("id")) == "None":
+            # a bare `None` infers nothing; it is an `Opt` of what it flows into
+            filled = _v3_fill_erased("Opt[any]", ctx.flow_hints.get(node.get("name")))
+            inferred = filled if filled != "Opt[any]" else None
+        if _v3_has_any(inferred):
+            inferred = _v3_fill_erased(
+                inferred, ctx.flow_hints.get(node.get("name")))
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         value = _go_v3_expr(node.get("value"), ctx, inferred)
@@ -6905,6 +6982,7 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         name = _v3_ident(fn.get("name"), "function name")
         ctx.var_types = {p.get("name"): p.get("type") for p in fn.get("params") or []}
         ctx.ret_type = fn.get("returns")
+        ctx.flow_hints = _v3_flow_hints(fn.get("body") or [], ctx.ret_type, ctx)
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
         ctx.reserved_idents = _go_v3_reserved_idents(fn)
@@ -6932,6 +7010,7 @@ def _emit_v3_go_tests(tests: list, ctx: _V3GoCtx) -> list[str]:
         tname = _go_v3_test_name(test.get("name"), used)
         ctx.var_types = {}
         ctx.ret_type = None
+        ctx.flow_hints = _v3_flow_hints(test.get("body") or [], None, ctx)
         ctx.str_builders = {}
         ctx.str_builder_seq = 0
         ctx.scan_loops = _v3_scan_loops(test)
