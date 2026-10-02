@@ -13,10 +13,10 @@ revl has two independently written implementations of its own semantics.
 same corpus and classifies every disagreement. Agreement means the same
 TAG and the same MESSAGE, not merely the same verdict.
 
-Distinct programs: **977**. Programs run: **983**.
-Checker version: `GATE-CENSUS-1+657d3a4d3cfd`.
+Distinct programs: **997**. Programs run: **1003**.
+Checker version: `GATE-CENSUS-1+189c635de62e`.
 Engine: `selfhost`.
-Run: `census-selfhost-1dcf7ceeef91`.
+Run: `census-selfhost-0fda28faac6a`.
 
 The two numbers differ because 6 case ids reach
 the corpus twice, from two entries that spell the same
@@ -41,7 +41,7 @@ are recomputable from any clone, at any path.
 
 ## The claim, and why it is not the corpus size
 
-The interesting property is not that the two agree over 977 programs.
+The interesting property is not that the two agree over 997 programs.
 It is that the bucket that matters **cannot be written**.
 
 `false-admission` is an issued admission for a program the reference
@@ -139,21 +139,21 @@ Read the two columns below as two different questions, because they are:
 
 | corpus | loop-authored | human-authored | total | independent of the loop | floor | undeclared | verdict |
 |---|---|---|---|---|---|---|---|
-| `census` | 0 | 0 | 983 | 100.0% | 80% | 0 | ok |
+| `census` | 0 | 0 | 1003 | 100.0% | 80% | 0 | ok |
 | `emit_go_corpus` | 0 | 0 | 24 | 100.0% | 75% | 0 | ok |
 | `emit_java_corpus` | 0 | 0 | 34 | 100.0% | 75% | 0 | ok |
 | `emit_py_corpus` | 0 | 0 | 68 | 100.0% | 75% | 0 | ok |
 | `emit_rust_corpus` | 0 | 0 | 41 | 100.0% | 75% | 0 | ok |
 | `emit_ts_corpus` | 0 | 0 | 42 | 100.0% | 75% | 0 | ok |
 | `emit_wasm_corpus` | 0 | 0 | 22 | 100.0% | 75% | 0 | ok |
-| `selfhost_oracle` | 0 | 0 | 343 | 100.0% | 90% | 0 | ok |
+| `selfhost_oracle` | 0 | 0 | 361 | 100.0% | 90% | 0 | ok |
 
 ## Full bucket table
 
 | bucket | count |
 |---|---|
-| `agree-admit` | 510 |
-| `agree-refuse/G4` | 119 |
+| `agree-admit` | 521 |
+| `agree-refuse/G4` | 128 |
 | `agree-refuse/G1` | 73 |
 | `agree-refuse/T1` | 71 |
 | `no-objection-out-of-slice` | 54 |
@@ -187,10 +187,10 @@ mirrors. The reproduction asks the REAL crate, built by cargo, and is
 recorded in `tests/fixtures/census_crate_reproduction.json` because it needs a rust toolchain
 and minutes rather than seconds.
 
-- programs: **973**
+- programs: **1003**
 - tracked buckets agree: **yes**
 - crate `false-admission` members: **0**
-- recorded at checker version: `GATE-CENSUS-1+657d3a4d3cfd`
+- recorded at checker version: `GATE-CENSUS-1+189c635de62e`
 - current for this run: **yes**
 
 What it does not establish: The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.
@@ -220,10 +220,10 @@ below are the values you should get.
 
 | number here | what recomputes it |
 |---|---|
-| distinct programs, 977 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
-| programs run, 983 | the length of the same list, repeats included |
-| run `census-selfhost-1dcf7ceeef91` | sha256 over every `(case id, source)` the run read, ids repo-relative |
-| checker version `GATE-CENSUS-1+657d3a4d3cfd` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
+| distinct programs, 997 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
+| programs run, 1003 | the length of the same list, repeats included |
+| run `census-selfhost-0fda28faac6a` | sha256 over every `(case id, source)` the run read, ids repo-relative |
+| checker version `GATE-CENSUS-1+189c635de62e` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
 | `src/revl@sha256:82a58185cd18` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
 | every bucket count | `tools/gate_reference_census.py --json out.json` |
 | the false-admit allowance | `tools/gate_reference_census_baseline.json`, which is in the tree |
@@ -249,7 +249,7 @@ the inputs they name? That is `--verify`:
 
 It re-runs the census in your clone and compares in two steps. First the
 pins: every file the published verdicts depend on, each by sha256. Then
-the verdicts, one row per program: this file carries 983
+the verdicts, one row per program: this file carries 1003
 rows of case id, sha256 of the source and bucket, and every row whose
 source is byte-identical in your clone is recomputed and compared.
 
@@ -302,7 +302,7 @@ is public and every one of those moves is a diff somebody can read.
 - Generation zero in the provenance manifest is a declaration about the tree as it stood, not a measurement. What holds from there on is that an arriving document must name its generation, and that an undeclared one counts as loop-authored.
 - Generation zero does not mean a person typed it. Issue #1397 measured the generation-zero set against the commits that introduced it: 153 of 850 entries arrived on a branch named agent/*, 132 more on a commit carrying an AI co-author trailer, 415 on commits pushed to the trunk with no branch to read, and the repository's root commit carries such a trailer itself. Both signals are lower bounds. The honest reading is that this corpus is model-written and pre-loop, and the floors gate the second word, not the first.
 - A mislabelled provenance entry defeats the provenance measurement exactly as re-recording the baseline would defeat the census. Neither is detected by a tool; both are edits in a diff somebody reads.
-- The corpus holds 6 case ids that appear twice, so `n` (983) counts 6 programs twice and `n_distinct` (977) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported.
+- The corpus holds 6 case ids that appear twice, so `n` (1003) counts 6 programs twice and `n_distinct` (997) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported.
 
 ## Schema
 
