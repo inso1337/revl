@@ -92,6 +92,23 @@ def _parseable_corpus():
     return listed, out
 
 
+# ---- every job that collects this file can import llguidance -----------------
+
+def test_every_venv_that_runs_this_suite_installs_llguidance():
+    """The `frontend` job installs the `test` extra; `frontend-cordis` runs the
+    same root suite out of the venv backends/python/setup.sh builds from a
+    LITERAL package list. A hard import missing from either is a collection
+    ERROR in that job, so both must name the library."""
+    extra = (ROOT / "pyproject.toml").read_text(encoding="utf-8")
+    test_extra = extra[extra.index("\ntest = ["):]
+    assert "llguidance" in test_extra[:test_extra.index("]")]
+    setup = (ROOT / "backends" / "python" / "setup.sh").read_text(encoding="utf-8")
+    install = setup[setup.index("pytest pytest-asyncio"):]
+    assert "llguidance" in install[:install.index("--editable")], (
+        "backends/python/setup.sh does not install `llguidance`, so the "
+        "`frontend-cordis` job cannot collect this file")
+
+
 # ---- drift -----------------------------------------------------------------
 
 def test_committed_grammars_equal_a_fresh_derivation():
