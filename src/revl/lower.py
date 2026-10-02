@@ -9390,6 +9390,7 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
                         hint="records carry data, not methods; call functions as `f(x)` (G6)",
                     )
+                _refuse_record_method(method, recv_t, env, filename, line)
                 node = {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
@@ -9473,6 +9474,13 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                     code="G4", category="emission",
                 )
         node = {"kind": "call", "callee": callee_node, "args": args}
+        if inst is None and isinstance(callee_node.get("target"), dict):
+            # a record receiver read in place (`r.g.f(n)`, issue #1547)
+            _refuse_record_method(
+                callee_node.get("name"),
+                infer_ir(callee_node["target"], env.type_env, env.types,
+                         env.services),
+                env, filename, line)
         if inst is None:
             # a field or element read off a service-typed local (issue #1509)
             _refuse_unmarked_local_crossing(
@@ -14801,6 +14809,41 @@ def _mentions_service(ty, env: Env) -> bool:
     import re as _re  # noqa: PLC0415
     return any(word in env.services
                for word in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(ty)))
+
+
+def _is_record_type(ty, types: dict) -> bool:
+    """Whether a type spelling is a record: a structural `{…}` record, or a
+    declared `type T = { … }` (a `record` entry in the type table)."""
+    if not ty:
+        return False
+    if str(ty).lstrip().startswith("{"):
+        return True
+    head, _ = parse_type(ty)
+    entry = (types or {}).get(head)
+    return isinstance(entry, dict) and entry.get("kind") == "record"
+
+
+def _refuse_record_method(method, recv_t, env: Env, filename: str,
+                          line: int) -> None:
+    """A method call on a RECORD in a component body (issue #1547, option A):
+    refused with the message a `fn` body gives the same call.
+
+    Records carry data, not methods, and `r.f(n)` with `f` a function-typed
+    field is not a call through the field: a `fn` body refuses it on every
+    tier. The component-method lowering refused only a Str/List/Bytes receiver
+    and let a record through as a generic method call, which no emitter can
+    tell from a host-object call; py rendered the record as a dict and the call
+    as attribute access, and crashed with `AttributeError`. The documented
+    spelling `let g = r.f  g(n)` is unaffected."""
+    if not method or not _is_record_type(recv_t, env.types):
+        return
+    raise RevlError(
+        filename, line,
+        f"no builtin method `{method}` on values — the stdlib surface is "
+        f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
+        hint="records carry data, not methods; call functions as `f(x)`, "
+             "and call arrows through a `let` binding",
+    )
 
 
 def _refuse_unmarked_local_crossing(node: dict, spelled: str, env: Env,

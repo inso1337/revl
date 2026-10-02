@@ -4223,6 +4223,13 @@ fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     _ => "",
   }
   if (lr != "") { return ac_refuse(a, "G4", lr) }
+  // issue #1547: a method call on a RECORD receiver, refused with the message
+  // a `fn` body gives the same call (`lower._refuse_record_method`)
+  let rr = match tg {
+    Field(fl) => svc_local_first(fl, cx) ? record_method_refusal(fl.target, fl.name, cx) : "",
+    _ => "",
+  }
+  if (rr != "") { return ac_refuse(a, "T1", rr) }
   let pa = match tg {
     Field(fl) => svc_local_first(fl, cx) ? svc_recv_note(fl.target, fl.name, cx, a) : a,
     _ => a,
@@ -5226,6 +5233,20 @@ fn svc_recv_msig(recv: Expr, op: Str, cx: Ctx) -> MSig {
   let ty = infer(recv, cx.svcTys)
   if (ty == "" || !cx.svcs.has(parse_head(ty))) { return none }
   return find_msig(svc_of(cx, parse_head(ty)), op, 0)
+}
+
+// `lower._is_record_type` over the gate's own typing environment: a structural
+// `{…}` record. `Ctx.svcTys` types the body's `let`s with `infer`, so a record
+// literal bound by `let`, read through a field or element, or written in place
+// types as one.
+fn gate_is_record(t: Str) -> Bool { return starts_with(ty_trim(t), "{") }
+
+fn record_method_refusal(recv: Expr, op: Str, cx: Ctx) -> Str {
+  if (is_builtin_method(op)) { return "" }
+  if (!gate_is_record(infer(recv, cx.svcTys))) { return "" }
+  return "no builtin method `".concat(op)
+    .concat("` on values — the stdlib surface is ")
+    .concat(tk_stdlib_surface()).concat(" (docs/stdlib-2.0.md)")
 }
 
 // `t.charge` / `r.p.charge` for a receiver written as names and fields, else
@@ -12906,7 +12927,7 @@ fn tk_low_method(c: CallN, env: List[Bind]) -> Str {
     // receiver decided in one direction or the other, because an undecided one
     // may be a host object, a `use`d module alias or a required-service handle,
     // none of which take the builtin table at all.
-    if (!tk_low_stdlib_proven(recv) && !untyped) { return "" }
+    if (!tk_low_stdlib_proven(recv) && !untyped && !gate_is_record(recv)) { return "" }
     // `revl.diagnostics.classify` reads this shape as T1, so the wire's tag is
     // T1 and not the code-less `TYPE` family.
     return tagged("T1", "no builtin method `".concat(f.name)
@@ -26108,4 +26129,35 @@ component Supervisor provides sup: Sup {
   }
 }""")
   assert v == "G4|`Sup.run` is declared `emission[db]`, but this implementation emits through `net` (reaching `Task.go`)"
+}
+
+// ---- issue #1547: a method call on a record in a component body -----------
+
+test "a call through a record field in a provide method is refused" {
+  let v = admit_src("""extern pure fn twice(n: Int) -> Int = @py { return n * 2 }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let r = { f: twice }
+      return r.f(n)
+    }
+  }
+}""")
+  assert v == "T1|no builtin method `f` on values — the stdlib surface is ".concat(tk_stdlib_surface()).concat(" (docs/stdlib-2.0.md)")
+}
+
+test "the function read off a record field and bound is admitted" {
+  let v = admit_src("""extern pure fn twice(n: Int) -> Int = @py { return n * 2 }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let r = { f: twice }
+      let g = r.f
+      return g(n)
+    }
+  }
+}""")
+  assert v == ""
 }

@@ -1557,7 +1557,9 @@ _FN_VALUE_HELPERS = {
 _FN_VALUE_SPELLINGS = {
     "alias": ("", "let g = charge let u = g(n) return 0"),
     "passed-to-helper": ("apply", "let u = apply(charge, n) return 0"),
-    "record-field": ("", "let r = { f: charge } let u = r.f(n) return 0"),
+    # read off the field and called through a binding: `r.f(n)` itself is
+    # refused in a component body (issue #1547, records carry no methods)
+    "record-field": ("", "let r = { f: charge } let g = r.f let u = g(n) return 0"),
     "list-element": ("apply0", "let u = apply0([charge], n) return 0"),
     "returned-from-fn": ("pick", "let h = emit pick() let u = h(n) return 0"),
     "arrow-captures-alias": (

@@ -9623,6 +9623,13 @@ fn call_check(tg: Expr, args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
     if (lr != "") {
         return ac_refuse(a.clone(), String::from("G4"), lr.clone());
     }
+    let rr = match tg.clone() {
+    Expr::Field(fl) => { let fl = *fl; if svc_local_first(fl.clone(), cx.clone()) { record_method_refusal(fl.target.clone(), &fl.name, cx.clone()) } else { String::from("") } },
+    _ => String::from(""),
+};
+    if (rr != "") {
+        return ac_refuse(a.clone(), String::from("T1"), rr.clone());
+    }
     let pa = match tg.clone() {
     Expr::Field(fl) => { let fl = *fl; if svc_local_first(fl.clone(), cx.clone()) { svc_recv_note(fl.target.clone(), &fl.name, cx.clone(), a.clone()) } else { a.clone() } },
     _ => a,
@@ -10280,6 +10287,20 @@ fn svc_recv_msig(recv: Expr, op: &str, cx: Ctx__m2) -> MSig {
         return none;
     }
     return find_msig(svc_of(cx.clone(), parse_head(ty.clone())), op, 0i64);
+}
+
+fn gate_is_record(t: &str) -> bool {
+    return starts_with__m2(&ty_trim(t), "{");
+}
+
+fn record_method_refusal(recv: Expr, op: &str, cx: Ctx__m2) -> String {
+    if is_builtin_method(op) {
+        return String::from("");
+    }
+    if (!gate_is_record(&infer(recv.clone(), cx.svcTys))) {
+        return String::from("");
+    }
+    return (((String::from("no builtin method `").revl_concat(&op)).revl_concat("` on values — the stdlib surface is ")).revl_concat(&tk_stdlib_surface())).revl_concat(" (docs/stdlib-2.0.md)");
 }
 
 fn svc_recv_spelling(e: Expr) -> String {
@@ -16800,7 +16821,7 @@ fn tk_low_method(c: CallN, env: Vec<Bind>) -> String {
     }
     let untyped = tk_low_untyped_recv(f.target.clone(), &env);
     if (!is_builtin_method(&f.name)) {
-        if ((!tk_low_stdlib_proven(recv.clone())) && (!untyped)) {
+        if (((!tk_low_stdlib_proven(recv.clone())) && (!untyped)) && (!gate_is_record(&recv))) {
             return String::from("");
         }
         return tagged("T1", &((((String::from("no builtin method `").revl_concat(&f.name)).revl_concat("` on values — the stdlib surface is ")).revl_concat(&tk_stdlib_surface())).revl_concat(" (docs/stdlib-2.0.md)")));
@@ -30153,6 +30174,18 @@ fn a_spawn_handle_step_under_a_bound_covering_the_op_s_scope_is_admitted() {
 fn a_spawn_handle_value_under_a_bound_missing_the_op_s_scope_is_refused() {
     let v = admit_src(String::from("service Task { emission[net] fn go() -> Int }\nservice Sup { emission[db] fn run() -> Int }\ncomponent Worker provides task: Task {\n  provide task { fn go() = 0 }\n}\ncomponent Supervisor provides sup: Sup {\n  provide sup {\n    fn run() {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let r = emit w.task.go()\n      return r\n    }\n  }\n}"));
     assert!((v == "G4|`Sup.run` is declared `emission[db]`, but this implementation emits through `net` (reaching `Task.go`)"));
+}
+
+#[test]
+fn a_call_through_a_record_field_in_a_provide_method_is_refused() {
+    let v = admit_src(String::from("extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let r = { f: twice }\n      return r.f(n)\n    }\n  }\n}"));
+    assert!((v == (String::from("T1|no builtin method `f` on values — the stdlib surface is ").revl_concat(&tk_stdlib_surface())).revl_concat(" (docs/stdlib-2.0.md)")));
+}
+
+#[test]
+fn the_function_read_off_a_record_field_and_bound_is_admitted() {
+    let v = admit_src(String::from("extern pure fn twice(n: Int) -> Int = @py { return n * 2 }\nservice S { fn go(n: Int) -> Int }\ncomponent C provides s: S {\n  provide s {\n    fn go(n: Int) {\n      let r = { f: twice }\n      let g = r.f\n      return g(n)\n    }\n  }\n}"));
+    assert!((v == ""));
 }
 
 #[test]
