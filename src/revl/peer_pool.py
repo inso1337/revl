@@ -1839,6 +1839,13 @@ def pool_command(args) -> int:
         from .pool_dispatch import ledger_command  # noqa: PLC0415 (lazy)
         return ledger_command(args)
 
+    # `digest` reads files and touches no pool: it prints the digest that
+    # `init --artifact` and `request --artifact` pin for what
+    # `run --pool private` would send, one file or a multi-file bundle.
+    if verb == "digest":
+        from .pool_dispatch import digest_command  # noqa: PLC0415 (lazy)
+        return digest_command(args)
+
     # `keygen` is the PEER's first step and touches no pool: it draws a key pair
     # on the machine that will hold it. The private half is written 0600 and is
     # never read by any other verb here; the public half is the file the peer

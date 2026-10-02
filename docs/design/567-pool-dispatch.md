@@ -65,8 +65,10 @@ admits and whose bytes are different.
 
 Eight checks on the peer side, each naming one lowercase link, each failing
 closed: `task-shape`, `task-signature`, `pool-identity`, `charter-identity`,
-`peer-identity`, `artifact-digest`, `unknown-runner`, `replayed-task`. Four more
-on the way back: `peer-unreachable`, `result-digest`, `receipt-refused`,
+`peer-identity`, `artifact-digest`, `unknown-runner`, `replayed-task`. A
+multi-file task adds four, each naming the file it is about: `bundle-path`,
+`bundle-missing-file`, `bundle-extra-file` and `bundle-file-digest` (see
+"Multi-file artifacts" below). Four more on the way back: `peer-unreachable`, `result-digest`, `receipt-refused`,
 `delivered-twice`. None of them is a `revl.diagnostics` guarantee code, for the
 reason `peer_pool` and `revl.deploy` give: a dispatch refusal is a decision
 about a deployment, not a verdict about a program, and there is no program to
@@ -76,6 +78,71 @@ write under `examples/rejections/` for "this peer already ran that task id".
 of `[A-Za-z0-9._-]` in the shape check. A signature proves who sent a task; it
 does not make `../../etc` a safe file name, and the peer is the side that would
 pay for the difference.
+
+## Multi-file artifacts: the bundle digest
+
+`revl run --pool private` given two or more files sends them as one BUNDLE
+(`src/revl/pool_bundle.py`). One file is unchanged: it is still pinned by the
+sha256 of its bytes, so a charter written before bundles existed admits what it
+admitted.
+
+**The digest.** A bundle is described by its manifest, one entry per file:
+`{path, mode, digest}`, where `digest` is the sha256 of the file's bytes and
+`mode` is `0644` or `0755` (taken from the executable bit). The bundle digest is
+the sha256 of the domain tag `revl.pool-bundle/v1` and the canonical JSON of the
+manifest sorted by path. So it covers every file's content, its path and its
+mode, and the set of files itself. The order the files were given in does not
+change it; moving a file, editing it, adding one or making one executable does.
+That digest is what `pool init --artifact` and `pool request --artifact` pin,
+and `revl pool digest FILE...` prints it, reading the command line exactly as
+`run --pool private` does.
+
+**Names.** Each file is named by its path relative to the working directory, so
+run from the composition's root. A name is relative and `/`-separated, and each
+segment is `[A-Za-z0-9._-]`, is not `.` or `..`, and does not start with `-`
+(the names are handed to the runner on its command line). No two names may be
+equal ignoring case, and no name may be a directory of another, so the files
+cannot collide when a case-insensitive file system writes them out. The
+operator checks every name before it reads a single file: `../x.rvl` is refused
+on `bundle-path`, naming it, and nothing is recorded.
+
+**What crosses the wire.** The task carries the manifest and the files
+separately, with `artifact` empty and `artifact_digest` set to the bundle
+digest. Carrying them separately is what lets the peer say WHICH file is wrong
+rather than only that something is. The peer checks, in this order and before
+it writes or runs anything:
+
+1. every manifest name and every carried name (`bundle-path`, naming it);
+2. the manifest against the digest the task pins (`artifact-digest`);
+3. a file the manifest lists and the task does not carry
+   (`bundle-missing-file`, naming it);
+4. a file the task carries and the manifest does not list, or carries twice
+   (`bundle-extra-file`, naming it);
+5. each file's bytes and mode against its entry (`bundle-file-digest`, naming
+   it);
+6. the bundle digest against the charter's admitted digests (`artifact-digest`,
+   as for one file).
+
+The operator never builds such a task: `build_task` computes the digest from
+the files it carries. The peer checks anyway, for the same reason it re-hashes
+a single file.
+
+**Running it.** The peer writes the bundle into a fresh directory under its
+workspace, each file at its path with its mode, created exclusively and without
+following links, and hands the runner every `.rvl` file in path order, as a
+local `revl test a.rvl b.rvl` would be handed them. Every `.rvl` file is a
+root. The operator compiles the bundle the same way, from a scratch directory,
+to classify it, so a `use` naming a file the bundle does not carry fails on the
+operator before anything is recorded instead of resolving against the
+operator's working directory.
+
+**Receipts and the ledger.** The peer's signed receipt carries a `bundle` block
+`{digest, files}` inside the signed body, so it names the bundle digest and
+every path, mode and file digest it ran. `pool_receipt.check_receipt` refuses a
+receipt whose block does not hash to its own `artifact_digest`
+(`receipt-artifact`): one claim with two spellings must not say two things. The
+ledger entry for the task keeps the same block, the `dispatched` event counts
+its files, and `revl pool ledger` prints `bundle=<digest> (N files)`.
 
 ## One result, impossible and visible
 
@@ -214,9 +281,12 @@ dispatch is exactly the failure the refusal exists to prevent.
    send as an unreachable one. The pointer this point used to carry, to
    `src/revl/liveness.py`, was wrong: that module is the Petri-net deadlock
    search behind `revl analyze`.
-3. **A multi-file artifact.** A task pins ONE artifact by hash. Two files are
-   refused on `multi-file-artifact` rather than silently hashing the first; a
-   bundle digest is what that needs.
+3. **A multi-file artifact.** Closed since (issue #1198): several files are
+   one bundle with one digest over every file, its path and its mode. See
+   "Multi-file artifacts" above. `tests/test_pool_bundle_1198.py` runs a
+   three-file composition through `run --pool private` against a `pool serve`
+   process, and refuses a tampered file, a missing or extra file and a
+   `../x` name on both ends. The `multi-file-artifact` link is gone.
 4. **Concurrency.** Closed since (issue #1198). Every writer of the pool
    directory holds `pool_state.locked` for its whole read-modify-write, and
    every file is replaced atomically. `dispatch_one` is two transactions, one
