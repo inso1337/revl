@@ -259,11 +259,44 @@ The gate carries both: `appr_group` walks the step's `compensate` slot after
 the head, and `appr_crossed` resolves a handle head through `handle_msig`, the
 gate's twin of `_instance_get_call`.
 
+## Service-typed locals (issue #1509)
+
+A provision can be held by a local in more ways than the direct read and its
+plain alias: chosen by an `if`, stored in a record field or a list element, or
+read back out of one. Measured before this change, with the crossing's token
+requiring approval:
+
+- `let t = if (n > 0) { w.pay } else { w.pay }`, then `emit t.charge(n)`: the
+  marker rule read `t` as a crossing through its service type, but the floor
+  never resolved a call whose receiver is a local, so it crossed with no edge.
+- `let r = { p: w.pay }`, then `r.p.charge(n)`: admitted UNMARKED and
+  unapproved. Neither rule saw through the field; marked, the call was refused
+  as "not declared `emission`".
+- `let ps = [w.pay]`, then `ps[0].charge(n)`: the same as the record field.
+
+One resolver now answers both rules, `_service_receiver_decl`: a call whose
+receiver is rooted at a `let`-bound local of the body being lowered
+(`Env.let_locals`), read through fields and elements, and whose static type
+(`infer_ir`) is a service. `_is_emission_call` reads it for a field or element
+receiver, the unmarked demand is raised at both call sites (spelled as
+written, `t.charge` / `r.p.charge`, the operation alone for a receiver that is
+not names and fields), and `_approval_crossed_caps` reads it for the floor.
+
+An arrow PARAMETER is not a `let`-bound local (`Env._arrow_params`): what
+flows into one is decided at the application (`_check_arrow_param_crossings`),
+and an arrow never applied to a provision must still compile. A provide
+method's own service-typed parameter is likewise outside the resolver.
+
+The gate keeps a per-body typing environment (`Ctx.svcTys`) built with its
+`infer` over a seed that types a spawn-handle read (`@spawn:C` and
+`field @spawn:C.<key>`), and reads it through `svc_recv_msig` for the marker
+(`svc_local_refusal`) and the floor (`appr_local_caps`).
+
 ## What is not covered
 
-- **Service-typed locals.** A crossing through a local or parameter of a
-  service type (the `name`-target call) is still not resolved by
-  `_emit_crossed_caps`.
+- **A service-typed method parameter.** A provide method whose service
+  declares a parameter of a service type is not resolved: whether a provision
+  reaches it is a question about the caller.
 - **`undo` slots.** A bracket's `undo` that reaches an emission is refused
   under G5 before any approval question arises.
 - **The formal model** carries no fact about approvals. The approval

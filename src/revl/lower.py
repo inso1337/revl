@@ -955,6 +955,17 @@ class Env:
         # through what holds it (a record field, a list index, an arm); scoped
         # to the body being lowered, exactly like `local_arrows`.
         self.provision_values: dict = {}
+        # SERVICE-TYPED LOCALS (issue #1509): the safe names a `let` bound in
+        # the body being lowered. A local whose static type is a service holds
+        # a provision (only a provision read yields a service value), so a call
+        # through it is the crossing the provision's own call is, and the
+        # marker rule and the approval floor both judge it
+        # (`_service_receiver_decl`). An arrow PARAMETER is not one of these:
+        # whether a provision flows into it is decided at the application
+        # (`_check_arrow_param_crossings`), and `_arrow_params` keeps the
+        # parameters of the arrow being lowered out of the set.
+        self.let_locals: set = set()
+        self._arrow_params: set = set()
         # item 130: stream lifecycle tracking. `terminal_stream_sources` holds
         # the safe names of stream sources (`let s = effect Stream.source() undo
         # s.close()`) whose inverse CLOSES the source — the terminal-delivering
@@ -9325,9 +9336,12 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                         f"{', '.join(sorted(_BUILTIN_METHODS))} (docs/stdlib-2.0.md)",
                         hint="records carry data, not methods; call functions as `f(x)` (G6)",
                     )
-                return {"kind": "call",
+                node = {"kind": "call",
                         "target": {"kind": "name", "id": scope[root]},
                         "method": method, "args": args}
+                _refuse_unmarked_local_crossing(node, f"{root}.{method}", env,
+                                                filename, line)
+                return node
         if isinstance(expr.callee, ExprVar):
             name = expr.callee.name
             # ADT/Opt construction lowers exactly as it does in a `fn` body:
@@ -9404,7 +9418,13 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
                          "`emit` makes that visible at the call site",
                     code="G4", category="emission",
                 )
-        return {"kind": "call", "callee": callee_node, "args": args}
+        node = {"kind": "call", "callee": callee_node, "args": args}
+        if inst is None:
+            # a field or element read off a service-typed local (issue #1509)
+            _refuse_unmarked_local_crossing(
+                node, _receiver_spelling(expr.callee) or callee_node.get("name"),
+                env, filename, line)
+        return node
     if isinstance(expr, ExprBin):
         node = {"kind": "bin", "op": expr.op,
                 "left": _lower_component_pure_expr(expr.left, env, scope, callables,
@@ -9506,11 +9526,17 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
         # refused the inline spelling as a nested `emit`.
         saved_in_args = getattr(env, "_in_emit_args", False)
         env._in_emit_args = False
+        # the parameters are not service-typed LOCALS (issue #1509): what flows
+        # into one is decided at the application, so they leave the set while
+        # the body is lowered
+        saved_arrow_params = set(getattr(env, "_arrow_params", ()) or ())
+        env._arrow_params = saved_arrow_params | set(expr.params)
         try:
             body = _lower_component_pure_expr(expr.body, env, inner, callables,
                                               pure_only)
         finally:
             env._in_emit_args = saved_in_args
+            env._arrow_params = saved_arrow_params
         node = {"kind": "arrow", "params": expr.params, "captures": captures,
                 "body": body}
         # item 75(a) §4/§5.3: the same complete-signature condition as the
@@ -9577,6 +9603,7 @@ def _lower_component_setup_stmt(stmt, env: Env, scope: dict[str, str], callables
             env.type_env[safe] = inferred
         _note_provision_alias(safe, value, env)
         env.provision_values[stmt.name] = stmt.value
+        env.let_locals.add(safe)
         if isinstance(stmt.value, ExprArrow):
             env.local_arrows[stmt.name] = stmt.value
         out.append({"step": "let", "name": safe, "value": value})
@@ -12718,6 +12745,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         saved_provisions = dict(env.provision_locals)
         saved_arrows = dict(env.local_arrows)
         saved_values = dict(env.provision_values)
+        saved_let_locals = set(env.let_locals)
         env.params = env.bind_params(method.params, method.line)
         # method params carry the service's declared types (A6): surface
         # names bind the body, the service contributes the signature
@@ -12843,6 +12871,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
             env.params[ms.name] = safe
             _note_provision_alias(safe, value, env)
             env.provision_values[ms.name] = ms.value
+            env.let_locals.add(safe)
             if isinstance(ms.value, ExprArrow):
                 env.local_arrows[ms.name] = ms.value
             if ms.type is not None:
@@ -13270,6 +13299,7 @@ def _lower_provide(stmt: ProvideStmt, provides: dict[str, str], provided_keys: s
         env.provision_locals = saved_provisions
         env.local_arrows = saved_arrows
         env.provision_values = saved_values
+        env.let_locals = saved_let_locals
 
         # A service declaration is an *upper bound* on its providers' effects:
         # consumers bind to the service, not to this component, and a provider
@@ -13959,6 +13989,12 @@ def _approval_crossed_caps(node: dict, env: Env) -> list:
         if inst is not None:
             caps = getattr(inst[1], "capabilities", None)
             return list(caps) if caps else ["*"]
+        # a call through a service-typed local (issue #1509), resolved by the
+        # resolver the marker rule reads: the op's declared scope, `*` when bare
+        decl = _service_receiver_decl(node, env)
+        if decl is not None and decl.emission:
+            caps = getattr(decl, "capabilities", None)
+            return list(caps) if caps else ["*"]
     if not crossed and node.get("kind") == "fn":
         reached = (getattr(env, "emitting_caps", None) or {}).get(node.get("name"))
         crossed = sorted(reached or ())
@@ -14571,6 +14607,86 @@ def _instance_get_decl(node: dict, services: dict):
     return (recv, decl) if decl is not None else None
 
 
+def _service_receiver_decl(node: dict, env: Env):
+    """The `MethodDecl` a call reaches through a service-typed LOCAL: a name a
+    `let` bound in the body being lowered, or a field / element read off one
+    (`t.charge(n)`, `r.p.charge(n)`, `ps[0].charge(n)`), whose static type is a
+    service. Else None. Issue #1509.
+
+    Only a provision read yields a service value, so such a local holds a
+    provision, and a call through it crosses the boundary exactly as the
+    provision's own call does. The direct read and its plain alias already
+    lower back to the `instance-get` (`Env.provision_locals`); this is every
+    other way a `let` can hold one: an `if`/`match` arm, a record field, a list
+    element. One resolver, read by the marker rule (`_is_emission_call`, and
+    the unmarked demand at both call sites) and by the approval floor
+    (`_approval_crossed_caps`).
+
+    An arrow PARAMETER is excluded (`Env._arrow_params`): what flows into one
+    is decided at the application (`_check_arrow_param_crossings`), and an
+    arrow never applied to a provision must still compile."""
+    if node.get("kind") != "call":
+        return None
+    target = node.get("target")
+    if isinstance(target, dict):
+        if target.get("kind") != "name":
+            return None
+        recv, method = target, node.get("method")
+    else:
+        callee = node.get("callee")
+        if not (isinstance(callee, dict) and callee.get("kind") == "field"):
+            return None
+        recv, method = callee.get("target"), callee.get("name")
+        if not isinstance(recv, dict) or recv.get("kind") == "instance-get":
+            return None
+    root = recv
+    while isinstance(root, dict) and root.get("kind") in ("field", "index"):
+        root = root.get("target")
+    if not (isinstance(root, dict) and root.get("kind") == "name"):
+        return None
+    rid = root.get("id")
+    if rid not in (getattr(env, "let_locals", None) or ()) \
+            or rid in (getattr(env, "_arrow_params", None) or ()):
+        return None
+    ty = infer_ir(recv, getattr(env, "type_env", None) or {}, env.types,
+                  env.services)
+    head, _ = parse_type(ty or "")
+    svc = env.services.get(head)
+    return svc.methods.get(method) if svc is not None else None
+
+
+def _refuse_unmarked_local_crossing(node: dict, spelled: str, env: Env,
+                                    filename: str, line: int) -> None:
+    """The marker rule for a call through a service-typed local (issue #1509):
+    an unmarked emission is refused exactly as the direct provision call is
+    (`call to emission `w.task.run` must be marked `emit``), spelled as the
+    author wrote the receiver."""
+    if getattr(env, "_expr_mode", "setup") != "setup":
+        return
+    decl = _service_receiver_decl(node, env)
+    if decl is None or not decl.emission:
+        return
+    raise RevlError(
+        filename, line,
+        f"call to emission `{spelled}` must be marked `emit` (G4)",
+        hint="an emission crosses the system boundary and cannot be reverted; "
+             "`emit` makes that visible at the call site",
+        code="G4", category="emission",
+    )
+
+
+def _receiver_spelling(expr) -> "str | None":
+    """`t.charge` / `r.p.charge` for a callee written as a chain of names and
+    fields, else None (the refusal then names the operation alone)."""
+    from .parser import ExprField, ExprVar  # noqa: PLC0415
+    if isinstance(expr, ExprVar):
+        return expr.name
+    if isinstance(expr, ExprField):
+        base = _receiver_spelling(expr.target)
+        return f"{base}.{expr.name}" if base is not None else None
+    return None
+
+
 def _is_emission_call(node: dict, env: Env) -> bool:
     # an `emission` extern (or a function reaching one) is a boundary
     # crossing exactly as a service emission is, so `emit` marks it too
@@ -14585,7 +14701,11 @@ def _is_emission_call(node: dict, env: Env) -> bool:
         # handle's provision to the service and read the method's emission-ness
         # there rather than assuming a `req` target (which KeyError'd here)
         inst = _instance_get_call(node, env)
-        return inst is not None and inst[1].emission
+        if inst is not None:
+            return inst[1].emission
+        # a field or element read off a service-typed local (issue #1509)
+        decl = _service_receiver_decl(node, env)
+        return decl is not None and decl.emission
     if target.get("kind") == "name":
         # a call whose receiver is a service-typed local or parameter. A value
         # of a service type is a boundary handle — only a provision read or a

@@ -3419,7 +3419,7 @@ type Ctx = { svcs: Map[Str, SvcD], ambOps: Map[Str, AmbSvc],
              scopeNames: List[Str], fnNames: List[Str], compName: Str,
              fnAsyncSlots: Map[Str, List[Int]],
              underArrow: Bool, handles: Map[Str, Str],
-             provKeySvc: Map[Str, Str], provAlias: Map[Str, Str],
+             provKeySvc: Map[Str, Str], provAlias: Map[Str, Str], svcTys: List[Bind],
              localArrows: Map[Str, ArrowN], acqWhere: Str, emitPos: Str,
              appr: ApprI }
 
@@ -3697,7 +3697,7 @@ fn ctx_appr(cx: Ctx, ap: ApprI) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere,
            emitPos: cx.emitPos, appr: ap }
 }
@@ -3828,21 +3828,31 @@ fn appr_crossed(head: Expr, cx: Ctx) -> List[Str] {
       Field(fl) => match fl.target {
         Var(v) => cx.provAlias.has(v)
           ? appr_alias_caps(v, fl.name, cx)
-          : (cx.reqMap.has(v) ? appr_req_caps(v, fl.name, cx) : []),
+          : (cx.reqMap.has(v) ? appr_req_caps(v, fl.name, cx)
+                              : appr_local_caps(fl.target, fl.name, cx)),
         // `h.<key>.<op>(…)` off a spawn handle: the op's declared scope, off
         // the one resolver the marker rule uses for this carrier
         // (`handle_msig`, the reference's `_instance_get_call`)
         Field(inner) => match inner.target {
-          Var(h) => cx.handles.has(h) ? appr_handle_caps(h, inner.name, fl.name, cx) : [],
-          _ => [],
+          Var(h) => cx.handles.has(h) ? appr_handle_caps(h, inner.name, fl.name, cx)
+                                      : appr_local_caps(fl.target, fl.name, cx),
+          _ => appr_local_caps(fl.target, fl.name, cx),
         },
-        _ => [],
+        _ => appr_local_caps(fl.target, fl.name, cx),
       },
       Var(n) => appr_name_caps(n, cx),
       _ => [],
     },
     _ => [],
   }
+}
+
+// A call through a service-typed local (issue #1509), off the resolver the
+// marker rule reads (`svc_recv_msig`): the op's declared scope, `*` when bare.
+fn appr_local_caps(recv: Expr, op: Str, cx: Ctx) -> List[Str] {
+  let decl = svc_recv_msig(recv, op, cx)
+  if (decl.name == "" || !decl.isEm) { return [] }
+  return decl.caps.length() > 0 ? decl.caps : ["*"]
 }
 
 fn appr_handle_caps(h: Str, key: Str, op: Str, cx: Ctx) -> List[Str] {
@@ -4009,7 +4019,7 @@ fn ctx_emit_pos(cx: Ctx, pos: Str) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
            // leaving a marked head for its argument list leaves the `emit`
            // expression position too: the reference's arguments lower in
            // "setup" there, whose host-acquire phrase is "this position"
@@ -4254,6 +4264,14 @@ fn walk_expr(e: Expr, marked: Bool, cx: Ctx, a: Ac) -> Ac {
 }
 
 fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
+  // a call through a service-typed local (issue #1509): judged ahead of the
+  // value walk, after the alias and handle spellings, which resolve to the
+  // provision read themselves
+  let lr = match tg {
+    Field(fl) => svc_local_first(fl, cx) ? svc_local_refusal(fl.target, fl.name, marked, cx) : "",
+    _ => "",
+  }
+  if (lr != "") { return ac_refuse(a, "G4", lr) }
   return match tg {
     Field(fl) => match fl.target {
       // a local that ALIASES a spawn-handle provision (`let t = w.task`) is
@@ -4270,6 +4288,20 @@ fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     },
     Var(n) => fn_call(n, args, marked, cx, a),
     _      => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
+  }
+}
+
+// Whether a call's receiver is NOT one the alias or handle path resolves to
+// the provision read (`provAlias`, `h.<key>`), so the service-typed-local rule
+// is the one that judges it.
+fn svc_local_first(fl: FieldN, cx: Ctx) -> Bool {
+  return match fl.target {
+    Var(v) => !cx.provAlias.has(v),
+    Field(inner) => match inner.target {
+      Var(h) => !cx.handles.has(h),
+      _ => true,
+    },
+    _ => true,
   }
 }
 
@@ -4706,7 +4738,7 @@ fn ctx_bind(cx: Ctx, names: List[Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: svc_shadow(cx.svcTys, names), localArrows: cx.localArrows,
            acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -4720,7 +4752,7 @@ fn ctx_acq(cx: Ctx, where: Str) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
            acqWhere: where, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -4733,7 +4765,7 @@ fn ctx_alias(cx: Ctx, al: Map[Str, Str]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: al, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: al, svcTys: cx.svcTys, localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context carrying the local arrows one body binds (`let f = (…) =>
@@ -4747,7 +4779,7 @@ fn ctx_arrows(cx: Ctx, m: Map[Str, ArrowN]) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: m, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
 // The same context marked as being inside an arrow value: only the `aops`
@@ -4766,7 +4798,7 @@ fn ctx_under_arrow(cx: Ctx) -> Ctx {
            compName: cx.compName,
            fnAsyncSlots: cx.fnAsyncSlots, underArrow: true,
            handles: cx.handles, provKeySvc: cx.provKeySvc,
-           provAlias: cx.provAlias, localArrows: cx.localArrows,
+           provAlias: cx.provAlias, svcTys: cx.svcTys, localArrows: cx.localArrows,
            acqWhere: cx.acqWhere,
            emitPos: cx.emitPos == "args" ? "" : cx.emitPos, appr: cx.appr }
 }
@@ -4937,7 +4969,7 @@ fn mk_ctx(svcs: Map[Str, SvcD], rm: Map[Str, Str], caps: CapsT,
            emittingNames: emitting, asyncExterns: ai, scopeNames: scope,
            fnNames: fnn, compName: cnm, fnAsyncSlots: slots,
            underArrow: false, handles: Map.empty(), provKeySvc: pks,
-           provAlias: Map.empty(), localArrows: Map.empty(),
+           provAlias: Map.empty(), svcTys: [], localArrows: Map.empty(),
            acqWhere: "this position", emitPos: "", appr: no_appr() }
 }
 
@@ -4951,7 +4983,7 @@ fn ctx_with_callables(cx: Ctx, names: List[Str]) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: union_into(cx.fnNames, names),
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -4973,7 +5005,7 @@ fn ctx_amb_ops(cx: Ctx, ops: Map[Str, AmbSvc]) -> Ctx {
            scopeNames: cx.scopeNames, fnNames: cx.fnNames,
            compName: cx.compName, fnAsyncSlots: cx.fnAsyncSlots,
            underArrow: cx.underArrow, handles: cx.handles,
-           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias,
+           provKeySvc: cx.provKeySvc, provAlias: cx.provAlias, svcTys: cx.svcTys,
            localArrows: cx.localArrows, acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
@@ -4997,7 +5029,7 @@ fn ctx_for(base: Ctx, comp: CompD) -> Ctx {
            fnNames: base.fnNames, compName: comp.name,
            fnAsyncSlots: base.fnAsyncSlots, underArrow: false,
            handles: handles_of(comp), provKeySvc: base.provKeySvc,
-           provAlias: Map.empty(), localArrows: Map.empty(),
+           provAlias: Map.empty(), svcTys: [], localArrows: Map.empty(),
            acqWhere: "this position", emitPos: "", appr: base.appr }
 }
 
@@ -5080,6 +5112,119 @@ fn arrows_in(ss: List[Stmt], i: Int, m: Map[Str, ArrowN]) -> Map[Str, ArrowN] {
     _         => m,
   }
   return arrows_in(ss, i + 1, m2)
+}
+
+// SERVICE-TYPED LOCALS (issue #1509, lower.py `Env.let_locals` and
+// `_service_receiver_decl`). The static type of every `let` one body binds,
+// over a seed that types a spawn-handle read: a handle `h` bound to `spawn C`
+// is `@spawn:C`, and `field @spawn:C.<key>` is the service `C` provides at
+// `<key>`, so `infer` types `w.pay`, `if c { w.pay } else { w.pay }`,
+// `{ p: w.pay }` and `[w.pay]` exactly as the reference's `infer_ir` does
+// (`Pay`, `Pay`, `{p: Pay}`, `List[Pay]`). Scoped per body as `alias_in` is.
+fn svc_seed(cx: Ctx) -> List[Bind] {
+  var env: List[Bind] = []
+  let hs = cx.handles.keys()
+  var i = 0
+  while (i < hs.length()) {
+    let comp = match cx.handles.lookup(hs[i]) { Some(c) => c, None => "" }
+    env = tenv_put(env, hs[i], "@spawn:".concat(comp))
+    i += 1
+  }
+  let ks = cx.provKeySvc.keys()
+  i = 0
+  while (i < ks.length()) {
+    let cut = ks[i].indexOf("#")
+    let sv = match cx.provKeySvc.lookup(ks[i]) { Some(v) => v, None => "" }
+    if (cut != 0 - 1) {
+      env = tenv_put(env, "field @spawn:".concat(ks[i].slice(0, cut)).concat(".")
+                            .concat(ks[i].slice(cut + 1, ks[i].length())), sv)
+    }
+    i += 1
+  }
+  return env
+}
+
+fn svc_tys_in(ss: List[Stmt], i: Int, env: List[Bind]) -> List[Bind] {
+  if (i >= ss.length()) { return env }
+  let s = ss[i]
+  // a plain `let` parses as an `expr` statement with a binding
+  let env2 = (s.kind == "expr" && s.bind != "")
+    ? tenv_put(env, s.bind, infer(s.e, env)) : env
+  return svc_tys_in(ss, i + 1, env2)
+}
+
+// A binder that is not a `let` (an arrow parameter, a match arm's payload)
+// shadows a same-named local: its type is unknown here, as the reference's
+// fresh safe name is outside `Env.let_locals`.
+fn svc_shadow(env: List[Bind], names: List[Str]) -> List[Bind] {
+  var out = env
+  var i = 0
+  while (i < names.length()) {
+    out = tenv_put(out, names[i], "")
+    i += 1
+  }
+  return out
+}
+
+fn ctx_svc(cx: Ctx, tys: List[Bind]) -> Ctx {
+  return { svcs: cx.svcs, ambOps: cx.ambOps, reqMap: cx.reqMap,
+           caps: cx.caps, colored: cx.colored,
+           emittingNames: cx.emittingNames, asyncExterns: cx.asyncExterns,
+           scopeNames: cx.scopeNames, fnNames: cx.fnNames,
+           compName: cx.compName,
+           fnAsyncSlots: cx.fnAsyncSlots, underArrow: cx.underArrow,
+           handles: cx.handles, provKeySvc: cx.provKeySvc,
+           provAlias: cx.provAlias, svcTys: tys, localArrows: cx.localArrows,
+           acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
+}
+
+// `_service_receiver_decl`: the op a call reaches through a receiver rooted at
+// a `let`-bound local (read through fields and elements) whose static type is
+// a service. The empty `MSig` (`name == ""`) otherwise.
+fn svc_recv_root(e: Expr) -> Str {
+  return match e {
+    Var(n) => n,
+    Field(f) => svc_recv_root(f.target),
+    Index(x) => svc_recv_root(x.target),
+    _ => "",
+  }
+}
+
+fn svc_recv_msig(recv: Expr, op: Str, cx: Ctx) -> MSig {
+  let none = find_msig(svc_of(cx, ""), "", 0)
+  let root = svc_recv_root(recv)
+  if (root == "") { return none }
+  let rt = tenv_get(cx.svcTys, root)
+  if (rt == "" || starts_with(rt, "@spawn:")) { return none }
+  let ty = infer(recv, cx.svcTys)
+  if (ty == "" || !cx.svcs.has(parse_head(ty))) { return none }
+  return find_msig(svc_of(cx, parse_head(ty)), op, 0)
+}
+
+// `t.charge` / `r.p.charge` for a receiver written as names and fields, else
+// "" (`_receiver_spelling`).
+fn svc_recv_spelling(e: Expr) -> Str {
+  return match e {
+    Var(n) => n,
+    Field(f) => svc_field_spelling(svc_recv_spelling(f.target), f.name),
+    _ => "",
+  }
+}
+
+fn svc_field_spelling(base: Str, name: Str) -> Str {
+  return base == "" ? "" : base.concat(".").concat(name)
+}
+
+// The marker rule for a call through a service-typed local: an unmarked
+// emission is refused as the provision's own call is, spelled as written.
+// "" when the call is not such a crossing or is marked.
+fn svc_local_refusal(recv: Expr, op: Str, marked: Bool, cx: Ctx) -> Str {
+  if (marked) { return "" }
+  let decl = svc_recv_msig(recv, op, cx)
+  if (decl.name == "" || !decl.isEm) { return "" }
+  let sp = svc_recv_spelling(recv)
+  let spelled = sp == "" ? op : sp.concat(".").concat(op)
+  return "call to emission `".concat(spelled).concat("` must be marked `emit` (G4)")
 }
 
 fn tagged(tag: Str, msg: Str) -> Str { return tag.concat("|").concat(msg) }
@@ -6536,7 +6681,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   // are visible to every provide method, a method's own are not visible to the
   // next (GHSA-wg4v-r47x-52p2 residual — the arrow-parameter provision seam).
   let setupArrows = arrows_in(comp.setup, 0, Map.empty())
-  let scx = ctx_arrows(ctx_alias(cx, setupAlias), setupArrows)
+  // the service-typed locals (issue #1509) are per body too, over a seed that
+  // types every spawn-handle read
+  let setupSvcTys = svc_tys_in(comp.setup, 0, svc_seed(cx))
+  let scx = ctx_svc(ctx_arrows(ctx_alias(cx, setupAlias), setupArrows), setupSvcTys)
   let sa = walk_stmts(comp.setup, 0, scx, empty_ac())
   if (sa.msg != "") {
     return mk_verd(tagged(sa.tag, sa.msg), body_line(comp.setup, scx, comp.line))
@@ -6584,9 +6732,10 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       // is lowered.
       let sigv = a6_annotation_verdict(pv, mi, decl, gtys)
       if (sigv.v != "") { return sigv }
-      let mcx = ctx_arrows(
+      let mcx = ctx_svc(ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
-        arrows_in(pm.body, 0, setupArrows))
+        arrows_in(pm.body, 0, setupArrows)),
+        svc_tys_in(pm.body, 0, svc_shadow(setupSvcTys, pm.params)))
       // `_check_rebind`, run by the reference DURING the body lowering: it
       // interleaves with the walk below statement by statement, so the earlier
       // SOURCE LINE wins (both are read in statement order). A walk verdict with
@@ -25726,4 +25875,68 @@ component Classifier requires llm: Model provides out: Answer {
   provide out { fn classify(text) = emit llm.complete(text) }
 }""")
   assert v == "MODEL|`Classifier` routes `classify` (*) through model role `local`, which reaches `Model`, but `Classifier` holds only service `Model`'s unscoped emission (an unscoped emission has no token a `reaches [...]` list can name: give the `emission` methods of `Model` a scoped capability, such as `emission[model.complete]`, and reach that) - a component's effective ceiling is the pair's, so a model may not reach past the component that consults it (G-MODEL-PLACE)"
+}
+
+// ---- issue #1509: crossings through service-typed locals -------------------
+
+test "a crossing through a record field holding a provision must be marked" {
+  // admitted unmarked before: the field hid the provision from the marker rule
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let r = { p: w.pay }
+      let x = r.p.charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `r.p.charge` must be marked `emit` (G4)"
+}
+
+test "an if-bound provision local meets the approval floor" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = if (n > 0) { w.pay } else { w.pay }
+      emit t.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"
+}
+
+test "an if-bound provision local crossed with an approval edge is admitted" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  let a = await approval[production.payment] { reason: "pay" }
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = if (n > 0) { w.pay } else { w.pay }
+      emit t.charge(n) with a
+      return 0
+    }
+  }
+}""")
+  assert v == ""
 }
