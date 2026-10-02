@@ -519,9 +519,19 @@ def _method_emissions(body: list, env: "Env",
             result.add("*")
         return result
 
+    # issue #1682: a crossing through a provide method's own service-typed
+    # parameter, recorded by the body walk (`lower._param_crossings`): the
+    # op's declared scope, labelled `<Service>.<op>`. Not a host emission.
+    param_crossings = getattr(env, "param_crossings", None) or {}
+
     def walk(node):
         if isinstance(node, dict):
-            if node.get("step") == "emit":
+            crossing = param_crossings.get(id(node))
+            if crossing is not None:
+                note(crossing[0])
+                caps.update(crossing[1])
+            through_param = id(node.get("expr")) in param_crossings
+            if node.get("step") == "emit" and not through_param:
                 expr = node.get("expr") or {}
                 target = expr.get("target") or {}
                 if target.get("kind") == "req":

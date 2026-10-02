@@ -636,9 +636,38 @@ def _resolve_emission(root: str, chain: str, requires: dict, handles: dict,
     hit = _alias_hit(root, chain, aliases)
     if hit is not None:
         (comp, key), meth = hit
+        if comp == SERVICE_PARAM:
+            return key, meth  # a service-typed method parameter (#1682)
         svc = psvc.get(comp, {}).get(key)
         return (svc, meth) if svc else None
     return None
+
+
+#: The alias marker for a provide method's own SERVICE-TYPED parameter (issue
+#: #1682): `aliases[p] = (SERVICE_PARAM, <Service>)`. A call through it is a
+#: crossing of that service's declared scopes, judged in the method, so it
+#: resolves to the service directly rather than through a spawn handle.
+SERVICE_PARAM = "@service-param"
+
+
+def collect_service_params(c, psvc: dict, svc_objs: dict, aliases: dict) -> None:
+    """Record every provide method's service-typed parameters as aliases of
+    their service (issue #1682). Keyed by surface name over the whole
+    component, as `collect_provision_aliases` is."""
+    for stmt in c.body:
+        if not isinstance(stmt, ProvideStmt):
+            continue
+        svc = svc_objs.get(psvc.get(c.name, {}).get(stmt.key))
+        if svc is None:
+            continue
+        for pm in stmt.methods:
+            decl = svc.methods.get(pm.name)
+            if decl is None:
+                continue
+            for pname, (_dn, ptype) in zip(pm.params, decl.params):
+                head, _ = parse_type(ptype or "")
+                if head in svc_objs:
+                    aliases[pname] = (SERVICE_PARAM, head)
 
 
 def _alias_hit(root: str, chain: str, aliases: dict | None):
@@ -850,8 +879,19 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
     res = _resolve_emission(root, chain, requires, handles, psvc, aliases)
     if res is not None and region == "all":
         svc, meth = res
-        if (svc, meth) in em_set:
-            if root in handles or _alias_hit(root, chain, aliases) is not None:
+        hit = _alias_hit(root, chain, aliases)
+        if (svc, meth) in em_set and hit is not None and hit[0][0] == SERVICE_PARAM:
+            # a crossing through a service-typed method parameter (#1682):
+            # the op's declared scope on both columns, `*` when bare, which is
+            # what the checker's provider bound reads (`_param_crossings`)
+            mode, entries = bounds[(svc, meth)]
+            if mode == "any":
+                out.add(("*", "*"))
+            else:
+                for e in entries:
+                    out.add((_declared_cap(e), e))
+        elif (svc, meth) in em_set:
+            if root in handles or hit is not None:
                 out.add(("*", "*"))
             else:
                 mode, entries = bounds[(svc, meth)]
@@ -1602,6 +1642,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             # to, and the U rows it produces already carry the resolved
             # (service, method), so both sides read the same crossing.
             aliases: dict[str, tuple[str, str]] = {}
+            # the method parameters first, so a receiver written in place over
+            # one (`(if c { p } else { p }).charge(n)`) resolves through it
+            collect_service_params(c, psvc, svc_objs, aliases)
             for stmt in c.body:
                 collect_provision_aliases(stmt, handles, aliases)
             # ... and the SERVICE-TYPED arrow parameters an application binds a

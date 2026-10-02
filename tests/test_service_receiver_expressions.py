@@ -8,8 +8,8 @@ the approval floor read it: unmarked it was admitted, marked it was refused
 as "not declared `emission`". The resolver (`lower._service_receiver_decl`)
 now reads any receiver expression whose static type is a service, except one
 that depends on a binder it does not decide: an arrow parameter (decided at
-the application) and a provide method's own service-typed parameter (issue
-#1682).
+the application). A provide method's own service-typed parameter is decided
+since issue #1682.
 
 The self-host gate also noted nothing for an `emit` STEP through such a
 receiver, so it raised no objection where the provider upper bound refuses
@@ -78,9 +78,10 @@ def test_the_controls_are_admitted(stem):
     assert compile_source(_src(stem), f"{stem}.rvl")
 
 
-def test_a_method_parameter_receiver_is_left_to_its_own_rule():
-    """A provide method's own service-typed parameter is issue #1682's, and a
-    receiver that depends on one is not judged here."""
+def test_a_method_parameter_receiver_is_judged_since_issue_1682():
+    """A provide method's own service-typed parameter was left out here and
+    decided by issue #1682: a call through it is a crossing judged in the
+    method, so a receiver written in place over one is refused unmarked."""
     src = ("service Pay { emission fn charge(cents: Int) -> Int }\n"
            "service Till { emission fn go(p: Pay, n: Int) -> Int }\n"
            "component Register provides till: Till {\n"
@@ -89,7 +90,9 @@ def test_a_method_parameter_receiver_is_left_to_its_own_rule():
            "      let x = (if (n > 0) { p } else { p }).charge(n)\n"
            "      return x\n"
            "    }\n  }\n}\n")
-    assert compile_source(src, "t.rvl")
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(src, "t.rvl")
+    assert excinfo.value.message == MARKER
 
 
 @pytest.mark.parametrize("stem", ["g4_upper_bound_if_inline",

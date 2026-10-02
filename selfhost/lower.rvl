@@ -3581,7 +3581,8 @@ fn note_host_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
 fn svc_recv_head(e: Expr, cx: Ctx) -> Bool {
   return match e {
     Call(c) => match c.target {
-      Field(fl) => svc_local_first(fl, cx)
+      Field(fl) => svc_live(cx) && svc_local_first(fl, cx)
+        && !svc_reads_param(fl.target, cx)
         && svc_recv_msig(fl.target, fl.name, cx).isEm,
       _ => false,
     },
@@ -4288,22 +4289,26 @@ fn call_check(tg: Expr, args: List[Expr], marked: Bool, cx: Ctx, a: Ac) -> Ac {
     _ => "",
   }
   if (lr != "") { return ac_refuse(a, "G4", lr) }
+  let pa = match tg {
+    Field(fl) => svc_local_first(fl, cx) ? svc_param_note(fl.target, fl.name, cx, a) : a,
+    _ => a,
+  }
   return match tg {
     Field(fl) => match fl.target {
       // a local that ALIASES a spawn-handle provision (`let t = w.task`) is
       // the provision, so `t.<op>(…)` takes the handle path and is judged as
       // `w.task.<op>(…)` is — same rule, same message, same spelling.
       Var(v)      => cx.provAlias.has(v)
-        ? alias_call(v, fl.name, args, tg, marked, cx, a)
-        : req_call(v, fl.name, args, marked, cx, a),
+        ? alias_call(v, fl.name, args, tg, marked, cx, pa)
+        : req_call(v, fl.name, args, marked, cx, pa),
       // `h.<key>.<op>(…)` — a doubly-nested field head is a candidate provision
       // read off a spawn handle. If `h` is a known handle it is the instance
       // path (checked like a `req` emission); otherwise it is walked as a value.
-      Field(inner) => handle_call(inner, fl.name, args, tg, marked, cx, a),
-      _           => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
+      Field(inner) => handle_call(inner, fl.name, args, tg, marked, cx, pa),
+      _           => walk_args(args, marked, cx, walk_expr(tg, marked, cx, pa)),
     },
-    Var(n) => fn_call(n, args, marked, cx, a),
-    _      => walk_args(args, marked, cx, walk_expr(tg, marked, cx, a)),
+    Var(n) => fn_call(n, args, marked, cx, pa),
+    _      => walk_args(args, marked, cx, walk_expr(tg, marked, cx, pa)),
   }
 }
 
@@ -5146,6 +5151,10 @@ fn svc_seed(cx: Ctx) -> List[Bind] {
     env = tenv_put(env, hs[i], "@spawn:".concat(comp))
     i += 1
   }
+  // `@live` (`svc_live`): this body can hold a service value at all, so the
+  // resolver is worth asking. A body with no handle, no service-typed `let`
+  // and no service-typed parameter never pays for the receiver walk.
+  if (hs.length() > 0) { env = tenv_put(env, "@live", "1") }
   let ks = cx.provKeySvc.keys()
   i = 0
   while (i < ks.length()) {
@@ -5160,14 +5169,20 @@ fn svc_seed(cx: Ctx) -> List[Bind] {
   return env
 }
 
-fn svc_tys_in(ss: List[Stmt], i: Int, env: List[Bind]) -> List[Bind] {
+fn svc_tys_in(ss: List[Stmt], i: Int, env: List[Bind], cx: Ctx) -> List[Bind] {
   if (i >= ss.length()) { return env }
   let s = ss[i]
   // a plain `let` parses as an `expr` statement with a binding
-  let env2 = (s.kind == "expr" && s.bind != "")
-    ? tenv_put(env, s.bind, infer(s.e, env)) : env
-  return svc_tys_in(ss, i + 1, env2)
+  var env2 = env
+  if (s.kind == "expr" && s.bind != "") {
+    let ty = infer(s.e, env)
+    env2 = tenv_put(env, s.bind, ty)
+    if (svc_ty_mentions(ty, cx)) { env2 = tenv_put(env2, "@live", "1") }
+  }
+  return svc_tys_in(ss, i + 1, env2, cx)
 }
+
+fn svc_live(cx: Ctx) -> Bool { return tenv_get(cx.svcTys, "@live") == "1" }
 
 // A binder that is not a `let` (an arrow parameter, a match arm's payload)
 // shadows a same-named local: its type is unknown here, as the reference's
@@ -5176,10 +5191,96 @@ fn svc_shadow(env: List[Bind], names: List[Str]) -> List[Bind] {
   var out = env
   var i = 0
   while (i < names.length()) {
-    out = tenv_put(out, names[i], "")
+    out = tenv_put(tenv_put(out, names[i], ""), "param ".concat(names[i]), "")
     i += 1
   }
   return out
+}
+
+// A provide method's own parameters (issue #1682). One whose declared type
+// mentions a service is typed at that type and marked `param <name>`, so a
+// call through it is the crossing `svc_recv_msig` resolves, and the provider
+// upper bound reads it at the op's declared scope (`svc_param_note`). Every
+// other parameter shadows a same-named local, as before.
+fn svc_param_tys(env: List[Bind], pm: ProvM, decl: MSig, cx: Ctx) -> List[Bind] {
+  var out = env
+  var i = 0
+  while (i < pm.params.length()) {
+    var ty = ""
+    if (i < pm.ps.length()) { ty = taint_strip(pm.ps[i].ty) }
+    if (ty == "" && i < decl.ps.length()) { ty = taint_strip(decl.ps[i].ty) }
+    let n = pm.params[i]
+    out = svc_ty_mentions(ty, cx)
+      ? tenv_put(tenv_put(tenv_put(out, n, ty), "param ".concat(n), "1"), "@live", "1")
+      : tenv_put(tenv_put(out, n, ""), "param ".concat(n), "")
+    i += 1
+  }
+  return out
+}
+
+// `_mentions_service`: whether a type spelling names a declared service.
+fn svc_ty_mentions(ty: Str, cx: Ctx) -> Bool {
+  var word = ""
+  var i = 0
+  while (i <= ty.length()) {
+    let ch = i < ty.length() ? ty.slice(i, i + 1) : " "
+    let alnum = (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z")
+      || (ch >= "0" && ch <= "9") || ch == "_"
+    if (alnum) {
+      word = word.concat(ch)
+    } else {
+      if (word != "" && cx.svcs.has(word)) { return true }
+      word = ""
+    }
+    i += 1
+  }
+  return false
+}
+
+// Whether a receiver reads one of the method's own service-typed parameters.
+fn svc_reads_param(e: Expr, cx: Ctx) -> Bool {
+  return match e {
+    Var(n) => tenv_get(cx.svcTys, "param ".concat(n)) == "1",
+    Field(f) => svc_reads_param(f.target, cx),
+    Index(x) => svc_reads_param(x.target, cx) || svc_reads_param(x.idx, cx),
+    If(x) => svc_reads_param(x.cond, cx) || svc_reads_param(x.then_, cx)
+      || svc_reads_param(x.els, cx),
+    Match(m) => svc_reads_param(m.scrut, cx) || svc_reads_arms(m.arms, 0, cx),
+    Rec(r) => svc_reads_inits(r.fields, 0, cx),
+    Lst(l) => svc_reads_list(l.items, 0, cx),
+    Call(c) => svc_reads_param(c.target, cx) || svc_reads_list(c.args, 0, cx),
+    Bin(b) => svc_reads_param(b.l, cx) || svc_reads_param(b.r, cx),
+    Un(u) => svc_reads_param(u.e, cx),
+    _ => false,
+  }
+}
+
+fn svc_reads_list(xs: List[Expr], i: Int, cx: Ctx) -> Bool {
+  if (i >= xs.length()) { return false }
+  return svc_reads_param(xs[i], cx) || svc_reads_list(xs, i + 1, cx)
+}
+
+fn svc_reads_inits(xs: List[InitN], i: Int, cx: Ctx) -> Bool {
+  if (i >= xs.length()) { return false }
+  return svc_reads_param(xs[i].value, cx) || svc_reads_inits(xs, i + 1, cx)
+}
+
+fn svc_reads_arms(xs: List[ArmN], i: Int, cx: Ctx) -> Bool {
+  if (i >= xs.length()) { return false }
+  return svc_reads_param(xs[i].body, cx) || svc_reads_arms(xs, i + 1, cx)
+}
+
+// The provider upper bound's evidence for a crossing through a service-typed
+// parameter (`lower._param_crossings`): labelled `<Service>.<op>`, crossing
+// the op's declared scope, `*` when bare. Not a host emission.
+fn svc_param_note(recv: Expr, op: Str, cx: Ctx, a: Ac) -> Ac {
+  if (!svc_live(cx) || !svc_reads_param(recv, cx)) { return a }
+  let decl = svc_recv_msig(recv, op, cx)
+  if (decl.name == "" || !decl.isEm) { return a }
+  let label = parse_head(infer(recv, cx.svcTys)).concat(".").concat(op)
+  return { msg: a.msg, tag: a.tag, labels: union_into(a.labels, [label]),
+           ecaps: union_into(a.ecaps, decl.caps.length() > 0 ? decl.caps : ["*"]),
+           areach: a.areach, aops: a.aops, avals: a.avals }
 }
 
 fn ctx_svc(cx: Ctx, tys: List[Bind]) -> Ctx {
@@ -5207,6 +5308,7 @@ fn ctx_svc(cx: Ctx, tys: List[Bind]) -> Ctx {
 // types `@spawn:<C>`, which is no service.
 fn svc_recv_msig(recv: Expr, op: Str, cx: Ctx) -> MSig {
   let none = find_msig(svc_of(cx, ""), "", 0)
+  if (!svc_live(cx)) { return none }
   let ty = infer(recv, cx.svcTys)
   if (ty == "" || !cx.svcs.has(parse_head(ty))) { return none }
   return find_msig(svc_of(cx, parse_head(ty)), op, 0)
@@ -6694,7 +6796,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
   let setupArrows = arrows_in(comp.setup, 0, Map.empty())
   // the service-typed locals (issue #1509) are per body too, over a seed that
   // types every spawn-handle read
-  let setupSvcTys = svc_tys_in(comp.setup, 0, svc_seed(cx))
+  let setupSvcTys = svc_tys_in(comp.setup, 0, svc_seed(cx), cx)
   let scx = ctx_svc(ctx_arrows(ctx_alias(cx, setupAlias), setupArrows), setupSvcTys)
   let sa = walk_stmts(comp.setup, 0, scx, empty_ac())
   if (sa.msg != "") {
@@ -6746,7 +6848,7 @@ fn check_component(comp: CompD, cx: Ctx, gtys: List[Bind]) -> Verd {
       let mcx = ctx_svc(ctx_arrows(
         ctx_alias(pcx, alias_in(pm.body, 0, pcx.handles, setupAlias)),
         arrows_in(pm.body, 0, setupArrows)),
-        svc_tys_in(pm.body, 0, svc_shadow(setupSvcTys, pm.params)))
+        svc_tys_in(pm.body, 0, svc_param_tys(setupSvcTys, pm, decl, pcx), pcx))
       // `_check_rebind`, run by the reference DURING the body lowering: it
       // interleaves with the walk below statement by statement, so the earlier
       // SOURCE LINE wins (both are read in statement order). A walk verdict with
@@ -26009,4 +26111,48 @@ component Register provides till: Till {
   }
 }""")
   assert v == "G4|`Till.go` is declared `emission[production.payment]`, but this implementation emits through an unnameable host boundary (reaching `a host emission`)"
+}
+
+// ---- issue #1682: a provide method's own service-typed parameter ----------
+
+test "a call through a service-typed method parameter must be marked" {
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(p: Pay, n: Int) -> Int }
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      let x = p.charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `p.charge` must be marked `emit` (G4)"
+}
+
+test "a crossing through a service-typed parameter fits the declared bound" {
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission[audit.log] fn go(p: Pay, n: Int) -> Int }
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      emit p.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"
+}
+
+test "a crossing through a service-typed parameter inside its bound is admitted" {
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission[production.payment] fn go(p: Pay, n: Int) -> Int }
+component Register provides till: Till {
+  provide till {
+    fn go(p, n) {
+      emit p.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == ""
 }

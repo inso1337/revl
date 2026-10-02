@@ -9114,7 +9114,7 @@ fn note_host_emission(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
 fn svc_recv_head(e: Expr, cx: Ctx__m2) -> bool {
     return match e {
     Expr::Call(c) => { let c = *c; match c.target {
-    Expr::Field(fl) => { let fl = *fl; (svc_local_first(fl.clone(), cx.clone()) && svc_recv_msig(fl.target.clone(), &fl.name, cx.clone()).isEm) },
+    Expr::Field(fl) => { let fl = *fl; (((svc_live(cx.clone()) && svc_local_first(fl.clone(), cx.clone())) && (!svc_reads_param(fl.target.clone(), cx.clone()))) && svc_recv_msig(fl.target.clone(), &fl.name, cx.clone()).isEm) },
     _ => false,
 } },
     _ => false,
@@ -9660,14 +9660,18 @@ fn call_check(tg: Expr, args: &[Expr], marked: bool, cx: Ctx__m2, a: Ac) -> Ac {
     if (lr != "") {
         return ac_refuse(a.clone(), String::from("G4"), lr.clone());
     }
+    let pa = match tg.clone() {
+    Expr::Field(fl) => { let fl = *fl; if svc_local_first(fl.clone(), cx.clone()) { svc_param_note(fl.target.clone(), &fl.name, cx.clone(), a.clone()) } else { a.clone() } },
+    _ => a,
+};
     return match tg.clone() {
     Expr::Field(fl) => { let fl = *fl; match fl.target.clone() {
-    Expr::Var(v) => if cx.provAlias.contains_key(&v) { alias_call(v.clone(), &fl.name, args, tg.clone(), marked, cx.clone(), a.clone()) } else { req_call(v.clone(), &fl.name, args, marked, cx.clone(), a.clone()) },
-    Expr::Field(inner) => { let inner = *inner; handle_call(inner, &fl.name, args, tg.clone(), marked, cx.clone(), a.clone()) },
-    _ => walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
+    Expr::Var(v) => if cx.provAlias.contains_key(&v) { alias_call(v.clone(), &fl.name, args, tg.clone(), marked, cx.clone(), pa.clone()) } else { req_call(v.clone(), &fl.name, args, marked, cx.clone(), pa.clone()) },
+    Expr::Field(inner) => { let inner = *inner; handle_call(inner, &fl.name, args, tg.clone(), marked, cx.clone(), pa.clone()) },
+    _ => walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), pa.clone())),
 } },
-    Expr::Var(n) => fn_call(n, args, marked, cx.clone(), a.clone()),
-    _ => walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), a.clone())),
+    Expr::Var(n) => fn_call(n, args, marked, cx.clone(), pa.clone()),
+    _ => walk_args(args, marked, cx.clone(), walk_expr(tg.clone(), marked, cx.clone(), pa.clone())),
 };
 }
 
@@ -10187,6 +10191,9 @@ fn svc_seed(cx: Ctx__m2) -> Vec<Bind> {
         env = tenv_put(&env, (hs)[(i) as usize].clone(), String::from("@spawn:").revl_concat(&comp));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
+    if (hs.revl_length() > 0i64) {
+        env = tenv_put(&env, String::from("@live"), String::from("1"));
+    }
     let ks = { let mut ks: std::vec::Vec<String> = cx.provKeySvc.keys().cloned().collect(); ks.sort(); ks };
     i = 0i64;
     while (i < ks.revl_length()) {
@@ -10204,23 +10211,120 @@ fn svc_seed(cx: Ctx__m2) -> Vec<Bind> {
     return env;
 }
 
-fn svc_tys_in(ss: Vec<Stmt>, i: i64, env: Vec<Bind>) -> Vec<Bind> {
+fn svc_tys_in(ss: Vec<Stmt>, i: i64, env: Vec<Bind>, cx: Ctx__m2) -> Vec<Bind> {
     if (i >= ss.revl_length()) {
         return env;
     }
     let s = (ss)[(i) as usize].clone();
-    let env2 = if ((s.kind == "expr") && (s.bind != "")) { tenv_put(&env, s.bind.clone(), infer(s.e.clone(), env.clone())) } else { env.clone() };
-    return svc_tys_in(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), env2);
+    let mut env2 = env.clone();
+    if ((s.kind == "expr") && (s.bind != "")) {
+        let ty = infer(s.e.clone(), env.clone());
+        env2 = tenv_put(&env, s.bind.clone(), ty.clone());
+        if svc_ty_mentions(&ty, cx.clone()) {
+            env2 = tenv_put(&env2, String::from("@live"), String::from("1"));
+        }
+    }
+    return svc_tys_in(ss.clone(), (i).checked_add(1i64).expect("revl: Int overflow"), env2.clone(), cx.clone());
+}
+
+fn svc_live(cx: Ctx__m2) -> bool {
+    return (tenv_get(&cx.svcTys, "@live") == "1");
 }
 
 fn svc_shadow(env: Vec<Bind>, names: Vec<String>) -> Vec<Bind> {
     let mut out = env;
     let mut i = 0i64;
     while (i < names.revl_length()) {
-        out = tenv_put(&out, (names)[(i) as usize].clone(), String::from(""));
+        out = tenv_put(&tenv_put(&out, (names)[(i) as usize].clone(), String::from("")), String::from("param ").revl_concat(&(names)[(i) as usize]), String::from(""));
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }
     return out;
+}
+
+fn svc_param_tys(env: Vec<Bind>, pm: ProvM, decl: MSig, cx: Ctx__m2) -> Vec<Bind> {
+    let mut out = env;
+    let mut i = 0i64;
+    while (i < pm.params.revl_length()) {
+        let mut ty = String::from("");
+        if (i < pm.ps.revl_length()) {
+            ty = taint_strip((pm.ps)[(i) as usize].ty.clone());
+        }
+        if ((ty == "") && (i < decl.ps.revl_length())) {
+            ty = taint_strip((decl.ps)[(i) as usize].ty.clone());
+        }
+        let n = (pm.params)[(i) as usize].clone();
+        out = if svc_ty_mentions(&ty, cx.clone()) { tenv_put(&tenv_put(&tenv_put(&out, n.clone(), ty.clone()), String::from("param ").revl_concat(&n), String::from("1")), String::from("@live"), String::from("1")) } else { tenv_put(&tenv_put(&out, n.clone(), String::from("")), String::from("param ").revl_concat(&n), String::from("")) };
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return out;
+}
+
+fn svc_ty_mentions(ty: &str, cx: Ctx__m2) -> bool {
+    let mut word = String::from("");
+    let mut i = 0i64;
+    while (i <= ty.revl_length()) {
+        let ch = if (i < ty.revl_length()) { ty.revl_slice(i, (i).checked_add(1i64).expect("revl: Int overflow")) } else { String::from(" ") };
+        let alnum = (((((ch >= String::from("a")) && (ch <= String::from("z"))) || ((ch >= String::from("A")) && (ch <= String::from("Z")))) || ((ch >= String::from("0")) && (ch <= String::from("9")))) || (ch == "_"));
+        if alnum {
+            word.push_str(&ch);
+        } else {
+            if ((word != "") && cx.svcs.contains_key(&word)) {
+                return true;
+            }
+            word = String::from("");
+        }
+        i = (i).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return false;
+}
+
+fn svc_reads_param(e: Expr, cx: Ctx__m2) -> bool {
+    return match e {
+    Expr::Var(n) => (tenv_get(&cx.svcTys, &(String::from("param ").revl_concat(&n))) == "1"),
+    Expr::Field(f) => { let f = *f; svc_reads_param(f.target, cx.clone()) },
+    Expr::Index(x) => { let x = *x; (svc_reads_param(x.target.clone(), cx.clone()) || svc_reads_param(x.idx.clone(), cx.clone())) },
+    Expr::If(x) => { let x = *x; ((svc_reads_param(x.cond.clone(), cx.clone()) || svc_reads_param(x.then_.clone(), cx.clone())) || svc_reads_param(x.els.clone(), cx.clone())) },
+    Expr::Match(m) => { let m = *m; (svc_reads_param(m.scrut.clone(), cx.clone()) || svc_reads_arms(&m.arms, 0i64, cx.clone())) },
+    Expr::Rec(r) => svc_reads_inits(&r.fields, 0i64, cx.clone()),
+    Expr::Lst(l) => svc_reads_list(&l.items, 0i64, cx.clone()),
+    Expr::Call(c) => { let c = *c; (svc_reads_param(c.target.clone(), cx.clone()) || svc_reads_list(&c.args, 0i64, cx.clone())) },
+    Expr::Bin(b) => { let b = *b; (svc_reads_param(b.l.clone(), cx.clone()) || svc_reads_param(b.r.clone(), cx.clone())) },
+    Expr::Un(u) => { let u = *u; svc_reads_param(u.e, cx.clone()) },
+    _ => false,
+};
+}
+
+fn svc_reads_list(xs: &[Expr], i: i64, cx: Ctx__m2) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    return (svc_reads_param((xs)[(i) as usize].clone(), cx.clone()) || svc_reads_list(xs, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone()));
+}
+
+fn svc_reads_inits(xs: &[InitN], i: i64, cx: Ctx__m2) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    return (svc_reads_param((xs)[(i) as usize].value.clone(), cx.clone()) || svc_reads_inits(xs, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone()));
+}
+
+fn svc_reads_arms(xs: &[ArmN], i: i64, cx: Ctx__m2) -> bool {
+    if (i >= xs.revl_length()) {
+        return false;
+    }
+    return (svc_reads_param((xs)[(i) as usize].body.clone(), cx.clone()) || svc_reads_arms(xs, (i).checked_add(1i64).expect("revl: Int overflow"), cx.clone()));
+}
+
+fn svc_param_note(recv: Expr, op: &str, cx: Ctx__m2, a: Ac) -> Ac {
+    if ((!svc_live(cx.clone())) || (!svc_reads_param(recv.clone(), cx.clone()))) {
+        return a;
+    }
+    let decl = svc_recv_msig(recv.clone(), op, cx.clone());
+    if ((decl.name == "") || (!decl.isEm)) {
+        return a;
+    }
+    let label = (parse_head(infer(recv.clone(), cx.svcTys.clone())).revl_concat(".")).revl_concat(&op);
+    return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), vec![label]), ecaps: union_into(a.ecaps.clone(), if (decl.caps.revl_length() > 0i64) { decl.caps } else { vec![String::from("*")] }), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
 }
 
 fn ctx_svc(cx: Ctx__m2, tys: Vec<Bind>) -> Ctx__m2 {
@@ -10229,6 +10333,9 @@ fn ctx_svc(cx: Ctx__m2, tys: Vec<Bind>) -> Ctx__m2 {
 
 fn svc_recv_msig(recv: Expr, op: &str, cx: Ctx__m2) -> MSig {
     let none = find_msig(svc_of(cx.clone(), String::from("")), "", 0i64);
+    if (!svc_live(cx.clone())) {
+        return none;
+    }
     let ty = infer(recv.clone(), cx.svcTys.clone());
     if ((ty == "") || (!cx.svcs.contains_key(&parse_head(ty.clone())))) {
         return none;
@@ -11403,7 +11510,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind]) -> Verd {
     }
     let setupAlias = alias_in(&comp.setup, 0i64, cx.handles.clone(), std::collections::HashMap::new());
     let setupArrows = arrows_in(&comp.setup, 0i64, std::collections::HashMap::new());
-    let setupSvcTys = svc_tys_in(comp.setup.clone(), 0i64, svc_seed(cx.clone()));
+    let setupSvcTys = svc_tys_in(comp.setup.clone(), 0i64, svc_seed(cx.clone()), cx.clone());
     let scx = ctx_svc(ctx_arrows(ctx_alias(cx.clone(), setupAlias.clone()), setupArrows.clone()), setupSvcTys.clone());
     let sa = walk_stmts(&comp.setup, 0i64, scx.clone(), empty_ac());
     if (sa.msg != "") {
@@ -11439,7 +11546,7 @@ fn check_component(comp: CompD, cx: Ctx__m2, gtys: &[Bind]) -> Verd {
             if (sigv.v != "") {
                 return sigv;
             }
-            let mcx = ctx_svc(ctx_arrows(ctx_alias(pcx.clone(), alias_in(&pm.body, 0i64, pcx.handles.clone(), setupAlias.clone())), arrows_in(&pm.body, 0i64, setupArrows.clone())), svc_tys_in(pm.body.clone(), 0i64, svc_shadow(setupSvcTys.clone(), pm.params.clone())));
+            let mcx = ctx_svc(ctx_arrows(ctx_alias(pcx.clone(), alias_in(&pm.body, 0i64, pcx.handles.clone(), setupAlias.clone())), arrows_in(&pm.body, 0i64, setupArrows.clone())), svc_tys_in(pm.body.clone(), 0i64, svc_param_tys(setupSvcTys.clone(), pm.clone(), decl.clone(), pcx.clone()), pcx.clone()));
             let rb = mth_rebind(pm.clone(), &union_into(pm.params.clone(), compLocals.clone()), 0i64);
             let a = walk_method_stmts(&pm.body, 0i64, mcx.clone(), empty_ac());
             if (a.msg != "") {
@@ -30077,6 +30184,24 @@ fn a_marked_crossing_through_a_list_literal_read_in_place_meets_the_floor() {
 fn a_step_through_an_if_bound_provision_local_meets_a_scoped_upper_bound() {
     let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[production.payment] fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
     assert!((v == "G4|`Till.go` is declared `emission[production.payment]`, but this implementation emits through an unnameable host boundary (reaching `a host emission`)"));
+}
+
+#[test]
+fn a_call_through_a_service_typed_method_parameter_must_be_marked() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      let x = p.charge(n)\n      return x\n    }\n  }\n}"));
+    assert!((v == "G4|call to emission `p.charge` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_crossing_through_a_service_typed_parameter_fits_the_declared_bound() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[audit.log] fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      emit p.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|`Till.go` is declared `emission[audit.log]`, but this implementation emits through `production.payment` (reaching `Pay.charge`)"));
+}
+
+#[test]
+fn a_crossing_through_a_service_typed_parameter_inside_its_bound_is_admitted() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[production.payment] fn go(p: Pay, n: Int) -> Int }\ncomponent Register provides till: Till {\n  provide till {\n    fn go(p, n) {\n      emit p.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == ""));
 }
 
 #[test]

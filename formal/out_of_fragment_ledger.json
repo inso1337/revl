@@ -68,6 +68,7 @@
     "tests/fixtures/service_receiver_expressions/g4_if_marked.rvl",
     "tests/fixtures/service_receiver_expressions/g4_list_marked.rvl",
     "tests/fixtures/service_receiver_expressions/g4_match_marked.rvl",
-    "tests/fixtures/service_receiver_expressions/g4_record_marked.rvl"
+    "tests/fixtures/service_receiver_expressions/g4_record_marked.rvl",
+    "tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl"
   ]
 }
