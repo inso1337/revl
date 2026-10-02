@@ -19,13 +19,13 @@ them. That is the cost, stated first.
 
 | tier | residual | corpus | reproduced |
 |---|---:|---:|---:|
-| go | **2** | 37 | 35 |
+| go | **3** | 38 | 35 |
 | java | **0** | 59 | 59 |
 | py | **6** | 60 | 54 |
 | rust | **2** | 40 | 38 |
 | ts | **4** | 61 | 57 |
 | wasm | **0** | 21 | 21 |
-| **total** | **14** | 278 | 264 |
+| **total** | **15** | 279 | 264 |
 
 Tiers with no residual: java, wasm.
 

@@ -90,6 +90,7 @@ _IMPORT_ALIAS = {
     "clear_session_owner": "_revl_clear_session_owner",
     "mark_secret": "_revl_mark_secret",
     "secret_result": "_revl_secret_result",
+    "estop_gated": "_revl_estop_gated",
     "declare_secret_types": "_revl_declare_secret_types",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
@@ -2006,7 +2007,23 @@ class _ComponentEmitter:
             # never runs). The compensation registers AFTER, exactly as the sync
             # spelling registers after the fire (design §4 clause 1).
             aw = "await " if step.get("async") else ""
-            out.add(indent, f"{aw}{self._emit_fire(step, where)}")
+            if (step.get("async") and step.get("approval") is None
+                    and self._validated_call(step.get("expr")) is not None):
+                # A `validated` async operation checks the SETTLED response
+                # (item 257), so the await belongs inside the seam:
+                # `_revl_validate((await <call>), ..)`. Awaiting the whole
+                # expression validated the coroutine object instead. Rendering
+                # the fire in async mode gives exactly the form a validated
+                # call takes in an async provide method.
+                prev_async = self._in_async
+                self._in_async = True
+                try:
+                    fire = self._emit_fire(step, where)
+                finally:
+                    self._in_async = prev_async
+                out.add(indent, fire)
+            else:
+                out.add(indent, f"{aw}{self._emit_fire(step, where)}")
             if step.get("compensate") is not None:
                 # item 247 (docs/design/teardown-contract.md): a compensation
                 # is a first-class COMPENSATION entry on the frame's shared
@@ -2611,7 +2628,11 @@ class _ComponentEmitter:
         the activation fails and the prefix reverts LIFO with the subscription
         bracket on it (§6, A8). Nothing here catches anything."""
         self.uses.add("Stream")
-        item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
+        # `_ident` already applies the keyword/builtin rename, exactly as it
+        # does for every name the body reads; wrapping it in `_mangle` again
+        # escaped a colliding bind twice (`len_` bound as `len___` while the
+        # body read `len__`, a NameError on the first item).
+        item = _ident(step.get("bind"), f"{where}: stream item")
         subject = self._expr(step.get("subject"), where)
         contract = step.get("event")
         gate = None
@@ -4295,7 +4316,12 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
     return out
 
 
-def _emit_externs(externs: list) -> "_Lines":
+#: Extern classes whose host body crosses a boundary (issue #1504). A `pure`
+#: extern is a computation: gating it would stop value code, not a crossing.
+_GATED_EXTERN_CLASSES = frozenset({"emission", "witnessed", "acquire"})
+
+
+def _emit_externs(externs: list, gated: bool = True) -> "_Lines":
     out = _Lines()
     # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
     # FAIL-LOUD lookup. The driver (src/revl/run.py) resolves each bound secret's
@@ -4372,6 +4398,11 @@ def _emit_externs(externs: list) -> "_Lines":
         # `Map` the type is spelled out too, because the walk cannot otherwise
         # tell a `Map` from a record — both are a `dict` here — and would skip
         # the map's keys as if they were field names.
+        # issue #1504: an extern whose body crosses a boundary checks the E-Stop
+        # BEFORE its body runs, in whatever position it is called. The gate is
+        # the outermost decorator, so nothing else runs first.
+        if gated and ext.get("class") in _GATED_EXTERN_CLASSES:
+            out.add(0, f"@{_runtime_ref('estop_gated')}({ext['name']!r})")
         if ext.get("secret_return"):
             returns = ext.get("returns")
             needs_shape, _ = _secret_shape_facts([returns], _PY_TYPES)
@@ -5466,6 +5497,14 @@ def emit(ir: dict) -> str:
         # through `emitter.uses`.
         | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
            else set())
+        # issue #1504: the E-Stop gate on every boundary-crossing extern
+        # issue #1504: the E-Stop gate on every boundary-crossing extern, in a
+        # document with components (the runtime is loaded to run them). A
+        # component-free document is host code a test drives directly and must
+        # stay importable without the runtime on the path.
+        | ({"estop_gated"} if components and any(
+            ext.get("class") in _GATED_EXTERN_CLASSES for ext in externs)
+           else set())
         # item 421 F6: a declared secret type that reaches a `Map` also needs the
         # record field types emitted, so the walk can tell the two apart.
         | ({"declare_secret_types"} if secret_types else set())
@@ -5811,7 +5850,7 @@ def emit(ir: dict) -> str:
     if functions:
         out.extend(_emit_functions(functions))
     if externs:
-        out.extend(_emit_externs(externs))
+        out.extend(_emit_externs(externs, gated=bool(components)))
     if tests:
         out.extend(_emit_tests(tests))
     if fault_tests:

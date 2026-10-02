@@ -53,6 +53,16 @@ only when a caller sets them (the `bench/` tools do).
   `completion_tokens` includes reasoning tokens, and
   `completion_tokens_details.reasoning_tokens` is kept when reported.
 
+## Structured output
+
+`structured_output` is `json-schema` (default), `gbnf` or `none`. A `validated`
+operation's wire schema goes in `response_format` (`json-schema`), or its GBNF
+text in the top-level `grammar` field llama.cpp's server reads (`gbnf`). Both
+modes CLAIM the decode, so the completion is held to the artifact on return.
+Ollama honours `response_format` and ignores `grammar` without an error, so use
+`json-schema` there; `gbnf` is for llama.cpp. See
+[model-providers.md](model-providers.md#structured-output-constrained-decoding-issue-1462).
+
 ## What is checked, and what is not
 
 Checked: the `on_device` claim against the host in `base_url`; no credential in

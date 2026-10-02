@@ -587,7 +587,7 @@ named `checked_mod` pulls in Result, in a document that uses neither. The
 output still builds; the preambles are dead code. The port mirrors the probe
 exactly (`tests/fixtures/emit_go_corpus/blob_probes.rvl` pins it). Not fixed.
 
-### An erased `Ok`/`Err` type argument breaks the go tier twice (MED)
+### An erased `Ok`/`Err` type argument broke the go tier twice (MED, fixed by issue #1631)
 When neither the flow target nor the argument types a built-in Result
 constructor, `_go_v3_construct` erases the missing side to `any`:
 - `let r = Ok(g(1)); return r`, with `g` a function parameter, emits
@@ -597,10 +597,12 @@ constructor, `_go_v3_construct` erases the missing side to `any`:
   and `reflect.DeepEqual` across two instantiations answers `false` where the
   python tier answers `true` (measured with `go test`).
 
-Both sides of the byte oracle agree on these bytes, so the oracle cannot see
-it; no corpus document holds either shape. Not fixed: it is a reference
-(`backends/go/emit.py`) defect, the item 280/302 element-type recovery not
-reaching a call whose callee the ctx cannot type.
+Both sides of the byte oracle agreed on these bytes, so the oracle could not
+see it. Issue #1631 fixed the reference: a call through a function value types
+its payload, a `let` takes an erased type argument from where the binding flows
+(a declared return or parameter), and an `==` fills each side from the other.
+The port mirrors it, and backends/go/testdata/result_erased_1631.rvl holds the
+shapes in the go corpus and runs them under `go test`.
 
 ### The reference's match binders leak into the rest of the function (LOW)
 `_go_v3_match` and its Opt/Result siblings write each arm binder's type into
@@ -1812,15 +1814,15 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 |------|-------:|----------------------------:|-----------------------:|
 | py   |     60 |                   60 (100%) |             54 (90.0%) |
 | ts   |     61 |                   61 (100%) |             57 (93.4%) |
-| go   |     37 |                   37 (100%) |             35 (94.6%) |
+| go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **278** | **278 (100%)** | **264 (95.0%)** |
+| **total** | **279** | **279 (100%)** | **264 (94.6%)** |
 
-Every one of the 278 documents is reproduced byte-for-byte by its
+Every one of the 279 documents is reproduced byte-for-byte by its
 self-host emitter when the emitter is fed the **reference** IR. 264 of
-them survive the **fully-native** chain, so all 14 residual documents
+them survive the **fully-native** chain, so all 15 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1866,10 +1868,11 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `component_edges.rvl`
 - `../emit_py_corpus/services_control_flow.rvl`
 
-`go`, 2 residual of 37:
+`go`, 3 residual of 38:
 
 - `in_file_tests.rvl`
 - `../../../backends/go/testdata/opt_gaps_280.rvl`
+- `../../../backends/go/testdata/result_erased_1631.rvl`
 
 `java`, 0 residual of 59:
 
