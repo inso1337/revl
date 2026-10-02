@@ -19,7 +19,6 @@ right memory.
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import sys
 from pathlib import Path
@@ -31,8 +30,14 @@ _ROOT = _HERE.parents[1]
 if str(_ROOT / "src") not in sys.path:
     sys.path.insert(0, str(_ROOT / "src"))
 
+# tests/ is APPENDED, as backends/java/test_reserved_word_idents_java.py does,
+# so `_load_by_path` resolves without letting tck/tests win the name `tests`.
+if str(_ROOT / "tests") not in sys.path:
+    sys.path.append(str(_ROOT / "tests"))
+
 from revl import compile_source  # noqa: E402
 from revl import run_wasm as run_wasm_mod  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 
 _REQUIRE = os.environ.get("REVL_REQUIRE_WASMTIME", "").strip().lower() not in (
     "", "0", "false", "no")
@@ -150,9 +155,9 @@ def test_a_provider_with_compound_operations_still_emits():
 @pytest.fixture(scope="module")
 def runtime():
     """The cordis-wasm `Runtime`, loaded by explicit path under its own module
-    name, as backends/wasm/test_spawn_exec.py does: a plain `import runtime`
-    would put it in `sys.modules["runtime"]`, where the py tier's runtime lives,
-    and break every later test that imports that one."""
+    name through tests/_load_by_path.py: a plain `import runtime` would put it
+    in `sys.modules["runtime"]`, where the py tier's runtime lives, and break
+    every later test that imports that one."""
     try:
         import wasmtime  # noqa: F401, PLC0415
     except ImportError:
@@ -165,13 +170,7 @@ def runtime():
             pytest.fail(f"cordis-wasm runtime not found at {path} and "
                         f"REVL_REQUIRE_WASMTIME is set")
         pytest.skip(f"cordis-wasm runtime not found at {path} (set CORDIS_WASM)")
-    spec = importlib.util.spec_from_file_location("cordis_wasm_runtime", path)
-    module = importlib.util.module_from_spec(spec)
-    # registered before exec: the runtime's dataclasses resolve their field
-    # types through sys.modules[cls.__module__].
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
-    return module.Runtime
+    return load_by_path("cordis_wasm_runtime", path).Runtime
 
 
 @pytest.mark.parametrize("op", sorted(_PROBES))
