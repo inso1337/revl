@@ -1,0 +1,22 @@
+// REFUSED G4 (provider upper bound, issue #1508): `Task.go` declares a bare
+// `emission`, which names no scope, so the crossing stays the unnameable `*`,
+// which no scoped bound covers. The file name's prefix is the expected verdict
+// (`g4_` refused, `ok_` admitted); tests/test_handle_provider_bound_1508.py
+// holds it.
+
+service Task { emission fn go() -> Int }
+service Sup { emission[net] fn run() -> Int }
+
+component Worker provides task: Task {
+  provide task { fn go() = 0 }
+}
+
+component Supervisor provides sup: Sup {
+  provide sup {
+    fn run() {
+      let w = effect spawn Worker with { } undo w.dispose()
+      emit w.task.go()
+      return 0
+    }
+  }
+}

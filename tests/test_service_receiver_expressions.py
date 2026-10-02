@@ -11,9 +11,9 @@ that depends on a binder it does not decide: an arrow parameter (decided at
 the application). A provide method's own service-typed parameter is decided
 since issue #1682.
 
-The self-host gate also noted nothing for an `emit` STEP through such a
-receiver, so it raised no objection where the provider upper bound refuses
-it; `g4_upper_bound_*` pins that.
+The provider upper bound reads a crossing through such a receiver at the op's
+declared scope (issue #1508): `ok_upper_bound_*` fits a covering bound and
+`g4_upper_bound_*` does not.
 
 tests/fixtures/service_receiver_expressions/ is the corpus: `g4_` refused,
 `ok_` admitted. tests/test_gate_reference_census.py holds the self-host gate
@@ -51,7 +51,8 @@ def test_the_corpus_is_three_documents_per_shape_two_controls_and_the_bound():
                   + [f"g4_{s}_marked" for s in SHAPES]
                   + [f"ok_{s}_approved" for s in SHAPES]
                   + ["ok_if_no_approval", "ok_arrow_param_expression_unapplied",
-                     "g4_upper_bound_if_inline", "g4_upper_bound_if_local"])
+                     "g4_upper_bound_if_inline", "g4_upper_bound_if_local",
+                     "ok_upper_bound_if_inline", "ok_upper_bound_if_local"])
     assert sorted(p.stem for p in CORPUS.glob("*.rvl")) == want
 
 
@@ -95,15 +96,14 @@ def test_a_method_parameter_receiver_is_judged_since_issue_1682():
     assert excinfo.value.message == MARKER
 
 
-@pytest.mark.parametrize("stem", ["g4_upper_bound_if_inline",
-                                  "g4_upper_bound_if_local"])
-def test_a_step_through_the_receiver_meets_the_provider_upper_bound(stem):
-    """A step crossing through a service-typed receiver is a host emission
-    over the unnameable boundary, as every non-requirement step head is, so a
-    scoped `emission[...]` bound refuses it. The self-host gate raised no
-    objection to either document before this change."""
-    err = _refusal(stem)
+@pytest.mark.parametrize("stem", ["if_inline", "if_local"])
+def test_a_step_through_the_receiver_is_read_at_the_ops_scope(stem):
+    """Issue #1508: the provider upper bound reads a crossing through a
+    service-typed receiver at the op's declared scope, as it reads a
+    parameter's (#1682). A bound covering `production.payment` admits it; one
+    that does not refuses it, naming the scope and the op."""
+    assert compile_source(_src(f"ok_upper_bound_{stem}"), "t.rvl")
+    err = _refusal(f"g4_upper_bound_{stem}")
     assert (err.code, err.message) == ("G4", (
-        "`Till.go` is declared `emission[production.payment]`, but this "
-        "implementation emits through an unnameable host boundary (reaching "
-        "`a host emission`)"))
+        "`Till.go` is declared `emission[audit.log]`, but this implementation "
+        "emits through `production.payment` (reaching `Pay.charge`)"))

@@ -358,7 +358,7 @@ def test_every_receiver_expression_document_is_decided_alike_by_both(measured):
     _, (buckets, _) = measured
     got = {case: name for name, cases in buckets.items() for case in cases}
     docs = sorted(SERVICE_RECEIVER_EXPRESSIONS.glob("*.rvl"))
-    assert len(docs) == 16, f"the receiver-expression corpus has {len(docs)} documents"
+    assert len(docs) == 18, f"the receiver-expression corpus has {len(docs)} documents"
     wrong = []
     for doc in docs:
         case = str(doc.relative_to(ROOT))
@@ -389,6 +389,28 @@ def test_every_service_typed_param_document_is_decided_alike_by_both(measured):
         if got.get(case) != want:
             wrong.append(f"{case}: {got.get(case)}, expected {want}")
     assert not wrong, "\n  ".join(["service-typed-param documents moved:"] + wrong)
+
+
+# --- the provider bound reads a handle crossing at the op's scope (#1508) -----
+#
+# A spawn-handle crossing (direct, aliased, in value position) is read at the
+# op's declared scope, a bare op stays `*`. `g4_` both refuse under G4, `ok_`
+# both admit.
+HANDLE_PROVIDER_BOUND = ROOT / "tests" / "fixtures" / "handle_provider_bound"
+
+
+def test_every_handle_bound_document_is_decided_alike_by_both(measured):
+    _, (buckets, _) = measured
+    got = {case: name for name, cases in buckets.items() for case in cases}
+    docs = sorted(HANDLE_PROVIDER_BOUND.glob("*.rvl"))
+    assert len(docs) == 8, f"the handle-bound corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        case = str(doc.relative_to(ROOT))
+        want = _block_nesting_expected(doc.stem)
+        if got.get(case) != want:
+            wrong.append(f"{case}: {got.get(case)}, expected {want}")
+    assert not wrong, "\n  ".join(["handle-bound documents moved:"] + wrong)
 
 
 def test_every_guarantee_this_census_names_is_in_the_construct_reach_row(measured):

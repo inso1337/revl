@@ -880,29 +880,30 @@ def _reach_call(node: ExprCall, out: "set[tuple[str, str]]", region: str,
     if res is not None and region == "all":
         svc, meth = res
         hit = _alias_hit(root, chain, aliases)
-        if (svc, meth) in em_set and hit is not None and hit[0][0] == SERVICE_PARAM:
-            # a crossing through a service-typed method parameter (#1682):
-            # the op's declared scope on both columns, `*` when bare, which is
-            # what the checker's provider bound reads (`_param_crossings`)
+        if (svc, meth) in em_set and (root in handles or hit is not None):
+            # a crossing through a resolved receiver: a spawn handle, an alias
+            # of one, a service-typed local, or a method's own service-typed
+            # parameter (issues #1682, #1508). The BOUND column reads the op's
+            # declared scope, `*` when bare, which is what the checker's
+            # provider bound reads (`_resolved_crossings`); the attenuation
+            # column stays `*`, as `_emit_step_caps_pairs` reads a non-`req`
+            # head.
             mode, entries = bounds[(svc, meth)]
             if mode == "any":
                 out.add(("*", "*"))
             else:
                 for e in entries:
-                    out.add((_declared_cap(e), e))
+                    out.add(("*", e))
         elif (svc, meth) in em_set:
-            if root in handles or hit is not None:
-                out.add(("*", "*"))
+            mode, entries = bounds[(svc, meth)]
+            if mode == "any":
+                # No declared token: the SERVICE names the boundary
+                # for the fold, in its own namespace; the BOUND
+                # column still reads the wiring key (item 561).
+                out.add((_undeclared_cap(svc), root))
             else:
-                mode, entries = bounds[(svc, meth)]
-                if mode == "any":
-                    # No declared token: the SERVICE names the boundary
-                    # for the fold, in its own namespace; the BOUND
-                    # column still reads the wiring key (item 561).
-                    out.add((_undeclared_cap(svc), root))
-                else:
-                    for e in entries:
-                        out.add((_declared_cap(e), _canon_cap(root, e)))
+                for e in entries:
+                    out.add((_declared_cap(e), _canon_cap(root, e)))
     elif res is None and region == "all" and root in emitting:
         # A host emission. The two namespaces part company here (#1169 F3):
         # the attenuation fold gives it the unnameable `*` whatever the
