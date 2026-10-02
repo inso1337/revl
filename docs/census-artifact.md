@@ -16,7 +16,7 @@ TAG and the same MESSAGE, not merely the same verdict.
 Distinct programs: **1035**. Programs run: **1041**.
 Checker version: `GATE-CENSUS-1+63065a8caf90`.
 Engine: `selfhost`.
-Run: `census-selfhost-f4f5643adbd2`.
+Run: `census-selfhost-72a4752ce73f`.
 
 The two numbers differ because 6 case ids reach
 the corpus twice, from two entries that spell the same
@@ -222,7 +222,7 @@ below are the values you should get.
 |---|---|
 | distinct programs, 1035 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
 | programs run, 1041 | the length of the same list, repeats included |
-| run `census-selfhost-f4f5643adbd2` | sha256 over every `(case id, source)` the run read, ids repo-relative |
+| run `census-selfhost-72a4752ce73f` | sha256 over every `(case id, source)` the run read, ids repo-relative |
 | checker version `GATE-CENSUS-1+63065a8caf90` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
 | `src/revl@sha256:cc4ff9eabb9c` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
 | every bucket count | `tools/gate_reference_census.py --json out.json` |

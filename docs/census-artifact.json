@@ -3085,7 +3085,7 @@
    ],
    [
     "selfhost/emit_py.rvl",
-    "70487890afb087959e303f4a7e2fb1fa579f652666b57a49415cbf3b16ffd96a",
+    "d32c541f9b7922c2487fb60ce153272acc287e2262ab310af6ba1857286901e6",
     "refuse-out-of-slice/BAD"
    ],
    [
@@ -5390,7 +5390,7 @@
   ],
   "pins": {
    "decides_verdicts": {
-    "backends/python/emit.py": "a6a0996505be8faff037194fb7c575d3850414277a13fb3099bff96a208d03d6",
+    "backends/python/emit.py": "56656781f098679edcc51dfa7da4df2f769ef4b7c466aaf197b5e98dc6e564ea",
     "tests/test_selfhost_lower.py": "5df224ccfdacaba58c49b5a297aa2bc96fc948575c80aaf643393747f6f4f629",
     "tools/build_gate_crate.py": "9c1947aed30321deba81b5b749149a3549281e094c3d585e3c4c47f1c7ef3d13",
     "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
@@ -5574,7 +5574,7 @@
    "tracked_buckets_agree": true,
    "what": "the committed crates/revl-gate, built by cargo and asked through a standalone consumer, over the same corpus"
   },
-  "run": "census-selfhost-f4f5643adbd2",
+  "run": "census-selfhost-72a4752ce73f",
   "schema": "GATE-CENSUS-1",
   "tracked_bucket_prefixes": [
    "false-admission",
@@ -5591,7 +5591,7 @@
     "compiler_commit": "src/revl@sha256:cc4ff9eabb9c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-f4f5643adbd2"
+    "run": "census-selfhost-72a4752ce73f"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5602,7 +5602,7 @@
     "compiler_commit": "src/revl@sha256:cc4ff9eabb9c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-f4f5643adbd2"
+    "run": "census-selfhost-72a4752ce73f"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5612,7 +5612,7 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:cc4ff9eabb9c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-f4f5643adbd2"
+    "run": "census-selfhost-72a4752ce73f"
    },
    "public": true,
    "rung": "measured",
@@ -5622,7 +5622,7 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:cc4ff9eabb9c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-f4f5643adbd2"
+    "run": "census-selfhost-72a4752ce73f"
    },
    "public": true,
    "rung": "measured",
@@ -5631,7 +5631,7 @@
  ],
  "generator": {
   "name": "selfhost/lower.rvl admit_src behind crates/revl-gate",
-  "run": "census-selfhost-f4f5643adbd2",
+  "run": "census-selfhost-72a4752ce73f",
   "tool": "tools/gate_reference_census.py --engine selfhost"
  },
  "grader": {
