@@ -13,7 +13,7 @@ component C provides k: K {
   provide k {
     fn f(k) {
       var n = 0
-      while (n < 1) { let q = zz_write(k) }
+      while (n < 1) { let q = emit zz_write(k) }
       return 0
     }
   }

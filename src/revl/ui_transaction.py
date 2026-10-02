@@ -111,7 +111,13 @@ says revl "checks the signature, not the dataflow between two crossings". A
 step reports the `ui.find` its target came from (`targetResolvedBy`) and
 declines to bind at all when an extern declares two `UiTarget` parameters,
 which is §7's undecided question answered on the fail-closed side. Neither is
-the race, and neither should be read as it.
+the race, and neither should be read as it. Issue #1371 itself was closed by
+PR 1416 on a narrower property, checked in `lower._check_ui_target_provenance`:
+every `UiTarget` in an admitted program originates in a target-producing
+crossing (565 §13). That rules out a forged target. It is still not the race:
+that the target is the one resolved for THIS step, and that it is fresh, needs
+a resolved handle from the substrate (item 539). (Corrected 2026-09-29, issue
+#1572.)
 """
 
 from __future__ import annotations

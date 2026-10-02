@@ -1,0 +1,16 @@
+// item 391: the fourth host root, `Stream`, as a component-body host call
+// (`kind=host`, fn `Stream.source`). Kept apart from services_host.rvl for one
+// reason: selfhost/lower.rvl drops this acquisition, so the fully-native chain
+// emits a component with an empty body and no `Stream` import. That is a
+// lower.rvl gap, listed in LOWER_GAP_DOCS in tests/test_selfhost_compile.py;
+// the emitter half is byte-exact on the reference IR.
+//
+// Only the bare source is here. A source that DECLARES a replay backlog
+// (`replay(8)`, `replay(from: "orders")`) is refused by the port with the named
+// `host` marker, and cannot be a corpus document yet: the self-host gate
+// refuses the `replay(...)` clause with G1, a false reject the gate/reference
+// census would report. tests/test_selfhost_emit_py.py pins that refusal.
+
+component Feed {
+  let src = effect Stream.source() undo src.close()
+}

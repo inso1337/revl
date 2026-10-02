@@ -24,20 +24,52 @@ most wrong answers unrepresentable.
 The shape added to every obligation in `revl_check` is::
 
     "fillSpec": {
+      "version": 2,
       "expected": "Str",
-      "capability": {"mayEmit": false, "bound": [], "reason": "..."},
+      "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
+                     "reason": "..."},
+      "crossing": {"permitted": false, "required": false, "form": null,
+                   "calls": [], "rule": "..."},
       "bindings": [{"name": "key", "type": "Str"}, ...],
       "reachableServices": [
         {"service": "Db", "method": "q", "signature": "q(sql: Str) -> Str",
-         "instance": "db", "emission": false}
+         "instance": "db", "emission": false, "callableHere": true}
       ]
     }
+
+VERSION 2 (this shape). Version 1 had no `version`, no `crossing`, no
+`permitsCrossing` and no `callableHere`; every version-1 field is still here
+with its version-1 meaning, so a version-1 reader keeps working. What version 2
+fixes is a word: `mayEmit` reads as a property of the HOLE ("this position may
+emit") and was read as an obligation ("this hole is an emission position, so
+the fill must emit"). It is a permission only: a declared `emission` operation
+bounds what its provider may do, and a provider may always be purer than
+declared (G4). Version 2 states the permission under a name that cannot be
+read as an obligation (`permitsCrossing`), says outright that a crossing is
+never `required`, and gives the call-site FORM a crossing is written in, with
+the exact crossings available at this position.
 """
 
 from __future__ import annotations
 
 from ..diagnostics import GUARANTEES
 from ..holes import EMITTABLE_SECTIONS
+
+#: The fillSpec shape this module writes. Version 1 had no `version` key.
+FILL_SPEC_VERSION = 2
+
+#: How a crossing is written at a hole, in any position that permits one.
+CROSSING_FORM = ("emit <key>.<operation>(<args>) for an injected service, or "
+                 "emit <extern>(<args>) for a declared emission extern; write "
+                 "`let r = emit ...` to keep its value")
+
+#: What `permitted`/`required` mean, said once, in the spec itself.
+CROSSING_RULE = ("A crossing is a PERMISSION, never an obligation: a fill may "
+                 "be a pure expression in every position. Where `permitted` "
+                 "is true the fill may contain marked crossings (`emit`), one "
+                 "marker per crossing, each through a call listed in `calls`; "
+                 "where it is false a crossing is refused (G4). `required` is "
+                 "always false.")
 
 
 def _lit_type(value) -> str | None:
@@ -102,6 +134,93 @@ def _expr_type(node, services: dict, functions: dict,
     return None
 
 
+def _crossing_tokens(instance: str, decl: dict, carry: dict) -> set:
+    """The capability tokens a crossing through `instance.<op>` contributes,
+    as `emission_analysis._method_emissions` computes them: the require KEY,
+    or, for a key declared `carrying(...)`, the carried tokens, plus the
+    unnameable `*` when the carry cannot bound the operation's own reach."""
+    carried = (carry or {}).get(instance)
+    if not carried:
+        return {instance}
+    tokens = set(carried)
+    caps = decl.get("capabilities")
+    if caps is None or len(set(caps)) > len(tokens):
+        tokens.add("*")
+    return tokens
+
+
+def _within(tokens: set, bound) -> bool:
+    """Whether a crossing's tokens sit inside a provide-method's bound: `None`
+    is bare `emission` (any boundary), a list is a scoped `emission[...]`."""
+    if bound is None:
+        return True
+    return tokens <= set(bound)
+
+
+def _crossing_calls(requires: dict, services: dict, externs: list,
+                    capability: dict, carry: dict) -> list[dict]:
+    """Every crossing a fill at this position may write, already in its
+    call-site form: each injected service's emission operations and each
+    declared emission extern whose tokens sit inside the bound."""
+    if not capability.get("permitsCrossing"):
+        return []
+    bound = capability.get("bound")
+    calls: list[dict] = []
+    for instance, service in sorted((requires or {}).items()):
+        methods = services.get(service, {}).get("methods", {})
+        for method, decl in sorted(methods.items()):
+            if not decl.get("emission"):
+                continue
+            tokens = _crossing_tokens(instance, decl, carry)
+            if not _within(tokens, bound):
+                continue
+            args = ", ".join(f"<{p['name']}: {p['type']}>"
+                             for p in decl.get("params", []))
+            calls.append({"write": f"emit {instance}.{method}({args})",
+                          "returns": decl.get("returns"),
+                          "carrier": "service",
+                          "capabilities": sorted(tokens)})
+    for ext in externs or []:
+        if ext.get("class") != "emission":
+            continue
+        tokens = set(ext.get("capabilities") or [ext["name"]])
+        if not _within(tokens, bound):
+            continue
+        args = ", ".join(f"<{p['name']}: {p['type']}>"
+                         for p in ext.get("params", []))
+        calls.append({"write": f"emit {ext['name']}({args})",
+                      "returns": ext.get("returns"),
+                      "carrier": "extern",
+                      "capabilities": sorted(tokens)})
+    return calls
+
+
+def _crossing(capability: dict, calls: list[dict]) -> dict:
+    """The `crossing` block: may a fill here cross, must it (never), how a
+    crossing is written, and which crossings exist at this position."""
+    permitted = bool(capability.get("permitsCrossing"))
+    return {
+        "permitted": permitted,
+        "required": False,
+        "form": CROSSING_FORM if permitted else None,
+        "calls": calls,
+        "rule": CROSSING_RULE,
+    }
+
+
+def _callable_here(entries: list[dict], calls: list[dict]) -> list[dict]:
+    """`reachableServices` with `callableHere`: a plain operation is callable
+    in every position; an emission operation only where it is one of the
+    crossings this position permits (and then only as `emit ...`)."""
+    allowed = {c["write"].split("(", 1)[0] for c in calls}
+    out = []
+    for entry in entries:
+        here = (not entry.get("emission")
+                or f"emit {entry['instance']}.{entry['method']}" in allowed)
+        out.append({**entry, "callableHere": here})
+    return out
+
+
 def _reachable_services(requires: dict, services: dict) -> list[dict]:
     """Every method of every injected dependency, with its signature.
 
@@ -137,8 +256,12 @@ def _capability(emission: bool, capabilities, in_method: bool,
     position where no emission is permitted at all.
     """
     if not (in_method and emission):
-        return {"mayEmit": False, "bound": [], "reason": reason}
+        return {"permitsCrossing": False, "mayEmit": False, "bound": [],
+                "reason": reason}
     return {
+        # `permitsCrossing` is the version-2 name; `mayEmit` is the same bool
+        # under its version-1 name, kept so a version-1 reader keeps working
+        "permitsCrossing": True,
         "mayEmit": True,
         # bare `emission` carries no capability list -> unbounded ("any").
         "bound": list(capabilities) if capabilities is not None else None,
@@ -200,13 +323,20 @@ def _collect_exprs(node, services, functions, bindings, capability,
             visible = [
                 {"name": name, "type": typ}
                 for name, typ in bindings.items()
-                if not name.startswith("@")  # `@service:`/`@reachable` internals
+                if not name.startswith("@")  # `@service:`/`@reachable`/... internals
             ]
+            calls = _crossing_calls(
+                bindings.get("@requires") or {}, services,
+                bindings.get("@externs") or [], capability,
+                bindings.get("@carry") or {})
             collected.append((node, {
+                "version": FILL_SPEC_VERSION,
                 "expected": node.get("type"),
                 "capability": capability,
+                "crossing": _crossing(capability, calls),
                 "bindings": visible,
-                "reachableServices": bindings.get("@reachable", []),
+                "reachableServices": _callable_here(
+                    bindings.get("@reachable", []), calls),
             }))
             return
         # `step` bodies nested in an expression are rare, but a statement dict
@@ -227,12 +357,23 @@ def _collect_exprs(node, services, functions, bindings, capability,
                            collected)
 
 
-def _method_scope(component, method, service_decl, services, functions):
+def _position_context(component, services, externs) -> dict:
+    """The internal (`@`-prefixed) entries every scope inside `component`
+    carries: its reachable service table, its `requires` and `carrying(...)`
+    maps, and the program's externs, which the crossing calls are read off."""
+    return {
+        "@reachable": _reachable_services(component.get("requires"), services),
+        "@requires": component.get("requires") or {},
+        "@carry": component.get("carry") or {},
+        "@externs": externs,
+    }
+
+
+def _method_scope(component, method, service_decl, services, functions,
+                  externs):
     """The binding scope a provide-method's body opens with: the component's
     config fields and the method's parameters, each with a declared type."""
-    bindings: dict = {}
-    reachable = _reachable_services(component.get("requires"), services)
-    bindings["@reachable"] = reachable
+    bindings: dict = _position_context(component, services, externs)
     for field in component.get("config", []) or []:
         bindings[field["name"]] = field.get("type")
     # record each injected dependency so a call on it resolves to its service.
@@ -254,13 +395,13 @@ def enrich(ir: dict) -> list[dict]:
     """
     services = ir.get("services") or {}
     functions = {f["name"]: f for f in (ir.get("functions") or [])}
+    externs = ir.get("externs") or []
     collected: list = []
 
     # Components: provide-methods (may be emission positions) and component-level
     # setup `let`/effect (always a pure position).
     for component in ir.get("components") or []:
-        setup_scope: dict = {"@reachable": _reachable_services(
-            component.get("requires"), services)}
+        setup_scope: dict = _position_context(component, services, externs)
         for field in component.get("config", []) or []:
             setup_scope[field["name"]] = field.get("type")
         for instance, service in (component.get("requires") or {}).items():
@@ -279,7 +420,7 @@ def enrich(ir: dict) -> list[dict]:
                         reason="a non-emission provide-method — pure"
                         if not decl.get("emission") else "")
                     scope = _method_scope(
-                        component, method, decl, services, functions)
+                        component, method, decl, services, functions, externs)
                     _walk_body(method.get("body"), services, functions,
                                scope, capability, collected)
             elif stmt.get("step") == "let":
@@ -310,4 +451,5 @@ def enrich(ir: dict) -> list[dict]:
     return [_obligation(hole, spec) for hole, spec in collected]
 
 
-__all__ = ["enrich", "EMITTABLE_SECTIONS"]
+__all__ = ["enrich", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
+           "CROSSING_FORM", "CROSSING_RULE"]

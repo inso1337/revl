@@ -31,8 +31,9 @@ pre-merge-affected:
 # --require-issue is on (roadmap item 452): the issue migration is finished, so
 # every open or partial item cites its issue, or its private security advisory
 # for a security item that must not be a public issue on this public repo.
+# --check-tier-parity is on too (issue #1572), so this target is the lint job.
 roadmap-check:
-	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue
+	python3 tools/check_roadmap_markers.py --check-contradiction --check-delegation --check-duplicate-headers --check-orphan --require-issue --check-tier-parity
 
 # The same tool with all five prose checks on: self-contradiction, dangling
 # delegation, orphaned findings, single-tier fixes for language-wide

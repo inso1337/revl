@@ -39,8 +39,10 @@ Covered subset (what emits byte-identical):
     map incl function types -> ``Callable``); the built-in Result (``Ok``/``Err``)
     classes with user-case shadowing; the canonical Float->Str (``_revl_ftoa``)
     helper gated by a float ``${…}`` interpolation; and host roots
-    (``Map``/``Pool``/``Job``) in fn/test bodies pulled into the sorted
-    ``from runtime import``.
+    (``Map``/``Pool``/``Job``/``Stream``) in fn/test bodies pulled into the
+    sorted ``from runtime import``. Item 391 adds the component-body ``host``
+    call (``Map.new()``, ``Pool.open(..)``, ``Job.run(..)``,
+    ``Stream.source()``) and its root import.
 
 Slice 4 (item 206) adds three more byte-identical forms:
   * externs (``_emit_externs``) — ``def <name>(...)`` plus the verbatim ``@py``
@@ -149,6 +151,16 @@ CORPUS = [
     # `kind=format` py-tier emitter gap the coverage ledger recorded. Covers a
     # single name arg, two args, the A4 literal-`$` escape, and a `bin` arg.
     "services_interp.rvl",
+    # item 391: a host builtin in a component body (`kind=host`): `Map.new()`,
+    # `Pool.open(..)`, `Job.run(..)` in effect/undo/compensate position, and
+    # (its own document, because selfhost/lower.rvl does not lower it) a bare
+    # `Stream.source()`, with each root in the sorted `from runtime import`.
+    # The port answered `<<UNSUPPORTED-CEXPR:host>>`, the only marker on 242
+    # documents in the whole-tree survey. Both added FAILING FIRST. A
+    # replay-declaring `Stream.source()` is still refused by name, see
+    # test_a_declared_stream_replay_is_named_not_dropped below.
+    "services_host.rvl",
+    "services_host_stream.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -473,6 +485,8 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
 
     runtime = types.ModuleType("runtime")
     runtime.Frame = Frame
+    # issue #1504: a witnessed extern carries the E-Stop gate; no halt here
+    runtime.estop_gated = lambda name: (lambda fn: fn)
     monkeypatch.setitem(sys.modules, "runtime", runtime)
     ns = {}
     exec(compile(source, "witnessed_emitted.py", "exec"), ns)
@@ -577,13 +591,13 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
     ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
      "<<UNSUPPORTED-CEXPR:spawn>>"),
-    # advance.rvl's component-body `${…}` (`format`) is now ported (see
-    # `services_interp.rvl` in the CORPUS above and the `fmt as _revl_fmt`
-    # import), so this document is pinned on its REMAINING deferred boundary:
-    # the `host` builtin `Map.new()` in an activation body, which the port
-    # still refuses.
-    ("backends/go/scenarios/advance.rvl", "store = Map.new()",
-     "<<UNSUPPORTED-CEXPR:host>>"),
+    # advance.rvl's component-body `${…}` (`format`) and its `host` builtin
+    # `Map.new()` are both ported now (`services_interp.rvl` and
+    # `services_host.rvl` in the CORPUS above), so this document is pinned on
+    # its REMAINING deferred boundary: the lifecycle tests that drive the
+    # clock coeffect with `advance`, which the port names instead of emitting.
+    ("backends/go/scenarios/advance.rvl", "_revl_Clock.advance(",
+     "<<UNSUPPORTED-TEST:an every-timer fires on each advanced tick>>"),
     # item 130 (issue #81): a stream document reaches this port at TWO
     # boundaries, and the row below covered only the first. The `subscribe`
     # acquisition is one; the `every … in` loop the reference lowers as a
@@ -592,8 +606,10 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
     # entry is satisfied by a port that emits the acquisition's marker and
     # then drops the loop with nothing in its place — the section-level
     # silence issue #1123 found, and the worst answer item 130 admits for a
-    # stream.
-    ("backends/go/testdata/stream_130.rvl", "Pool, Stream",
+    # stream. The acquisition row reads the reference's subscribe CALL: the
+    # `Pool, Stream` import it used to read is emitted by the port too now that
+    # a component-body `Stream.source()` is ported (`services_host_stream.rvl`).
+    ("backends/go/testdata/stream_130.rvl", "Stream.subscribe(",
      "<<UNSUPPORTED-CEXPR:subscribe>>"),
     ("backends/go/testdata/stream_130.rvl", "Stream.is_closed(",
      "<<UNSUPPORTED-BODYSTEP:stream-iter>>"),
@@ -610,6 +626,38 @@ def test_named_runtime_and_harness_boundaries(emitted, reference, path, referenc
     assert reason is None, reason
     if port_marker is not None:
         assert port_marker in actual
+
+
+# A `Stream.source()` that DECLARES its replay backlog (item 130 §4.5) is the
+# one `host` shape the port still refuses. The reference renders the
+# declaration as a keyword argument (`_replay_kwarg`); the port answers the
+# named `host` marker rather than emitting the bare call, which would drop the
+# backlog silently. It cannot be a CORPUS document yet: the self-host gate
+# refuses the `replay(...)` clause with G1, so the gate/reference census would
+# report a false reject for any file under a census directory. Hence the
+# inline source, which pins both replay shapes.
+STREAM_REPLAY_SRC = """component Backlog {
+  let src = effect Stream.source() replay(8) undo src.close()
+}
+component Durable {
+  let src = effect Stream.source() replay(from: "orders") undo src.close()
+}
+"""
+
+
+def test_a_declared_stream_replay_is_named_not_dropped(emitted, reference, tmp_path):
+    path = tmp_path / "replay.rvl"
+    path.write_text(STREAM_REPLAY_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    for declared in ("src = Stream.source(replay={'count': 8})",
+                     "src = Stream.source(replay={'cursor': 'orders'})"):
+        assert declared in want
+        assert declared not in got
+    assert "src = Stream.source()" not in got
+    assert got.count("<<UNSUPPORTED-CEXPR:host>>") == 2
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:host>>")
+    assert reason is None, reason
 
 
 # ---------------------------------------------------------------------------

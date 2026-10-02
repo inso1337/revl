@@ -61,6 +61,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the dense, complete, prompt-pinnable grammar (roadmap item "
              "346; also shipped as docs/syntax-2.0.prompt.txt) instead of the "
              "short human-readable summary")
+    grammar.add_argument(
+        "--format", choices=("lark", "gbnf", "ebnf"), default=None,
+        help="print the grammar of revl source DERIVED FROM THE PARSER in a "
+             "format grammar-constrained decoders read: `lark` (llguidance), "
+             "`gbnf` (llama.cpp server, XGrammar) or `ebnf` (issue #1661)")
+    grammar.add_argument(
+        "--category", default="program",
+        choices=("program", "component-body", "statements", "expression", "type"),
+        help="with --format: scope the grammar to one syntactic category, so a "
+             "hole-filling decoder is constrained to that slice (default: program)")
+    grammar.add_argument(
+        "--notes", action="store_true",
+        help="list where the derived grammar is looser than the parser")
+    grammar.add_argument(
+        "--write", action="store_true",
+        help="regenerate the committed grammar/revl.{lark,gbnf,ebnf} (source checkout)")
+    grammar.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if grammar/ differs from a fresh derivation (the drift gate)")
 
     # item 296: propose a safe adapter between a consumer's required service and
     # a candidate's provided service (proposed, not silent).
@@ -246,7 +265,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="a TOML/JSON placement map: also print the item-411 sandbox "
              "envelope per sandboxed process: the fs/net grant, the effective "
              "reach of each seam-served key, and the externs the [sandbox.needs] "
-             "table vouches (claimed, unverified). Human output only.")
+             "table vouches (claimed, unverified); and each model role's "
+             "binding per host with the model bindings digest (item 515). "
+             "Human output only.")
     # item 309: the replay-class view over the recovery surface.
     audit.add_argument(
         "--recovery", action="store_true", default=None,
@@ -959,7 +980,54 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_import.add_argument("--key", default="imported", help="provision key")
     mcp_import.add_argument("--backend", default="ts", choices=("ts", "py"),
                             help="host block backend for the generated externs")
+    mcp_import.add_argument("--undo", action="append", default=[],
+                            metavar="TOOL=INVERSE[:result]",
+                            help="declare INVERSE as the tool that reverts TOOL, "
+                                 "making TOOL `witnessed` (repeatable). INVERSE "
+                                 "receives TOOL's arguments, or with `:result` its "
+                                 "structuredContent. Your assertion, not the server's")
     mcp_import.add_argument("-o", "--output", default=None, help="output path (default: stdout)")
+    # `revl mcp proxy` (issue #1463, docs/mcp-proxy.md): gate an existing MCP
+    # server with the surface `revl mcp import` derives, no .rvl written.
+    mcp_proxy = mcp_sub.add_parser(
+        "proxy", help="gate an existing MCP server: classify its tools as `revl mcp "
+                      "import` does and enforce approval, WAL and undo at call time")
+    mcp_proxy.add_argument("upstream", nargs=argparse.REMAINDER,
+                           metavar="-- COMMAND [ARG ...]",
+                           help="the upstream MCP server to spawn, spoken to over "
+                                "its stdio")
+    mcp_proxy.add_argument("--undo", action="append", default=[],
+                           metavar="TOOL=INVERSE[:result]",
+                           help="declare INVERSE as the upstream tool that reverts "
+                                "TOOL (repeatable): TOOL becomes `witnessed`, runs "
+                                "without a prompt, and is reverted on abort. INVERSE "
+                                "receives TOOL's arguments, or with `:result` its "
+                                "structuredContent")
+    mcp_proxy.add_argument("--trust-read-only-hints", action="store_true",
+                           help="admit a tool whose uncontradicted `readOnlyHint: "
+                                "true` revl cannot check, without a prompt. By "
+                                "default the proxy does not trust an unchecked "
+                                "claim and gates the tool like any emission")
+    mcp_proxy.add_argument("--upstream-timeout", type=float, default=120.0,
+                           metavar="SECONDS",
+                           help="how long to wait for one upstream answer "
+                                "(default: 120)")
+    mcp_proxy.add_argument("--wal", default=None, metavar="PATH",
+                           help="the session write-ahead log (default: the "
+                                "per-user state directory)")
+    mcp_proxy.add_argument("--operator-profile", default=None, metavar="PROFILE",
+                           help="an operator profile (item 55); grant `approve` "
+                                "only to the human, or the agent can answer its "
+                                "own tickets")
+    mcp_proxy.add_argument("--operator", default=None, metavar="TOKEN",
+                           help="which operator in the profile this session runs as")
+    mcp_proxy.add_argument("--policy", default=None, metavar="POLICY",
+                           help="a boundary-policy file (item 33) bound to the session")
+    mcp_proxy.add_argument("--approval-record-values", default="withheld",
+                           choices=("bound", "withheld"),
+                           help="whether an approved crossing's caller-supplied "
+                                "resource value is written to the durable approval "
+                                "log (default: withheld)")
 
     imp = sub.add_parser("import",
                          help="import an external interface definition as revl source")
@@ -1274,6 +1342,15 @@ def build_parser() -> argparse.ArgumentParser:
                      help="TOML/JSON file of `component-name = { ... }` config tables")
     run.add_argument("--env", default=None,
                      help="TOML/JSON file of flat `name = value` environment values, injected into the composition's `boot` component — its `config {}` block is the environment contract, and an undeclared key, a missing required field or a value outside a declared `under`/`in` bound refuses the boot (item 350)")
+    run.add_argument("--providers", default=None, metavar="FILE",
+                     help="JSON/TOML provider configuration binding each "
+                          "`model role` to a runtime adapter (OpenAI-compatible, "
+                          "Anthropic, Gemini). Checked before boot against the "
+                          "program's placement: an on_device role bound off the "
+                          "device, a crossing on an unbound or undeclared role, "
+                          "or a credential in the file refuses the run. "
+                          "Credentials come from the environment variables the "
+                          "file names (docs/model-providers.md)")
     run.add_argument("--policy", default=None, metavar="POLICY",
                      help="boundary policy file (item 33). With --backend wasm it "
                           "enforces the item-289 least-authority chain (host "

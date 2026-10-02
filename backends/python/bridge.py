@@ -814,6 +814,14 @@ class _Client:
         return self._deadline
 
     def call(self, key: str, method: str, args, deadline=None):
+        # issue #1504: a remote call is a crossing. Refuse it under an E-Stop,
+        # before anything is encoded or sent, through the same runtime check
+        # every other crossing path calls. The bridge stays importable without
+        # the runtime; with none loaded there is no halt to honour.
+        runtime = _sys.modules.get("runtime")
+        check = getattr(runtime, "_estop_check", None)
+        if callable(check):
+            check(f"{key}.{method}")
         seconds = self.deadline_for(method, deadline)
         # Encode the arguments through the SAME fail-closed marshaller the return
         # path uses (Finding B): a scalar/list/dict/record/ADT arg encodes (byte-

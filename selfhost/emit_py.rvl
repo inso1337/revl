@@ -32,7 +32,8 @@
 // 3 (item 192) adds the MODULE DECLARATION surface — see the slice-3 banner
 // below `emit_services_table`: `_emit_types` (record + variant declarations, the
 // `_py_type` map, forward-ref quoting), the built-in Result classes, the
-// canonical Float->Str `_revl_ftoa` helper, and host roots in fn/test bodies.
+// canonical Float->Str `_revl_ftoa` helper, and host roots in fn/test bodies
+// (and, since item 391, host calls in component bodies).
 // Slice 4 (item 206) adds externs (`_emit_externs`, the verbatim `@py` body via
 // stdlib/str.rvl::dedent — item 193), component `config`/`ConfigSchema`, and
 // method-body `effect`/saga `emit … compensate` (the `_revl_frame.adopt`
@@ -1167,7 +1168,13 @@ fn splitlines(s: Str) -> List[Str] {
 // dedented + split into indented lines. An async extern's `async def` header is
 // reproduced faithfully; the await-seed / awaited call sites it needs are
 // DEFERRED to slice 5 (so an async extern is excluded from the cross-check).
-fn emit_externs(externs: List[Any]) -> List[Str] {
+// The extern classes whose host body crosses a boundary (issue #1504), the
+// reference's `_GATED_EXTERN_CLASSES`.
+fn gated_extern_class(cls: Str) -> Bool {
+  return cls == "emission" || cls == "witnessed" || cls == "acquire"
+}
+
+fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   var out = []
   for (ext of externs) {
     let name = mangle(value_str(value_field(ext, "name")))
@@ -1184,6 +1191,11 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
     // marking of its own (the host trace an operator console prints) scrub it.
     // Emitted ONLY for a `Secret[T]`-returning extern, so every other module is
     // byte-identical.
+    // issue #1504: an extern whose body crosses a boundary checks the E-Stop
+    // before its body runs; the gate is the outermost decorator.
+    if (gated && gated_extern_class(value_str(value_field(ext, "class")))) {
+      out = out.push(`@${runtime_ref("estop_gated")}(${py_repr(value_str(value_field(ext, "name")))})`)
+    }
     if (value_bool(value_field(ext, "secret_return"))) {
       out = out.push("@".concat(runtime_ref("secret_result")))
     }
@@ -1446,13 +1458,16 @@ fn comp_names(ir: Any) -> Str {
 // `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
 // threaded through provides/methods). STILL DEFERRED to slice 5: async coloring
 // (async methods / await bodies / the
-// await-seed), host roots (`Pool`/`Map`/`Job`) in COMPONENT bodies (fn/test
-// bodies already covered), realm placements (`isolate`/`intercept`/`routes`/the
+// await-seed), realm placements (`isolate`/`intercept`/`routes`/the
 // router), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
-// `asyncio` driver), and the `host`/`spawn`/`instance-get` cexpr kinds. The
+// `asyncio` driver), and the `spawn`/`instance-get` cexpr kinds. The
 // component-body `${…}` template (the `format` cexpr, `_revl_fmt` + the `fmt`
 // runtime import) is ported — a fn body lowers `${…}` to `interp` instead, so
 // `format` is the component/method-body twin of the fn-body f-string concat.
+// The `host` cexpr (item 391) is ported too: a host builtin in a COMPONENT body
+// (`Map.new()`, `Pool.open(..)`, `Job.run(..)`, `Stream.source()`) renders as
+// the dotted call and pulls its root into the runtime import, except a
+// `Stream.source()` that declares a replay backlog, which keeps the marker.
 
 // A body-emission result: the lines produced AND the running timer counter (the
 // reference's `self._counter`, threaded here since revl has no method state).
@@ -1470,6 +1485,7 @@ fn runtime_ref(name: Str) -> Str {
   // the `ConfigSchema` argument list and needs no name of its own.
   if (name == "mark_secret") { return "_revl_mark_secret" }
   if (name == "secret_result") { return "_revl_secret_result" }
+  if (name == "estop_gated") { return "_revl_estop_gated" }
   // item 414 (ported per item 429(d)): the recording seam a DIRECT host-extern
   // emission fires through. The alias is the one the reference's `_IMPORT_ALIAS`
   // carries, so the `from runtime import` line and the call site that references
@@ -1716,6 +1732,22 @@ fn cexpr(node: Any) -> Str {
   }
   if (kind == "fn") {
     return `${mangle(value_str(value_field(node, "name")))}(${ccommajoin(value_list(value_field(node, "args")))})`
+  }
+  // A host builtin in a component or method body (`Map.new()`,
+  // `Pool.open(…)`, `Job.run(…)`, `Stream.source()`): the dotted name is
+  // emitted verbatim, because the host roots are the language names the
+  // runtime exports under the same spelling (they are never `_revl_`
+  // aliased). The root lands in the `from runtime import` line through
+  // `ir_uses_host_root`.
+  //
+  // A `Stream.source()` that DECLARES a replay backlog (item 130 §4.5) is
+  // part of the stream surface this port does not carry yet, so it falls
+  // through to the named marker below instead of dropping the declaration.
+  // Rendering it is one keyword argument (the reference's `_replay_kwarg`),
+  // but no corpus document can hold it to agreement while the self-host gate
+  // refuses the `replay(…)` clause with G1, so the port waits for that.
+  if (kind == "host" && value_is_null(value_field(node, "replay"))) {
+    return `${value_str(value_field(node, "fn"))}(${ccommajoin(value_list(value_field(node, "args")))})`
   }
   // A `${…}` template in a component/method body (the fn-body path lowers to
   // `interp` instead). The reference `_ComponentEmitter._expr` renders
@@ -2365,8 +2397,9 @@ fn emit_services_table(services: Any) -> List[Str] {
 //     and suppressed per-name when a user variant case shadows it;
 //   * `_revl_ftoa`  — the canonical Float->Str interpolation helper, gated by
 //     `_uses_float_interp` (a `${…}` over a provably-Float expression);
-//   * host roots in fn/test bodies  — a `var` naming `Map`/`Pool`/`Job` pulls
-//     the name into the sorted `from runtime import` line (`_find_host_roots`).
+//   * host roots in fn/test bodies: a `var` naming `Map`/`Pool`/`Job`/`Stream`
+//     pulls the name into the sorted `from runtime import` line
+//     (`_find_host_roots`); item 391 added the component-body `host` call.
 //
 // LANDED in slice 4 (item 206): externs (`_emit_externs`, the verbatim `@py`
 // body via stdlib/str.rvl::dedent + local `splitlines`), component `config`/
@@ -2699,16 +2732,26 @@ fn ftoa_block() -> List[Str] {
 }
 
 // ------------------------------------------------------------- host roots
-// `_find_host_roots`: a `var` node naming `Map`/`Pool`/`Job` in a fn/test body
-// pulls that host builtin into the `from runtime import` line.
+// `_find_host_roots`: a `var` node naming `Map`/`Pool`/`Job`/`Stream` in a
+// fn/test body pulls that host builtin into the `from runtime import` line.
 fn uses_host_root(n: Any, root: Str) -> Bool {
   if (node_kind(n) == "var" && value_str(value_field(n, "name")) == root) { return true }
   for (c of value_children(n)) { if (uses_host_root(c, root)) { return true } }
   return false
 }
+// The component half: the reference's `_ComponentEmitter._expr` adds a host
+// node's ROOT (the name before the first `.`) to its `uses` as it renders it.
+// This port writes its import line before any body is rendered, so it asks the
+// same question of the IR: does any component carry a `host` node on `root`?
+fn uses_host_call(n: Any, root: Str) -> Bool {
+  if (node_kind(n) == "host" && value_str(value_field(n, "fn")).startsWith(root.concat("."))) { return true }
+  for (c of value_children(n)) { if (uses_host_call(c, root)) { return true } }
+  return false
+}
 fn ir_uses_host_root(ir: Any, root: Str) -> Bool {
   if (uses_host_root(value_field(ir, "functions"), root)) { return true }
   if (uses_host_root(value_field(ir, "tests"), root)) { return true }
+  if (uses_host_call(value_field(ir, "components"), root)) { return true }
   return false
 }
 
@@ -2996,7 +3039,8 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // The `from runtime import …` line (before the arithmetic preludes), rendered
   // in `sorted(uses)` order with the `_revl_` aliases. The `uses` set for this
   // slice: `Frame` iff there is any component; the `schedule_*` a timer needs;
-  // and (slice 3) the host roots `Map`/`Pool`/`Job` a fn/test body references.
+  // and (slice 3) the host roots `Map`/`Pool`/`Job`/`Stream` a fn/test body
+  // references or (item 391) a component body calls.
   // The canonical order is `list_sort(list_dedup(imports))` (stdlib/list.rvl,
   // item 194): the codepoint sort Python `sorted` uses, which puts the
   // capitalised names before the lower-case `schedule_*`. No longer walked as a
@@ -3035,8 +3079,10 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     if (body_has_receiver_secret_witness(value_list(value_field(c, "body")), value_list(value_field(ir, "externs")))) { need_mark_secret = true }
   }
   var need_secret_result = false
+  var need_estop_gated = false
   for (e of value_list(value_field(ir, "externs"))) {
     if (value_bool(value_field(e, "secret_return"))) { need_secret_result = true }
+    if (components.length() > 0 && gated_extern_class(value_str(value_field(e, "class")))) { need_estop_gated = true }
   }
   // Collect the needed imports in any order; `list_sort` fixes the canonical
   // codepoint order below. Each alias-bearing name carries its `_revl_` alias.
@@ -3048,10 +3094,12 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
   if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }
+  if (ir_uses_host_root(ir, "Stream")) { imports = imports.push("Stream") }
   if (need_mark_secret) { imports = imports.push("mark_secret as _revl_mark_secret") }
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
   if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
   if (need_secret_result) { imports = imports.push("secret_result as _revl_secret_result") }
+  if (need_estop_gated) { imports = imports.push("estop_gated as _revl_estop_gated") }
   if (imports.length() > 0) {
     let sorted_imports = list_sort(list_dedup(imports))
     out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
@@ -3111,7 +3159,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   // Externs (slice 4): `def <name>(...)` + dedented verbatim body, gated on a
   // non-empty extern list, between the functions and the SERVICES table.
   let externs = value_list(value_field(ir, "externs"))
-  if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
+  if (externs.length() > 0) { out = out.concat(emit_externs(externs, components.length() > 0)) }
   out = out.concat(emit_services_table(value_field(ir, "services")))
   out = out.push("")
   out = out.push("")

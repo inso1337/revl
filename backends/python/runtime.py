@@ -36,6 +36,7 @@ import itertools
 import json
 import os
 import re
+import threading
 import time
 import types
 import weakref
@@ -595,14 +596,24 @@ def validate_retry(make_call, budget: int, schema, where: str = "",
     attempt = 0
     started = time.monotonic()
     while True:
-        value = make_call()
+        value = None
         try:
+            # issue #1462: a provider may itself report that its completion is
+            # outside the constraint it claimed (a byte-level grammar check it
+            # can run and `validate_response` cannot). That is the same
+            # response fault, so it is retried under the same budget.
+            value = make_call()
             validated = validate_response(value, schema, where, constructors,
                                           grammar)
-        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+        except ResponseValidationError as fault:  # noqa: PERF203 - retry is the point
+            _take_grammar_claim()
             if attempt >= budget:
-                _revl_record_model_call(started, attempt + 1, budget + 1, value,
-                                        validated=False)
+                # the raw return when there was one; a provider-raised fault
+                # carries its (redacted) completion instead
+                _revl_record_model_call(
+                    started, attempt + 1, budget + 1,
+                    value if value is not None else fault.value,
+                    validated=False)
                 raise
             attempt += 1
             continue
@@ -636,16 +647,22 @@ async def validate_retry_async(make_call, budget: int, schema, where: str = "",
     attempt = 0
     started = time.monotonic()
     while True:
-        result = make_call()
-        if inspect.isawaitable(result):
-            result = await result
+        result = None
         try:
+            # issue #1462: see `validate_retry`; a provider-reported response
+            # fault is retried like one found here
+            result = make_call()
+            if inspect.isawaitable(result):
+                result = await result
             validated = validate_response(result, schema, where, constructors,
                                           grammar)
-        except ResponseValidationError:  # noqa: PERF203 — retry is the point
+        except ResponseValidationError as fault:  # noqa: PERF203 - retry is the point
+            _take_grammar_claim()
             if attempt >= budget:
-                _revl_record_model_call(started, attempt + 1, budget + 1, result,
-                                        validated=False)
+                _revl_record_model_call(
+                    started, attempt + 1, budget + 1,
+                    result if result is not None else fault.value,
+                    validated=False)
                 raise
             attempt += 1
             continue
@@ -1302,6 +1319,8 @@ def extern_emit(ctx, name: "str", fn, args: "tuple"):
     transparent frame keeps a recorded site on the emitted module's own line
     rather than on this helper."""
     _revl_transparent_frame = True
+    # issue #1504: refuse BEFORE the crossing is recorded or its host body runs
+    _estop_check(name)
     record = getattr(ctx, "_revl_record_extern", None)
     if callable(record):
         record(name, args)
@@ -1392,28 +1411,36 @@ def revl_model_hop(*, model, tokens_in, tokens_out, cost, latency_seconds,
 # ---------------------------------------------------------------------------
 
 class _RealmLabel:
-    """A realm identity. cordis compares isolate labels by object identity,
-    so same-string sharing must go through one object — never rely on
-    string interning."""
+    """The isolation label of one key in one realm. cordis compares isolate
+    labels by object identity, so same-string sharing must go through one
+    object — never rely on string interning."""
 
-    __slots__ = ("name",)
+    __slots__ = ("name", "key")
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, key: str) -> None:
         self.name = name
+        self.key = key
 
     def __repr__(self) -> str:  # pragma: no cover — debugging aid
-        return f"<realm {self.name}>"
+        return f"<realm {self.name}/{self.key}>"
 
 
 _REALM_LABELS: dict = {}
 
 
-def realm_label(name: str) -> "_RealmLabel":
-    """Process-wide string -> label-object registry: equal strings share a
-    realm (the paper §5.2.1 global-realm convention)."""
-    label = _REALM_LABELS.get(name)
+def realm_label(name: str, key: str) -> "_RealmLabel":
+    """Process-wide `(realm, key)` -> label-object registry: equal realm
+    strings share a realm (the paper §5.2.1 global-realm convention).
+
+    Keyed by the key too, not by the realm string alone (issue #1543). cordis
+    stores a provision under its isolation label (`ctx.isolate(name, label)`
+    then `reflect.store[label]`), which is why its own loader mints one label
+    per key inside a realm (`loader.Realm.access`). One label for the whole
+    realm put `isolate db in realm("wa")` and `isolate api in realm("wa")` in
+    the same slot."""
+    label = _REALM_LABELS.get((name, key))
     if label is None:
-        label = _REALM_LABELS[name] = _RealmLabel(name)
+        label = _REALM_LABELS[(name, key)] = _RealmLabel(name, key)
     return label
 
 
@@ -1429,7 +1456,7 @@ def plug(ctx, component: dict, config=None):
     _estop_check(f"plug {component.get('name') or '<component>'}")
     scoped = ctx
     for key, realm in (component.get("isolate") or {}).items():
-        scoped = scoped.isolate(key, realm_label(realm))
+        scoped = scoped.isolate(key, realm_label(realm, key))
     return scoped.plugin(component, config)
 
 
@@ -2208,6 +2235,13 @@ class _Transactional:
         """The abort branch: replay the declared inverse. Also called directly
         by a failed UI transaction unit (`Frame._unwind_ui_unit`), which settles
         its own entries before the activation's commit-vs-abort bit exists."""
+        # issue #1504: an inverse is a crossing too. Under a halt it is
+        # stranded, never run, whichever path reached it (a cordis unwind, a
+        # method entry's drain, the session escrow, a failed UI transaction
+        # unit's own unwind).
+        if _estop_poll():
+            self.frame._record_estop_stranded(self)
+            return None
         # abort: replay the declared inverse against the captured witness, then
         # drop both references (idempotent single-shot, so a re-entrant unwind
         # or a `revl recover` pass does not run it twice).
@@ -2424,6 +2458,11 @@ class _Compensation:
         fails the abort and never blocks the remaining ones (teardown-
         contract.md's continue-and-record rule, `compensation-residue`
         severity)."""
+        # issue #1504: a compensation is a crossing. Under a halt it is
+        # stranded, never run, on every path that reaches it.
+        if _estop_poll():
+            self.frame._record_estop_stranded(self)
+            return
         self.ran = True
         fn, self.fn = self.fn, None
         if fn is None:  # pragma: no cover — single-flight guard
@@ -2726,6 +2765,23 @@ _INFLIGHT: list = []
 #: halt walks this to build its inventory.
 _LIVE_FRAMES: "weakref.WeakSet" = weakref.WeakSet()
 
+#: Guards the halt's shared state (issue #1487): `_ESTOP`, `_INFLIGHT` and
+#: every ADD to `_LIVE_FRAMES`. `estop` may be called from any thread (a
+#: signal handler, a watchdog, a transport's request thread) while other
+#: threads build frames and dispatch crossings. Without it, the walk of
+#: `_LIVE_FRAMES` raised "Set changed size during iteration" when a frame was
+#: added mid-walk, and two halts could both pass the `_ESTOP is None` check.
+#: Re-entrant, because the walk calls into frames that may consult it. A weak
+#: set's own removals (a frame collected mid-walk) are already deferred by the
+#: set while it is being iterated; only an add can race the walk.
+_ESTOP_LOCK = threading.RLock()
+
+
+def _live_frames() -> list:
+    """A snapshot of the live frames, taken under the halt lock."""
+    with _ESTOP_LOCK:
+        return list(_LIVE_FRAMES)
+
 
 class EstopRefused(RuntimeError):
     """`estop()` was called without operator authority.
@@ -2822,8 +2878,9 @@ def clear_estop() -> None:
     reconciling and is starting a FRESH process-level session — never a
     resume: the halted instance stays dead (item 443, open question 3)."""
     global _ESTOP
-    _ESTOP = None
-    _INFLIGHT.clear()
+    with _ESTOP_LOCK:
+        _ESTOP = None
+        _INFLIGHT.clear()
 
 
 def _estop_check(where: str) -> None:
@@ -2833,13 +2890,47 @@ def _estop_check(where: str) -> None:
     Cost is one `open()` on the latch path per crossing, and nothing at all
     when no latch is armed — which is the default, so a composition that never
     arms one is byte-identical to the pre-443 runtime."""
+    if _estop_poll():
+        raise EstopHalted(where)
+
+
+def _estop_poll() -> bool:
+    """Whether a halt is in force, engaging it first when the latch file says
+    an operator armed one. The one read every crossing path makes before a host
+    body runs: `_estop_check` raises on it, a teardown path strands on it."""
     if _ESTOP is None:
         record = _latch_record()
         if record is None:
-            return
+            return False
         estop(record.get("reason") or "operator halt",
               operator=record.get("operator") or "unknown", _from_latch=True)
-    raise EstopHalted(where)
+    return True
+
+
+def estop_gated(name: str):
+    """Decorator the emitter puts on every extern whose body crosses a boundary
+    (class `emission`, `witnessed` or `acquire`), so the E-Stop is checked
+    BEFORE the host body runs, whatever position the call is written in
+    (issue #1504). Before this, a direct `emit extern(..)` never checked, and a
+    witnessed effect was refused only after its body had run, at the
+    registration of its inverse. An async extern is checked when its coroutine
+    starts, before its first instruction."""
+    def _wrap(fn):
+        if inspect.iscoroutinefunction(fn):
+            async def _gated_async(*args, **kwargs):
+                _estop_check(name)
+                return await fn(*args, **kwargs)
+            wrapped = _gated_async
+        else:
+            def _gated(*args, **kwargs):
+                _estop_check(name)
+                return fn(*args, **kwargs)
+            wrapped = _gated
+        wrapped.__name__ = fn.__name__
+        wrapped.__qualname__ = fn.__qualname__
+        wrapped.__doc__ = fn.__doc__
+        return wrapped
+    return _wrap
 
 
 class _InFlight:
@@ -2857,14 +2948,16 @@ class _InFlight:
         self.descriptor = descriptor
 
     def __enter__(self) -> "_InFlight":
-        _INFLIGHT.append(self.descriptor)
+        with _ESTOP_LOCK:
+            _INFLIGHT.append(self.descriptor)
         return self
 
     def __exit__(self, *_exc: Any) -> None:
-        try:
-            _INFLIGHT.remove(self.descriptor)
-        except ValueError:  # pragma: no cover — a halt already drained it
-            pass
+        with _ESTOP_LOCK:
+            try:
+                _INFLIGHT.remove(self.descriptor)
+            except ValueError:  # pragma: no cover — a halt already drained it
+                pass
 
 
 def _estop_record(kind: str, *, component: Optional[str], method: Optional[str],
@@ -2914,7 +3007,18 @@ def estop(reason: str = "operator halt", *, operator: Optional[str] = None,
     What this does NOT do, and must not: run an inverse, run a compensation,
     flush a deferred emission, write a discharge record, or tear anything down.
     Its cost is one latch flip plus the walk of the live frames — never the
-    cost of a teardown, which is the entire reason the verb exists."""
+    cost of a teardown, which is the entire reason the verb exists.
+
+    Safe from any thread (issue #1487): the whole halt is one critical section
+    under `_ESTOP_LOCK`, so concurrent callers get the SAME halt record, the
+    walk never sees the frame set change under it, and a frame built while a
+    halt is in progress either is walked or is born halted."""
+    with _ESTOP_LOCK:
+        return _estop_locked(reason, operator=operator, _from_latch=_from_latch)
+
+
+def _estop_locked(reason: str, *, operator: Optional[str],
+                  _from_latch: bool) -> dict:
     global _ESTOP
     if _ESTOP is not None:
         return dict(_ESTOP)
@@ -2934,7 +3038,7 @@ def estop(reason: str = "operator halt", *, operator: Optional[str] = None,
         for d in list(_INFLIGHT)]
     stranded: list = []
     activations: list = []
-    for frame in list(_LIVE_FRAMES):
+    for frame in list(_LIVE_FRAMES):   # the caller holds `_ESTOP_LOCK`
         if getattr(frame, "_halted", False):
             continue
         frame._halted = True
@@ -2995,7 +3099,7 @@ def estop_residue() -> list:
     if _ESTOP is None:
         return []
     out = list(_ESTOP["inFlight"]) + list(_ESTOP["stranded"])
-    for frame in list(_LIVE_FRAMES):
+    for frame in _live_frames():
         out.extend(getattr(frame, "estop_residue", []))
     return out
 
@@ -3124,7 +3228,6 @@ class Frame:
         # halt-time half lives on the halt record itself; `runtime.estop_residue()`
         # merges the two.
         self.estop_residue: list = []
-        _LIVE_FRAMES.add(self)
         # stateful host resources this activation acquires (`Map.new()`, …), in
         # acquisition order — the instance's migratable state for a hot-swap
         # (see the state-migration section above). Populated by
@@ -3170,6 +3273,16 @@ class Frame:
         # component it belongs to (ConfigSchema itself is name-less in
         # emitted output, and emitted output must stay byte-identical).
         self.config = _flush_config_trace(name)
+        # issue #1487: published to the halt LAST, once every attribute the
+        # halt's walk reads exists, and under the halt lock, so a concurrent
+        # halt either walks this frame whole or has already finished, in which
+        # case the frame is born halted instead of escaping the inventory.
+        # Registering it earlier let a halt on another thread walk a frame
+        # whose `_resources` did not exist yet.
+        with _ESTOP_LOCK:
+            _LIVE_FRAMES.add(self)
+            if _ESTOP is not None:
+                self._halted = True
 
     def install(self, body: Callable) -> Any:
         """Install the component body (a generator function) as one effect.
@@ -3232,6 +3345,7 @@ class Frame:
         the activation's Phase 2 and a failed UI transaction unit."""
         if not pending:
             return
+        _estop_poll()   # issue #1504: an armed latch halts this frame first
         # item 443: an E-Stop runs no compensation either. Phase 2 is the
         # best-effort offset pass; "best effort" under an operator halt is zero
         # effort, because every compensation is itself a boundary CROSSING and
@@ -3399,8 +3513,9 @@ class Frame:
             # runtime half of `RevL.G7.estop_replays_nothing` — the halt's
             # replay set is empty by construction, at the one chokepoint every
             # emitted disposer shape already passes through — and the entry is
-            # recorded as owed rather than dropped.
-            if frame._halted:
+            # recorded as owed rather than dropped. The poll engages a halt an
+            # operator armed through the latch file since (issue #1504).
+            if frame._halted or _estop_poll():
                 frame._record_estop_stranded(_disposer)
                 return None
             with _InFlight(component=frame.name,
@@ -4044,6 +4159,7 @@ class Frame:
         same durable discharge record — a compensation is never owed on a
         clean unload (teardown-contract.md's "Commit path"), so its seq joins
         the transactional seqs in the one discharge record written here."""
+        _estop_poll()   # issue #1504: an armed latch halts this frame first
         # item 443: under an E-Stop, `drain` does NOTHING. It does not flip
         # `_committed` (the halt is a third verdict, not a commit), it writes no
         # discharge record (a discharge would DROP the very descriptors the
