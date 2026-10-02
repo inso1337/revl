@@ -1550,17 +1550,20 @@ _FN_VALUE_HELPERS = {
     "": "",
 }
 
-# spelling id -> (helpers, provide-method body)
+# spelling id -> (helpers, provide-method body). A named call to a `fn` that
+# reaches the emission (`pick()`, `run(n)`) is itself an emission crossing and
+# carries its `emit` marker (issue #1437); the function-value reach is what
+# these rows measure.
 _FN_VALUE_SPELLINGS = {
     "alias": ("", "let g = charge let u = g(n) return 0"),
     "passed-to-helper": ("apply", "let u = apply(charge, n) return 0"),
     "record-field": ("", "let r = { f: charge } let u = r.f(n) return 0"),
     "list-element": ("apply0", "let u = apply0([charge], n) return 0"),
-    "returned-from-fn": ("pick", "let h = pick() let u = h(n) return 0"),
+    "returned-from-fn": ("pick", "let h = emit pick() let u = h(n) return 0"),
     "arrow-captures-alias": (
         "", "let g = charge let h = (x: Int) => g(x) let u = h(n) return 0"),
     "two-helpers-deep": ("apply2", "let u = apply2(charge, n) return 0"),
-    "value-inside-a-called-fn": ("run", "let u = run(n) return 0"),
+    "value-inside-a-called-fn": ("run", "let u = emit run(n) return 0"),
 }
 
 _BARE_CHARGE = "extern emission fn charge(n: Int) -> Int = @py { return n }\n"
