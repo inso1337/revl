@@ -942,7 +942,9 @@ an admitted program is byte-identical to the same program without it.
 
 Rejections that enforce no guarantee code exist too, and follow the same
 message-plus-hint discipline: parse and lex errors (`expected ..., found
-...` — classified `SYNTAX`), arithmetic definedness (`mod` by a literal
+...` — classified `SYNTAX`; a `requires`/`provides` clause written inside a
+component body is its own `SYNTAX` refusal, category `header`, whose `fix` is
+the corrected header line), arithmetic definedness (`mod` by a literal
 zero), integer literal range, lifecycle-test mistakes (`unknown component
 Ghost`, `` `Kv` is already loaded ``), realm-label rules, and module-system
 refusals (missing import, private access). Each has its entry in
