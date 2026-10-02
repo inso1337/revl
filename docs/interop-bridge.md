@@ -147,8 +147,15 @@ Participation levels differ, and the docs are honest about it:
   are present: `RealPlacementRunner` consumes via a generic
   `java.lang.reflect.Proxy` (any interface, no codegen) and a monitor connection
   turns provider death into reactive withdrawal (verified: the consumer unloads,
-  no exception). Without JDK 21 + cordis4j it falls back to the non-reactive
-  in-repo stub (`PlacementRunner`, JDK 17), which still crosses and tears down.
+  no exception). It also serves (issue #1581): it binds the serve socket, and
+  each connection hands its call to the main thread, because cordis4j is
+  single-threaded. The main thread refuses a key the process does not serve and
+  a method the service does not declare, resolves the key (the shared realm
+  first, then the one component context that isolated it, since cordis4j cannot
+  read an isolated realm by label), and runs the method with the crossing
+  recorded for the E-Stop inventory. A key two realms provide is refused by
+  name. Without JDK 21 + cordis4j it falls back to the non-reactive in-repo stub
+  (`PlacementRunner`, JDK 17), which still crosses and tears down.
 - `rust` is emitter-generated (`backends/rust/emit.py`): per service a
   `<Svc>Proxy` and a stub dispatcher plus a `plugin_by_name` table, so the
   runner carries no composition-specific code, consumes and serves any seam,
@@ -167,7 +174,10 @@ Participation levels differ, and the docs are honest about it:
 Every bridge marshals values to the same JSON so any pair of backends interop:
 - scalars: `Int`/`Float` to number, `Bool` to bool, `Str` to string, `Unit` to null;
 - `List[T]` to array; records and `Map[K, V]` to a JSON object `{field/key: value}`;
-- `Opt[T]`: the bare value for `Some(x)`, `null` for `None` (never tagged);
+- `Opt[T]`: the bare value for `Some(x)`, `null` for `None` (never tagged). A
+  tier whose own `None` is not `null` maps it at decode by the declared type:
+  ts reads a declared `Opt[T]`'s `null` as `undefined`, the tier's `None`, in
+  a reply, an argument, a record field and a list element (issue #1619);
 - a user ADT or `Result[T, E]` value: a tagged object
   `{"$kind": "<Case>", "$value": <payload>}`, where `<Case>` is the variant name
   (`Hit`, `Missing`, `Ok`, `Err`, ...) and `<payload>` is the case's single
@@ -300,9 +310,14 @@ reply — a request never reaches attribute lookup on the provided object. This
 is the same claim `revl audit` makes about the boundary (G8): the surface is
 *enumerable*, and here it is also *checked*. Per tier: py and node check the
 declared list (`backends/python/bridge.py`, `backends/typescript/bridge.ts`);
-java resolves the method on the emitted service *interface* by reflection, so
-an undeclared name has nowhere to land; rust dispatches through an emitted
-`match` over the declared methods, so an unknown name is not expressible.
+go checks both lists before the generated `RevlInvoke` runs
+(`backends/go/placement_runner/main.go`; before issue #1599 it answered any key
+the document provides, exported or not); java resolves the method on the emitted service *interface* by reflection, so
+an undeclared name has nowhere to land; rust checks both lists before the
+emitted `match` over the declared methods runs
+(`backends/rust/placement_runner/src/main.rs`; before issue #1599 it answered
+any key the document provides, and answered an unknown key or method with
+`"ok": true` and a `null` value).
 (The legacy `serve(ctx, ["db"], sock)` form, used by the hand-written demos,
 has no declared list and derives the allowlist from the provided object's own
 public methods — weaker, because it trusts the object rather than the

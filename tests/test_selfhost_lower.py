@@ -700,6 +700,15 @@ _SOP_CLAUSES = [
 ]
 
 
+# item 309: one emission extern whose modifier slot is `{mods}`, crossed once.
+_IDEM = """extern emission {mods} fn deliver(id: Str, body: Str, n: Int, xs: List[Str], s: Secret[Str]) = @py {{ return }}
+service Ops {{ fn ping() -> Int }}
+component Mailer provides ops: Ops {{
+  emit deliver("k1", "hi", 1, [], "x")
+  provide ops {{ fn ping() = 1 }}
+}}
+"""
+
 ACCEPTED_PROGRAMS = [
     # ---- the qualified test heads (item 391) -------------------------------
     # `lifecycle` (syntax-2.0 §7.1), `fault` (docs/fault-tests.md) and `prop`
@@ -952,7 +961,7 @@ extern emission async fn http_post(url: Str, body: Str) -> Str
   = @py { return url }
 service Http { emission async fn post(url: Str, body: Str) -> Str }
 component Poster provides http: Http {
-  provide http { async fn post(url, body) = http_post(url, body) }
+  provide http { async fn post(url, body) = emit http_post(url, body) }
 }
 """),
     # per-realm G2: the same key provided in two DIFFERENT realms composes —
@@ -1161,7 +1170,7 @@ extern emission async fn tick() -> Int = @py { return 1 }
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission async fn go() -> Int }
 component C provides s: S {
-  provide s { async fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { async fn go() { let r = caller(() => emit tick())   return 0 } }
 }
 """),
     # item 53: a `handoff` on a PROVIDED key is valid state-handoff wiring —
@@ -1221,7 +1230,7 @@ fn wrap(cb: (Str) -> Async[Str], y: Str) -> Str { return y }
 fn plain(f: (Str) -> Str) -> Str { return f("a") }
 service S { emission async fn go(y: Str) -> Str }
 component C provides s: S {
-  provide s { async fn go(y) { let r = plain(w => wrap(z => tick(z), w))   return r } }
+  provide s { async fn go(y) { let r = plain(w => wrap(z => emit tick(z), w))   return r } }
 }
 """),
     ("a fn whose only async reach is a coerced arrow stays sync", """
@@ -1725,6 +1734,30 @@ component Supervisor requires net: Kv provides sup: Sup {
                            return 0 } }
 }
 """),
+    # ---- item 309: `idempotent` in the extern modifier slot -----------------
+    # The gate's extern reader had no case for the keyword, so every one of
+    # these drew `BAD|expected fn after extern` on a program the reference
+    # admits. Bare and keyed, with and without `deferred`, in either order, on
+    # a scoped emission, and with a key whose type is an alias of `Str` (the
+    # reference resolves aliases before the scalar check).
+    ("item 309: the checked-in deferred idempotent fixture",
+     (ROOT / "tests" / "fixtures" /
+      "extern_idempotent_deferred.rvl").read_text()),
+    ("item 309: a bare idempotent emission", _IDEM.format(mods="idempotent")),
+    ("item 309: a keyed idempotent emission",
+     _IDEM.format(mods="idempotent(key: id)")),
+    ("item 309: keyed idempotent after deferred",
+     _IDEM.format(mods="deferred idempotent(key: id)")),
+    ("item 309: keyed idempotent before deferred",
+     _IDEM.format(mods="idempotent(key: id) deferred")),
+    ("item 309: an Int key", _IDEM.format(mods="idempotent(key: n)")),
+    ("item 309: a Secret[Str] key, past the qualifier",
+     _IDEM.format(mods="idempotent(key: s)")),
+    ("item 309: a keyed idempotent scoped emission",
+     _IDEM.replace("extern emission", "extern emission[net]")
+     .format(mods="idempotent(key: id)")),
+    ("item 309: a key typed by an alias of Str", "type Id = Str\n"
+     + _IDEM.replace("id: Str", "id: Id").format(mods="idempotent(key: id)")),
 ]
 
 
@@ -1927,7 +1960,7 @@ component LyingCache provides cache: Cache {
     fn put(key, value) {
       effect store.insert(key, value)
       undo   store.remove(key)
-      let n = write_through(key)
+      let n = emit write_through(key)
     }
   }
 }
@@ -1936,7 +1969,7 @@ component LyingCache provides cache: Cache {
 fn helper(u: Str) -> Str { return http_post(u, u) }
 service Http { emission fn post(url: Str, body: Str) -> Str }
 component Poster provides http: Http {
-  provide http { fn post(url, body) = helper(url) }
+  provide http { fn post(url, body) = emit helper(url) }
 }
 """, "A1"),
     # G1: `db` is read but never declared in the requires row (fixture).
@@ -2157,7 +2190,7 @@ component C requires d: D provides s: S {
 fn apply(f: (Str) -> Str, x: Str) -> Str { return f(x) }
 service S { emission async fn go() -> Str }
 component C provides s: S {
-  provide s { async fn go() { let r = apply(msgs => tick(msgs), "x")   return r } }
+  provide s { async fn go() { let r = apply(msgs => emit tick(msgs), "x")   return r } }
 }
 """, "A1"),
     # `_refuse_leaky_pure_arrow`: the module-fn twin — a sync arrow in a pure fn
@@ -2220,7 +2253,7 @@ component Supervisor requires other: Store provides sup: Sup {
 fn caller(cb: () -> Async[Int]) -> Int { return cb() }
 service S { emission fn go() -> Int }
 component C provides s: S {
-  provide s { fn go() { let r = caller(() => tick())   return 0 } }
+  provide s { fn go() { let r = caller(() => emit tick())   return 0 } }
 }
 """, "A1"),
     # code-less spawn-form: a spawn naming a component not in this composition
@@ -3226,17 +3259,18 @@ component Bookkeeper provides ledger: Ledger {
   }
 }
 """, "G4"),
-    # Control 3: an ordinary statement that merely REACHES the same extern
-    # through a helper, with no `emit` marker of its own. It is not an emit
-    # step, so it draws `helper()` and nothing more on both sides.
-    ("an unmarked reach through a helper carries no host label", """
+    # Control 3: a statement that REACHES the same extern through a helper. Its
+    # marker sits on the helper call (every crossing carries one, issue #1437),
+    # and it is a binding, not an emit step, so it draws `helper()` and nothing
+    # more on both sides.
+    ("a marked reach through a helper carries no host label", """
 extern emission fn pg_write(row: Str) -> Int = @py { return 0 }
 fn helper(row: Str) -> Int { return pg_write(row) }
 service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let receipt = helper(row)
+      let receipt = emit helper(row)
       return receipt
     }
   }
@@ -3270,7 +3304,7 @@ service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let r = pg_write(row) + audit_log(row)
+      let r = emit pg_write(row) + emit audit_log(row)
       return r
     }
   }
@@ -3285,7 +3319,7 @@ service Ledger { fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let r = pg_write(row) + audit_log(row)
+      let r = emit pg_write(row) + emit audit_log(row)
       return r
     }
   }
@@ -3339,7 +3373,7 @@ service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let r = row == "x" ? pg_write(row) : audit_log(row)
+      let r = row == "x" ? emit pg_write(row) : emit audit_log(row)
       return r
     }
   }
@@ -3355,8 +3389,8 @@ service Ledger { emission[db] fn post(row: Str) -> Int }
 component Bookkeeper provides ledger: Ledger {
   provide ledger {
     fn post(row) {
-      let a = pg_write(row)
-      let b = audit_log(row)
+      let a = emit pg_write(row)
+      let b = emit audit_log(row)
       return a + b
     }
   }
@@ -3510,6 +3544,66 @@ component Supervisor requires net: Kv provides sup: Sup {
   provide sup { fn run() { let w = effect spawn Worker with { } undo w.dispose()
                            let r = emit w.task.go()
                            return 0 } }
+}
+""", "G4"),
+    # ---- item 309: the `idempotent` validity block, in its reference order --
+    # Emission-only, then a keyed role must name a declared parameter whose
+    # type is a serializable scalar. The class rules come first, so an
+    # idempotent emission with an `undo` meets the class rule. Each was a
+    # parse `BAD` from the gate before the modifier was read.
+    ("item 309: an acquire extern declared idempotent", """type H = opaque
+extern pure fn shut(h: H) = @py { return }
+extern acquire idempotent fn grab(n: Int) -> H undo shut(result) = @py { return 1 }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a pure extern declared idempotent", """
+extern pure idempotent fn f(n: Int) -> Int = @py { return 1 }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a witnessed extern declared idempotent", """
+type Stash = { path: Str }
+type FsError = { code: Str }
+extern pure fn unstash(w: Stash) -> Unit = @py { return }
+extern witnessed[fs] idempotent fn stash(p: Str) -> Result[Stash, FsError] undo unstash(result) = @py { return }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: an idempotent emission with an undo meets the class rule", """
+extern pure fn back(n: Int) = @py { return }
+extern emission idempotent fn go(n: Int) -> Int undo back(result) = @py { return 1 }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a key naming no parameter",
+     _IDEM.format(mods="idempotent(key: nope)"), "G4"),
+    ("item 309: a key naming no parameter, after deferred",
+     _IDEM.format(mods="deferred idempotent(key: nope)"), "G4"),
+    ("item 309: a key on an extern with no parameters", """
+extern emission idempotent(key: k) fn go() = @py { return }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  emit go()
+  provide ops { fn ping() = 1 }
+}
+""", "G4"),
+    ("item 309: a key whose type is not a scalar",
+     _IDEM.format(mods="deferred idempotent(key: xs)"), "G4"),
+    ("item 309: a key typed by an alias of a list", """type Ids = List[Str]
+extern emission idempotent(key: ids) fn go(ids: Ids) = @py { return }
+service Ops { fn ping() -> Int }
+component C provides ops: Ops {
+  emit go([])
+  provide ops { fn ping() = 1 }
 }
 """, "G4"),
 ]
@@ -3968,8 +4062,10 @@ def test_nested_coerced_arrows_agree(admit, oneline, async_slot, calls_param,
                                      nested, async_method):
     cb_type = "(Str) -> Async[Str]" if async_slot else "(Str) -> Str"
     wrap_body = "return cb(y)" if calls_param else "return y"
-    call = ("plain(w => wrap(z => tick(z), w))" if nested
-            else "wrap(z => tick(z), y)")
+    # the arrow's crossing carries its marker (issue #1437), so the switches
+    # above stay what decides the verdict
+    call = ("plain(w => wrap(z => emit tick(z), w))" if nested
+            else "wrap(z => emit tick(z), y)")
     decl = "emission async fn go(y: Str) -> Str" if async_method \
         else "emission fn go(y: Str) -> Str"
     method = "async fn go(y)" if async_method else "fn go(y)"

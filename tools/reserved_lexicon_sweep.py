@@ -85,16 +85,25 @@ def _probe(position: str, name: str, i: int) -> str:
     return POSITIONS[position](name).replace("{i}", str(i))
 
 
-def sweep(names=UNION, positions=tuple(POSITIONS)):
+def sweep(names=UNION, positions=tuple(POSITIONS), tiers=ALL_TIERS):
     """Return {(name, position, tier): (outcome, detail)}.
 
     outcome in {"pass", "fail", "unavailable", "frontend-reject"}.
+
+    `tiers` limits the sweep to those tiers: no other tier is probed for
+    availability, emitted for, or run. A python-only sweep starts no `go test`,
+    node, cargo or javac subprocess (issue #1582).
     """
+    unknown = set(tiers) - set(ALL_TIERS)
+    if unknown:
+        raise ValueError(f"unknown tier(s): {sorted(unknown)}")
+    compile_tiers = tuple(t for t in COMPILE_TIERS if t in tiers)
+    exec_tiers = tuple(t for t in EXEC_TIERS if t in tiers)
     result: dict = {}
 
     # Which tiers can we actually check here?
     avail: dict[str, str | None] = {}
-    for tier in ALL_TIERS:
+    for tier in compile_tiers + exec_tiers:
         if tier in EXEC_TIERS:
             avail[tier] = V.EXECUTORS[tier].unavailable()
         else:
@@ -102,8 +111,8 @@ def sweep(names=UNION, positions=tuple(POSITIONS)):
 
     for position in positions:
         # Batch compile-tier artifacts across all names into one toolchain call.
-        artifacts: dict[str, list] = {t: [] for t in COMPILE_TIERS}
-        exec_items: dict[str, list] = {t: [] for t in EXEC_TIERS}
+        artifacts: dict[str, list] = {t: [] for t in compile_tiers}
+        exec_items: dict[str, list] = {t: [] for t in exec_tiers}
         labels: list[str] = []
         for i, name in enumerate(names):
             label = f"{position}:{name}"
@@ -113,11 +122,11 @@ def sweep(names=UNION, positions=tuple(POSITIONS)):
             try:
                 ir = compile_source(src)
             except RevlError as err:
-                for tier in ALL_TIERS:
+                for tier in compile_tiers + exec_tiers:
                     result[(name, position, tier)] = (
                         "frontend-reject", str(err).splitlines()[0])
                 continue
-            for tier in COMPILE_TIERS:
+            for tier in compile_tiers:
                 if avail[tier] is not None:
                     result[(name, position, tier)] = ("unavailable", avail[tier])
                     continue
@@ -127,14 +136,14 @@ def sweep(names=UNION, positions=tuple(POSITIONS)):
                 except Exception as exc:  # noqa: BLE001
                     result[(name, position, tier)] = (
                         "fail", f"emit: {str(exc).splitlines()[0]}")
-            for tier in EXEC_TIERS:
+            for tier in exec_tiers:
                 if avail[tier] is not None:
                     result[(name, position, tier)] = ("unavailable", avail[tier])
                     continue
                 exec_items[tier].append((label, src))
 
         # Run the batched compile tiers.
-        for tier in COMPILE_TIERS:
+        for tier in compile_tiers:
             if not artifacts[tier]:
                 continue
             checked = V.VALIDATORS[tier].check(artifacts[tier])
@@ -149,7 +158,7 @@ def sweep(names=UNION, positions=tuple(POSITIONS)):
                     "pass" if ok == V.OK else "fail", detail)
 
         # Run the exec tiers (per program; py is in-process/fast).
-        for tier in EXEC_TIERS:
+        for tier in exec_tiers:
             for (label, src) in exec_items[tier]:
                 name = label.split(":", 1)[1]
                 out, detail = V._run_program(tier, src)

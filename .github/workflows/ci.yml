@@ -5,7 +5,18 @@ on:
     branches: [main]
   pull_request:
   # Merge queue. GitHub builds each queued candidate on top of the queue's tip
-  # and asks THIS workflow for the same 13 required checks before it lands.
+  # and asks THIS workflow for the required checks before it lands. The 7
+  # required contexts (`lint` and the six `backend-*` jobs) run on both
+  # pull_request and merge_group, so they report on both events.
+  #
+  # The PR/queue split (issue #1678): a pull request runs the light jobs only.
+  # The heavy ones (`frontend`'s 3.11/3.12/3.13 matrix, `frontend-cordis`,
+  # `conformance`, `formal`, `temporal-exit`, `sandbox-container`,
+  # `sandbox-microvm`) carry `if: github.event_name != 'pull_request'` and run
+  # here, on the queued candidate, which is the merged result that lands. On a
+  # PR the root suite is still collected by the ungated `root-suite-affected`.
+  # Until the queue is enabled in branch protection, those heavy jobs run only
+  # after a merge, on push to main.
   #
   # Without this trigger a queued PR waits forever for checks that never run,
   # so the trigger must be on main BEFORE the queue is enabled.
@@ -24,9 +35,9 @@ on:
   # changes; this only lets the workflow be `uses:`-called from the tag build.
   workflow_call:
   # Nightly full sweep and a manual trigger. Both are NON-pull_request events,
-  # so the `changes` job below reports frontend='true' for them and the whole
-  # matrix runs -- the PR fast-path narrows only pull_request events, never
-  # main, nightly or an on-demand dispatch.
+  # so every job runs for them: the heavy-job skip and the `changes` narrowing
+  # apply to pull_request events only, never to main, the queue, nightly or an
+  # on-demand dispatch.
   schedule:
     - cron: '0 7 * * *'
   workflow_dispatch:
@@ -36,8 +47,8 @@ on:
 # last one: the queue hit 16 runs deep with 2 executing, which made CI the
 # bottleneck the whole push-and-let-CI-test workflow exists to remove.
 # Superseded PR runs are cancelled because only the newest commit matters.
-# Runs on main are NOT cancelled: main's history is the signal, and dropping a
-# run there would leave a landed commit with no verdict.
+# A RUNNING main run is never cancelled; a newer main push replaces the pending
+# one (see cancel-in-progress below).
 concurrency:
   # One stable group per ref, for pushes and pull_requests alike: a newer run on
   # the same ref supersedes the older one.
@@ -51,11 +62,21 @@ concurrency:
   #
   # The trade, stated: an intermediate main commit can be superseded before it
   # reports. That is acceptable because every commit reaching main was already
-  # green on all 13 required checks as a PR, and main's job here is to catch
-  # MERGE INTERACTIONS at the tip. A green tip is the signal that matters, and
+  # green on the 7 required checks (and, with the queue on, on the heavy jobs
+  # too, against the merged result), and main's job here is to catch MERGE
+  # INTERACTIONS at the tip. A green tip is the signal that matters, and
   # under this group the tip actually gets one as soon as merging pauses.
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # Pull requests: a newer push cancels the running run (only the newest commit
+  # matters). Every other event (push to main, schedule, dispatch): NEVER cancel
+  # the running run. The group stays per
+  # ref, so GitHub still keeps at most one run in progress and ONE pending: a
+  # newer main push replaces the pending run instead of stacking behind it. That
+  # avoids the reverted per-sha design above (runs stacked, none completed) and
+  # the cancel-everything design (2026-09-30: every main run was cancelled by the
+  # next merge, so main went a day with no verdict at all). Under this rule the
+  # running main commit always reports, and the newest tip is always next.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Least privilege for GITHUB_TOKEN, workflow-wide. Every job below only checks
 # out the repository and runs tests: none opens an issue, writes a check, pushes
@@ -80,11 +101,12 @@ env:
   GOSUMDB: "off"
 
 jobs:
-  # PR fast-path (approved CI-topology change, reworked by issue #854). The
-  # heavy frontend-family jobs (`frontend`'s 3.11/3.12/3.13 matrix and
-  # `frontend-cordis`, and by dependency `conformance` and `formal`) are skipped
-  # only when a PR touches NOTHING that could affect the root suite. This job
-  # decides that ONCE, and those jobs gate on its `frontend` output.
+  # Documentation-only PR filter (issue #854). Since issue #1678 the heavy jobs
+  # (`frontend`, `frontend-cordis`, `conformance`, `formal`, `temporal-exit` and
+  # the two sandbox lanes) never run on a pull request at all, so this output no
+  # longer gates them. Today it gates `frontend-assets` alone: that job is
+  # skipped on a PR that touches NOTHING that could affect the suite. The
+  # history below is why the rule is an allow-list.
   #
   # The rule is an ALLOW-list, and issue #854 reworked it into one because the
   # DENY-list form shipped a real break. The rule used to be
@@ -114,8 +136,8 @@ jobs:
   #
   # On any NON-pull_request event -- push to main, the nightly schedule, a
   # manual workflow_dispatch, a merge_group candidate, or a workflow_call from
-  # the tag build -- it reports 'true', so the full matrix always runs there.
-  # The narrowing applies to pull_request events alone.
+  # the tag build -- it reports 'true'. The narrowing applies to pull_request
+  # events alone.
   #
   # It uses only the already-pinned `actions/checkout` (no new third-party
   # action) and a `git diff` against the PR base, and inherits the workflow's
@@ -338,10 +360,11 @@ jobs:
       # repo). A new open item with no tracked state is now a red rather than
       # a line that quietly rots in the roadmap.
       #
-      # D (--check-tier-parity) is the only one still off: it has two real
-      # findings on main (items 421 F6 and 422 F6, python-only fixes to a
-      # language-wide guarantee). Turn it on here as its findings are
-      # dispatched.
+      # D (--check-tier-parity) is on since issue #1572. It was the one check
+      # left off while it had real findings on main (items 421 F6 and 422 F6,
+      # one-tier fixes to a language-wide guarantee); 422 F6 was answered
+      # first, and 421 F6(i) now names every tier's scope, so it is clean and
+      # an off check would only be silence read as success.
       #
       # Never add `|| true`, and never narrow a check to make this line pass.
       # `make roadmap-check-all` runs all five locally.
@@ -366,6 +389,7 @@ jobs:
             --check-duplicate-headers \
             --check-orphan \
             --require-issue \
+            --check-tier-parity \
             --head-branch "$HEAD_BRANCH"
       # The citation half of the same question. check_roadmap_markers above
       # resolves the roadmap's MARKERS against git and says so itself: it
@@ -426,12 +450,12 @@ jobs:
 
   frontend:
     runs-on: ubuntu-latest
-    # PR fast-path: run on every non-PR event (push/nightly/dispatch/merge_group/
-    # workflow_call, where `changes` reports 'true'), and on a PR only when it
-    # touches language sources. A skip here cascades to `conformance` and
-    # `formal` (which `needs: frontend`), so those narrow with it automatically.
-    needs: [changes]
-    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
+    # Heavy job: never on a pull request (issue #1678). It runs on the merge queue
+    # (merge_group), on push to main, nightly, on dispatch and from the tag
+    # build (workflow_call). On a PR the root suite is still collected, by the
+    # ungated `root-suite-affected` job. `conformance` and `formal` need this
+    # job and carry the same `if:` of their own.
+    if: ${{ github.event_name != 'pull_request' }}
     strategy:
       matrix:
         python: ["3.11", "3.12", "3.13"]
@@ -480,7 +504,7 @@ jobs:
       # --check` drift growing from 3 findings to 9 with nothing reporting it.
       #
       # `!cancelled()` and not `always()`, deliberately. This workflow sets
-      # `cancel-in-progress: true`, so a superseded run is cancelled mid-job;
+      # `cancel-in-progress` for pull requests, so a superseded PR run is cancelled mid-job;
       # under `always()` that run would still push through `pytest tests/`,
       # spending the runner minutes that are this repository's actual
       # throughput limit. `!cancelled()` runs after a FAILED step and stops
@@ -633,10 +657,9 @@ jobs:
   # the runtime IS there.
   frontend-cordis:
     runs-on: ubuntu-latest
-    # Same PR fast-path as `frontend`: full matrix on non-PR events, and on a
-    # PR only when language sources changed.
-    needs: [changes]
-    if: ${{ github.event_name != 'pull_request' || needs.changes.outputs.frontend == 'true' }}
+    # Heavy job, same rule as `frontend`: never on a pull request, always on
+    # merge_group, push, schedule, dispatch and workflow_call (issue #1678).
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
@@ -701,11 +724,11 @@ jobs:
   # because `backends/python/emit.py` is the reference twin of
   # `selfhost/emit_py.rvl` and the port was never made.
   #
-  # The primary repair is in `changes` above, which now runs the matrix by
-  # default and skips it only for an ALLOW-list of paths that cannot affect the
-  # suite: `backends/**`, `crates/**`, `tools/**`, `tests/**` and every other
-  # unlisted path select `frontend` and `frontend-cordis` again, and a
-  # documentation-only PR still skips them.
+  # The first repair was in `changes` above: run the matrix by default and skip
+  # it only for an ALLOW-list of paths that cannot affect the suite. Since issue
+  # #1678 `frontend` and `frontend-cordis` do not run on a pull request at all;
+  # they run in the merge queue, on the merged result. On a PR, THIS job is what
+  # collects the root suite.
   #
   # This job is the second half of the repair, and it is here because no
   # classifier should be trusted with COVERAGE: it is UNGATED, with no `if:` at
@@ -720,11 +743,10 @@ jobs:
   # `tools/affected_tests.py` already computes and `make pre-merge --affected`
   # already consumes, so the narrow-versus-FULL decision keeps one owner. Here
   # that selection is a COST decision, not a coverage one. On a
-  # documentation-only diff -- the one case the allow-list still skips the
-  # matrix -- it is `tests/test_doc_examples.py`, the single root-suite test that
-  # reads documentation, so the fast path stays fast and stays covered. On
-  # `tests/fixtures/**`, or on any compile-reachable change, it is the
-  # selector's documented fail-safe, the whole root suite.
+  # documentation-only diff it is `tests/test_doc_examples.py`, the single
+  # root-suite test that reads documentation. On `tests/fixtures/**`, or on any
+  # compile-reachable change, it is the selector's documented fail-safe, the
+  # whole root suite.
   #
   # Deliberate limits, so the next reader does not have to infer them: the gates
   # the selector also names are left to the jobs that own them (`ruff` runs
@@ -732,10 +754,10 @@ jobs:
   # site-wheel gate must never run on a PR, see
   # tests/test_site_wheel_gate_runs_in_ci.py), and there is no cordis-py runtime
   # on this interpreter, so the runtime-guarded half of the suite skips here
-  # exactly as it does in `frontend`. The cordis half of a documentation-only
-  # diff is therefore still unmeasured, which is a strictly smaller hole than
-  # #854 (nothing at all), and closing it means installing the runtime here,
-  # which duplicates `frontend-cordis` rather than selecting for it.
+  # exactly as it does in `frontend`. Since issue #1678 the cordis half of the
+  # suite (`frontend-cordis`) and the 3.11 and 3.13 interpreters (`frontend`)
+  # are not measured on a pull request at all; they run on the merge-queue
+  # candidate before it lands, and on push to main.
   root-suite-affected:
     runs-on: ubuntu-latest
     steps:
@@ -984,6 +1006,75 @@ jobs:
           echo "    --diff-base $base --count 200"
           exit 1
 
+  # Issue #1572: the committed census artifact (`docs/census-artifact.{md,json}`,
+  # roadmap item 549) had drifted from main with nothing reporting it, because
+  # no step ran its check. A check nobody runs reads as a pass.
+  #
+  # This job keeps the committed copy CURRENT. On a pull request it asks
+  # `census_artifact.py --moved-inputs` whether the diff moves an input of the
+  # artifact: a file its pins name (a deciding file, a reference module the
+  # census run opens, a report input), a program it carries, a new `.rvl` under
+  # a census directory, a gate crate source, or the tool and the artifact
+  # themselves. If one moved, `--verify --strict` re-runs the census (about 20
+  # seconds) and fails unless the committed file reproduces program by program
+  # with no program missing and no report input moved. The fix is to run
+  # `python3 tools/census_artifact.py --write` in the same pull request.
+  #
+  # A diff that moves no input is not checked, and says so. On every other
+  # event (push to main, schedule, dispatch) it always checks, so a merge race
+  # between two regenerating pull requests shows up on main. The filter's exit
+  # 2 (it could not decide) runs the check, never skips it.
+  census-artifact:
+    runs-on: ubuntu-latest
+    if: >-
+      github.event_name == 'pull_request' ||
+      github.event_name == 'push' ||
+      github.event_name == 'workflow_dispatch' ||
+      github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
+        with:
+          python-version: "3.12"
+      - id: decide
+        env:
+          # attacker-controllable text reaches the shell through env: only,
+          # the same rule `changes` and `held-out` follow.
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): the committed artifact is checked"
+            exit 0
+          fi
+          git fetch --no-tags --depth=1 origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          changed=$(git diff --name-only "origin/${BASE_REF}" HEAD)
+          if [ -z "$changed" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "no changed paths (unresolved base ref?): checking anyway"
+            exit 0
+          fi
+          status=0
+          printf '%s\n' "$changed" \
+            | python3 tools/census_artifact.py --moved-inputs || status=$?
+          if [ "$status" = "1" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "this diff moves no input of the census artifact: not checked"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "the inputs above moved (filter exit $status): checking"
+          fi
+      - if: steps.decide.outputs.run == 'true'
+        run: pip install -e ".[test]"
+      - name: the committed census artifact is current
+        if: steps.decide.outputs.run == 'true'
+        run: python3 tools/census_artifact.py --verify --strict
+
   # The `container` isolation rung (roadmap item 411 Slice 2) launches a REAL
   # container: a sandboxed process runs inside a boundary whose confinement
   # flags come from its declared envelope, and an in-sandbox boot canary
@@ -998,6 +1089,9 @@ jobs:
   # against the job that sets it, a filesystem probe is invisible to that audit.
   sandbox-container:
     runs-on: ubuntu-latest
+    # Heavy job: never on a pull request, always on merge_group, push,
+    # schedule, dispatch and workflow_call (issue #1678).
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1081,6 +1175,9 @@ jobs:
   # the job if the boot assets did not actually come up.
   sandbox-microvm:
     runs-on: ubuntu-latest
+    # Heavy job: never on a pull request, always on merge_group, push,
+    # schedule, dispatch and workflow_call (issue #1678).
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1089,14 +1186,6 @@ jobs:
       - uses: astral-sh/setup-uv@37802adc94f370d6bfd71619e3f0bf239e1f3b78  # v7 (v7.6.0)
       # the CONDUCTOR needs cordis-py, same as the container rung.
       - run: sh backends/python/setup.sh
-      # a hosted ubuntu-latest runner exposes /dev/kvm but the runner user is not
-      # in the `kvm` group; open it so the hypervisor can. Fail loudly if the
-      # device is gone (a runner image that dropped KVM must not go quietly).
-      - name: open /dev/kvm
-        run: |
-          ls -l /dev/kvm
-          sudo chmod 666 /dev/kvm
-          test -w /dev/kvm
       # qemu is not preinstalled; the kernel build needs the usual toolchain.
       - name: install qemu + kernel build deps
         run: |
@@ -1104,6 +1193,22 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             qemu-system-x86 build-essential bc bison flex \
             libelf-dev libssl-dev xz-utils e2fsprogs
+      # a hosted ubuntu-latest runner exposes /dev/kvm but the runner user is not
+      # in the `kvm` group. This step runs AFTER the qemu install on purpose:
+      # installing qemu-system-x86 ships udev rules whose trigger resets
+      # /dev/kvm to root:kvm 0660, which silently undid a chmod done earlier.
+      # A persistent udev rule survives later triggers. Fail loudly if the
+      # device is gone (a runner image that dropped KVM must not go quietly).
+      - name: open /dev/kvm
+        run: |
+          ls -l /dev/kvm
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' \
+            | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          sudo chmod 666 /dev/kvm
+          ls -l /dev/kvm
+          test -r /dev/kvm -a -w /dev/kvm
       # the guest kernel is a small delta over defconfig; cache it so only the
       # first run (or a config/version bump) pays the ~10min build.
       - name: cache guest kernel
@@ -1230,8 +1335,9 @@ jobs:
   # running. Without it this job could install nothing and still report green.
   #
   # It is deliberately NOT a required check — that is the repo owner's call on
-  # branch protection, not something a workflow file can assert — and it is gated
-  # like `frontend`, so a documentation-only PR does not pay for a node install.
+  # branch protection, not something a workflow file can assert. It runs on pull
+  # requests (issue #1678 keeps it there: it takes about half a minute), gated
+  # on `changes` so a documentation-only PR does not pay for a node install.
   frontend-assets:
     runs-on: ubuntu-latest
     needs: [changes]
@@ -1658,8 +1764,12 @@ jobs:
     runs-on: ubuntu-latest
     # Fail fast: this job provisions six toolchains and runs for minutes, so
     # skip it entirely when `lint` or `frontend` is red (see backend-python for
-    # the rationale — required context unchanged).
+    # the rationale; required context unchanged). Heavy job: never on a pull
+    # request, always on merge_group, push, schedule, dispatch and
+    # workflow_call (issue #1678). `frontend` is skipped on a PR too, so this
+    # `if:` states what the `needs:` would already imply.
     needs: [lint, frontend]
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1879,6 +1989,9 @@ jobs:
   # tests/test_env_gated_skips_run_somewhere.py checks.
   temporal-exit:
     runs-on: ubuntu-latest
+    # Heavy job: never on a pull request, always on merge_group, push,
+    # schedule, dispatch and workflow_call (issue #1678).
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1926,9 +2039,11 @@ jobs:
   formal:
     runs-on: ubuntu-latest
     # Fail fast: the Lean `lake build` is heavy, so skip it when `lint` or
-    # `frontend` is red (see backend-python for the rationale — required context
-    # unchanged).
+    # `frontend` is red (see backend-python for the rationale; required context
+    # unchanged). Heavy job: never on a pull request, always on merge_group,
+    # push, schedule, dispatch and workflow_call (issue #1678).
     needs: [lint, frontend]
+    if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: leanprover/lean-action@50fcf42d2e460296f1a34b402e990d1b24f8b596  # v1 (v1.6.0)

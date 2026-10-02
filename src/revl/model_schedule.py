@@ -80,6 +80,8 @@ load, unload and `no_residue` teardown, is slice S2 and is not built.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import dataclass, field
 
@@ -276,6 +278,7 @@ class Schedule:
     devices: tuple
     placements: tuple
     resident: dict = field(default_factory=dict)
+    demands: dict = field(default_factory=dict, compare=False)
 
     def loads(self) -> int:
         """How many model loads this host makes: one per resident role."""
@@ -303,8 +306,11 @@ def schedule(host: str, devices, roles: dict, steps) -> Schedule:
     search = _Search(host, tuple(devices), roles, list(steps))
     if not search.place(0):
         raise ScheduleRefusal(_refusal(search))
-    return Schedule(host, tuple(devices), tuple(search.chosen),
-                    dict(search.resident))
+    chosen = tuple(search.chosen)
+    demands = {p.role: roles[p.role].profile for p in chosen
+               if roles[p.role].profile is not None}
+    return Schedule(host, tuple(devices), chosen, dict(search.resident),
+                    demands)
 
 
 class _Search:
@@ -610,3 +616,101 @@ def _describe_difference(handed, expected: dict) -> str:
         return (f"handed resident {handed.get('resident')!r}, derived "
                 f"{expected['resident']!r}")
     return "the placements differ"
+
+
+# --------------------------------------------------------------------------
+# The binding manifest: each role's binding, per host, and a digest over it
+# (slice S5, placement-side)
+# --------------------------------------------------------------------------
+
+#: The first line of the digest preimage. A second version of the manifest
+#: gets a second tag rather than a reinterpretation of this one.
+BINDINGS_VERSION = "revl-model-bindings-v1"
+
+
+def binding_manifest(schedules) -> dict | None:
+    """The placement-side record of which member each role is bound to.
+
+    One entry per host that routes a model action, carrying the host's
+    declared devices and one row per role the schedule chose there: the
+    role's residence, its declared demand, the device it is bound to, and the
+    routed actions that use it. `digest` is sha256 over everything else, so a
+    change to one role's device, quantisation or memory, to a host's declared
+    devices, or to which actions share a role, changes it.
+
+    Returns None when nothing is scheduled, so a composition with no
+    `route model` block has no manifest at all rather than an empty one.
+
+    This is NOT item 517's `placement_digest`, which the PROVIDER computes over
+    what it actually loaded. This digest is over what the placement DECLARED
+    and the scheduler DECIDED; the compiler IR carries neither.
+    """
+    if not schedules:
+        return None
+    hosts = [_host_entry(decided) for decided in schedules]
+    return {"version": BINDINGS_VERSION, "hosts": hosts,
+            "digest": bindings_digest(hosts)}
+
+
+def _host_entry(decided: Schedule) -> dict:
+    rows: dict[str, dict] = {}
+    for placement in decided.placements:
+        row = rows.get(placement.role)
+        if row is None:
+            row = rows[placement.role] = _binding_row(decided, placement)
+        row["consumers"].append(
+            f"{placement.component}.{placement.action} {placement.origin}")
+    return {"host": decided.host,
+            "devices": handoff(decided)["devices"],
+            "bindings": [rows[name] for name in sorted(rows)]}
+
+
+def _binding_row(decided: Schedule, placement: Placement) -> dict:
+    role = _role_of(decided, placement)
+    device = next((d for d in decided.devices if d.name == placement.device),
+                  None)
+    return {
+        "role": placement.role,
+        "residence": "off_device" if placement.how == OFF_DEVICE else "on_device",
+        "demand": role,
+        "device": placement.device,
+        "device_class": device.device if device else None,
+        "consumers": [],
+    }
+
+
+def _role_of(decided: Schedule, placement: Placement) -> dict | None:
+    """The declared demand the schedule placed, as plain data."""
+    demand = decided.demands.get(placement.role)
+    if demand is None:
+        return None
+    return {"device": demand.device, "memory_mib": demand.memory_mib,
+            "quant": demand.quant}
+
+
+def bindings_digest(hosts) -> str:
+    """sha256 over the version line and the canonical JSON of `hosts`."""
+    body = json.dumps(hosts, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True)
+    return hashlib.sha256(
+        (BINDINGS_VERSION + "\n" + body).encode("utf-8")).hexdigest()
+
+
+def binding_lines(manifest: dict | None) -> list:
+    """The operator's view of the manifest: one line per binding, then the
+    digest. Empty for a composition with no scheduled role."""
+    if manifest is None:
+        return []
+    lines = []
+    for host in manifest["hosts"]:
+        for row in host["bindings"]:
+            demand = row["demand"]
+            wants = (f"device {demand['device']} memory {demand['memory_mib']} "
+                     f"quant {demand['quant']}" if demand else "no profile")
+            where = (f"on {row['device']} ({row['device_class']})"
+                     if row["device"] else f"{row['residence']}, no device")
+            lines.append(f"model binding [{host['host']}]: {row['role']} "
+                         f"{where}, {wants}; used by "
+                         f"{', '.join(row['consumers'])}")
+    lines.append(f"model bindings digest: {manifest['digest']}")
+    return lines
