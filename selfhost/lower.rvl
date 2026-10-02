@@ -3573,6 +3573,22 @@ fn note_host_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
 
 // ---- an `emit` through a spawn handle (issue #1261) ------------------------
 //
+// An `emit` step whose head is a call through a service-typed receiver that
+// is neither a requirement nor a handle path (issues #1509, #1681): a `let`
+// local holding a provision, a field or element read off one, or a receiver
+// written in place. The reference's `_method_emissions` reads it as it reads
+// every non-`req` step head, `a host emission` crossing the unnameable `*`.
+fn svc_recv_head(e: Expr, cx: Ctx) -> Bool {
+  return match e {
+    Call(c) => match c.target {
+      Field(fl) => svc_local_first(fl, cx)
+        && svc_recv_msig(fl.target, fl.name, cx).isEm,
+      _ => false,
+    },
+    _ => false,
+  }
+}
+
 // The same third arm at the other head shape. A spawn-handle provision call
 // (`emit w.<key>.<op>(…)`) is not a required-key crossing: the handle's
 // component is a separate activation, so from this method's side the crossing
@@ -3631,7 +3647,7 @@ fn handle_head_ref(e: Expr, cx: Ctx) -> Bool {
 
 fn note_handle_emission(s: Stmt, cx: Ctx, a: Ac) -> Ac {
   if (s.kind != "emit" || s.bind != "") { return a }
-  if (!handle_head_ref(s.e, cx)) { return a }
+  if (!handle_head_ref(s.e, cx) && !svc_recv_head(s.e, cx)) { return a }
   // `union_into`, not `push`: `note` dedups on its `seen` set, so a body with
   // two handle emissions carries the label once.
   return { msg: a.msg, tag: a.tag,
@@ -5178,24 +5194,19 @@ fn ctx_svc(cx: Ctx, tys: List[Bind]) -> Ctx {
            acqWhere: cx.acqWhere, emitPos: cx.emitPos, appr: cx.appr }
 }
 
-// `_service_receiver_decl`: the op a call reaches through a receiver rooted at
-// a `let`-bound local (read through fields and elements) whose static type is
-// a service. The empty `MSig` (`name == ""`) otherwise.
-fn svc_recv_root(e: Expr) -> Str {
-  return match e {
-    Var(n) => n,
-    Field(f) => svc_recv_root(f.target),
-    Index(x) => svc_recv_root(x.target),
-    _ => "",
-  }
-}
-
+// `_service_receiver_decl`: the op a call reaches through a receiver whose
+// static type (`infer` over `Ctx.svcTys`) is a service: a `let`-bound local, a
+// field or element read off one, or an expression written in place, `(if c {
+// w.pay } else { w.pay }).charge(n)` (issues #1509, #1681). The empty `MSig`
+// (`name == ""`) otherwise.
+//
+// `svcTys` types only what this rule decides: the `let`s of the body and the
+// spawn-handle reads. A provide method's own parameter and an arrow parameter
+// shadow to "" there, so a receiver that depends on one types "" and is left
+// alone, as the reference's `_receiver_names_decided` leaves it. A bare handle
+// types `@spawn:<C>`, which is no service.
 fn svc_recv_msig(recv: Expr, op: Str, cx: Ctx) -> MSig {
   let none = find_msig(svc_of(cx, ""), "", 0)
-  let root = svc_recv_root(recv)
-  if (root == "") { return none }
-  let rt = tenv_get(cx.svcTys, root)
-  if (rt == "" || starts_with(rt, "@spawn:")) { return none }
   let ty = infer(recv, cx.svcTys)
   if (ty == "" || !cx.svcs.has(parse_head(ty))) { return none }
   return find_msig(svc_of(cx, parse_head(ty)), op, 0)
@@ -25939,4 +25950,63 @@ component Register provides till: Till {
   }
 }""")
   assert v == ""
+}
+
+// ---- issue #1681: a service-typed receiver written in place ----------------
+
+test "a crossing through an if written in place must be marked" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let x = (if (n > 0) { w.pay } else { w.pay }).charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `charge` must be marked `emit` (G4)"
+}
+
+test "a marked crossing through a list literal read in place meets the floor" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      emit [w.pay][0].charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"
+}
+
+test "a step through an if-bound provision local meets a scoped upper bound" {
+  let v = admit_src("""service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission[production.payment] fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let t = if (n > 0) { w.pay } else { w.pay }
+      emit t.charge(n)
+      return 0
+    }
+  }
+}""")
+  assert v == "G4|`Till.go` is declared `emission[production.payment]`, but this implementation emits through an unnameable host boundary (reaching `a host emission`)"
 }

@@ -133,6 +133,7 @@ from revl.parser import (
     ExprIf,
     ExprIndex,
     ExprList,
+    ExprMatch,
     ExprRecord,
     ExprVar,
     IsolateStmt,
@@ -194,8 +195,15 @@ def _route_values(callee: object) -> tuple[str, str] | None:
             cur = cur.target
         if isinstance(cur, ExprVar):
             return cur.name, ".".join(reversed(parts))
-        return None
+        # a receiver written in place (issue #1681): keyed by the expression,
+        # which `collect_provision_aliases` resolved to the provision it holds
+        return _expr_key(callee.target), callee.name
     return _route(callee)
+
+
+def _expr_key(e) -> str:
+    """The alias key of a receiver expression written in place."""
+    return f"@expr{id(e)}"
 
 
 # ---------------------------------------------------------------- caps
@@ -659,6 +667,13 @@ def collect_provision_aliases(node, handles: dict, aliases: dict) -> None:
     if type(node).__name__ == "LetStmt" and isinstance(getattr(node, "name", None), str):
         _note_value_aliases(node.name, getattr(node, "value", None), handles,
                             aliases)
+    if isinstance(node, ExprCall) and isinstance(node.callee, ExprField) \
+            and _alias_path(node.callee.target) is None:
+        # a receiver written in place (issue #1681): what it holds, keyed by
+        # the expression itself, which `_route_values` reads back
+        held = _value_provision(node.callee.target, handles, aliases)
+        if held is not None:
+            aliases[_expr_key(node.callee.target)] = held
     if dataclasses.is_dataclass(node) and not isinstance(node, type):
         for f in dataclasses.fields(node):
             collect_provision_aliases(getattr(node, f.name), handles, aliases)
@@ -694,6 +709,19 @@ def _value_provision(value, handles: dict, aliases: dict):
         then = _value_provision(value.then, handles, aliases)
         return then if then is not None and then == _value_provision(
             value.otherwise, handles, aliases) else None
+    if isinstance(value, ExprMatch):
+        arms = [_value_provision(arm[-1], handles, aliases) for arm in value.arms]
+        return arms[0] if arms and arms[0] is not None \
+            and all(a == arms[0] for a in arms) else None
+    if isinstance(value, ExprField) and isinstance(value.target, ExprRecord):
+        for key, item in value.target.fields:
+            if key == value.name:
+                return _value_provision(item, handles, aliases)
+        return None
+    if isinstance(value, ExprIndex) and isinstance(value.target, ExprList):
+        items = [_value_provision(i, handles, aliases) for i in value.target.items]
+        return items[0] if items and items[0] is not None \
+            and all(i == items[0] for i in items) else None
     path = _alias_path(value)
     held = aliases.get(path) if path is not None else None
     return held if isinstance(held, tuple) else None

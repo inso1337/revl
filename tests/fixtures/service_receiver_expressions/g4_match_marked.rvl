@@ -1,0 +1,25 @@
+// REFUSED G4 (approval floor, issue #1681): the same receiver (a `match`
+// written in place over `let o = Some(n)`) with the crossing marked, `emit
+// ....charge(n)`, and no `with` edge. `production.payment` requires approval.
+// Before, the marked call was refused as "not declared `emission`". The file
+// name's prefix is the expected verdict (`g4_` refused, `ok_` admitted);
+// tests/test_service_receiver_expressions.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let o = Some(n)
+      emit (match o { Some(v) => w.pay, None => w.pay }).charge(n)
+      return 0
+    }
+  }
+}

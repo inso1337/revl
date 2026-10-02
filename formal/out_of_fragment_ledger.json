@@ -64,6 +64,10 @@
     "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl",
     "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl",
     "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl",
-    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl"
+    "tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_if_marked.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_list_marked.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_match_marked.rvl",
+    "tests/fixtures/service_receiver_expressions/g4_record_marked.rvl"
   ]
 }

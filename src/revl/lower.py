@@ -14608,23 +14608,26 @@ def _instance_get_decl(node: dict, services: dict):
 
 
 def _service_receiver_decl(node: dict, env: Env):
-    """The `MethodDecl` a call reaches through a service-typed LOCAL: a name a
-    `let` bound in the body being lowered, or a field / element read off one
-    (`t.charge(n)`, `r.p.charge(n)`, `ps[0].charge(n)`), whose static type is a
-    service. Else None. Issue #1509.
+    """The `MethodDecl` a call reaches through a receiver whose static type is
+    a service, else None. Issues #1509 and #1681.
 
-    Only a provision read yields a service value, so such a local holds a
+    Only a provision read yields a service value, so such a receiver holds a
     provision, and a call through it crosses the boundary exactly as the
     provision's own call does. The direct read and its plain alias already
     lower back to the `instance-get` (`Env.provision_locals`); this is every
-    other way a `let` can hold one: an `if`/`match` arm, a record field, a list
-    element. One resolver, read by the marker rule (`_is_emission_call`, and
-    the unmarked demand at both call sites) and by the approval floor
-    (`_approval_crossed_caps`).
+    other way to write one. A `let`-bound local (`t.charge(n)` after
+    `let t = if c { w.pay } else { w.pay }`), a field or element read off one
+    (`r.p.charge(n)`, `ps[0].charge(n)`), and an expression written in place
+    (`(if c { w.pay } else { w.pay }).charge(n)`, a `match`, a record or list
+    literal read in place). One resolver, read by the marker rule
+    (`_is_emission_call`, and the unmarked demand at both call sites) and by
+    the approval floor (`_approval_crossed_caps`).
 
-    An arrow PARAMETER is excluded (`Env._arrow_params`): what flows into one
-    is decided at the application (`_check_arrow_param_crossings`), and an
-    arrow never applied to a provision must still compile."""
+    A receiver that depends on a binder this rule does not decide is left out
+    (`_receiver_names_decided`): an arrow PARAMETER, whose value is decided at
+    the application (`_check_arrow_param_crossings`), so an arrow never applied
+    to a provision must still compile; and a provide method's own
+    service-typed parameter, whose value comes from the caller (issue #1682)."""
     if node.get("kind") != "call":
         return None
     target = node.get("target")
@@ -14639,20 +14642,48 @@ def _service_receiver_decl(node: dict, env: Env):
         recv, method = callee.get("target"), callee.get("name")
         if not isinstance(recv, dict) or recv.get("kind") == "instance-get":
             return None
-    root = recv
-    while isinstance(root, dict) and root.get("kind") in ("field", "index"):
-        root = root.get("target")
-    if not (isinstance(root, dict) and root.get("kind") == "name"):
-        return None
-    rid = root.get("id")
-    if rid not in (getattr(env, "let_locals", None) or ()) \
-            or rid in (getattr(env, "_arrow_params", None) or ()):
+    if not _receiver_names_decided(recv, env):
         return None
     ty = infer_ir(recv, getattr(env, "type_env", None) or {}, env.types,
                   env.services)
     head, _ = parse_type(ty or "")
     svc = env.services.get(head)
     return svc.methods.get(method) if svc is not None else None
+
+
+def _receiver_names_decided(recv, env: Env) -> bool:
+    """Whether every name a receiver expression reads is one this rule
+    decides: a `let`-bound local of the body being lowered, or a name whose
+    type mentions no service at all (a condition's `n`, a scrutinee's `o`).
+    An arrow parameter, and a provide method's own parameter of a type that
+    mentions a service, are not decided here."""
+    lets = getattr(env, "let_locals", None) or ()
+    arrow_params = getattr(env, "_arrow_params", None) or ()
+    tenv = getattr(env, "type_env", None) or {}
+
+    def ok(n) -> bool:
+        if isinstance(n, dict):
+            if n.get("kind") == "name":
+                rid = n.get("id")
+                if rid in arrow_params:
+                    return False
+                if rid not in lets and _mentions_service(tenv.get(rid), env):
+                    return False
+            return all(ok(v) for v in n.values())
+        if isinstance(n, list):
+            return all(ok(v) for v in n)
+        return True
+
+    return ok(recv)
+
+
+def _mentions_service(ty, env: Env) -> bool:
+    """Whether a type spelling names a declared service anywhere in it."""
+    if not ty:
+        return False
+    import re as _re  # noqa: PLC0415
+    return any(word in env.services
+               for word in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", str(ty)))
 
 
 def _refuse_unmarked_local_crossing(node: dict, spelled: str, env: Env,

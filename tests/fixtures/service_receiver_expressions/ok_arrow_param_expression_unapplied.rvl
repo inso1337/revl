@@ -1,0 +1,23 @@
+// ADMITTED: an arrow whose service-typed parameter is read through an `if` in
+// place, never applied to a provision. What flows into a parameter is decided
+// at the application, so a receiver that depends on one is left to that rule.
+// The file name's prefix is the expected verdict (`g4_` refused, `ok_`
+// admitted); tests/test_service_receiver_expressions.py holds it.
+
+extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let f = (p: Pay, k: Int) => (if (k > 0) { p } else { p }).charge(k)
+      return 0
+    }
+  }
+}

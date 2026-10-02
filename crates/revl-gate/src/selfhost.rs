@@ -9111,6 +9111,16 @@ fn note_host_emission(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
     return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), vec![String::from("a host emission")]), ecaps: a.ecaps.clone(), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
 }
 
+fn svc_recv_head(e: Expr, cx: Ctx__m2) -> bool {
+    return match e {
+    Expr::Call(c) => { let c = *c; match c.target {
+    Expr::Field(fl) => { let fl = *fl; (svc_local_first(fl.clone(), cx.clone()) && svc_recv_msig(fl.target.clone(), &fl.name, cx.clone()).isEm) },
+    _ => false,
+} },
+    _ => false,
+};
+}
+
 fn handle_head_ref(e: Expr, cx: Ctx__m2) -> bool {
     return match e {
     Expr::Call(c) => { let c = *c; match c.target {
@@ -9132,7 +9142,7 @@ fn note_handle_emission(s: Stmt, cx: Ctx__m2, a: Ac) -> Ac {
     if ((s.kind != "emit") || (s.bind != "")) {
         return a;
     }
-    if (!handle_head_ref(s.e.clone(), cx.clone())) {
+    if ((!handle_head_ref(s.e.clone(), cx.clone())) && (!svc_recv_head(s.e.clone(), cx.clone()))) {
         return a;
     }
     return Ac { msg: a.msg.clone(), tag: a.tag.clone(), labels: union_into(a.labels.clone(), vec![String::from("a host emission")]), ecaps: union_into(a.ecaps.clone(), vec![String::from("*")]), areach: a.areach.clone(), aops: a.aops.clone(), avals: a.avals.clone() };
@@ -10217,25 +10227,8 @@ fn ctx_svc(cx: Ctx__m2, tys: Vec<Bind>) -> Ctx__m2 {
     return Ctx__m2 { svcs: cx.svcs.clone(), ambOps: cx.ambOps.clone(), reqMap: cx.reqMap.clone(), caps: cx.caps.clone(), colored: cx.colored.clone(), emittingNames: cx.emittingNames.clone(), asyncExterns: cx.asyncExterns.clone(), scopeNames: cx.scopeNames.clone(), fnNames: cx.fnNames.clone(), compName: cx.compName.clone(), fnAsyncSlots: cx.fnAsyncSlots.clone(), underArrow: cx.underArrow, handles: cx.handles.clone(), provKeySvc: cx.provKeySvc.clone(), provAlias: cx.provAlias.clone(), svcTys: tys.clone(), localArrows: cx.localArrows.clone(), acqWhere: cx.acqWhere.clone(), emitPos: cx.emitPos.clone(), appr: cx.appr.clone() };
 }
 
-fn svc_recv_root(e: Expr) -> String {
-    return match e {
-    Expr::Var(n) => n,
-    Expr::Field(f) => { let f = *f; svc_recv_root(f.target) },
-    Expr::Index(x) => { let x = *x; svc_recv_root(x.target) },
-    _ => String::from(""),
-};
-}
-
 fn svc_recv_msig(recv: Expr, op: &str, cx: Ctx__m2) -> MSig {
     let none = find_msig(svc_of(cx.clone(), String::from("")), "", 0i64);
-    let root_ = svc_recv_root(recv.clone());
-    if (root_ == "") {
-        return none;
-    }
-    let rt = tenv_get(&cx.svcTys, &root_);
-    if ((rt == "") || starts_with__m2(&rt, "@spawn:")) {
-        return none;
-    }
     let ty = infer(recv.clone(), cx.svcTys.clone());
     if ((ty == "") || (!cx.svcs.contains_key(&parse_head(ty.clone())))) {
         return none;
@@ -30066,6 +30059,24 @@ fn an_if_bound_provision_local_meets_the_approval_floor() {
 fn an_if_bound_provision_local_crossed_with_an_approval_edge_is_admitted() {
     let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  let a = await approval[production.payment] { reason: \"pay\" }\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n) with a\n      return 0\n    }\n  }\n}"));
     assert!((v == ""));
+}
+
+#[test]
+fn a_crossing_through_an_if_written_in_place_must_be_marked() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let x = (if (n > 0) { w.pay } else { w.pay }).charge(n)\n      return x\n    }\n  }\n}"));
+    assert!((v == "G4|call to emission `charge` must be marked `emit` (G4)"));
+}
+
+#[test]
+fn a_marked_crossing_through_a_list_literal_read_in_place_meets_the_floor() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      emit [w.pay][0].charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge"));
+}
+
+#[test]
+fn a_step_through_an_if_bound_provision_local_meets_a_scoped_upper_bound() {
+    let v = admit_src(String::from("service Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission[production.payment] fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let t = if (n > 0) { w.pay } else { w.pay }\n      emit t.charge(n)\n      return 0\n    }\n  }\n}"));
+    assert!((v == "G4|`Till.go` is declared `emission[production.payment]`, but this implementation emits through an unnameable host boundary (reaching `a host emission`)"));
 }
 
 #[test]
