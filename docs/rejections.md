@@ -188,6 +188,38 @@ component Auditor requires db: Database {
 call to emission `db.execute` must be marked `emit` (G4)
 ```
 
+The carrier does not change the rule. A host `emission` extern crosses the
+boundary exactly as a service operation does, and so does a module `fn` that
+reaches one, so each call needs the marker in every position a service call
+does: a binding, a return, an expression-bodied method, an operand, an
+`effect` bracket's acquisition (g4_unmarked_host_emission.rvl,
+g4_unmarked_host_emission_helper.rvl, g4_unmarked_host_emission_acquire.rvl):
+
+```revl reject G4
+extern emission fn charge(cents: Int) -> Int = @py { return 1 }
+
+service Till { emission fn ring(cents: Int) -> Int }
+
+component Register provides till: Till {
+  provide till {
+    fn ring(cents) {
+      let paid = charge(cents)
+      return paid
+    }
+  }
+}
+```
+
+```
+call to emission `charge` must be marked `emit` (G4)
+```
+
+`let paid = emit charge(cents)` is admitted. A teardown slot (`undo`,
+`compensate`) keeps its bare-emission exception, and a `witnessed` extern in
+effect position is marked by `effect` (docs/design/243-witnessed-externs.md).
+Until issue #1437 an unmarked extern call was refused only inside an `emit`'s
+arguments; docs/design/1437-emit-marks-every-crossing.md records the change.
+
 **A crossing nested in an `emit`'s arguments** — one `emit` marks one
 boundary crossing. The marker covers the head call it is written on, and the
 head's arguments are judged in the position the `emit` itself sits in, so an
@@ -305,6 +337,35 @@ declaration bounds *which* boundary the method reaches, not just whether
 ```
 `Cache.put` is declared `emission[db]`, but this implementation emits through `bus`
 ```
+
+**A crossing that requires approval, with no covering edge**: an extern
+that declares `requires approval` makes its capability unreachable without an
+`Approval[C]` threaded to the crossing with `emit … with a` (item 246). The
+requirement belongs to the capability TOKEN, so a scoped extern is required
+under its scope (g4_approval_scoped_extern.rvl):
+
+```revl reject G4
+extern emission[production.payment] fn charge(cents: Int) requires approval = @py { return }
+
+service Till { fn total() -> Int }
+
+component Register provides till: Till {
+  emit charge(199)
+  provide till { fn total() = 199 }
+}
+```
+
+```
+crossing capability `production.payment` requires approval, but this `emit` carries no covering `with` edge
+```
+
+Every marked spelling meets the same floor. The value form (`let r = emit
+charge(n)`, `return emit …`, `fn m() = emit …`) has no `with` clause, so an
+approval-required crossing written that way is always refused
+(g4_approval_value_form_method.rvl), and a marked call to a `fn` that reaches
+the extern crosses what the `fn` reaches (g4_approval_helper_reach.rvl). The
+fix is an `emit … with a` step whose approval, minted in the activation body by
+`let a = await approval[production.payment] { … }`, covers the token.
 
 Fix: give the mutation an `undo`, or admit it is irreversible — `emit` at
 the call site and `emission fn` on the service operation. The propagation
@@ -455,6 +516,13 @@ component Renamer {
 ```
 
 Fix, when the collision was deliberate: rename the source binding.
+
+A provided service method's name is part of its contract: the bridge, the
+router and every dispatcher look it up by that string. So no tier renames it
+where a caller can see it. On ts a keyword is a legal property name, and the
+method keeps its contract name at the interface, the definition and every call
+(`s.delete(x)`, issue #1512). On py the `def` is renamed (`class_`) and the
+provided class carries the contract name as an alias (issue #1474).
 
 ## A5 — compensation accompanies an emission
 
@@ -874,7 +942,9 @@ an admitted program is byte-identical to the same program without it.
 
 Rejections that enforce no guarantee code exist too, and follow the same
 message-plus-hint discipline: parse and lex errors (`expected ..., found
-...` — classified `SYNTAX`), arithmetic definedness (`mod` by a literal
+...` — classified `SYNTAX`; a `requires`/`provides` clause written inside a
+component body is its own `SYNTAX` refusal, category `header`, whose `fix` is
+the corrected header line), arithmetic definedness (`mod` by a literal
 zero), integer literal range, lifecycle-test mistakes (`unknown component
 Ghost`, `` `Kv` is already loaded ``), realm-label rules, and module-system
 refusals (missing import, private access). Each has its entry in

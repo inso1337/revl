@@ -420,3 +420,161 @@ def test_enforced_refusal_end_to_end_and_advisory_warning(_fresh_session):
     server.SESSION.leases.claim("UserCache", "alice", ttl=600)
     ok = _call("revl_swap", {"source": _swap_user()})
     assert ok["ok"] is True and ok["swapped"] is True
+
+
+# ------------------------------------- load and unload answer to the lease too
+
+
+def test_enforced_unload_of_another_operators_lease_is_refused():
+    sess = _FakeSession(compile_source(TWO), Operator("alice"), sandbox=ENFORCING)
+    sess.leases.claim("UserCache", "bob", ttl=600)
+    refusal = L.check(sess, "unload", {})
+    assert refusal is not None and refusal.heldBy == "bob"
+    assert refusal.verb == "unload"
+    assert "may not unload `UserCache`" in refusal.message
+    assert refusal.why.path() == ["alice", "UserCache"]
+
+
+def test_enforced_cold_load_of_a_name_another_operator_leases_is_refused():
+    """A lease claimed before boot fences the boot: see `leases.FENCED`."""
+    sess = _FakeSession(None, Operator("alice"), sandbox=ENFORCING)
+    sess.loaded = False
+    sess.leases.claim("UserCache", "bob", ttl=600)
+    refusal = L.check(sess, "load", {"source": TWO})
+    assert refusal is not None and refusal.component == "UserCache"
+    assert "may not boot `UserCache`" in refusal.message
+    # a composition that boots no leased name is not fenced
+    other = TWO.split("component UserCache")[0] + "component OtherCache" + \
+        TWO.split("component OtherCache")[1]
+    assert L.check(sess, "load", {"source": other}) is None
+
+
+def test_the_holder_may_load_and_unload_its_own_lease():
+    sess = _FakeSession(compile_source(TWO), Operator("alice"), sandbox=ENFORCING)
+    sess.leases.claim("UserCache", "alice", ttl=600)
+    assert L.check(sess, "unload", {}) is None
+    assert L.check(sess, "load", {"source": TWO}) is None
+
+
+def test_advisory_leases_never_refuse_a_load_or_unload():
+    sess = _FakeSession(compile_source(TWO), Operator("alice"), sandbox=None)
+    sess.leases.claim("UserCache", "bob", ttl=600)
+    assert L.check(sess, "unload", {}) is None
+    assert L.check(sess, "load", {"source": TWO}) is None
+
+
+def test_a_cold_load_that_cannot_be_scoped_fails_closed():
+    sess = _FakeSession(None, Operator("alice"), sandbox=ENFORCING)
+    sess.loaded = False
+    sess.leases.claim("UserCache", "bob", ttl=600)
+    refusal = L.check(sess, "load", {"source": "component {"})
+    assert refusal is not None and refusal.heldBy == "bob"
+
+
+def test_check_swap_is_the_swap_case_of_check():
+    sess = _FakeSession(compile_source(TWO), Operator("alice"), sandbox=ENFORCING)
+    sess.leases.claim("UserCache", "bob", ttl=600)
+    assert L.check_swap(sess, {"source": _swap_user()}) == \
+        L.check(sess, "swap", {"source": _swap_user()})
+    with pytest.raises(ValueError):
+        L.check(sess, "estop", {})
+
+
+# The two-operator case end to end, built the way
+# `test_enforced_refusal_end_to_end_and_advisory_warning` builds it: alice is
+# the session's operator and may do anything; bob holds a lease in the book.
+_ALICE = Operator("alice", (Grant(("swap", "load", "unload", "restore",
+                                   "snapshot", "call", "commit"), ("*",),
+                                  True),))
+
+
+@needs_runtime
+def test_a_refused_swap_cannot_be_reached_by_unload_and_load(_fresh_session):
+    server.SESSION.sandbox = ENFORCING
+    server.SESSION.operator = _ALICE
+    assert _call("revl_load", {"source": TWO})["ok"] is True
+    snapshot = _call("revl_snapshot", {})["snapshot"]
+    server.SESSION.leases.claim("UserCache", "bob", ttl=600)
+
+    refused = _call("revl_swap", {"source": _swap_user()})
+    assert refused["ok"] is False and refused["lease"]["heldBy"] == "bob"
+
+    # the other way to the same result: take the component down, boot your own
+    refused = _call("revl_unload", {})
+    assert refused["ok"] is False and refused["lease"]["heldBy"] == "bob"
+    assert "still serving" in refused["note"]
+    assert server.SESSION.loaded
+    assert _call("revl_call", {"key": "uc", "method": "size"})["result"] == 0
+
+    # and with the name empty (the composition never booted, or its holder
+    # unloaded it), a cold load or a restore of the leased name is refused too
+    server.SESSION.unload()
+    for verb, arguments in (("revl_load", {"source": _swap_user()}),
+                            ("revl_restore", {"snapshot": snapshot})):
+        refused = _call(verb, arguments)
+        assert refused["ok"] is False, verb
+        assert refused["lease"]["heldBy"] == "bob", verb
+        assert not server.SESSION.loaded, verb
+    assert server.SESSION.leases.holder_of("UserCache") == "bob"
+
+    # the holder keeps every path: bob hands the name back, alice claims it,
+    # and she boots, swaps, unloads and reboots it at will
+    server.SESSION.leases.release("UserCache", "bob")
+    server.SESSION.leases.claim("UserCache", "alice", ttl=600)
+    server.SESSION.leases.claim("Unrelated", "bob", ttl=600)
+    for _ in range(2):
+        assert _call("revl_load", {"source": TWO})["ok"] is True
+        assert _call("revl_swap", {"source": _swap_user()})["ok"] is True
+        assert _call("revl_call", {"key": "uc", "method": "size"})["result"] == 42
+        assert _call("revl_unload", {})["ok"] is True
+        assert not server.SESSION.loaded
+    assert _call("revl_restore", {"snapshot": snapshot})["ok"] is True
+
+
+@needs_runtime
+def test_a_commit_confirm_or_abort_cannot_tear_down_another_operators_lease(
+        _fresh_session):
+    """`revl_commit_confirm` and `revl_abort` settle the session and then tear
+    the composition down, so they are one more way to take down a component
+    another operator leases. Refused, the composition keeps serving."""
+    server.SESSION.sandbox = ENFORCING
+    server.SESSION.operator = _ALICE
+    assert _call("revl_load", {"source": TWO})["ok"] is True
+    server.SESSION.leases.claim("UserCache", "bob", ttl=600)
+
+    manifest = _call("revl_commit", {})     # step 1 only enumerates: unfenced
+    assert manifest["ok"] is True
+    for verb, arguments in (("revl_commit_confirm",
+                             {"hash": manifest["manifest"]["hash"]}),
+                            ("revl_abort", {})):
+        refused = _call(verb, arguments)
+        assert refused["ok"] is False, verb
+        assert refused["lease"]["heldBy"] == "bob", verb
+        assert "still serving" in refused["note"], verb
+        assert server.SESSION.loaded, verb
+        assert _call("revl_call", {"key": "uc", "method": "size"})["result"] == 0
+
+    # the holder commits and aborts freely
+    server.SESSION.leases.release("UserCache", "bob")
+    server.SESSION.leases.claim("UserCache", "alice", ttl=600)
+    manifest = _call("revl_commit", {})["manifest"]
+    committed = _call("revl_commit_confirm", {"hash": manifest["hash"]})
+    assert committed["ok"] is True and committed["committed"] is True
+    assert not server.SESSION.loaded
+    assert _call("revl_load", {"source": TWO})["ok"] is True
+    aborted = _call("revl_abort", {})
+    assert aborted["ok"] is True and aborted["aborted"] is True
+    assert not server.SESSION.loaded
+
+
+def test_enforced_commit_and_abort_of_another_operators_lease_are_refused():
+    sess = _FakeSession(compile_source(TWO), Operator("alice"), sandbox=ENFORCING)
+    sess.leases.claim("UserCache", "bob", ttl=600)
+    for verb in ("commit", "abort"):
+        refusal = L.check(sess, verb, {})
+        assert refusal is not None and refusal.heldBy == "bob", verb
+        assert "still serving" in refusal.note, verb
+    sess.leases.release("UserCache", "bob")
+    sess.leases.claim("UserCache", "alice", ttl=600)
+    assert L.check(sess, "commit", {}) is None
+    assert L.check(sess, "abort", {}) is None

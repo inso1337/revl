@@ -27,16 +27,131 @@ of everything that already resolved is unchanged.
 """
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 
 import pytest
+
+
+# --------------------------------------------------------------------------- #
+# The repository a git hook was running for is not the repository under test. #
+# --------------------------------------------------------------------------- #
+#
+# git exports the committing repository into every hook it runs. Measured on
+# git 2.50: a pre-commit hook in a linked worktree gets GIT_DIR (that worktree's
+# gitdir under the shared .git/worktrees/) and GIT_INDEX_FILE (its index, or a
+# temporary index for `commit -a` and `commit <paths>`); `git -c k=v commit`
+# adds GIT_CONFIG_PARAMETERS. tools/hooks/pre-commit runs pytest, and every
+# fixture that shells out to git inherits them. GIT_DIR outranks both the
+# working directory and `git -C`, so a fixture's `git init` in its tmp dir
+# re-initialises the COMMITTING repository instead:
+#
+#   * `git init` with a GIT_DIR that does not end in `/.git` guesses a bare
+#     repository and writes `core.bare = true`. A worktree's gitdir never ends
+#     in `/.git`, and its config IS the shared `.git/config`, so every checkout
+#     of the repository went bare at once.
+#   * `git config user.name t` wrote the shared identity, which is how commits
+#     authored `t <t@example.com>` reached main.
+#   * `git add` wrote the fixture's README into that worktree's own index,
+#     and `git checkout -b` / `git commit` would move its branch.
+#
+# The fix is here, once, rather than in each fixture: these are stripped when
+# this file is imported, before any test module is collected and so before any
+# fixture or tool runs. tools/hooks/pre-commit strips the same set before it
+# starts pytest, for runs this file does not reach.
+#
+# The list is git's own (`git rev-parse --local-env-vars`): the variables git
+# clears when it runs a command in ANOTHER repository, e.g. a submodule. Every
+# one of them names or configures the repository a command acts on:
+#   GIT_DIR, GIT_COMMON_DIR                 where the repository and its refs are
+#   GIT_WORK_TREE, GIT_IMPLICIT_WORK_TREE   where checkouts are written
+#   GIT_INDEX_FILE                          which index `add` and `commit` use
+#   GIT_OBJECT_DIRECTORY,
+#   GIT_ALTERNATE_OBJECT_DIRECTORIES        where objects are written and read
+#   GIT_PREFIX, GIT_INTERNAL_SUPER_PREFIX   the hook's path inside that tree
+#   GIT_SHALLOW_FILE, GIT_GRAFT_FILE,
+#   GIT_NO_REPLACE_OBJECTS,
+#   GIT_REPLACE_REF_BASE                    how that repository's history reads
+#   GIT_CONFIG, GIT_CONFIG_PARAMETERS,
+#   GIT_CONFIG_COUNT                        config given to the committing
+#                                           command (`git -c ...`); without
+#                                           the count, GIT_CONFIG_KEY_<n> and
+#                                           GIT_CONFIG_VALUE_<n> are inert
+#
+# A second, smaller set names no repository but is still the hook's and not
+# the test's: the identity and date of the commit being made. `git commit`
+# exports GIT_AUTHOR_NAME, GIT_AUTHOR_EMAIL and GIT_AUTHOR_DATE to its hooks
+# (measured), and they outrank a fixture's own `git config user.name`, so
+# under the hook every fixture commit was authored as the committer, with one
+# frozen date, and a run under the hook differed from the same run in CI.
+#
+# Kept on purpose: GIT_EXEC_PATH and GIT_EDITOR, which change nothing a test
+# can observe, and GIT_CONFIG_GLOBAL / GIT_CONFIG_SYSTEM / GIT_CONFIG_NOSYSTEM,
+# which a test may set for its own subprocesses.
+# tests/test_hook_git_env_isolation.py holds the first list against the
+# installed git's and runs a fixture under a simulated hook environment.
+REPOSITORY_LOCAL_GIT_ENV = (
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+    "GIT_CONFIG_PARAMETERS",
+    "GIT_DIR",
+    "GIT_GRAFT_FILE",
+    "GIT_IMPLICIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_INTERNAL_SUPER_PREFIX",
+    "GIT_NO_REPLACE_OBJECTS",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_PREFIX",
+    "GIT_REPLACE_REF_BASE",
+    "GIT_SHALLOW_FILE",
+    "GIT_WORK_TREE",
+)
+
+HOOK_COMMIT_IDENTITY_ENV = (
+    "GIT_AUTHOR_DATE",
+    "GIT_AUTHOR_EMAIL",
+    "GIT_AUTHOR_NAME",
+    "GIT_COMMITTER_DATE",
+    "GIT_COMMITTER_EMAIL",
+    "GIT_COMMITTER_NAME",
+)
+
+for _name in REPOSITORY_LOCAL_GIT_ENV + HOOK_COMMIT_IDENTITY_ENV:
+    os.environ.pop(_name, None)
+del _name
+
+def pytest_configure(config):
+    # tools/hooks/pre-commit runs with pytest-timeout's `--timeout=60`. A test
+    # that is slow by nature (not re-deriving anything a session could share)
+    # carries `@pytest.mark.timeout(N)` with the measurement and the reason
+    # beside it (issue #1449). CI does not install pytest-timeout; declaring the
+    # marker here keeps it a known marker there, where it has no effect.
+    config.addinivalue_line(
+        "markers", "timeout(seconds): per-test limit for pytest-timeout")
+
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SRC = _ROOT / "src"
 
 if (_SRC / "revl").is_dir() and str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+# The same for every python a test starts. Without it, a child resolves revl
+# through the interpreter's own install, which for the main checkout's `.venv`
+# (run from a worktree by hand; tools/hooks/pre-commit refuses it since #1608)
+# is an editable `.pth` entry naming the MAIN checkout's src/: in-process imports read this
+# tree and `python -m revl` in a subprocess read another. PYTHONPATH outranks
+# site-packages and `.pth` entries. Where revl is installed from this same tree
+# (CI) this changes nothing. tests/test_child_python_resolves_this_tree.py.
+if (_SRC / "revl").is_dir():
+    _inherited = os.environ.get("PYTHONPATH", "")
+    if _inherited.split(os.pathsep)[0] != str(_SRC):
+        os.environ["PYTHONPATH"] = (
+            str(_SRC) + (os.pathsep + _inherited if _inherited else ""))
+    del _inherited
 
 if _ROOT.is_dir() and str(_ROOT) not in sys.path:
     sys.path.append(str(_ROOT))

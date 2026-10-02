@@ -59,6 +59,7 @@ import sys
 import tempfile
 from pathlib import Path
 
+from ._once_proof import SPEC_FLAG, OnceProof
 from ._paths import backends_root
 from .errors import RevlError
 from .refusal import refusals
@@ -229,6 +230,28 @@ def _build(ir: dict, tmp: Path, jdk_bin: str, record: bool = False,
     return str(out)
 
 
+def _placements(ir: dict) -> list[dict]:
+    """Every provision of the composition, one entry per (component, key),
+    with the realm an `isolate` places it in (None for the shared realm).
+
+    Issue #1550: the once runner's UP and no-residue proofs resolved every
+    provided key in the SHARED realm. A key a component isolates
+    (`isolate kv in realm("tenant_a")`) is published in its realm only, so the
+    proof threw `no provider` for a composition that had loaded cleanly, and
+    `examples/tenants.rvl` could not run on java at all. Each provision is now
+    checked where it is published: two tenants providing `kv` are two
+    provisions, `kv@tenant_a` and `kv@tenant_b`, and each must be live while
+    the composition is up and gone after teardown."""
+    out: list[dict] = []
+    for comp in ir.get("components") or []:
+        isolate = comp.get("isolate") or {}
+        for key, service in (comp.get("provides") or {}).items():
+            out.append({"component": comp.get("name"), "key": key,
+                        "iface": f"revl.Components${service}",
+                        "realm": isolate.get(key)})
+    return out
+
+
 def _spec(ir: dict, config: dict) -> dict:
     key_service = _key_service(ir)
     return {
@@ -238,11 +261,12 @@ def _spec(ir: dict, config: dict) -> dict:
         "config": config,
         "provides": list(key_service),
         "ifaces": {k: f"revl.Components${s}" for k, s in key_service.items()},
+        "placements": _placements(ir),
     }
 
 
 def run_java(ir: dict, config: dict, files, once: bool = False,
-             interactive: bool = False) -> int:
+             interactive: bool = False, proof_out: dict | None = None) -> int:
     """Emit -> build -> boot the composition on the cordis4j runtime as a JVM
     process, then run the once round-trip (LIFO teardown + no-residue proof) and
     exit. Returns 0 on a clean ``UP`` -> ``NO-RESIDUE`` -> ``DOWN``; nonzero
@@ -292,8 +316,11 @@ def run_java(ir: dict, config: dict, files, once: bool = False,
                   file=sys.stderr)
             return 1
 
+        proof = OnceProof("run")
+
         spec_file = tmp / "run.spec.json"
-        spec_file.write_text(json.dumps(_spec(ir, config)), encoding="utf-8")
+        spec_file.write_text(json.dumps({**_spec(ir, config), SPEC_FLAG: True}),
+                             encoding="utf-8")
 
         print("== load composition (java tier) ==", flush=True)
         proc = subprocess.Popen(
@@ -301,35 +328,29 @@ def run_java(ir: dict, config: dict, files, once: bool = False,
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, text=True, env=child_env,
         )
-        if proc.stdin is not None:
-            proc.stdin.close()
+        # the proof token is stdin's only line; then stdin closes, as before,
+        # so the runner never blocks on it (issue #1621)
+        proof.send(proc.stdin)
 
-        saw_up = saw_down = saw_no_residue = saw_residue_left = False
         assert proc.stdout is not None
         for line in proc.stdout:
-            sys.stdout.write(line)
+            # only a token-tagged line is the runtime's proof; anything else,
+            # a program's own `[run] NO-RESIDUE` included, is output (#1621)
+            sys.stdout.write(proof.line(line))
             sys.stdout.flush()
-            text = line.strip()
-            if text == "[run] UP":
-                saw_up = True
-            elif text.startswith("[run] NO-RESIDUE"):
-                saw_no_residue = True
-            elif text.startswith("[run] RESIDUE-LEFT"):
-                saw_residue_left = True
-            elif text == "[run] DOWN":
-                saw_down = True
         rc = proc.wait()
     finally:
         shutil.rmtree(tmp, ignore_errors=True)
 
+    proof.record(proof_out)
     if rc != 0:
         print(f"error: the java composition process exited {rc}", file=sys.stderr)
         return 1
-    if not (saw_up and saw_down):
+    if not (proof.up and proof.down):
         print("error: the java composition did not complete the boot/teardown "
               "round-trip (no UP/DOWN)", file=sys.stderr)
         return 1
-    if saw_residue_left or not saw_no_residue:
+    if proof.residue_left or not proof.no_residue:
         print("error: the java composition left residue after teardown",
               file=sys.stderr)
         return 1

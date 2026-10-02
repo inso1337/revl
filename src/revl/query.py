@@ -20,12 +20,12 @@ reading the docs, so `precision`, `precisionNote` and `assumptions` are
 fields of the result itself, not prose in `docs/queries.md`.
 
 The emission reachability through the pure stratum is *not* recomputed
-here: `lower._emitting_fns` is the checker's own least fixed point over the
-fn call graph (the same set G4 uses to force `emission` into a service
-declaration), and `__main__._extern_reachability` names which externs a fn
-reaches. This module consumes both and adds only what neither has: the
-inter-component edges (a call on an injected key lands in the provider's
-provide-method) and the withdrawal cascade.
+here: `emission_analysis._emitting_extern_names` is the checker's own least
+fixed point over the fn call and value graph (the one G4 uses to force
+`emission` into a service declaration), and `boundary._extern_reachability`
+names which externs a fn calls. This module consumes both and adds only what
+neither has: the inter-component edges (a call on an injected key lands in the
+provider's provide-method) and the withdrawal cascade.
 
 The same seven-verb surface answers in three time modes (docs/queries.md §9):
 against the STATIC IR (the default), against the LIVE session as it stands
@@ -127,15 +127,6 @@ _ASSUMPTION_RECORDING_SCOPE = (
 
 # ---------------------------------------------------------------- reuse
 
-def _emitting_fn_names(ir: dict) -> set:
-    """The checker's own set of fn names whose call reaches an irreversible
-    host effect. Imported from `lower` rather than recomputed so this module
-    can never disagree with the gate that rejects code."""
-    from .lower import _emitting_fns
-
-    return _emitting_fns(list(ir.get("functions") or []), list(ir.get("externs") or []))
-
-
 def _fn_extern_reach(ir: dict) -> dict:
     """fn name -> externs it transitively reaches. `__main__` owns this walk
     (it is what `revl audit` prints); imported lazily because `__main__`
@@ -147,15 +138,33 @@ def _fn_extern_reach(ir: dict) -> dict:
     return reach
 
 
-def _called_names(node) -> set:
-    """Callable names a lowered node references — `lower`'s own walk, which
-    knows both call encodings (component `{kind: fn}`, pure `{kind: call,
-    callee: {kind: var}}`) and looks inside arrow bodies."""
+def _emitting_extern_reach(ir: dict) -> dict:
+    """The checker's G4 fixed point keyed by EXTERN NAME: callable name -> the
+    emission/witnessed externs its call or its value reaches, with `*` marking
+    a first-class dispatch on the way. The same map `boundary._boundary` folds
+    for the G8 surface, so a first-class route is read off the checker's own
+    analysis rather than re-derived."""
+    from .emission_analysis import _emitting_extern_names
+
+    fns = ir.get("functions") or []
+    if isinstance(fns, dict):
+        fns = list(fns.values())
+    return _emitting_extern_names(list(fns), list(ir.get("externs") or []))
+
+
+def _channels(node) -> tuple:
+    """`(called, values)`: `lower._calls_in`'s call channel (both call
+    encodings, component `{kind: fn}` and pure `{kind: call, callee: {kind:
+    var}}`, arrow bodies included) and its VALUE channel (callable names
+    referenced as values: `let g = x`, `apply(x, n)`, `{ f: x }`, `[x]`, an
+    arrow capturing an alias). The same pair the G4 fixed point folds, so a
+    reach read off it is the checker's."""
     from .lower import _calls_in
 
-    found: set = set()
-    _calls_in(node, found)
-    return found
+    called: set = set()
+    values: set = set()
+    _calls_in(node, called, values=values)
+    return called, values
 
 
 # ---------------------------------------------------------------- index
@@ -175,8 +184,8 @@ class Composition:
         self.components = {c["name"]: c for c in ir.get("components") or []}
         self.entries = {e["name"]: e for e in self.manifest.get("components") or []}
         self.load_order = list(self.manifest.get("loadOrder") or [])
-        self.emitting_fns = _emitting_fn_names(ir)
         self.fn_externs = _fn_extern_reach(ir)
+        self._emitting_externs = None  # the G4 fixed point, built by `_host_routes`
 
         # provision resolution is per-(key, realm): the same key in two realms
         # is multi-tenancy, not a conflict (docs/design-v2-realms.md)
@@ -243,24 +252,92 @@ class Composition:
                 if self.provider(component, key) is None]
 
     def value_widens(self, nodes) -> bool:
-        """Whether `nodes` reference an emitting callable in VALUE position (an
-        arrow-typed argument, a stored binding). This is the `*` first-class
-        widening the G4 fixed point applies (`emission_analysis._emitting_
-        capabilities`): an emitting callable handed on as a value escapes this
-        scope and may be dispatched by whoever receives it, so the boundary it
-        may reach cannot be named (`*`) and can never be proven reversible.
+        """Whether `nodes` reach the `*` first-class widening the G4 fixed
+        point applies (`emission_analysis._emitting_capabilities`): an emitting
+        callable handed on as a value escapes the body that hands it on and may
+        be dispatched by whoever receives it, so the boundary it may reach
+        cannot be named (`*`) and can never be proven reversible.
 
-        It is exactly the reach the name-only extern walk misses and the
-        emitting-fn fixed point catches. Both the auto-approve `ClassMap`
-        (which raises a class-(c) `*` crossing) and the erase report consult
-        THIS one detection, so the two can never disagree about whether a scope
-        widens (item 414: the erase report was a second class fold blind to it)."""
-        from .lower import _calls_in
+        Two routes, both read off the checker's own channels: the scope names
+        an emitting callable in VALUE position (an arrow-typed argument, a
+        stored binding), or it CALLS a pure `fn` whose body does
+        (`fn pick() = charge`, `fn run(n) = apply(charge, n)`). The fixed point
+        already carries `*` up through that call; reading only this scope's
+        value channel missed it (issue #1458).
 
-        found: set = set()
-        values: set = set()
-        _calls_in(nodes, found, values=values)
-        return bool(values & self.emitting_fns)
+        Both the auto-approve `ClassMap` (which raises a class-(c) `*` crossing)
+        and the erase report consult THIS one detection, so the two can never
+        disagree about whether a scope widens (item 414: the erase report was a
+        second class fold blind to it)."""
+        return self._host_routes(*_channels(nodes))[1]
+
+    def emission_routes(self, nodes) -> dict:
+        """Every `emission` extern `nodes` reach -> whether EVERY route to it is
+        a call naming the extern itself in this scope.
+
+        The reach is the checker's own: `_calls_in`'s call and value channels
+        over the scope, closed by the G4 fixed point (`_emitting_extern_reach`). That
+        is the pair `emission_analysis._method_emissions` reads to print "`x`
+        (passed as a function value)", so this cannot find less than the
+        diagnostic names. Three routes, and only the first is direct:
+
+        * the scope calls the extern by name;
+        * the scope calls a pure `fn` that reaches it (a fn body cannot call a
+          `deferred` extern by name, item 400, so a deferred extern reached
+          this way was handed through as a value);
+        * the scope references the extern, or a callable reaching it, as a
+          VALUE (`let g = x`, `apply(x, n)`, `{ f: x }`, `[x]`, an arrow
+          capturing an alias). The value is dispatched as an ordinary call,
+          so a `deferred` extern reached this way fires at the call rather
+          than being enqueued: the py tier enqueues only an `emit x(..)` step.
+
+        `witnessed` externs are in the fixed point's seed but not in this map:
+        their reversibility is a registered inverse, not a crossing."""
+        routes, _ = self._host_routes(*_channels(nodes))
+        return {name: route["direct"] for name, route in routes.items()
+                if (self.externs.get(name) or {}).get("class") == "emission"}
+
+    def _host_routes(self, called: set, values: set) -> tuple:
+        """`(routes, widens)` for one scope's call and value channels, closed by
+        the G4 fixed point keyed by extern name. The one reach walk behind
+        `emission_routes`, `value_widens` and the per-scope `externs` facts.
+
+        `routes` maps every `emission`/`witnessed` extern the scope reaches (the
+        fixed point's seed) to `{direct, through, value}`: `direct` holds when
+        every route is a call naming the extern in this scope, `through` names
+        the pure fns called or passed on the way, and `value` marks a route
+        where this scope references the extern, or a fn reaching it, as a
+        function value. `widens` is whether the reach carries `*`."""
+        if self._emitting_externs is None:
+            self._emitting_externs = _emitting_extern_reach(self.ir)
+        emitting = self._emitting_externs
+        routes: dict = {}
+        widens = False
+
+        def reach(ext: str, direct: bool, via, value: bool) -> None:
+            route = routes.setdefault(
+                ext, {"direct": True, "through": set(), "value": False})
+            route["direct"] = route["direct"] and direct
+            route["value"] = route["value"] or value
+            if via is not None:
+                route["through"].add(via)
+
+        for name in called:
+            caps = emitting.get(name) or set()
+            if name in self.externs:
+                if caps:
+                    reach(name, True, None, False)
+                continue
+            widens = widens or "*" in caps
+            for ext in caps - {"*"}:
+                reach(ext, False, name, False)
+        for name in values:
+            caps = emitting.get(name) or set()
+            widens = widens or bool(caps)
+            via = None if name in self.externs else name
+            for ext in caps - {"*"}:
+                reach(ext, False, via, True)
+        return routes, widens
 
     # -- per-scope boundary facts -------------------------------------
 
@@ -308,13 +385,43 @@ class Composition:
 
         # host code: externs called directly, plus everything the pure fns
         # this scope calls reach transitively (lower/`__main__` own that walk)
+        called, values = _channels(nodes)
         host: dict = {}
-        for name in sorted(_called_names(nodes)):
+        for name in sorted(called):
             if name in self.externs:
                 host.setdefault(name, set())
             elif name in self.fn_externs:
                 for reached in self.fn_externs[name]:
                     host.setdefault(reached, set()).add(name)
+        # ...and every boundary extern the checker's G4 reach finds that the
+        # called-name walk cannot: one reached as a FUNCTION VALUE, here or
+        # inside a called fn (`let g = x`, `apply(x, n)`, `fn pick() = x`,
+        # `fn run(n) = apply(x, n)`). Issue #1458: `revl query reach`,
+        # `emitters`, the approval ClassMap and the erase report all read this
+        # list, and all of them missed every such spelling.
+        routes, _ = self._host_routes(called, values)
+        for name, route in routes.items():
+            host.setdefault(name, set()).update(route["through"])
+
+        def fact(name: str, through: set) -> dict:
+            decl = self.externs.get(name) or {}
+            route = routes.get(name) or {"direct": True, "value": False}
+            entry = {
+                "kind": "extern", "name": name,
+                "class": decl.get("class"),
+                "emission": decl.get("class") == "emission",
+                # item 245: the deferred flag rides the fact so the G8 crossing
+                # surface can tag class (b) without re-deriving it. Only an
+                # `emit x(..)` naming the extern is enqueued; one reached any
+                # other way fires at the call, so it is not held (#1459).
+                "deferred": bool(decl.get("deferred")) and route["direct"],
+                "backends": sorted(decl.get("bodies") or {}),
+                "through": sorted(through) or None,
+            }
+            if route["value"]:
+                # additive, so a scope with no value route serializes as before
+                entry["asValue"] = True
+            return entry
 
         return {
             "emissions": [
@@ -323,17 +430,8 @@ class Composition:
                  "compensated": flag}
                 for (key, method), flag in sorted(emissions.items())
             ],
-            "externs": [
-                {"kind": "extern", "name": name,
-                 "class": (self.externs.get(name) or {}).get("class"),
-                 "emission": (self.externs.get(name) or {}).get("class") == "emission",
-                 # item 245: the deferred flag rides the fact so the G8 crossing
-                 # surface can tag class (b) without re-deriving it.
-                 "deferred": bool((self.externs.get(name) or {}).get("deferred")),
-                 "backends": sorted((self.externs.get(name) or {}).get("bodies") or {}),
-                 "through": sorted(through) or None}
-                for name, through in sorted(host.items())
-            ],
+            "externs": [fact(name, through)
+                        for name, through in sorted(host.items())],
             "calls": [{"key": key, "method": method, "emission": flag}
                       for (key, method), flag in sorted(calls.items())],
             # spawn-seam edges the reach fold must follow (item 246). Not part
@@ -1390,6 +1488,8 @@ def render(result: dict) -> str:
         for fact in surface["emissions"] or []:
             what = (f"{fact['key']}.{fact['method']}" if fact["kind"] == "service"
                     else f"{fact['name']}()")
+            if fact.get("asValue"):
+                what += " (passed as a function value)"
             where = "direct" if fact["direct"] else " -> ".join(fact["path"])
             out.append(f"    {what}  [{where}]")
         if not surface["emissions"]:

@@ -40,7 +40,6 @@ as the one it closes.
 
 from __future__ import annotations
 
-import importlib.util
 import re
 import subprocess
 import sys
@@ -51,6 +50,7 @@ import pytest
 # check below skip wherever PyYAML is absent, which is a guard against silent
 # skips silently skipping. `pyyaml` is in the `test` extra.
 import yaml
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 WORKFLOWS = ROOT / ".github" / "workflows"
@@ -59,11 +59,9 @@ WORKFLOWS = ROOT / ".github" / "workflows"
 def _regen_goldens():
     """`tools/regen_goldens.py`, loaded by path under an explicit name (the
     module is a script, not an installed package)."""
-    spec = importlib.util.spec_from_file_location(
-        "revl_regen_goldens_registry", ROOT / "tools" / "regen_goldens.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module          # dataclasses needs the module visible
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "revl_regen_goldens_registry",
+        ROOT / "tools" / "regen_goldens.py")
     return module
 
 

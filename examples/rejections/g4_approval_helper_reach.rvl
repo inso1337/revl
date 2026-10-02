@@ -1,0 +1,21 @@
+// REJECTED, G4: an approval-required emission reached through a module `fn`.
+//
+// `emit bill(cents)` crosses what `bill` reaches, and `bill` reaches `charge`,
+// which declares `requires approval`. The floor used to read only the marked
+// call's own name, found no approval requirement on `bill`, and admitted the
+// crossing with no edge, while `emit charge(cents)` was refused.
+//
+// expected error:
+//   crossing capability `charge` requires approval, but this `emit` carries
+//     no covering `with` edge
+
+extern emission fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+
+fn bill(cents: Int) -> Int { return charge(cents) }
+
+service Till { fn total() -> Int }
+
+component Register provides till: Till {
+  emit bill(199)
+  provide till { fn total() = 199 }
+}

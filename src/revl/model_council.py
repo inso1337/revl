@@ -1,9 +1,10 @@
 """A model council with role-bound members and typed disagreement (item 516).
 
-`docs/design/543-model-council.md` is the design; this module is slice 1 of it,
-the DECLARATION half, kept in one file so each refusal sits beside the rule it
-enforces (the `revl.model_route` discipline: the parser reads the shape, this
-reads the meaning).
+`docs/design/543-model-council.md` is the design. This module is its
+DECLARATION half (slice 1) and the per-member input clause (slice 4, issue
+#1368), kept in one file so each refusal sits beside the rule it enforces (the
+`revl.model_route` discipline: the parser reads the shape, this reads the
+meaning).
 
 The checked property is registered as `G-COUNCIL-SPLIT`
 (`docs/design/557-council-disagreement.md`, issue #1190): **disagreement can
@@ -50,11 +51,15 @@ exactly the roadmap's second refusal.
 
 WHAT THIS MODULE DOES NOT DO
 ----------------------------
-It checks the DECLARATION. It does not bind a council to an action - a
-`route model` arm naming a council instead of a role is slice 2 - and there is
-no runtime aggregator here: the answer type `Aggregate[T]` of the design's
-section 3 is described and not written. See the design doc's slice plan for
-what each of those adds and in which order.
+It checks the declaration. The other slices live elsewhere: a `route model`
+arm naming a council instead of a role is slice 2 (issue #1366) and is checked
+in `revl.model_route`, which reads the table `check()` returns; the answer type
+`Aggregate[T]` of the design's section 3 is slice 3 (issue #1367) and is written
+in `revl.model_answer`; the self-host port is slice 5. There is no runtime
+aggregator anywhere: nothing asks the members at run time, which section 11 of
+the design keeps as a non-goal. (Corrected 2026-09-29, issue #1572: this said
+slice 2 was unbuilt and `Aggregate[T]` was not written; both landed on
+2026-09-22 and 2026-09-23.)
 """
 
 from __future__ import annotations

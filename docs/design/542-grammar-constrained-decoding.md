@@ -431,6 +431,31 @@ other five refuse a validated crossing by name. At that point re-measure: the
 golden count is zero today only because nothing in the corpus uses the feature,
 and a corpus case added by the refusal work will change that number.
 
+**The second condition was met on 2026-09-24, and the question is open again
+(updated 2026-09-29, issue #1572).** PR 1391 made python refuse a `validated`
+extern, and PR 1413 (issue #1373) made the other five cordis tiers refuse a
+`validated` service operation and a `validated` extern by name, through
+`src/revl/validated_boundary.py` and each backend's `_refuse_validated_emissions`
+wrapper, pinned by `tests/test_validated_tier_refusal_1373.py`. So the
+differential table above is history: typescript, rust, wasm, go and java no
+longer emit the same bytes for a validated crossing, they refuse it. One scope
+boundary is deliberate and pinned there: typescript's `--target temporal`
+returns before the gate and reads `validated` on an extern to pin the crossing
+to at-most-once, so it is neither refused nor lowered as a checked boundary.
+
+The re-measurement this paragraph asks for, on `67fc027b7`: checked-in
+`.ir.json` documents carrying either key, 0 of 54; backend golden files
+mentioning either key, 0 of 29; and the only `.rvl` sources declaring a
+`validated` emission are the five refusal fixtures
+`tests/fixtures/emit_{go,java,rust,ts,wasm}_refusals/validated_emission_operation.rvl`,
+which the refusal work added and which lower to no golden. Python is still the
+only tier that reads `response_grammar` (`backends/python/emit.py`), so the
+first condition is not met. What changed is the argument: a slice 3
+differential now has six answers to check, one lowering and five refusals by
+name, instead of one answer and five silences. Whether that makes slice 3 worth
+its IR migration and seam-API change is a decision for the item's owner, and it
+has not been taken.
+
 ## 7. Recursion, and what would have to change together
 
 The most valuable thing a grammar can express that an inline schema cannot is a
@@ -824,3 +849,29 @@ not get a subtly wrong value, it gets an unconstrained one.
   three anyway.
 * **A general rate.** Three prompts per arm is enough to show that each of these
   outcomes happens, and is not enough to say how often.
+
+## 12. Through the runtime adapters (issue #1462)
+
+Sections 9 to 11 describe a provider as "the host object bound to the
+crossing's require key" and measured one written by hand. Issue #1461 made that
+object a runtime component (`revl.providers`, `revl run --providers`), and issue
+#1462 wired this item's artifacts into it:
+
+* the OpenAI-compatible adapter takes the `json-schema` dialect as
+  `response_format`, or the `gbnf` dialect as llama.cpp's `grammar` field, and
+  claims it through `revl_constrain`, in the caller's context, before an `async`
+  operation moves to a worker thread (a claim is a context variable);
+* the Anthropic and Gemini adapters READ the wire schema (a forced tool's
+  `input_schema`, a translated `responseSchema`) and claim nothing, because
+  neither enforces exactly that artifact;
+* with llguidance installed, a derived GBNF grammar is compiled by a real engine
+  before it is claimed, and a completion made under a `gbnf` claim is matched
+  byte for byte. This closes part of section 11.5's first point: the grammars
+  in `tests/test_constrained_decoding_1462.py` parse and behave in llguidance's
+  GBNF reader. It is not llama.cpp's parser, so that point stands for llama.cpp.
+* `validate_retry` now also retries a `ResponseValidationError` the completion
+  call itself raises, which is how the byte-level refusal rides the budget.
+
+`docs/model-providers.md` has the per-adapter table of exact and approximated
+types, and `bench/structured_output_bench.py` measures the path end to end.
+

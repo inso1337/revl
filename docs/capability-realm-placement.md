@@ -73,6 +73,11 @@ isolates into no named realm is never constrained, and an unpinned host with no
 validates trivially and produces **byte-identical** specs and output to before
 this item. The existing placement examples set neither and are unchanged.
 
+A host may also declare the devices it offers to model loads
+(`[[processes.<p>.devices]]`, item 515). That is a separate check with the
+same shape: a routed model action whose candidates need a device the host does
+not list is refused before anything spawns. See `docs/model-scheduling.md`.
+
 ## Optimization: the co-location advisory (conservative, opt-in)
 
 There is a real optimization angle — a provider and consumer of the same key in
@@ -98,6 +103,17 @@ default runs are byte-identical. Turning the advice into an *enforced* affinity
 (refusing a split realm) or an automatic re-placement is deliberately left out
 of this cut — correctness (capability/realm-consistent placement + a clear
 refusal) is the priority, and the optimization stays conservative.
+
+## Realms inside a process
+
+A placement process plugs each component into the realms its `isolate` map
+names, as `revl run` and `revl mcp` do, so two tenants of one key can share a
+process. A proxy for a key served by another process is provided in that
+key's provider realm, so a local consumer isolated into the same realm sees
+it. Probes and the served seam resolve a key the way `revl_call` does: the
+shared realm first, otherwise the key's single isolated realm. A probe on a
+key isolated into two or more realms is refused, naming each provider and its
+realm.
 
 ## Example
 

@@ -1344,14 +1344,18 @@ test "a record literal reaches a declared record through an Opt" {
 type MethSig = { name: Str, params: List[ParamN], ret: Str,
                  isEm: Bool, caps: List[Str], isAsync: Bool }
 type SvcD    = { name: Str, methods: List[MethSig] }
-// kind: emit | effect | undo | let | return | expr | skip; bind names a let.
+// kind: emit | effect | undo | let | return | expr | skip, plus the block
+// reader's scope_open | scope_close around an arm and elem for a `for` element;
+// bind names a let (or the element).
 type Stmt    = { kind: Str, bind: Str, e: Expr }
 // `extCaps` is what an extern-declared boundary crossing SEEDS the emission
 // fixed point with: its own name for an `emission`, its declared scope for a
 // scoped `witnessed` (item 243). Empty for a module `fn`, which contributes
 // the union of what it calls and never its own name.
+// `appr` is the declaration-owned `requires approval` floor (item 246): a
+// crossing of this extern needs a covering `with` edge.
 type FnD     = { name: Str, params: List[ParamN], extEm: Bool,
-                 extCaps: List[Str], body: List[Stmt] }
+                 extCaps: List[Str], body: List[Stmt], appr: Bool }
 // `isAsync` / `ret` are what the PROVIDER spelled, not what the service
 // declared: A6 judges the two against each other, so both sides have to be
 // carried separately. `ret` is "" when the method restated no return type.
@@ -1762,7 +1766,8 @@ fn mk_meths(xs: List[MethSig], i: Int, ok: Bool) -> MethsR {
 }
 
 fn mk_fn_d(nm: Str, ps: List[ParamN], em: Bool, cs: List[Str]) -> FnD {
-  return { name: nm, params: ps, extEm: em, extCaps: cs, body: [] }
+  return { name: nm, params: ps, extEm: em, extCaps: cs, body: [],
+           appr: false }
 }
 
 fn mk_meth(nm: Str, ps: List[ParamN], rt: Str, em: Bool,
@@ -1916,15 +1921,24 @@ fn p_extern(ts: List[Token], i: Int, pg: Prog) -> PStep {
   // spell one of these words, so widening the set only ends the extern where it
   // already ended (`selfhost/lower.rvl::p_extern` carries the same list).
   var k = rt.i
+  var appr = false
   while (k < ts.length() && !atw(ts, k, "service") && !atw(ts, k, "component")
          && !atw(ts, k, "extern") && !atw(ts, k, "fn") && !atw(ts, k, "pub")
          && !atw(ts, k, "type") && !atk(ts, k, "eof")) {
+    // item 246: `requires approval`, read before the `= @host` bodies. The
+    // reference parses it in the same post-return slot (`extern_decl`).
+    if (!appr && atw(ts, k, "requires") && ati(ts, k + 1, "approval")) {
+      appr = true
+    }
     if (atk(ts, k, "{")) {
       let e = close_brace(ts, k)
       if (e == 0 - 1) { k = ts.length() } else { k = e }
     } else { k += 1 }
   }
-  return mk_step(push_fn(pg, mk_fn_d(nm, ps.ps, em || wit, seed)), k)
+  let d = mk_fn_d(nm, ps.ps, em || wit, seed)
+  return mk_step(push_fn(pg, { name: d.name, params: d.params, extEm: d.extEm,
+                               extCaps: d.extCaps, body: d.body,
+                               appr: appr }), k)
 }
 
 // The capability tokens inside a `[...]` scope bracket, spelled as the
@@ -2006,7 +2020,7 @@ fn p_fn(ts: List[Token], i: Int, pg: Prog) -> PStep {
   }
   let body = p_stmts(ts, bi + 1, bend - 1, [])
   return { pg: push_fn(pg, { name: nm, params: ps.ps, extEm: false,
-                             extCaps: [], body: body }),
+                             extCaps: [], body: body, appr: false }),
            i: bend }
 }
 
@@ -2171,19 +2185,68 @@ fn append_stmts(a: List[Stmt], bs: List[Stmt]) -> List[Stmt] {
   return out
 }
 
-// One line's worth of tokens as statement(s). `effect X undo Y` on one line
-// yields two statements; `let n = [emit|effect] expr [undo expr]` keeps the
-// binding name for the checker's environment.
-fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
+// ---- the approval floor's surface (item 246) --------------------------------
+//
+// `let a = await approval[C] { ... }` binds an `Approval[C]`, and an emit step
+// threads one with a trailing `with <e>`. Both are read here as statements of
+// their own: an `approval` statement carries the token as a string literal,
+// and a `with` statement carries the edge expression and belongs to the emit
+// immediately before it (`check_stmts_in` reads it from there).
+fn at_await_approval(ts: List[Token], i: Int) -> Bool {
+  return atw(ts, i, "await") && ati(ts, i + 1, "approval") && atk(ts, i + 2, "[")
+}
+
+// The capability token at `i`, spelled as the reference's
+// `_capability_token`: a string literal as written, or a dotted ident path
+// joined by `.`.
+fn approval_token(ts: List[Token], i: Int) -> Str {
+  if (atk(ts, i, "string")) { return tkc(ts, i).text }
+  var out = tkc(ts, i).text
+  var k = i + 1
+  while (atk(ts, k, ".") && atk(ts, k + 1, "ident")) {
+    out = out.concat(".").concat(tkc(ts, k + 1).text)
+    k += 2
+  }
+  return out
+}
+
+type WithR = { found: Bool, e: Expr, i: Int }
+
+// The `with <e>` clause after an emit's call, stepping over a `compensate
+// <e>` written before it as the reference's `_emit_stmt` reads them.
+fn with_edge(ts: List[Token], i: Int) -> WithR {
+  var k = i
+  if (atw(ts, k, "compensate")) {
+    let c = expr_at(ts, k + 1)
+    if (is_bad(c.e)) { return { found: false, e: c.e, i: i } }
+    k = c.i
+  }
+  if (!atw(ts, k, "with")) { return { found: false, e: int_lit0(), i: i } }
+  let w = expr_at(ts, k + 1)
+  if (is_bad(w.e)) { return { found: false, e: w.e, i: i } }
+  return { found: true, e: w.e, i: w.i }
+}
+
+// One statement run as statement(s), and the index just past what it read (`hi`
+// when the run did not parse, so the caller moves on by the line).
+// `effect X undo Y` on one line yields two statements; `let n = [emit|effect]
+// expr [undo expr]` keeps the binding name for the checker's environment.
+type SRun = { ss: List[Stmt], i: Int }
+
+fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
   let t = tkc(ts, lo)
   if (t.kind == "kw" && (t.text == "let" || t.text == "var")) {
     let nm = tkc(ts, lo + 1).text
     var eq = lo + 2
     if (atk(ts, eq, ":")) { eq = type_at(ts, eq + 1).i }
     if (!atk(ts, eq, "=")) {
-      return [mk_stmt3("skip", nm, int_lit0())]
+      return { ss: [mk_stmt3("skip", nm, int_lit0())], i: hi }
     }
     var j = eq + 1
+    if (at_await_approval(ts, j)) {
+      return { ss: [mk_stmt3("approval", nm, StrLit(approval_token(ts, j + 3)))],
+               i: hi }
+    }
     var kd = "expr"
     if (atw(ts, j, "emit")) {
       kd = "emit"
@@ -2196,49 +2259,183 @@ fn p_stmt_run(ts: List[Token], lo: Int, hi: Int) -> List[Stmt] {
       }
     }
     let r = expr_at(ts, j)
-    if (is_bad(r.e)) { return [mk_stmt3("skip", nm, r.e)] }
+    if (is_bad(r.e)) { return { ss: [mk_stmt3("skip", nm, r.e)], i: hi } }
     var out: List[Stmt] = [mk_stmt3(kd, nm, r.e)]
+    var endl = r.i
     if (atw(ts, r.i, "undo")) {
       let u = expr_at(ts, r.i + 1)
-      if (!is_bad(u.e)) { out = out.push(mkstmt("undo", u.e)) }
+      if (!is_bad(u.e)) {
+        out = out.push(mkstmt("undo", u.e))
+        endl = u.i
+      }
     }
-    return out
+    return { ss: out, i: endl }
   }
   if (t.kind == "kw" && t.text == "return") {
     let rr = expr_at(ts, lo + 1)
-    if (is_bad(rr.e)) { return [mkstmt("skip", rr.e)] }
-    return [mkstmt("return", rr.e)]
+    if (is_bad(rr.e)) { return { ss: [mkstmt("skip", rr.e)], i: hi } }
+    return { ss: [mkstmt("return", rr.e)], i: rr.i }
   }
   if (t.kind == "kw" && t.text == "emit") {
     let re1 = expr_at(ts, lo + 1)
-    if (is_bad(re1.e)) { return [mkstmt("skip", re1.e)] }
-    return [mkstmt("emit", re1.e)]
+    if (is_bad(re1.e)) { return { ss: [mkstmt("skip", re1.e)], i: hi } }
+    let w1 = with_edge(ts, re1.i)
+    if (w1.found) {
+      return { ss: [mkstmt("emit", re1.e), mkstmt("with", w1.e)], i: w1.i }
+    }
+    return { ss: [mkstmt("emit", re1.e)], i: re1.i }
   }
   if (t.kind == "kw" && (t.text == "effect" || t.text == "undo")) {
     let rf = expr_at(ts, lo + 1)
-    if (is_bad(rf.e)) { return [mkstmt("skip", rf.e)] }
+    if (is_bad(rf.e)) { return { ss: [mkstmt("skip", rf.e)], i: hi } }
     var out2: List[Stmt] = [mkstmt(t.text, rf.e)]
+    var endl2 = rf.i
     if (atw(ts, rf.i, "undo")) {
       let u2 = expr_at(ts, rf.i + 1)
-      if (!is_bad(u2.e)) { out2 = out2.push(mkstmt("undo", u2.e)) }
+      if (!is_bad(u2.e)) {
+        out2 = out2.push(mkstmt("undo", u2.e))
+        endl2 = u2.i
+      }
     }
-    return out2
+    return { ss: out2, i: endl2 }
   }
   let r2 = expr_at(ts, lo)
-  if (is_bad(r2.e)) { return [mkstmt("skip", r2.e)] }
-  return [mkstmt("expr", r2.e)]
+  if (is_bad(r2.e)) { return { ss: [mkstmt("skip", r2.e)], i: hi } }
+  return { ss: [mkstmt("expr", r2.e)], i: r2.i }
 }
 
+// ------------------------------------------------- block statements, by nesting
+//
+// `if (<c>) <arm> [else <arm>]`, `while (<c>) <arm>` and `for (<x> of <e>) <arm>`,
+// where an arm is a brace block or one statement. The reader had no case for any
+// of them (issue #1453, the checker twin of the `selfhost/lower.rvl` fix in PR
+// #1452). A head line parsed as a bad expression and was skipped, and what
+// happened next depended on the LAYOUT, not on the program:
+//
+//   * written over several lines, the body's lines were read as the enclosing
+//     body's up to the line holding the block's `}`, and `p_stmts` and
+//     `p_comp_body` both stopped there. A guard's closing brace ended the
+//     COMPONENT, so no `provide` after it was checked, and an `if`'s closing
+//     brace ended the METHOD, so no statement after it was checked;
+//   * written on one line, the whole block was the skipped line, so nothing in
+//     its body or its condition was checked.
+//
+// The block is now read to its MATCHING brace by nesting depth (`close_brace`),
+// its condition is walked as an expression statement, and its arms are read out
+// inline: to the checker, the statements of a branch are more statements of the
+// body that holds it. Each arm is bracketed by `scope_open` / `scope_close`, so a
+// name bound in an arm leaves the environment where the arm ends (`check_stmts`).
+type StmtBlk = { ss: List[Stmt], i: Int, ok: Bool }
+
+fn blk_no() -> StmtBlk { return { ss: [], i: 0, ok: false } }
+
+fn scoped(ss: List[Stmt]) -> List[Stmt] {
+  let open: List[Stmt] = [mkstmt("scope_open", int_lit0())]
+  return append_stmts(open, ss).push(mkstmt("scope_close", int_lit0()))
+}
+
+// One arm's statements, unbracketed: a brace block read to its matching brace,
+// or a single statement (itself possibly a block).
+fn p_block_arm(ts: List[Token], k: Int) -> StmtBlk {
+  if (atk(ts, k, "{")) {
+    let e = close_brace(ts, k)
+    if (e == 0 - 1) { return blk_no() }
+    return { ss: p_stmts(ts, k + 1, e - 1, []), i: e, ok: true }
+  }
+  if (k >= ts.length() || atk(ts, k, "eof") || atk(ts, k, "}")) { return blk_no() }
+  let le = line_end(ts, k, ts.length())
+  if (atw(ts, k, "if") || atw(ts, k, "while") || atw(ts, k, "for")) {
+    let nb = p_block_stmt(ts, k)
+    if (nb.ok) { return nb }
+  }
+  let r = p_stmt_run(ts, k, le)
+  return { ss: r.ss, i: r.i > k ? r.i : le, ok: true }
+}
+
+// `( <cond> )` at k: the condition, walked as an expression statement, because
+// a call in it is checked exactly as a call in the body is.
+fn p_block_cond(ts: List[Token], k: Int) -> StmtBlk {
+  if (!atk(ts, k, "(")) { return blk_no() }
+  let c = expr_at(ts, k + 1)
+  if (is_bad(c.e) || !atk(ts, c.i, ")")) { return blk_no() }
+  return { ss: [mkstmt("expr", c.e)], i: c.i + 1, ok: true }
+}
+
+// The `else` tail of an `if` whose then-arm ended at k. A malformed tail keeps
+// what was read and stops at the `else`.
+fn p_else_tail(ts: List[Token], k: Int, acc: List[Stmt]) -> StmtBlk {
+  if (!atw(ts, k, "else")) { return { ss: acc, i: k, ok: true } }
+  if (atw(ts, k + 1, "if")) {
+    let ei = p_block_stmt(ts, k + 1)
+    if (!ei.ok) { return { ss: acc, i: k, ok: true } }
+    return { ss: append_stmts(acc, ei.ss), i: ei.i, ok: true }
+  }
+  let el = p_block_arm(ts, k + 1)
+  if (!el.ok) { return { ss: acc, i: k, ok: true } }
+  return { ss: append_stmts(acc, scoped(el.ss)), i: el.i, ok: true }
+}
+
+fn p_block_stmt(ts: List[Token], lo: Int) -> StmtBlk {
+  if (atw(ts, lo, "if") || atw(ts, lo, "while")) {
+    let c = p_block_cond(ts, lo + 1)
+    if (!c.ok) { return blk_no() }
+    let body = p_block_arm(ts, c.i)
+    if (!body.ok) { return blk_no() }
+    let ss = append_stmts(c.ss, scoped(body.ss))
+    if (atw(ts, lo, "while")) { return { ss: ss, i: body.i, ok: true } }
+    return p_else_tail(ts, body.i, ss)
+  }
+  // `for (<x> of <iterable>)`: the iterable is an expression, and the element
+  // name is bound inside the body with the unknown type "", so a call that
+  // passes it is judged as leniently as the reference judges an unknown.
+  if (atw(ts, lo, "for") && atk(ts, lo + 1, "(") && atk(ts, lo + 2, "ident")
+      && atw(ts, lo + 3, "of")) {
+    let it = expr_at(ts, lo + 4)
+    if (is_bad(it.e) || !atk(ts, it.i, ")")) { return blk_no() }
+    let body2 = p_block_arm(ts, it.i + 1)
+    if (!body2.ok) { return blk_no() }
+    let elem: List[Stmt] = [mk_stmt3("elem", tkc(ts, lo + 2).text, int_lit0())]
+    let head: List[Stmt] = [mkstmt("expr", it.e)]
+    return { ss: append_stmts(head, scoped(append_stmts(elem, body2.ss))),
+             i: body2.i, ok: true }
+  }
+  return blk_no()
+}
+
+// One statement run, a block statement included. `hi` bounds a non-block run,
+// which always ends there: a block runs to its matching brace, wherever that is.
+fn p_run(ts: List[Token], lo: Int, hi: Int) -> SRun {
+  if (atw(ts, lo, "if") || atw(ts, lo, "while") || atw(ts, lo, "for")) {
+    let b = p_block_stmt(ts, lo)
+    if (b.ok) { return { ss: b.ss, i: b.i } }
+  }
+  return { ss: p_stmt_run(ts, lo, hi).ss, i: hi }
+}
+
+// A body's statements, over `[lo, hi)`. `hi` is the body's own closing brace,
+// found by nesting depth, so a `}` met before it closes some inner block the
+// reader entered without recognising. It is stepped over, never taken for the
+// end of the body: stopping there left every statement after the block unread.
 fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
-  if (lo >= hi || atk(ts, lo, "}")) { return acc }
-  let re = line_end(ts, lo, hi)
-  return p_stmts(ts, re, hi, append_stmts(acc, p_stmt_run(ts, lo, re)))
+  if (lo >= hi) { return acc }
+  if (atk(ts, lo, "}")) { return p_stmts(ts, lo + 1, hi, acc) }
+  let le = line_end(ts, lo, hi)
+  let r = p_run(ts, lo, le)
+  let nx = r.i > lo ? r.i : le
+  return p_stmts(ts, nx, hi, append_stmts(acc, r.ss))
 }
 
 fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                provs: List[Provide], setup: List[Stmt]) -> ProvR {
-  if (i >= end || atk(ts, i, "}")) {
+  if (i >= end) {
     return { provs: provs, setup: setup, i: i, ok: true }
+  }
+  // `end` is the component's own closing brace, found by nesting depth, so a
+  // `}` before it closes an inner block and is stepped over (see `p_stmts`).
+  // Taking it for the component's end is what let a multi-line guard hide every
+  // `provide` written after it.
+  if (atk(ts, i, "}")) {
+    return p_comp_body(ts, i + 1, end, provh, provs, setup)
   }
   if (atw(ts, i, "provide")) {
     let key = tkc(ts, i + 1).text
@@ -2260,10 +2457,13 @@ fn p_comp_body(ts: List[Token], i: Int, end: Int, provh: List[Bind],
                        setup)
   }
   // component setup: one statement run per line, kept for the same call-site
-  // checks a provision body gets — G4 gates setup too (g4_unmarked_emission).
-  let re = line_end(ts, i, end)
-  let ss = p_stmt_run(ts, i, re)
-  return p_comp_body(ts, re, end, provh, provs, append_stmts(setup, ss))
+  // checks a provision body gets (G4 gates setup too: g4_unmarked_emission).
+  // A guard (`if (...) { ... }`) is read to its matching brace, so its arms are
+  // setup too.
+  let le = line_end(ts, i, end)
+  let r = p_run(ts, i, le)
+  let nx = r.i > i ? r.i : le
+  return p_comp_body(ts, nx, end, provh, provs, append_stmts(setup, r.ss))
 }
 
 fn p_component(ts: List[Token], i: Int, pg: Prog) -> PStep {
@@ -2861,27 +3061,242 @@ fn ck_ordered(before: Ev, ck: Ck, step: Bool) -> Ck {
 }
 
 fn check_stmts(ss: List[Stmt], i: Int, ck: Ck) -> Ck {
+  return check_stmts_in(ss, i, [], ck)
+}
+
+// `marks` holds the environment's length at each open block arm (`scoped`): a
+// name bound inside an arm leaves scope where the arm ends. Without that, a
+// name an arm binds and the body binds again after the block would resolve to
+// the ARM's binding (`lookup_at` takes the first match), and a call passing it
+// would be judged against the wrong type.
+fn check_stmts_in(ss: List[Stmt], i: Int, marks: List[Int], ck: Ck) -> Ck {
   if (i >= ss.length() || ck.msg != "") { return ck }
   let s = ss[i]
-  if (s.kind == "skip") { return check_stmts(ss, i + 1, ck) }
+  if (s.kind == "skip") { return check_stmts_in(ss, i + 1, marks, ck) }
+  if (s.kind == "scope_open") {
+    return check_stmts_in(ss, i + 1, marks.push(ck.env.length()), ck)
+  }
+  if (s.kind == "scope_close") {
+    if (marks.length() == 0) { return check_stmts_in(ss, i + 1, marks, ck) }
+    let m = marks[marks.length() - 1]
+    return check_stmts_in(ss, i + 1, marks.slice(0, marks.length() - 1),
+                          mk_ck2(ck.ctx, ck.env.slice(0, m), ck.ev, ck.msg))
+  }
+  if (s.kind == "elem") {
+    return check_stmts_in(ss, i + 1, marks,
+                          mk_ck2(ck.ctx, ck.env.push({ name: s.bind, ty: "" }),
+                                 ck.ev, ck.msg))
+  }
+  if (s.kind == "approval") {
+    let ty = "Approval[".concat(str_lit_of(s.e)).concat("]")
+    return check_stmts_in(ss, i + 1, marks,
+                          mk_ck2(ck.ctx, ck.env.push({ name: s.bind, ty: ty }),
+                                 ck.ev, ck.msg))
+  }
+  if (s.kind == "with") { return check_stmts_in(ss, i + 1, marks, ck) }
   var next = ck
   if (s.bind != "") {
     // calls in the value count even though the statement also binds
-    next = walk_expr(s.e, s.kind == "emit", ck)
+    next = walk_expr(s.e, stmt_mode(s), ck)
     if (next.msg != "") { return next }
     next = ck_ordered(ck.ev, next, s.kind == "emit")
     let inf = infer_t(s.e, next.env, next.ctx.tt, Map.empty())
     if (!inf.ok) { return refuse_ck(next, inf.msg) }
     next = { ctx: next.ctx, env: next.env.push({ name: s.bind, ty: inf.ty }),
               ev: next.ev, msg: "" }
-    return check_stmts(ss, i + 1, next)
+    return check_stmts_in(ss, i + 1, marks, next)
   }
-  next = walk_expr(s.e, s.kind == "emit", note_host_emission(s, ck))
+  next = walk_expr(s.e, stmt_mode(s), note_host_emission(s, ck))
   if (next.msg != "") { return next }
-  return check_stmts(ss, i + 1, ck_ordered(ck.ev, next, s.kind == "emit"))
+  next = approval_floor(s, edge_after(ss, i), next)
+  if (next.msg != "") { return next }
+  return check_stmts_in(ss, i + 1, marks,
+                        ck_ordered(ck.ev, next, s.kind == "emit"))
 }
 
-fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {
+// ---- one `emit` marker per crossing (issue #1175, #1427) -------------------
+//
+// The reference marks the HEAD call of an `emit` and lowers its argument list
+// in the enclosing mode (`_emit_head_args`). So the walk carries one of three
+// modes instead of a marked flag:
+//
+//   * plain: an ordinary position, where an emission is unmarked;
+//   * head:  the call an `emit` marks, and the receiver chain leading to it;
+//   * args:  anywhere inside the argument list of a marked head.
+//
+// An emission in `args` is unmarked exactly as in `plain`, and two refusals of
+// the reference become reachable with its text: a call to an emitting name
+// (`_refuse_unmarked_emission_call`, the host-extern carrier) and an `emit`
+// nested in another's arguments (`_refuse_nested_emit`). Before this, the
+// marked flag reached the arguments too, so `emit log_line(charge(1))` read
+// as two marked crossings and was admitted.
+fn mode_plain() -> Int { return 0 }
+fn mode_head() -> Int { return 1 }
+fn mode_args() -> Int { return 2 }
+
+fn stmt_mode(s: Stmt) -> Int {
+  if (s.kind == "emit") { return mode_head() }
+  return mode_plain()
+}
+
+// The mode an argument list is walked in: a marked head's arguments, and
+// everything nested in them, are `args`; elsewhere the mode stays `plain`.
+fn arg_mode(mode: Int) -> Int {
+  if (mode == mode_plain()) { return mode_plain() }
+  return mode_args()
+}
+
+// An arrow's body runs when the arrow is CALLED, not while the enclosing
+// `emit`'s arguments are evaluated, so it is not in argument position even
+// when written inside one: the reference clears `_in_emit_args` for the body.
+// `(t, a) => emit approvals.approve(t, a)` passed inline is the same marked
+// crossing it is when bound by `let` first.
+fn arrow_mode(mode: Int) -> Int {
+  if (mode == mode_args()) { return mode_plain() }
+  return mode
+}
+
+fn nested_emit_refusal() -> Str {
+  return "`emit` nested in the arguments of an `emit`: ".concat(
+    "one marker admits one crossing (G4)")
+}
+
+// ---- the declaration-owned approval floor (item 246, Decision 3) ------------
+//
+// Port of `_lower_emit_approval`. Every capability an emit step crosses that
+// an extern declared `requires approval` for must be covered by the step's
+// `with` edge, else the step is refused; the edge itself must be an
+// `Approval[C]`. Judged after the step's call, in the reference's order. The
+// policy-owned half is admission's and is not here.
+//
+// It is judged where the reference's `_lower_emit_step` judges it: on an
+// `emit` statement.
+type EdgeR = { has: Bool, e: Expr }
+
+fn edge_after(ss: List[Stmt], i: Int) -> EdgeR {
+  if (i + 1 < ss.length() && ss[i + 1].kind == "with") {
+    return { has: true, e: ss[i + 1].e }
+  }
+  return { has: false, e: int_lit0() }
+}
+
+fn str_lit_of(e: Expr) -> Str {
+  return match e {
+    StrLit(v) => v,
+    _         => "",
+  }
+}
+
+// `Approval[C]` -> `C`, or "" for any other type.
+fn approval_scope(ty: Str) -> Str {
+  if (!ty.startsWith("Approval[") || !ty.endsWith("]")) { return "" }
+  return ty.slice(9, ty.length() - 1)
+}
+
+fn approval_floor(s: Stmt, edge: EdgeR, ck: Ck) -> Ck {
+  if (s.kind != "emit") { return ck }
+  var scope = ""
+  if (edge.has) {
+    let inf = infer_t(edge.e, ck.env, ck.ctx.tt, Map.empty())
+    if (!inf.ok) { return refuse_ck(ck, inf.msg) }
+    scope = approval_scope(inf.ty)
+    if (scope == "") {
+      let shown = inf.ty == "" ? "unknown" : inf.ty
+      return refuse_ck(ck, "`with` on `emit` expects an `Approval[C]` value, "
+        .concat("but the expression has type ").concat(shown))
+    }
+  }
+  return floor_tokens(crossed_caps(s.e, ck), 0, scope, ck)
+}
+
+fn floor_tokens(toks: List[Str], i: Int, scope: Str, ck: Ck) -> Ck {
+  if (i >= toks.length()) { return ck }
+  let t = toks[i]
+  if (approval_required(t, ck) && (scope == "" || !glob_match(scope, 0, t, 0))) {
+    return refuse_ck(ck, "crossing capability `".concat(t)
+      .concat("` requires approval, but this `emit` carries no covering ")
+      .concat("`with` edge"))
+  }
+  return floor_tokens(toks, i + 1, scope, ck)
+}
+
+// The required set is the capability TOKENS of the externs that declared the
+// floor, as the reference's `_approval_index` builds it (issue #1437): an
+// extern's declared scope, else its name. That is the token `crossed_caps`
+// resolves the crossing to, so a scoped `emission[pay.card] ... requires
+// approval` extern is required under `pay.card`; keyed by name, the two never
+// met and such a crossing needed no edge.
+fn approval_required(token: Str, ck: Ck) -> Bool {
+  return appr_token_in(ck.ctx.fns.keys(), 0, token, ck)
+}
+
+fn appr_token_in(names: List[Str], i: Int, token: Str, ck: Ck) -> Bool {
+  if (i >= names.length()) { return false }
+  let hit = match ck.ctx.fns.lookup(names[i]) {
+    Some(f) => f.appr && f.extEm && list_contains(f.extCaps, token),
+    None    => false,
+  }
+  if (hit) { return true }
+  return appr_token_in(names, i + 1, token, ck)
+}
+
+// `_emit_crossed_caps`: the token(s) ONE emit step crosses. A required-service
+// emission crosses its method's declared scope, or `*` when bare; a direct
+// emission extern crosses its declared scope, or its own name.
+fn crossed_caps(e: Expr, ck: Ck) -> List[Str] {
+  return match e {
+    Call(c) => match c.target {
+      Var(n) => extern_crossed(n, ck),
+      Field(fl) => match fl.target {
+        Var(root) => req_crossed(root, fl.name, ck),
+        _         => [],
+      },
+      _ => [],
+    },
+    _ => [],
+  }
+}
+
+fn extern_crossed(name: Str, ck: Ck) -> List[Str] {
+  return match ck.ctx.fns.lookup(name) {
+    Some(f) => f.extEm ? f.extCaps : [],
+    None    => [],
+  }
+}
+
+fn req_crossed(root: Str, meth: Str, ck: Ck) -> List[Str] {
+  if (!ck.ctx.reqMap.has(root)) { return [] }
+  let svcName = match ck.ctx.reqMap.lookup(root) { Some(v) => v, None => "" }
+  if (!ck.ctx.svcs.has(svcName)) { return ["*"] }
+  let svc = match ck.ctx.svcs.lookup(svcName) {
+    Some(v) => v,
+    None    => { name: svcName, methods: [] },
+  }
+  let mr = find_method(svc, meth, 0)
+  if (!mr.ok) { return [] }
+  if (mr.m.caps.length() > 0) { return mr.m.caps }
+  return ["*"]
+}
+
+// `fnmatchcase(token, scope)` for the two wildcards an approval scope is
+// written with, `*` and `?`. A `[...]` class is matched literally, which is
+// the one place this can differ from the reference: no first-party scope
+// spells one.
+fn glob_match(p: Str, i: Int, t: Str, j: Int) -> Bool {
+  if (i >= p.length()) { return j >= t.length() }
+  let c = p.slice(i, i + 1)
+  if (c == "*") {
+    if (glob_match(p, i + 1, t, j)) { return true }
+    return j < t.length() && glob_match(p, i, t, j + 1)
+  }
+  if (j >= t.length()) { return false }
+  if (c == "?" || c == t.slice(j, j + 1)) {
+    return glob_match(p, i + 1, t, j + 1)
+  }
+  return false
+}
+
+fn walk_expr(e: Expr, mode: Int, ck: Ck) -> Ck {
   return match e {
     IntLit(_)   => ck,
     FloatLit(_) => ck,
@@ -2892,72 +3307,80 @@ fn walk_expr(e: Expr, marked: Bool, ck: Ck) -> Ck {
     Hole(_)    => ck,
     Asset(_)   => ck,
     Bad(_)     => ck,
-    Bin(b)     => walk_expr(b.r, marked, walk_expr(b.l, marked, ck)),
-    Un(u)      => walk_expr(u.e, marked, ck),
-    Emit(u)    => walk_expr(u.e, true, ck),
-    Call(c)    => call_check(c.target, c.args, marked, ck),
-    Field(f)   => walk_expr(f.target, marked, ck),
-    OptField(f) => walk_expr(f.target, marked, ck),
-    OptCall(c) => walk_args(c.args, 0, marked, walk_expr(c.target, marked, ck)),
-    Index(x)   => walk_expr(x.idx, marked, walk_expr(x.target, marked, ck)),
-    If(x)      => walk_expr(x.els, marked,
-                            walk_expr(x.then_, marked,
-                                      walk_expr(x.cond, marked, ck))),
-    Rec(r)     => walk_inits(r.fields, 0, marked, ck),
-    Lst(l)     => walk_exprs(l.items, 0, marked, ck),
-    Arrow(a)   => walk_expr(a.body, marked, ck),
-    Match(m)   => walk_arms(m.arms, 0, marked, walk_expr(m.scrut, marked, ck)),
-    Templ(t)   => walk_parts(t.parts, 0, marked, ck),
-    RecUpd(r)  => walk_inits(r.upds, 0, marked, walk_expr(r.base, marked, ck)),
+    Bin(b)     => walk_expr(b.r, mode, walk_expr(b.l, mode, ck)),
+    Un(u)      => walk_expr(u.e, mode, ck),
+    Emit(u)    => walk_emit(u.e, mode, ck),
+    Call(c)    => call_check(c.target, c.args, mode, ck),
+    Field(f)   => walk_expr(f.target, mode, ck),
+    OptField(f) => walk_expr(f.target, mode, ck),
+    OptCall(c) => walk_args(c.args, 0, arg_mode(mode),
+                            walk_expr(c.target, mode, ck)),
+    Index(x)   => walk_expr(x.idx, mode, walk_expr(x.target, mode, ck)),
+    If(x)      => walk_expr(x.els, mode,
+                            walk_expr(x.then_, mode,
+                                      walk_expr(x.cond, mode, ck))),
+    Rec(r)     => walk_inits(r.fields, 0, mode, ck),
+    Lst(l)     => walk_exprs(l.items, 0, mode, ck),
+    Arrow(a)   => walk_expr(a.body, arrow_mode(mode), ck),
+    Match(m)   => walk_arms(m.arms, 0, mode, walk_expr(m.scrut, mode, ck)),
+    Templ(t)   => walk_parts(t.parts, 0, mode, ck),
+    RecUpd(r)  => walk_inits(r.upds, 0, mode, walk_expr(r.base, mode, ck)),
   }
 }
 
-fn walk_exprs(xs: List[Expr], i: Int, marked: Bool, ck: Ck) -> Ck {
+fn walk_exprs(xs: List[Expr], i: Int, mode: Int, ck: Ck) -> Ck {
   if (i >= xs.length() || ck.msg != "") { return ck }
-  return walk_exprs(xs, i + 1, marked, walk_expr(xs[i], marked, ck))
+  return walk_exprs(xs, i + 1, mode, walk_expr(xs[i], mode, ck))
 }
 
-fn walk_args(xs: List[Expr], i: Int, marked: Bool, ck: Ck) -> Ck {
-  return walk_exprs(xs, i, marked, ck)
+fn walk_args(xs: List[Expr], i: Int, mode: Int, ck: Ck) -> Ck {
+  return walk_exprs(xs, i, mode, ck)
 }
 
-fn walk_inits(xs: List[InitN], i: Int, marked: Bool,
+fn walk_inits(xs: List[InitN], i: Int, mode: Int,
               ck: Ck) -> Ck {
   if (i >= xs.length() || ck.msg != "") { return ck }
-  return walk_inits(xs, i + 1, marked, walk_expr(xs[i].value, marked, ck))
+  return walk_inits(xs, i + 1, mode, walk_expr(xs[i].value, mode, ck))
 }
 
 fn walk_arms(xs: List[ArmN], i: Int,
-             marked: Bool, ck: Ck) -> Ck {
+             mode: Int, ck: Ck) -> Ck {
   if (i >= xs.length() || ck.msg != "") { return ck }
-  return walk_arms(xs, i + 1, marked, walk_expr(xs[i].body, marked, ck))
+  return walk_arms(xs, i + 1, mode, walk_expr(xs[i].body, mode, ck))
 }
 
 fn walk_parts(xs: List[PartN], i: Int,
-              marked: Bool, ck: Ck) -> Ck {
+              mode: Int, ck: Ck) -> Ck {
   if (i >= xs.length() || ck.msg != "") { return ck }
-  return walk_parts(xs, i + 1, marked, walk_expr(xs[i].e, marked, ck))
+  return walk_parts(xs, i + 1, mode, walk_expr(xs[i].e, mode, ck))
 }
 
-fn call_check(tg: Expr, args: List[Expr], marked: Bool, ck: Ck) -> Ck {
+// An `emit` expression: refused inside another `emit`'s arguments, otherwise
+// its operand is the marked head.
+fn walk_emit(e: Expr, mode: Int, ck: Ck) -> Ck {
+  if (mode == mode_args()) { return refuse_ck(ck, nested_emit_refusal()) }
+  return walk_expr(e, mode_head(), ck)
+}
+
+fn call_check(tg: Expr, args: List[Expr], mode: Int, ck: Ck) -> Ck {
   return match tg {
     Field(fl) => match fl.target {
-      Var(v) => req_call(v, fl.name, args, marked, ck),
-      _      => walk_args(args, 0, marked, walk_expr(tg, marked, ck)),
+      Var(v) => req_call(v, fl.name, args, mode, ck),
+      _      => walk_args(args, 0, arg_mode(mode), walk_expr(tg, mode, ck)),
     },
-    Var(n) => fn_call(n, args, marked, ck),
-    _      => walk_args(args, 0, marked, walk_expr(tg, marked, ck)),
+    Var(n) => fn_call(n, args, mode, ck),
+    _      => walk_args(args, 0, arg_mode(mode), walk_expr(tg, mode, ck)),
   }
 }
 
 // A call through a required key: the reference's `_component_req_call`,
 // in order (arity, then the `emit` marker, then argument types).
-fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
+fn req_call(root: Str, meth: Str, args: List[Expr], mode: Int,
             ck: Ck) -> Ck {
   if (!ck.ctx.reqMap.has(root)) {
     // a host object or a local (`store.insert`), not a requirement:
     // nothing this slice checks about it
-    return walk_args(args, 0, marked, ck)
+    return walk_args(args, 0, arg_mode(mode), ck)
   }
   let svcName = match ck.ctx.reqMap.lookup(root) { Some(v) => v, None => "" }
   var svc = { name: svcName, methods: [] }
@@ -2976,7 +3399,7 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
       .concat(" argument(s), ").concat(int_str(args.length()))
       .concat(" given"))
   }
-  if (decl.isEm && !marked) {
+  if (decl.isEm && mode != mode_head()) {
     return refuse_ck(ck, "call to emission `".concat(root).concat(".")
       .concat(meth).concat("` must be marked `emit` (G4)"))
   }
@@ -2994,11 +3417,11 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
     k += 1
   }
   var ev = ck.ev
-  if (decl.isEm && marked) {
+  if (decl.isEm && mode == mode_head()) {
     let lab = ev.labels.push(root.concat(".").concat(meth))
     ev = mk_ev2(lab, union_into(ev.caps, [root]))
   }
-  return walk_args(args, 0, marked, mk_ck2(ck.ctx, ck.env, ev, ""))
+  return walk_args(args, 0, arg_mode(mode), mk_ck2(ck.ctx, ck.env, ev, ""))
 }
 
 // A bare named-fn call in a component body: G4 evidence (reaching an emitting
@@ -3020,16 +3443,29 @@ fn req_call(root: Str, meth: Str, args: List[Expr], marked: Bool,
 // Leniency is the reference's: a name that is not a declared callable is not
 // judged here, and an argument whose type is unknown ("") is admitted, exactly
 // as `infer_ir` admits a `None`.
-fn fn_call(name: Str, args: List[Expr], marked: Bool, ck: Ck) -> Ck {
+fn fn_call(name: Str, args: List[Expr], mode: Int, ck: Ck) -> Ck {
   var ev = ck.ev
   if (ck.ctx.caps.has(name)) {
     let cc = caps_of(ck.ctx.caps, name)
     let lab = ev.labels.push(name.concat("()"))
     ev = mk_ev2(lab, union_into(ev.caps, cc))
   }
-  let wck = walk_args(args, 0, marked, mk_ck2(ck.ctx, ck.env, ev, ""))
+  let wck = walk_args(args, 0, arg_mode(mode),
+                      mk_ck2(ck.ctx, ck.env, ev, ""))
   if (wck.msg != "") { return wck }
-  return fn_sig_check(name, args, wck)
+  let sck = fn_sig_check(name, args, wck)
+  if (sck.msg != "") { return sck }
+  return unmarked_emitting_call(name, mode, sck)
+}
+
+// The host-extern carrier of the marker rule (issue #1427), in the
+// reference's order: after the arguments and the declared signature. Only the
+// argument list of a marked head is judged here; an unmarked emitting call
+// anywhere else is the provider upper bound's to judge, as in the reference.
+fn unmarked_emitting_call(name: Str, mode: Int, ck: Ck) -> Ck {
+  if (mode != mode_args() || !ck.ctx.caps.has(name)) { return ck }
+  return refuse_ck(ck, "call to emission `".concat(name)
+    .concat("` must be marked `emit` (G4)"))
 }
 
 // The declared-signature half of `fn_call`, ported from `infer_ir`'s `fn` arm

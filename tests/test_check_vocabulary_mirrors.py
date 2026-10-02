@@ -2,20 +2,17 @@
 each way a mirror goes wrong, and it still names the three instances the issue
 was filed for."""
 
-import importlib.util
 import json
-import sys
 from pathlib import Path
+from _load_by_path import load_by_path
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def _tool():
-    spec = importlib.util.spec_from_file_location(
-        "check_vocabulary_mirrors", ROOT / "tools" / "check_vocabulary_mirrors.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path(
+        "check_vocabulary_mirrors",
+        ROOT / "tools" / "check_vocabulary_mirrors.py")
     return module
 
 
@@ -207,27 +204,105 @@ def test_issue_1336s_own_copy_is_imported_rather_than_restated():
 
 
 def test_a_claim_that_drifts_by_one_token_reds_where_exact_equality_is_silent():
-    """Issue #1336's shape, run against the real tree: the recorded near miss
-    gains a token on the side that claims, and the class rule stays green.
+    """Issue #1336's shape, on the real tree's sites: a claim that holds
+    exactly is silent, and the same claim with one token more reds, while the
+    class rule stays green throughout.
 
     This is the whole argument for a second rule. `Session._live_fingerprint`
-    says it produces the shape `apply.fingerprint` does; move the one token
-    that differs and the claim is about a different difference than the one the
-    ledger has a reason for."""
+    says it produces the shape `apply.fingerprint` does. Give the claim exactly
+    `fingerprint`'s vocabulary and it is satisfied; add one token and it is a
+    near miss nobody recorded. The class rule, which only compares equal
+    vocabularies, sees neither. (Since issue #1513 the real session copy
+    differs by two tokens, beyond the slack, so it is no longer a recorded
+    near miss; this test builds the one-token case itself.)"""
     tool, sites, claims, entries, err = _claim_state()
     site = "src/revl/mcp/session.py::Session._live_fingerprint"
-    drifted = [
-        c if c.site != site
-        else tool.Claim(c.site, c.tokens | {"schemaVersion"}, c.cue, c.cited)
-        for c in claims
-    ]
+    target = next(s for s in sites if s.sid == "src/revl/apply.py::fingerprint")
+
+    def claiming(tokens):
+        return [c if c.site != site
+                else tool.Claim(c.site, frozenset(tokens), c.cue, c.cited)
+                for c in claims]
+
+    exact = claiming(target.tokens)
+    assert tool.check_claims(exact, tool.near_misses(sites, exact),
+                             entries, err) == []
+    drifted = claiming(target.tokens | {"schemaVersion"})
     problems = tool.check_claims(drifted, tool.near_misses(sites, drifted),
                                  entries, err)
     assert len(problems) == 1, problems
-    assert "NO LONGER OBSERVED" in problems[0]
+    assert "UNRECORDED NEAR MISS" in problems[0]
+    assert "schemaVersion" in problems[0]
     # The class rule saw nothing: the vocabularies were never equal.
     class_entries, class_err = tool.load_ledger(tool.LEDGER)
     assert tool.check(sites, class_entries, class_err) == []
+
+
+def _stale_near_miss(tool, claiming_source):
+    """A one-token near miss recorded against the self-test's `d.py`, checked
+    against a tree where `e.py` reads `claiming_source`."""
+    off = {"d.py": tool._CLAIM_DEF, "e.py": tool._CLAIM_OFF_BY_ONE}
+    off_sites = tool._sites_from(off)
+    ledger = tool._claim_ledger_for(off_sites, tool._claims_from(off, off_sites))
+    assert len(ledger) == 1, ledger
+    tree = {"d.py": tool._CLAIM_DEF, "e.py": claiming_source}
+    sites = tool._sites_from(tree)
+    claims = tool._claims_from(tree, sites)
+    return sites, claims, ledger
+
+
+def test_a_near_miss_that_resolved_says_the_vocabularies_agree():
+    """Issue #1580, the case the old message always assumed."""
+    tool = _tool()
+    sites, claims, ledger = _stale_near_miss(tool, tool._CLAIM_HOLDS)
+    problems = tool.check_claims(claims, tool.near_misses(sites, claims),
+                                 ledger, None, sites)
+    assert len(problems) == 1, problems
+    assert "NAMED NEAR MISS NO LONGER OBSERVED" in problems[0]
+    assert "now agree exactly" in problems[0]
+    assert "FURTHER APART" not in problems[0]
+    assert "DELETE this entry" in problems[0]
+
+
+def test_a_near_miss_that_drifted_further_apart_says_so():
+    """Issue #1580: a near miss also stops being observed when the two sides
+    move PAST the slack. The finding must say that, show the difference, and
+    point at reconciling or recording a divergence, not at a plain delete."""
+    tool = _tool()
+    sites, claims, ledger = _stale_near_miss(tool, tool._CLAIM_FURTHER_APART)
+    problems = tool.check_claims(claims, tool.near_misses(sites, claims),
+                                 ledger, None, sites)
+    assert len(problems) == 1, problems
+    text = problems[0]
+    assert "NAMED NEAR MISS NO LONGER OBSERVED" in text
+    assert "agree exactly" not in text
+    assert "FURTHER APART" in text and "differ by 2 tokens" in text
+    assert "only here:  ['blocker', 'code']" in text
+    assert "only there: -" in text
+    assert "NOT a resolution" in text
+    assert "Reconcile the vocabularies" in text
+    assert "record it as a divergence" in text
+    # Without the sites the cause cannot be told apart, so say both.
+    blind = tool.check_claims(claims, tool.near_misses(sites, claims),
+                              ledger, None)
+    assert "agree exactly" in blind[0] and "further apart" in blind[0]
+
+
+def test_the_issue_1540_near_miss_reads_as_drift_on_the_real_tree():
+    """The entry PR #1549 deleted, checked against the tree that outgrew it:
+    `Session._live_fingerprint` gained `isolate` and is now two tokens from
+    `apply.fingerprint`. The old message said they agree exactly."""
+    tool, sites, claims, _, _ = _claim_state()
+    entry = {"site": "src/revl/mcp/session.py::Session._live_fingerprint",
+             "mirrors": "src/revl/apply.py::fingerprint",
+             "only_here": [], "only_there": ["manifest"],
+             "note": "the reason on file before issue #1513"}
+    problems = tool.check_claims(claims, tool.near_misses(sites, claims),
+                                 [entry], None, sites)
+    assert len(problems) == 1, problems
+    assert "FURTHER APART" in problems[0], problems[0]
+    assert "only here:  ['isolate']" in problems[0]
+    assert "only there: ['manifest']" in problems[0]
 
 
 def test_an_unrecorded_near_miss_reds():

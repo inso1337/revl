@@ -37,10 +37,11 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import re
 import sys
 import types
 
-from ._paths import backends_root
+from ._paths import backends_root, python_backend_emitter
 from .refusal import is_refusal
 
 BACKENDS = backends_root()
@@ -500,10 +501,7 @@ def _load_py_tier():
     """Import the cordis-py reference tier: ``(emit, runtime, Context,
     FiberState)``.  Raises ``ModuleNotFoundError`` when the runtime is absent —
     the caller decides whether that is a skip or an error."""
-    backend_dir = BACKENDS / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415 — backend import after path setup
+    emit = python_backend_emitter()
     import runtime as runtime_mod  # noqa: PLC0415
     from cordis import Context  # noqa: PLC0415
     from cordis.fiber import FiberState  # noqa: PLC0415
@@ -928,29 +926,66 @@ def _once_verdict(runner, faulted_ir: dict, config: dict, files) -> tuple:
     """Run one faulted composition on a tier's `--once` runner, capture its
     output, and classify the result.  Returns ``(kind, detail)`` where *kind*
     is one of ``clean`` (proved no residue), ``residue`` (a real leak — the
-    runner printed ``RESIDUE-LEFT``), ``toolchain`` (the runtime is absent),
+    runner verified a ``RESIDUE-LEFT``), ``toolchain`` (the runtime is absent),
     or ``gap`` (the runner could not drive a faulting activation to a residue
     proof — a named capability gap, never a pass and never counted as a leak).
     """
+    return _classify_once(*_run_once(runner, faulted_ir, config, files))
+
+
+def _run_once(runner, faulted_ir: dict, config: dict, files) -> tuple:
+    """Run the `--once` runner with its output captured.  Returns ``(code,
+    output, crash, proof)``; *crash* is the reason the runner raised, else
+    ``None``, and *proof* is what the runner VERIFIED against its per-run token
+    (issue #1621).  The verdict reads *proof*, never the text a program could
+    print; the text is for diagnostics, and :func:`_host_lines` recovers the
+    program's own output from it (issue #1614)."""
     import contextlib  # noqa: PLC0415
     import io  # noqa: PLC0415
 
     buffer = io.StringIO()
+    proof: dict = {}
     try:
         with contextlib.redirect_stdout(buffer), contextlib.redirect_stderr(buffer):
-            code = runner(faulted_ir, config, files, once=True, interactive=False)
+            code = runner(faulted_ir, config, files, once=True, interactive=False,
+                          proof_out=proof)
     except Exception as error:  # noqa: BLE001 — a runner crash is a capability gap, not a leak
-        return ("gap", f"the --once runner raised "
-                       f"{type(error).__name__}: {error}")
-    output = buffer.getvalue()
-    if "RESIDUE-LEFT" in output:
+        return (None, buffer.getvalue(),
+                f"the --once runner raised {type(error).__name__}: {error}", proof)
+    return (code, buffer.getvalue(), None, proof)
+
+
+def _classify_once(code, output: str, crash: str | None, proof: dict) -> tuple:
+    """The verdict over one captured `--once` run: see :func:`_once_verdict`."""
+    if crash is not None:
+        return ("gap", crash)
+    if proof.get("residueLeft"):
         return ("residue", "the runner's teardown proof reported RESIDUE-LEFT")
     if code == 3:
         return ("toolchain", _first_error_line(output) or "runtime not available")
-    if code == 0 and "NO-RESIDUE" in output:
+    if code == 0 and proof.get("noResidue"):
         return ("clean", "")
     return ("gap", _first_error_line(output)
             or f"the --once runner exited {code} without a residue proof")
+
+
+_LOAD_HEADER = "== load composition"
+_RUNNER_EPILOGUE = re.compile(r"^error: the \w+ composition ")
+
+
+def _host_lines(output: str) -> list:
+    """The composition's own output inside a captured `--once` run: every
+    non-empty line after the runner's ``== load composition`` header that is
+    not runner protocol (a ``[run]`` line) and not the runner's closing
+    ``error: the <tier> composition ...`` diagnostic.  Before the header is
+    the build, which the verdict already summarises (issue #1614)."""
+    lines = output.splitlines()
+    start = next((i + 1 for i, line in enumerate(lines)
+                  if line.startswith(_LOAD_HEADER)), len(lines))
+    return [line.rstrip() for line in lines[start:]
+            if line.strip()
+            and not line.lstrip().startswith("[run]")
+            and not _RUNNER_EPILOGUE.match(line)]
 
 
 def _first_error_line(output: str) -> str:
@@ -1017,13 +1052,17 @@ def _compiled_tier_sweep(tier: str, ir: dict, config: dict, files,
     points: list = []
     for unit in corpus:
         faulted = _prune_dependents(_inject(ir, unit), unit["component"])
-        kind, detail = _once_verdict(runner, faulted, config, files)
+        code, output, crash, proof = _run_once(runner, faulted, config, files)
+        kind, detail = _classify_once(code, output, crash, proof)
+        host = _host_lines(output)
         if kind == "clean":
             points.append({"where": unit["where"], "component": unit["component"],
-                           "status": "clean"})
+                           "status": "clean",
+                           **({"hostOutput": host} if host else {})})
         elif kind == "residue":
             points.append({"where": unit["where"], "component": unit["component"],
-                           "status": "residue", "detail": detail})
+                           "status": "residue", "detail": detail,
+                           **({"hostOutput": host} if host else {})})
             return {"tier": tier, "status": "failed", "points": points,
                     "reason": f"residue at {unit['where']}: {detail}"}
         elif kind == "toolchain":  # pragma: no cover — pre-checked above
@@ -1157,6 +1196,20 @@ def _cross_tier_dossier(ir: dict, records: list, cap: int | None) -> dict:
     }
 
 
+def _format_host_output(record: dict, printer) -> None:
+    """Replay what the program printed at each fault point on a captured tier,
+    labelled with the tier and the point, under that tier's line.  The py leg
+    runs in process uncaptured, so its host output already reached the
+    terminal and carries no ``hostOutput`` (issue #1614)."""
+    for point in record.get("points") or []:
+        host = point.get("hostOutput")
+        if not host:
+            continue
+        printer(f"        [{record['tier']}] host output at {point['where']}:")
+        for line in host:
+            printer(f"          {line}")
+
+
 def _format_cross_tier(dossier: dict, printer) -> None:
     """Human-readable rendering: one line per tier, then the agreement verdict."""
     printer("cross-tier fault sweep — the same faults on every runtime "
@@ -1176,6 +1229,7 @@ def _format_cross_tier(dossier: dict, printer) -> None:
             printer(f"  {tier:5} RESIDUE  — {record['reason']}")
         else:
             printer(f"  {tier:5} skipped  — {record['reason']}")
+        _format_host_output(record, printer)
     printer("")
     agreement = dossier["agreement"]
     if dossier["counts"]["disagreements"]:
@@ -2274,11 +2328,7 @@ def _load_py_emitter():
     """Import the cordis-py backend *emitter only* (no cordis runtime): a prop
     test's body is a pure function, so it needs the emitter to lower+exec it but
     never a live ``Context``.  Returns the ``emit`` module."""
-    backend_dir = BACKENDS / "python"
-    if str(backend_dir) not in sys.path:
-        sys.path.insert(0, str(backend_dir))
-    import emit  # noqa: PLC0415 — backend import after path setup
-    return emit
+    return python_backend_emitter()
 
 
 def _prop_module(ir: dict, unit: dict, index: int, emit):

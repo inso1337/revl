@@ -16,7 +16,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { Context } from 'cordis'
 
-import { makeProxy, serve } from './bridge.ts'
+import { decodeAs, encodeValue, makeProxy, serve, signatureOf } from './bridge.ts'
 import { assertNoResidue, fiberStateName, redactText, snapshotRuntime } from './runtime.ts'
 
 // The uncaught-failure funnel (issue #814, the ts half of the same rule the py
@@ -66,6 +66,32 @@ process.on('unhandledRejection', fatal)
 
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 name = spec.name ?? 'proc'
+
+// issue #1621: the `--once` runner hands this process a per-run token as the
+// first line of stdin, and the four proof lines (UP, NO-RESIDUE, RESIDUE-LEFT,
+// DOWN) carry it, so a program's own output cannot forge them. Read here,
+// before the composition module is imported (so before any host code runs),
+// into a binding of this module that the emitted module cannot import. The
+// spec carries only the flag: it is a file the program could read.
+function readProofToken(): string {
+  const bytes: number[] = []
+  const one = Buffer.alloc(1)
+  for (;;) {
+    let n = 0
+    try {
+      n = fs.readSync(0, one, 0, 1, null)
+    } catch (error: any) {
+      if (error?.code === 'EAGAIN') continue
+      break
+    }
+    if (n === 0 || one[0] === 0x0a) break
+    bytes.push(one[0])
+  }
+  return Buffer.from(bytes).toString('utf8').trim()
+}
+const proofName: string = spec.proofOnStdin === true
+  ? `${name}#${readProofToken()}`
+  : name
 
 // item 396 option B: a `@ts ref` thunk resolves its host module at call time
 // through `globalThis.__REVL_REF_ROOT__` joined with the recorded relative path
@@ -160,6 +186,8 @@ function parseProbeArgs(src: string): unknown[] {
       const raw = (end < 0 ? rest : rest.slice(0, end)).trim()
       if (raw === 'true' || raw === 'false') args.push(raw === 'true')
       else if (raw === 'null') args.push(null)
+      // an integer literal past 2^53 stays exact as a `bigint` (issue #1566)
+      else if (/^-?\d+$/.test(raw) && !Number.isSafeInteger(Number(raw))) args.push(BigInt(raw))
       else if (raw !== '' && !Number.isNaN(Number(raw))) args.push(Number(raw))
       else throw new Error(`probe arguments must be literals, got ${JSON.stringify(raw)}`)
       rest = end < 0 ? '' : rest.slice(end + 1).trim()
@@ -180,8 +208,16 @@ function evalProbe(expr: string, scope: Record<string, unknown>): unknown {
   const service = scope[key] as Record<string, unknown>
   const target = service?.[method]
   if (typeof target !== 'function') throw new Error(`'${key}' has no method '${method}'`)
-  return (target as (...a: unknown[]) => unknown).apply(service, parseProbeArgs(argSrc))
+  // issue #1566: a probe's literals are decoded by the method's declared
+  // types, as a seam argument is, so `s.bump(41)` hands the method `41n`.
+  const sig = signatureOf(typing, key, method)
+  const args = parseProbeArgs(argSrc).map((a, i) => (sig ? decodeAs(a, sig.params[i], typing?.types) : a))
+  return (target as (...a: unknown[]) => unknown).apply(service, args)
 }
+
+// issue #1566: the declared seam types (`placement.py` `seam_typing`); absent
+// in a spec from an older conductor, which then decodes as before.
+const typing = spec.typing ?? null
 
 const mod = await import(pathToFileURL(path.resolve(spec.module)).href)
 const ctx = new Context()
@@ -212,7 +248,7 @@ for (const [key, info] of Object.entries<any>(spec.proxies || {})) {
   // no secret because the mTLS handshake already bound the identity). Absent,
   // the request line is byte-identical to the pre-118 wire.
   const { component, onPeerLost } = makeProxy(
-    key, info.methods, target, deadlineMs, info.correlation ?? null,
+    key, info.methods, target, deadlineMs, info.correlation ?? null, typing,
   )
   const fiber = ctx.plugin(component)
   await fiber
@@ -236,7 +272,7 @@ let server: import('node:net').Server | undefined
 if (spec.serve) {
   // `methods` (key -> declared operations) is the stub's allowlist; fall back
   // to the bare key list for a spec written before it existed.
-  server = await serve(ctx, spec.serve.methods ?? spec.serve.keys, spec.serve.socket)
+  server = await serve(ctx, spec.serve.methods ?? spec.serve.keys, spec.serve.socket, typing)
   log('serve', spec.serve.keys.join(', '), `-> ${spec.serve.socket}`)
 }
 
@@ -248,7 +284,7 @@ for (const expr of (spec.probe || []) as string[]) {
   try {
     let value = evalProbe(expr, scope)
     if (value && typeof (value as any).then === 'function') value = await value
-    log('probe', expr, `=> ${value === undefined ? 'undefined' : JSON.stringify(value)}`)
+    log('probe', expr, `=> ${value === undefined ? 'undefined' : JSON.stringify(encodeValue(value))}`)
   } catch (error) {
     log('probe', expr, `ERROR ${error}`)
   }
@@ -285,12 +321,12 @@ async function teardown(): Promise<void> {
     log('residue', 'provisions', `${now.serviceImpls.length} service(s) provided`)
     try {
       assertNoResidue(ctx, baseline)
-      console.log(`[${name}] NO-RESIDUE — the composition left nothing behind`)
+      console.log(`[${proofName}] NO-RESIDUE — the composition left nothing behind`)
     } catch (error) {
-      console.log(`[${name}] RESIDUE-LEFT — ${String(error).split('\n')[0]}`)
+      console.log(`[${proofName}] RESIDUE-LEFT — ${String(error).split('\n')[0]}`)
     }
   }
-  console.log(`[${name}] DOWN`)
+  console.log(`[${proofName}] DOWN`)
   process.exit(0)
 }
 
@@ -317,7 +353,7 @@ async function teardown(): Promise<void> {
 process.on('SIGTERM', teardown)
 process.on('SIGINT', teardown)
 
-console.log(`[${name}] UP`)
+console.log(`[${proofName}] UP`)
 
 if (once) {
   await teardown()

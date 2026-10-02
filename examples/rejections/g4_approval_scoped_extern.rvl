@@ -1,0 +1,25 @@
+// REJECTED, G4: a capability-SCOPED emission extern that declares
+// `requires approval`, crossed with no `with` edge.
+//
+// The approval floor is keyed by capability token. A scoped extern's token is
+// its scope, not its name ("a scope replaces the name; it does not join it",
+// docs/capabilities.md section 2), and the crossing resolves to that token.
+// The floor used to be keyed by the extern's NAME, so the two never met and
+// this crossing was admitted with no approval at all, while the same program
+// with the scope removed was refused.
+//
+// `let a = await approval[production.payment] { ... }` followed by
+// `emit charge(199) with a` is admitted.
+//
+// expected error:
+//   crossing capability `production.payment` requires approval, but this
+//     `emit` carries no covering `with` edge
+
+extern emission[production.payment] fn charge(cents: Int) requires approval = @py { return }
+
+service Till { fn total() -> Int }
+
+component Register provides till: Till {
+  emit charge(199)
+  provide till { fn total() = 199 }
+}

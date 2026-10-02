@@ -90,6 +90,7 @@ _IMPORT_ALIAS = {
     "clear_session_owner": "_revl_clear_session_owner",
     "mark_secret": "_revl_mark_secret",
     "secret_result": "_revl_secret_result",
+    "estop_gated": "_revl_estop_gated",
     "declare_secret_types": "_revl_declare_secret_types",
 }
 _RESERVED = _HOST_ROOTS | {"self"}
@@ -472,6 +473,39 @@ def _mangle(name: str, extra: "frozenset[str]" = frozenset()) -> str:
     return _mangle_escaping(name, _EMITTED_BUILTINS | extra)
 
 
+def _method_def_name(name: Any, what: str) -> str:
+    """The ONE rename for a provided service method (issue #1474), used at its
+    definition, at its registration and at every static call site.
+
+    A service method's CONTRACT name is what every dynamic dispatcher looks up
+    (`Session.call`, the bridge, a spawn handle, a lifecycle `call`), and what
+    a remote tier sends over the wire, so it stays the attribute name. Only the
+    `def` statement needs a Python-legal spelling: a keyword or soft keyword
+    (`class`, `from`, `match`, `_`) or `self` gets the injective append-`_`
+    rename for the `def`, the provided class gets the contract name back as an
+    alias (`_Ops.__dict__` holds both), and a static call through a required
+    service reaches it by `getattr(target, 'class')` because `target.class` is
+    not Python. Before this, the definition site renamed and the lookup site
+    did not, so `fn class()` was refused as "method 'class_' is not part of the
+    provided service", and `self` was refused as emitter scaffolding.
+
+    A name that needs no rename is returned unchanged, so every other module is
+    emitted byte-identically."""
+    if not isinstance(name, str) or not name.isidentifier():
+        raise EmitError(f"{what} {name!r} is not a usable Python identifier")
+    if name.startswith("_") and name.lstrip("_").startswith("revl"):
+        raise EmitError(f"{what} {name!r} collides with emitter scaffolding")
+    return _mangle_escaping(name, frozenset({"self"}))
+
+
+def _method_access(target: str, name: str) -> str:
+    """`target.name`, or `getattr(target, 'name')` for a contract name the
+    `def` had to rename (see `_method_def_name`)."""
+    if _method_def_name(name, "method name") == name:
+        return f"{target}.{name}"
+    return f"getattr({target}, {name!r})"
+
+
 def _mangle_kw(name: str) -> str:
     """`_mangle` without the builtin guard: keyword escaping only. For a name
     emitted as an attribute or a runtime string key (see `_mangle`), which
@@ -730,7 +764,7 @@ class _RevlRouter:
         self._served = {realm: 0 for realm in self._realms}
 
     def _handle(self, realm):
-        scoped = self._root.isolate(self._key, realm_label(realm))
+        scoped = self._root.isolate(self._key, realm_label(realm, self._key))
         return scoped.reflect.get(self._key)
 
     def _live(self):
@@ -1099,6 +1133,16 @@ def _render_builtin(method, target: str, args: list, recv: str | None = None) ->
         # one frame and builds the dict directly, where the generator form
         # entered four (the `dict` call, the genexpr frame, and its resumes)
         # for the same elements (roadmap item 436 F2).
+        if ":=" in target:
+            # Python refuses an assignment expression anywhere in a
+            # comprehension's iterable, and a receiver that is not a bare name
+            # carries one (`a.b.remove(k)` reads `a.b` through the `_fv :=`
+            # temp; bounded arithmetic binds `_bi :=`). Evaluate the receiver
+            # and the key as arguments, outside the comprehension. A plain
+            # receiver keeps the one-frame form above.
+            return ("(lambda _revl_m, _revl_k: {kk: vv for kk, vv in "
+                    "_revl_m.items() if kk != _revl_k})"
+                    f"({target}, {args[0]})")
         return ("{" + f"kk: vv for kk, vv in {target}.items() "
                 f"if kk != {args[0]}" + "}")
     # Integer division and modulo (docs/arithmetic.md). Python's `//` floors
@@ -1490,7 +1534,7 @@ class _ComponentEmitter:
                 if not isinstance(method, str) or not method.isidentifier():
                     raise EmitError(f"{where}: bad method name {method!r}")
                 args = ", ".join(self._expr(arg, where) for arg in expr.get("args") or [])
-                rendered = f"{target}.{method}({args})"
+                rendered = f"{_method_access(target, method)}({args})"
                 # item 121 Slice 2: a crossing whose arguments the analysis
                 # proved read completion `site`'s binding fires THROUGH the
                 # marker helper, so the recorder can stamp `producedBy` on this
@@ -1502,7 +1546,7 @@ class _ComponentEmitter:
                 site = self._derived_crossings.get(id(expr))
                 if site is not None:
                     self.uses.add("produced_emit")
-                    marked = f"{_runtime_ref('produced_emit')}({site!r}, {target}.{method}"
+                    marked = f"{_runtime_ref('produced_emit')}({site!r}, {_method_access(target, method)}"
                     rendered = f"{marked}, {args})" if args else f"{marked})"
             else:
                 # `Some(x)` is the identity on this tier (item 436 F8) — the
@@ -1953,7 +1997,23 @@ class _ComponentEmitter:
             # never runs). The compensation registers AFTER, exactly as the sync
             # spelling registers after the fire (design §4 clause 1).
             aw = "await " if step.get("async") else ""
-            out.add(indent, f"{aw}{self._emit_fire(step, where)}")
+            if (step.get("async") and step.get("approval") is None
+                    and self._validated_call(step.get("expr")) is not None):
+                # A `validated` async operation checks the SETTLED response
+                # (item 257), so the await belongs inside the seam:
+                # `_revl_validate((await <call>), ..)`. Awaiting the whole
+                # expression validated the coroutine object instead. Rendering
+                # the fire in async mode gives exactly the form a validated
+                # call takes in an async provide method.
+                prev_async = self._in_async
+                self._in_async = True
+                try:
+                    fire = self._emit_fire(step, where)
+                finally:
+                    self._in_async = prev_async
+                out.add(indent, fire)
+            else:
+                out.add(indent, f"{aw}{self._emit_fire(step, where)}")
             if step.get("compensate") is not None:
                 # item 247 (docs/design/teardown-contract.md): a compensation
                 # is a first-class COMPENSATION entry on the frame's shared
@@ -2538,7 +2598,11 @@ class _ComponentEmitter:
         the activation fails and the prefix reverts LIFO with the subscription
         bracket on it (§6, A8). Nothing here catches anything."""
         self.uses.add("Stream")
-        item = _mangle(_ident(step.get("bind"), f"{where}: stream item"))
+        # `_ident` already applies the keyword/builtin rename, exactly as it
+        # does for every name the body reads; wrapping it in `_mangle` again
+        # escaped a colliding bind twice (`len_` bound as `len___` while the
+        # body read `len__`, a NameError on the first item).
+        item = _ident(step.get("bind"), f"{where}: stream item")
         subject = self._expr(step.get("subject"), where)
         contract = step.get("event")
         gate = None
@@ -2672,17 +2736,25 @@ class _ComponentEmitter:
             out.add(0)
             self._method(out, indent + 1, name, method, where)
         out.add(0)
+        # issue #1474: a method whose `def` had to be renamed is registered
+        # under its contract name too, which is what every dispatcher looks up.
+        for method in methods:
+            contract = method.get("name")
+            spelled = _method_def_name(contract, f"{where}: method name")
+            if spelled != contract:
+                out.add(indent, f"setattr({cls}, {contract!r}, {cls}.{spelled})")
         # runtime-derived revertible provision (R5): the withdrawal inverse is
         # _revl_ctx.provide's own disposer, yielded into the component accumulator
         out.add(indent, f"yield _revl_ctx.provide({name!r})")
         out.add(indent, f"_revl_ctx.set({name!r}, {cls}())")
 
     def _method(self, out: _Lines, indent: int, provide_name: str, method: dict, where: str) -> None:
-        name = _ident(method.get("name"), f"{where}: method name", attr=True)
+        contract = method.get("name")
+        name = _method_def_name(contract, f"{where}: method name")
         service = self.services.get(self.provides.get(provide_name)) or {}
-        spec = (service.get("methods") or {}).get(name)
+        spec = (service.get("methods") or {}).get(contract)
         if spec is None:
-            raise EmitError(f"{where}: method {name!r} is not part of the provided service")
+            raise EmitError(f"{where}: method {contract!r} is not part of the provided service")
         params = [_ident(param, f"{where}.{name}: param") for param in method.get("params") or []]
         # v1/A6: method params are the surface names binding the body and may
         # differ from the service's declared names; only the arity must agree
@@ -4212,7 +4284,12 @@ def _emit_py_ref_thunk(name: str, params: str, ext: dict, ref: dict) -> "_Lines"
     return out
 
 
-def _emit_externs(externs: list) -> "_Lines":
+#: Extern classes whose host body crosses a boundary (issue #1504). A `pure`
+#: extern is a computation: gating it would stop value code, not a crossing.
+_GATED_EXTERN_CLASSES = frozenset({"emission", "witnessed", "acquire"})
+
+
+def _emit_externs(externs: list, gated: bool = True) -> "_Lines":
     out = _Lines()
     # item 256 Slice 1: the composition secrets map, keyed by secret name, and a
     # FAIL-LOUD lookup. The driver (src/revl/run.py) resolves each bound secret's
@@ -4289,6 +4366,11 @@ def _emit_externs(externs: list) -> "_Lines":
         # `Map` the type is spelled out too, because the walk cannot otherwise
         # tell a `Map` from a record — both are a `dict` here — and would skip
         # the map's keys as if they were field names.
+        # issue #1504: an extern whose body crosses a boundary checks the E-Stop
+        # BEFORE its body runs, in whatever position it is called. The gate is
+        # the outermost decorator, so nothing else runs first.
+        if gated and ext.get("class") in _GATED_EXTERN_CLASSES:
+            out.add(0, f"@{_runtime_ref('estop_gated')}({ext['name']!r})")
         if ext.get("secret_return"):
             returns = ext.get("returns")
             needs_shape, _ = _secret_shape_facts([returns], _PY_TYPES)
@@ -5383,6 +5465,14 @@ def emit(ir: dict) -> str:
         # through `emitter.uses`.
         | ({"secret_result"} if any(ext.get("secret_return") for ext in externs)
            else set())
+        # issue #1504: the E-Stop gate on every boundary-crossing extern
+        # issue #1504: the E-Stop gate on every boundary-crossing extern, in a
+        # document with components (the runtime is loaded to run them). A
+        # component-free document is host code a test drives directly and must
+        # stay importable without the runtime on the path.
+        | ({"estop_gated"} if components and any(
+            ext.get("class") in _GATED_EXTERN_CLASSES for ext in externs)
+           else set())
         # item 421 F6: a declared secret type that reaches a `Map` also needs the
         # record field types emitted, so the walk can tell the two apart.
         | ({"declare_secret_types"} if secret_types else set())
@@ -5728,7 +5818,7 @@ def emit(ir: dict) -> str:
     if functions:
         out.extend(_emit_functions(functions))
     if externs:
-        out.extend(_emit_externs(externs))
+        out.extend(_emit_externs(externs, gated=bool(components)))
     if tests:
         out.extend(_emit_tests(tests))
     if fault_tests:

@@ -474,6 +474,11 @@ NOT_A_RULE = {
     "sandbox_runtime": "the child-process sandbox `placement` launches.",
     "synthesize": "`revl synthesize`, a generator rather than a checker.",
     "tee_attestation": "TEE quote verification at run time.",
+    "model_schedule": "item 515's model scheduler, reached from `placement`'s "
+                      "conductor after the frontend has admitted the "
+                      "composition. It refuses a placement onto a host's "
+                      "declared devices, never a program: nothing under "
+                      "`compile_files` imports it.",
     "refusal": "tells a backend emitter's EmitError apart from its fault "
                "after the frontend has admitted the document; `placement` "
                "reads it only on the emit path. Measured: making "

@@ -509,6 +509,26 @@ def test_the_stage_verdict_inherits_item_536s_rather_than_restating_it():
     assert serialised["code"] == "AUTHORITY_WIDENED"
 
 
+def test_the_inheritance_holds_when_item_536s_tests_ran_first(tmp_path):
+    """The test above in the order that used to break it: a
+    `tests/test_evolution_reward.py` test first, in the same session.
+
+    That file loaded `tools/evolution_reward.py` by path and REPLACED the
+    `sys.modules` entry this module's import had already made, so
+    `ec.Verdict` subclassed one `Verdict` class and `import evolution_reward`
+    returned another. Run in a subprocess so the order is fixed here rather
+    than left to collection."""
+    first = ("tests/test_evolution_reward.py::"
+             "test_retention_requires_every_component")
+    then = ("tests/test_evolution_controller.py::"
+            "test_the_stage_verdict_inherits_item_536s_rather_than_restating_it")
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider",
+         "-p", "no:randomly", f"--basetemp={tmp_path / 'run'}", first, then],
+        cwd=str(ROOT), capture_output=True, text=True, timeout=300)
+    assert "2 passed" in proc.stdout, proc.stdout[-3000:] + proc.stderr[-2000:]
+
+
 def test_keys_outside_the_whitelist_are_dropped_and_reported(clean_tree):
     record = proposal_record(clean_tree)
     record["rationale"] = "this change is safe, trust me"

@@ -32,7 +32,6 @@ checker is an oracle, and a baseline over the tree would red on every unrelated
 
 from __future__ import annotations
 
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -40,15 +39,13 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+from _load_by_path import load_by_path  # noqa: E402
 
 
 def _census():
-    spec = importlib.util.spec_from_file_location(
+    module = load_by_path(
         "checker_reference_census",
         ROOT / "tools" / "checker_reference_census.py")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
     return module
 
 
@@ -200,12 +197,16 @@ UNMASKED_UNDECIDED = {
     "examples/rejections/g4_arrow_param_emission.rvl",
     "examples/rejections/g4_unmarked_alias_emission.rvl",
     "examples/rejections/g4_unmarked_handle_emission.rvl",
-    # -- one `emit` marker per crossing (issue #1175): an emission evaluated
-    # to build an emit head's argument, unmarked or marked in place. The
-    # checker's marker rule reads a statement's head call and never its
-    # argument list --
-    "examples/rejections/g4_nested_unmarked_emission.rvl",
-    "examples/rejections/g4_nested_emit_expression.rvl",
+    # -- one `emit` marker per crossing (issue #1175). Two documents stood
+    # here, `g4_nested_unmarked_emission.rvl` and
+    # `g4_nested_emit_expression.rvl`: the checker's marker flag reached an
+    # emit head's ARGUMENTS too, so a second crossing under one marker read as
+    # marked. The walk now carries the head/argument split the reference
+    # lowers with, and both are decided with the reference's text, pinned in
+    # tests/test_selfhost_checker.py's REJECTED_PROGRAMS together with the
+    # eight host-extern documents of issue #1427 that the same change decided.
+    # Measured over the census corpus: agree-refuse 32 to 42, no-objection
+    # 191 to 181, no other document moved --
     # -- the type layer past the expression slice: a config-field default.
     # `t7_provide_param_annotation_mismatch.rvl` stood here too — the PARAMETER
     # twin of the return annotation #1063 taught the parser to read — until
@@ -358,3 +359,58 @@ def test_the_unmasked_documents_are_refused_and_undecided(verdicts, rel):
     assert got == "", (
         f"the checker now decides {rel} ({got!r}); delete it from "
         f"UNMASKED_UNDECIDED and say which slice grew")
+
+
+# --- authority rules after a block (tests/fixtures/gate_block_nesting/) -------
+#
+# Issue #1453. `p_stmts` and `p_comp_body` here had the shapes PR #1452 fixed in
+# `selfhost/lower.rvl`: a `}` that began a line ended the enclosing body, and a
+# block written on one line, a braceless arm and a block's condition were one
+# skipped line. Measured on the 42 documents before the fix: 35 no-objection,
+# 1 agree-refuse, 6 agree-admit. Every G4 document but the multi-line layout
+# twin read as no-objection, because the crossing was never reached.
+#
+# Held per document, by the file-name prefix:
+#   * `g4_`: both refuse with the same text. The marker and the upper bound are
+#     in this slice.
+#   * `ok_`: both admit, so a fix that works by refusing more shows up.
+#   * `g1_`: the reference refuses G1 and the checker raises no objection. An
+#     undeclared requirement is outside this slice (`req_call` passes a root
+#     that is not a requirement through unjudged), with or without a block.
+#   * `g4_host_marker_` and `g4_approval_` (issue #1437): the reference and the
+#     gate refuse, and the checker raises no objection. This checker holds the
+#     `req` carrier to the marker but not the host extern carrier, and its
+#     approval floor (#1612) judges only an `emit` STATEMENT, not the value
+#     form these method documents use. Held undecided by name, so the day it
+#     grows either rule this reds and the documents move to the `g4_` rule.
+#     The one exception is the activation guard document: its crossing is an
+#     `emit` statement, so the checker's floor decides it and must agree.
+BLOCK_NESTING = ROOT / "tests" / "fixtures" / "gate_block_nesting"
+CHECKER_UNDECIDED_PREFIXES = ("g4_host_marker_", "g4_approval_")
+CHECKER_DECIDES = {"g4_approval_after_guard_setup"}
+G1_MESSAGE = "`db` is not a declared requirement of C"
+
+
+def test_every_block_nesting_document_is_held_by_name(verdicts):
+    docs = sorted(BLOCK_NESTING.glob("*.rvl"))
+    assert len(docs) == 66, f"the block-nesting corpus has {len(docs)} documents"
+    wrong = []
+    for doc in docs:
+        rel = str(doc.relative_to(ROOT))
+        if rel not in verdicts:
+            wrong.append(f"{rel}: not in the census corpus")
+            continue
+        want, got = verdicts[rel]
+        prefix = doc.stem.split("_", 1)[0]
+        if doc.stem.startswith(CHECKER_UNDECIDED_PREFIXES) \
+                and doc.stem not in CHECKER_DECIDES:
+            ok = want != "" and got == ""
+        elif prefix == "ok":
+            ok = want == "" and got == ""
+        elif prefix == "g4":
+            ok = want != "" and got == want
+        else:
+            ok = want == G1_MESSAGE and got == ""
+        if not ok:
+            wrong.append(f"{rel}: reference {want!r}, checker {got!r}")
+    assert not wrong, "\n  ".join(["block-nesting documents moved:"] + wrong)
