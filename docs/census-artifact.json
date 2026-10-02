@@ -2,8 +2,8 @@
  "briefs": [
   {
    "hard_gate": "compiles",
-   "n": 503,
-   "note": "The 503 census programs the reference admits compile under the current checker with no error and no compiler crash, and the gate raised no objection to any of them. Reference faults over the whole corpus: 0.",
+   "n": 523,
+   "note": "The 523 census programs the reference admits compile under the current checker with no error and no compiler crash, and the gate raised no objection to any of them. Reference faults over the whole corpus: 0.",
    "reference_faults": [],
    "result": "pass",
    "spec": "census/agree-admit"
@@ -14,11 +14,11 @@
   "buckets": [
    {
     "bucket": "agree-admit",
-    "count": 503
+    "count": 523
    },
    {
     "bucket": "agree-refuse/G4",
-    "count": 119
+    "count": 128
    },
    {
     "bucket": "agree-refuse/G1",
@@ -73,15 +73,15 @@
     "count": 4
    },
    {
+    "bucket": "refuse-out-of-slice/G1",
+    "count": 4
+   },
+   {
     "bucket": "agree-refuse/SPAWN",
     "count": 3
    },
    {
     "bucket": "frontier-declined",
-    "count": 3
-   },
-   {
-    "bucket": "refuse-out-of-slice/G1",
     "count": 3
    },
    {
@@ -939,6 +939,11 @@
     "no-objection-out-of-slice"
    ],
    [
+    "examples/rejections/requires_in_component_body.rvl",
+    "50df0e3b61730d0289a0fbacdef139f647033a82cb0bf6b42c5d23a0be1c3e51",
+    "refuse-out-of-slice/G1"
+   ],
+   [
     "examples/rejections/service_compat_duplicate.rvl",
     "c01324f8d08ce85be0bc7fcf95b0370447b05f5c734f8c63855f1c059712ad49",
     "no-objection-out-of-slice"
@@ -1394,6 +1399,11 @@
     "agree-admit"
    ],
    [
+    "tests/fixtures/emit_go_corpus/blob_probes.rvl",
+    "f1bd36ea92bac03f2da9c92dcd57e972f82b8c563ad5b834f18560e72c9eee78",
+    "agree-admit"
+   ],
+   [
     "tests/fixtures/emit_go_corpus/builder_literal.rvl",
     "37e673b5d0028ef5ce7d6489f563095256b6dbb65d3d06e40b8f2c4fa64b9410",
     "agree-admit"
@@ -1409,6 +1419,11 @@
     "agree-admit"
    ],
    [
+    "tests/fixtures/emit_go_corpus/extern_config.rvl",
+    "91995e099297bc49ed769719f75583acc9a0116771b60460e4164bd100c0b0a1",
+    "agree-admit"
+   ],
+   [
     "tests/fixtures/emit_go_corpus/float_rem.rvl",
     "356d8c8f572492c3533a6b6bc60b86fa0925c2c33ca79e77c3417801f639e1af",
     "agree-admit"
@@ -1419,6 +1434,11 @@
     "agree-admit"
    ],
    [
+    "tests/fixtures/emit_go_corpus/in_file_tests.rvl",
+    "f7d3a29eef59a8d41ec1e7bf430a2265b4b52a423a2eafa10e395abca73acfb6",
+    "agree-admit"
+   ],
+   [
     "tests/fixtures/emit_go_corpus/inference.rvl",
     "4832ab60d036ef7caa9fbea2949a10ff9490fe07958e9f26f96c99bf41e5c873",
     "agree-admit"
@@ -1426,6 +1446,11 @@
    [
     "tests/fixtures/emit_go_corpus/lists.rvl",
     "60bf9b4adbc20f1f06e63f66f36ae5ef9fa1f029b6373eedf94c0887c1892273",
+    "agree-admit"
+   ],
+   [
+    "tests/fixtures/emit_go_corpus/loop_shapes.rvl",
+    "346d1832ade070428c3473fba9a4d59bfbb93b76a6a20d9c8b992e50aa2af067",
     "agree-admit"
    ],
    [
@@ -1441,6 +1466,11 @@
    [
     "tests/fixtures/emit_go_corpus/secrets.rvl",
     "937758ffec05f7f924355bf1d912fd27c45b39e40e0d0b979f7cb04e6e661892",
+    "agree-admit"
+   ],
+   [
+    "tests/fixtures/emit_go_corpus/stdlib_surface.rvl",
+    "52212110c48f8e25f10836d44293b054193730c86d55fd626862590efbee46c3",
     "agree-admit"
    ],
    [
@@ -1461,6 +1491,16 @@
    [
     "tests/fixtures/emit_go_refusals/deferred_emission_call.rvl",
     "d31d159ffa6eeacd3b9d3bc39683beee9cac8f9d52f199784a6cb06b91455682",
+    "agree-admit"
+   ],
+   [
+    "tests/fixtures/emit_go_refusals/fault_test_section.rvl",
+    "8993a51a61bf9d028029c2f46c297384a4df9ee22c78dca727e7f7593eda9273",
+    "agree-admit"
+   ],
+   [
+    "tests/fixtures/emit_go_refusals/record_update.rvl",
+    "fa5210dce683a6b85d03c347b3717202044d8a7237f4c416b5d10b07e8907446",
     "agree-admit"
    ],
    [
@@ -2564,6 +2604,11 @@
     "agree-admit"
    ],
    [
+    "tests/fixtures/extern_idempotent_deferred.rvl",
+    "13c15d9445be402e278807886f1d9a3271fb286464c85db9d6dba0435d405342",
+    "agree-admit"
+   ],
+   [
     "tests/fixtures/g4_emit_arrow_argument_inline.rvl",
     "fbfd80e16f0fa1fc10494c0c50324cf1bca77667e44df932995526a9fd5ceffd",
     "agree-admit"
@@ -2845,7 +2890,7 @@
    ],
    [
     "selfhost/emit_go.rvl",
-    "9f8b24df48971371d33ddb6cc6ecac0db9fe06a99de67febae5676825e706dd7",
+    "68443e3e67b24392586dc930e06391053b23a0e3764924679fd9d9166c207e11",
     "refuse-out-of-slice/BAD"
    ],
    [
@@ -2855,7 +2900,7 @@
    ],
    [
     "selfhost/emit_py.rvl",
-    "70487890afb087959e303f4a7e2fb1fa579f652666b57a49415cbf3b16ffd96a",
+    "d32c541f9b7922c2487fb60ce153272acc287e2262ab310af6ba1857286901e6",
     "refuse-out-of-slice/BAD"
    ],
    [
@@ -2880,7 +2925,7 @@
    ],
    [
     "selfhost/lower.rvl",
-    "3c7752c6448dff5b1cecaca47194376a4070474dc2c96cd7463bbf6f11955f32",
+    "d0117d7284a8cb8de478c6de702882aa3ef521a2091a3ce62be7657aaf9e28ad",
     "frontier-declined"
    ],
    [
@@ -3059,6 +3104,11 @@
     "agree-admit"
    ],
    [
+    "backends/go/scenarios/extern_compensate.rvl",
+    "e4e881c2ba1e31e24e6c1492307c3b9cbbe221a865ce04c401115c277a3c11bd",
+    "agree-admit"
+   ],
+   [
     "backends/go/scenarios/memkv.rvl",
     "7d99b73ddccfcb86e8766ab22be2c671a3705fce643e4b413d7b58fcee3891de",
     "agree-admit"
@@ -3104,6 +3154,11 @@
     "agree-admit"
    ],
    [
+    "backends/go/testdata/module_fn_lifecycle_1669.rvl",
+    "83d3b8aa58881eee7294daf29a0b0a35a2edc822ffb2beabd88e84a4956b9df8",
+    "agree-admit"
+   ],
+   [
     "backends/go/testdata/opt_gaps_280.rvl",
     "49091b116681bd64b023199ed7046cf226c4f0615f9ced561c992c9a132309df",
     "agree-admit"
@@ -3111,6 +3166,11 @@
    [
     "backends/go/testdata/result_ctor_302.rvl",
     "0f22da2b186d4fa419753928aa08e474194fa7fe38569ebcf8f489b02b64f0d9",
+    "agree-admit"
+   ],
+   [
+    "backends/go/testdata/result_erased_1631.rvl",
+    "37293cc6eb49e2a9529045d0df8df356ec77a3e54ed3fd7024c5c5e21f077587",
     "agree-admit"
    ],
    [
@@ -3766,6 +3826,51 @@
    [
     "oracle-accept:a bare emission bound covers a spawn-handle emit",
     "52e2faa898f7f1eb5839362ac5691af2252c4dfa8399ed0c634cbdd432cba689",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: the checked-in deferred idempotent fixture",
+    "13c15d9445be402e278807886f1d9a3271fb286464c85db9d6dba0435d405342",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: a bare idempotent emission",
+    "b5314fcc96a3ce913dc6820afa37c91b2eed8cf9b4c4f4e6025989a837ca25bb",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: a keyed idempotent emission",
+    "6583fa1eeef9e384a95a7f46ec29981c90286eba5347eebc5ab9d3ea68273288",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: keyed idempotent after deferred",
+    "632c1d250631671e9ba6a979c3d4a883191d6811bea165be54a519b1371cd05b",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: keyed idempotent before deferred",
+    "dd61d724b413ae5c2045e69a07511e56b16e69049935a47adec9f13abc91e0a9",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: an Int key",
+    "b9ea8afc23fcd127aaf2316ead4d3133bf0be9afb1b7e9eb5d662b30b73309c4",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: a Secret[Str] key, past the qualifier",
+    "2b15aeb25c33c6b2504f7c05b0c92d792f8933b6a208c81baa93cd826a37414e",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: a keyed idempotent scoped emission",
+    "1e0b4a46146ed581365d4a58088b5d8b8c1ec81ea26c2d8d067f653bfc90bdf3",
+    "agree-admit"
+   ],
+   [
+    "oracle-accept:item 309: a key typed by an alias of Str",
+    "d99f21eea4d86bb81a41ba960e78ce58f0579d054bff131f07946fac3287ca49",
     "agree-admit"
    ],
    [
@@ -4924,6 +5029,51 @@
     "agree-refuse/G4"
    ],
    [
+    "oracle-reject:item 309: an acquire extern declared idempotent",
+    "e1c424a5ac1da75f0ccc5bebc89de6d7f8d03de1f57ae96a8395b3c0f87eeb8a",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: a pure extern declared idempotent",
+    "b5ae1dfa298f85250dfdeec35d7dea9ca321216d76a12662e88e074364b95e63",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: a witnessed extern declared idempotent",
+    "573d01ea5ca735129ee1e587ff266004abd679c60173fc69f41dce279a4b0d24",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: an idempotent emission with an undo meets the class rule",
+    "43bb1378ea41e402ca854dc576c7b803e5b8e9a64c6948d5f1c9b86d7b2cc1a3",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: a key naming no parameter",
+    "ff72353c9e4d0881d44631c761e0df1eeec6b0aa5cdeae7fab3e67ce027da253",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: a key naming no parameter, after deferred",
+    "f584db0ca079e21cd5b2ee356adc190b5a7da811d8c2ad1c0fdde7dca1ce49f5",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: a key on an extern with no parameters",
+    "f00f3d0b4ebfb36fb0513bdb04f685c06cd08df93ae52ded0833248cc96ad9bd",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: a key whose type is not a scalar",
+    "5caae5210e3d4ca8de25a6bd4f01eeacfcc3424efefbb11dd51834b93d23860f",
+    "agree-refuse/G4"
+   ],
+   [
+    "oracle-reject:item 309: a key typed by an alias of a list",
+    "ed8bf66431395849124ff9dadcaa03ad3c6e3c8dc952268c803d2ece57c98a92",
+    "agree-refuse/G4"
+   ],
+   [
     "admission:empty_composition",
     "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
     "agree-admit"
@@ -4996,14 +5146,14 @@
   ],
   "cases_note": "One row per program run, in run order: case id, sha256 of the source bytes, bucket. `tools/census_artifact.py --verify` re-runs the census and compares these rows one by one, so a published verdict is checkable on its own and not only as part of a bucket count.",
   "checker_sources": {
-   "selfhost/lower.rvl": "3c7752c6448dff5b1cecaca47194376a4070474dc2c96cd7463bbf6f11955f32",
+   "selfhost/lower.rvl": "d0117d7284a8cb8de478c6de702882aa3ef521a2091a3ce62be7657aaf9e28ad",
    "tests/test_gate_reference_census.py": "db49e785415076e632e8fb070ce5a12a3964e98ff5a0c234ed322d06b5d695a0",
    "tools/build_gate_crate.py": "88eb0b3d84a48290cb777319cce4afc7352705d8025df540746ad9dcaa9f5c63",
    "tools/corpus_provenance.py": "a98efd43d77d634328bb36a233c8f77ddb6c44f316bfab38da8a1cb2c73ef9bd",
    "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
   },
-  "checker_version": "GATE-CENSUS-1+657d3a4d3cfd",
-  "compiler_tree_digest": "src/revl@sha256:712893f922a2",
+  "checker_version": "GATE-CENSUS-1+189c635de62e",
+  "compiler_tree_digest": "src/revl@sha256:82a58185cd18",
   "compiler_tree_digest_note": "EVAL-REPORT-1 names this field `compiler_commit`. It is not a commit. It is a sha256 over the src/revl/**/*.py modules the census run opened, listed in `pins.reference`, which is narrower than a commit (a commit that touched no module the run reads does not move it) and recomputable by anyone with a checkout.",
   "corpus_dirs": [
    "examples",
@@ -5047,8 +5197,8 @@
    "measured_but_not_baselined": [],
    "total": 0
   },
-  "n": 975,
-  "n_distinct": 969,
+  "n": 1005,
+  "n_distinct": 999,
   "n_note": "`n` is programs RUN. `n_distinct` is distinct case ids: 6 case ids reach the corpus twice, once from each of two entries that spell the same name, so every bucket count and `n` itself carry them twice. The distinct number is the one to quote.",
   "not_established": [
    "This report says nothing about any implementation other than revl's own two. It is not a comparison and carries no comparative claim.",
@@ -5056,12 +5206,12 @@
    "Generation zero in the provenance manifest is a declaration about the tree as it stood, not a measurement. What holds from there on is that an arriving document must name its generation, and that an undeclared one counts as loop-authored.",
    "Generation zero does not mean a person typed it. Issue #1397 measured the generation-zero set against the commits that introduced it: 153 of 850 entries arrived on a branch named agent/*, 132 more on a commit carrying an AI co-author trailer, 415 on commits pushed to the trunk with no branch to read, and the repository's root commit carries such a trailer itself. Both signals are lower bounds. The honest reading is that this corpus is model-written and pre-loop, and the floors gate the second word, not the first.",
    "A mislabelled provenance entry defeats the provenance measurement exactly as re-recording the baseline would defeat the census. Neither is detected by a tool; both are edits in a diff somebody reads.",
-   "The corpus holds 6 case ids that appear twice, so `n` (975) counts 6 programs twice and `n_distinct` (969) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported."
+   "The corpus holds 6 case ids that appear twice, so `n` (1005) counts 6 programs twice and `n_distinct` (999) is the honest size. The repeats are named in the report. They are not deduplicated here: dropping one would move bucket counts and the recorded baseline, which is a change to the census rather than to the way it is reported."
   ],
   "pins": {
    "decides_verdicts": {
-    "backends/python/emit.py": "c8da1ae2a4f472de5b59845c1123e4c5d2f8f93b158aa0d4a646e8e64d8c86c4",
-    "tests/test_selfhost_lower.py": "02b8dd6276f1c6d740ab3998d34793b46af45784774872732d608ded455769f0",
+    "backends/python/emit.py": "56656781f098679edcc51dfa7da4df2f769ef4b7c466aaf197b5e98dc6e564ea",
+    "tests/test_selfhost_lower.py": "f1a63220d88cf3c26891ab6ac364b91aacd0c92e2d1e3b803fa72d7d4a654803",
     "tools/build_gate_crate.py": "88eb0b3d84a48290cb777319cce4afc7352705d8025df540746ad9dcaa9f5c63",
     "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
    },
@@ -5077,9 +5227,9 @@
     "src/revl/cardinality.py": "b3ece8c5c213a047244f45563df9764cf894b203a9eddd1cb6193615df5d2ea0",
     "src/revl/compiler.py": "9f9c210b6b7dc0a78fe9e1017b4a9017d6a94cd6c048a7c514b51225c895fc45",
     "src/revl/decode_grammar.py": "f0f44dc8da22fc9674573bf3a584366bac0ae87ff0472f2cdc975aea294d266a",
-    "src/revl/diagnostics.py": "044e24f15941ab528c0118e8a7d3d14cb53588bc0b2400d1c7ebffb479e32f4f",
+    "src/revl/diagnostics.py": "7bcfa4eacf1a8a056d2cd7b73ffc9ed5746199e926f18371bb0aad86f701dfbc",
     "src/revl/emission_analysis.py": "f296a58b2c0ada38015372ac322d57a3ba5f12d36e9c0f39d99f9d65ef73f71c",
-    "src/revl/errors.py": "50eb2ae9efef70a88c53e854596acf11fac99714a0f4d80de9d790a0ef365459",
+    "src/revl/errors.py": "9de8113a3aae7b74da53d67ad5267edb1cdddd74b5d66383a201fcd15afd587c",
     "src/revl/fmt.py": "4b6e2fa356d32307b5c5bfc1bf4e33d4f77c7b710d33acfe80ff5416c68b75d1",
     "src/revl/holes.py": "0d3ab0f41e75f6bd6c163159c2e75f04820603c19c78c78800ca1e6d8cad0014",
     "src/revl/hostfile.py": "58a0f9dc8186cbd2c601c10bcb29b4cba35ac89991c608ab6991c08590fdf705",
@@ -5097,7 +5247,7 @@
     "src/revl/navigate.py": "48dc9cf26d966359f04450460bcff0310da73557e19af40a8b29b68e6f00a0f3",
     "src/revl/ownership.py": "2433a7fe729a6347d66dbdc0dbab1577fe2f421a753a33995c356a7be86150cf",
     "src/revl/parallel.py": "814a50af84e46926e962e3607cd3308b8271064310ff31429877930b4250fba0",
-    "src/revl/parser.py": "7128271fe91be1becdb789dfbb45b89b3fbdb21ed0cbb465e5c0a873c81de241",
+    "src/revl/parser.py": "7c881b51e28d8f484294590afdeae660f4e10bca20edaf289963c16cf092bcf8",
     "src/revl/policy.py": "028284481cc35a686d3354dbc2722a2e40b655a57d6e7f6d75bdfa5ef4024312",
     "src/revl/resources.py": "6b4deac97a9a6b21301109678bdb12892eb84aa694a9c8bf76644133f5fb1a7f",
     "src/revl/retention.py": "45874047bad9f66ac8241baff8db816ed2e48d31bb8232068b53d24896451ec1",
@@ -5108,15 +5258,15 @@
    },
    "report_inputs": {
     "crates/revl-gate/Cargo.toml": "de0fdc92fd47facfe7b962a233722285724deddca3f2a8495dd427008ff9f25c",
-    "crates/revl-gate/src/admission.rs": "f68d998a9d776c2249e4b1a88b1da91904fd511230a43323f42671864424ead0",
-    "crates/revl-gate/src/frontier.rs": "28c11660f0159732740162795caaeb7ed51bdc824ccb7b84c815ca7435f8b492",
+    "crates/revl-gate/src/admission.rs": "fb5597078ad3c758bb7d6d02059665335cd480421323abfb30e53ca393b1dc66",
+    "crates/revl-gate/src/frontier.rs": "d3cf63926878a35a924c862123ded163a882abc0853cb503cacdae5169c163cf",
     "crates/revl-gate/src/ir.rs": "0d171beeb651561811e855308c62554f44fbfca7a64bb3030abf0a3f20f9793b",
     "crates/revl-gate/src/lib.rs": "e9c5ddb7d29b757a7e08df675ae54fbaa637a7e952c3421c0ca6934016a13869",
-    "crates/revl-gate/src/selfhost.rs": "e64a11145c87f436f4904365555317e29d3035b1050125e915981afbba55659d",
+    "crates/revl-gate/src/selfhost.rs": "a649b8d9d518cfcd837c4a32bc9f3bc2f4f4e57e24918f594b5c4ff7101cb12b",
     "crates/revl-gate/src/session.rs": "98470ddaf7803dd69da9e6c8c6750fc23956906d6529d5de5514ad0e02da6455",
     "crates/revl-gate/src/symbols.rs": "698969ee2ea20647b73a6b758da946a29658f1c72b1553153d50551b94becbec",
-    "tests/fixtures/census_crate_reproduction.json": "a6059b733f2c7adc13134d036d3ffc15b6986475e787daa2cc189131da6e89d1",
-    "tests/fixtures/corpus_provenance.json": "23ba8a1783f6495a0498132e7367ba408f97e490e2248a5c85e2f7b08d01d39e",
+    "tests/fixtures/census_crate_reproduction.json": "17b0266b27118117e465cf254c71cf8d3c3574b8ef869adb3d80ad15885d9941",
+    "tests/fixtures/corpus_provenance.json": "8c38a764d5d5d4d83f51070d68324b82a6618a22932aa1cbdd50a5125d4bbdd2",
     "tools/gate_reference_census_baseline.json": "5dc8b0ab9b4be6c8dd5e480f99446cce787a923334f113a5badf5dde0c946852"
    }
   },
@@ -5131,7 +5281,7 @@
      "independent_percent": "100.0",
      "independent_permille": 1000,
      "loop_authored": 0,
-     "total": 975,
+     "total": 1005,
      "undeclared": 0
     },
     {
@@ -5143,7 +5293,7 @@
      "independent_percent": "100.0",
      "independent_permille": 1000,
      "loop_authored": 0,
-     "total": 19,
+     "total": 24,
      "undeclared": 0
     },
     {
@@ -5215,7 +5365,7 @@
      "independent_percent": "100.0",
      "independent_permille": 1000,
      "loop_authored": 0,
-     "total": 343,
+     "total": 361,
      "undeclared": 0
     }
    ],
@@ -5235,16 +5385,16 @@
    "by": "tools/gate_reference_census.py --engine crate",
    "crate_false_admissions": [],
    "crate_tracked_buckets": {},
-   "current_checker_version": "GATE-CENSUS-1+657d3a4d3cfd",
+   "current_checker_version": "GATE-CENSUS-1+189c635de62e",
    "does_not_establish": "The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.",
    "is_current": true,
-   "n": 973,
-   "recorded_at_checker_version": "GATE-CENSUS-1+657d3a4d3cfd",
+   "n": 1003,
+   "recorded_at_checker_version": "GATE-CENSUS-1+189c635de62e",
    "recorded_in": "tests/fixtures/census_crate_reproduction.json",
    "tracked_buckets_agree": true,
    "what": "the committed crates/revl-gate, built by cargo and asked through a standalone consumer, over the same corpus"
   },
-  "run": "census-selfhost-cf487797d682",
+  "run": "census-selfhost-b865bfb3c18c",
   "schema": "GATE-CENSUS-1",
   "tracked_bucket_prefixes": [
    "false-admission",
@@ -5258,21 +5408,21 @@
  "claims": [
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:712893f922a2",
+    "compiler_commit": "src/revl@sha256:82a58185cd18",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-cf487797d682"
+    "run": "census-selfhost-b865bfb3c18c"
    },
    "public": true,
    "rung": "demonstrated",
-   "text": "Over 969 distinct programs (975 runs; 6 case ids appear more than once and are named in the report), the gate issued no admission the reference refuses: the `false-admission` bucket is empty, and it is in NEVER_BASELINED, so `--record` cannot write one into the baseline and `--check` fails on any member however the baseline reads."
+   "text": "Over 999 distinct programs (1005 runs; 6 case ids appear more than once and are named in the report), the gate issued no admission the reference refuses: the `false-admission` bucket is empty, and it is in NEVER_BASELINED, so `--record` cannot write one into the baseline and `--check` fails on any member however the baseline reads."
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:712893f922a2",
+    "compiler_commit": "src/revl@sha256:82a58185cd18",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-cf487797d682"
+    "run": "census-selfhost-b865bfb3c18c"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5280,28 +5430,28 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:712893f922a2",
+    "compiler_commit": "src/revl@sha256:82a58185cd18",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-cf487797d682"
+    "run": "census-selfhost-b865bfb3c18c"
    },
    "public": true,
    "rung": "measured",
-   "text": "0 of 975 census programs were produced by a generation of the self-improvement loop at or after generation 1 (100.0% independent of the loop, 0 undeclared), measured by tools/corpus_provenance.py over tests/fixtures/corpus_provenance.json. The loop has never run, which is why this figure is what it is."
+   "text": "0 of 1005 census programs were produced by a generation of the self-improvement loop at or after generation 1 (100.0% independent of the loop, 0 undeclared), measured by tools/corpus_provenance.py over tests/fixtures/corpus_provenance.json. The loop has never run, which is why this figure is what it is."
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:712893f922a2",
+    "compiler_commit": "src/revl@sha256:82a58185cd18",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-cf487797d682"
+    "run": "census-selfhost-b865bfb3c18c"
    },
    "public": true,
    "rung": "measured",
-   "text": "0 of 975 census programs are declared in tests/fixtures/corpus_provenance.json as typed by a person (0.0%). This report makes no claim that its corpus is human-written, and the figure above is not that claim: it is the share no generation of the self-improvement loop produced."
+   "text": "0 of 1005 census programs are declared in tests/fixtures/corpus_provenance.json as typed by a person (0.0%). This report makes no claim that its corpus is human-written, and the figure above is not that claim: it is the share no generation of the self-improvement loop produced."
   }
  ],
  "generator": {
   "name": "selfhost/lower.rvl admit_src behind crates/revl-gate",
-  "run": "census-selfhost-cf487797d682",
+  "run": "census-selfhost-b865bfb3c18c",
   "tool": "tools/gate_reference_census.py --engine selfhost"
  },
  "grader": {
