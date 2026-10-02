@@ -23,8 +23,8 @@
         },
         "py": {
           "residual": 23,
-          "corpus": 98,
-          "reproduced": 75,
+          "corpus": 99,
+          "reproduced": 76,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
             "../../../backends/go/testdata/stream_130.rvl",
@@ -79,7 +79,7 @@
         }
       },
       "total_residual": 32,
-      "total_corpus": 317,
+      "total_corpus": 318,
       "clean_tiers": [
         "java",
         "wasm"

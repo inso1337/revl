@@ -286,6 +286,10 @@ CORPUS = [
     # fires through the `extern_emit` seam.
     "../emit_ts_refusals/deferred_emission_call.rvl",
     "../emit_py_deferred_shapes.rvl",
+    # emit_py_deferred_register.rvl: the item-440 `keyed` and `declared`
+    # registers on the enqueue (an inline test until #1651 let the self-host
+    # gate read the `idempotent` modifier).
+    "../emit_py_deferred_register.rvl",
     # Reference fixes followed by the port. emit_py_map_remove_nested.rvl
     # (issue #1632): a `Map.remove` whose receiver carries a `:=` temp is
     # evaluated through a lambda. emit_py_stream_builtin_bind.rvl (issue
@@ -876,40 +880,6 @@ def test_a_subscribe_replay_request_is_named_not_dropped(emitted, reference, tmp
     assert plain in want and plain in got
     reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:subscribe>>")
     assert reason is None, reason
-
-
-# The item-440 idempotency register on a deferred emission's enqueue: `keyed`
-# with the key's VALUE at the call site, and the bare `declared` claim. Inline
-# because the self-host gate cannot parse the `idempotent` extern modifier, so
-# a fixture file holding it would be a gate/reference census false reject (the
-# rest of the deferred surface is the corpus document emit_py_deferred_shapes.rvl).
-# Unlike the refusals above, this one is a byte-agreement case.
-DEFERRED_REGISTER_SRC = """extern emission deferred idempotent(key: msg) fn post(sink: Str, msg: Str) = @py { return }
-extern emission deferred idempotent fn notify(msg: Str) = @py { return }
-service Ops {
-  emission fn enqueue(sink: Str, msg: Str)
-  emission fn announce(msg: Str)
-}
-component Agent provides ops: Ops {
-  emit notify("boot")
-  provide ops {
-    fn enqueue(sink, msg) { emit post(sink, msg) }
-    fn announce(msg) { emit notify(msg) }
-  }
-}
-"""
-
-
-def test_a_deferred_emission_carries_its_idempotency_register(emitted, reference, tmp_path):
-    path = tmp_path / "deferred_register.rvl"
-    path.write_text(DEFERRED_REGISTER_SRC)
-    ir = compile_files([str(path)])
-    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
-    for enqueue in ("lambda: post(sink, msg), register='keyed', idempotency=msg)",
-                    "lambda: notify(msg), register='declared')",
-                    "lambda: notify('boot'), register='declared')"):
-        assert enqueue in want
-    assert got == want
 
 
 # ---------------------------------------------------------------------------

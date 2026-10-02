@@ -51,7 +51,7 @@
     "reference": {
       "go": 2824,
       "java": 986,
-      "py": 310,
+      "py": 301,
       "rust": 1200,
       "ts": 552,
       "wasm": 1558
@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 104,
       "java": 175,
-      "py": 108,
+      "py": 100,
       "rust": 286,
       "ts": 97,
       "wasm": 63
@@ -811,12 +811,9 @@
         "Issue #1474, a provided method named after a Python keyword, soft keyword or `self`: `_method_def_name` is the one rename for the method's `def`, `_ComponentEmitter._provide` registers the contract name back on the provided class with `setattr`, and `_method_access` reaches it by `getattr(target, 'class')` at a static call site. No emit_py corpus document names a provided method after a Python keyword, and selfhost/emit_py.rvl does not port the rename, so a corpus document here would make the byte-agreement oracle diverge; the self-host port plus that document is the work that retires this entry. Not reached besides: the two refusals `_method_def_name` makes (a non-identifier, a `_revl` scaffolding name), which the frontend stops first. The input family is tests/test_keyword_method_names_1474.py.": {
           "_method_access": 1,
           "_method_def_name": 2
-        },
-        "Deferred-emission idempotency register (item 440 §(b)): `_deferred_register_kwargs` puts the extern's register, and the key's value at the call site, on the enqueue. Only a deferred extern declared `idempotent` or `idempotent(key: p)` reaches past its early return, and the self-host gate cannot parse that modifier, so a corpus file holding one would be a gate/reference census false reject. test_a_deferred_emission_carries_its_idempotency_register holds both registers to byte agreement from inline source instead; the rest of the deferred surface is the corpus documents emit_ts_refusals/deferred_emission_call.rvl and emit_py_deferred_shapes.rvl since item 391.": {
-          "_deferred_register_kwargs": 9
         }
       },
-      "uncovered_statements": 310
+      "uncovered_statements": 301
     },
     "rust": {
       "statements": 3771,
@@ -1821,12 +1818,9 @@
         },
         "uses_builtin_result's tests-subtree return selects Result helpers used only by an in-file test. The port deliberately omits test emission; such a helper alone cannot establish harness parity. Extern/activation/function Result uses are positively covered by result/result_ctor_secrets/witnessed; the separate harness boundary is reproduced by fuzz_go_6be27824.rvl.": {
           "uses_builtin_result": 1
-        },
-        "The port of the reference's `_deferred_register_kwargs` (item 440 §(b)): the register and key-value kwargs on a deferred emission's enqueue. Past its early return it runs only on a deferred extern declared `idempotent` or `idempotent(key: p)`, a modifier the self-host gate cannot parse, so no corpus file can hold one without a gate/reference census false reject. test_a_deferred_emission_carries_its_idempotency_register asserts the whole emitted module byte-equal to the reference over both registers from inline source. A self-host parser that reads the modifier would let a corpus document replace that test and close these.": {
-          "deferred_register_kwargs": 8
         }
       },
-      "uncovered_statements": 108
+      "uncovered_statements": 100
     },
     "rust": {
       "statements": 4092,

@@ -10,10 +10,7 @@
 //     deferred externs: a `call`, not a `fn`, so it is never looked up as one.
 //
 // The item-440 idempotency register on the enqueue (`idempotent`,
-// `idempotent(key: p)`) is NOT here: the self-host gate cannot parse that
-// modifier, so the gate/reference census would report a false reject for this
-// file. test_a_deferred_emission_carries_its_idempotency_register holds those
-// shapes to byte agreement from inline source instead.
+// `idempotent(key: p)`) is emit_py_deferred_register.rvl.
 //
 // It sits beside emit_py_corpus/ rather than in it because
 // tests/test_selfhost_lower_ir.py globs that directory, and selfhost/lower.rvl
