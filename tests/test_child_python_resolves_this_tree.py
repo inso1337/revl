@@ -1,8 +1,9 @@
 """A python a test starts imports `revl` from the tree under test.
 
-tools/hooks/pre-commit runs pytest with whichever interpreter it finds, and in
-a linked worktree that is the MAIN checkout's `.venv`. Its editable install of
-revl is a plain `.pth` path entry naming the main checkout's `src/`, so every
+tools/hooks/pre-commit used to run pytest with whichever interpreter it found,
+and in a linked worktree that was the MAIN checkout's `.venv` (the hook refuses
+that interpreter since issue #1608, but one can still be used by hand). Its
+editable install of revl is a plain `.pth` path entry naming the main checkout's `src/`, so every
 python started without this tree on PYTHONPATH imported the main checkout's
 revl. `tests/conftest.py` puts this tree's `src/` on `sys.path` for the pytest
 process itself, which is why in-process imports were right and only children

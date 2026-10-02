@@ -108,7 +108,7 @@ was corrected by hand and had drifted back within a day.
 | composition-layers.md | needs-work | 20 |  |
 | composition-rows.md | needs-work | 24 |  |
 | conformance.md | needs-work | 0 |  |
-| contract-errata.md | needs-work | 57 | yes |
+| contract-errata.md | needs-work | 56 | yes |
 | crash-recovery.md | needs-work | 52 |  |
 | dash.md | current | 11 |  |
 | delivery-semantics.md | needs-work | 7 |  |

@@ -279,6 +279,19 @@ fn main() {
     }
 
     let once = spec["once"].as_bool().unwrap_or(false);
+    // issue #1621: the `--once` runner hands this process a per-run token as
+    // the first line of stdin, and the four proof lines (`UP`, `NO-RESIDUE`,
+    // `RESIDUE-LEFT`, `DOWN`) carry it, so a program's own output cannot forge
+    // them. Read here, before any component loads (so before any host code
+    // runs), into a local the generated `components` module cannot name. The
+    // spec carries only the flag: it is a file the program could read.
+    let proof_name = if spec["proofOnStdin"].as_bool().unwrap_or(false) {
+        let mut token = String::new();
+        let _ = std::io::stdin().read_line(&mut token);
+        format!("{name}#{}", token.trim())
+    } else {
+        name.clone()
+    };
     let root = cordis::Context::new();
     let mut fibers = Vec::new();
     let (tx, rx) = std::sync::mpsc::channel::<String>();
@@ -373,7 +386,7 @@ fn main() {
         }
     }
 
-    println!("[{name}] UP");
+    println!("[{proof_name}] UP");
 
     // item 443 / issue #122 — the idle watcher. The accept seam refuses lazily,
     // at the NEXT crossing, which is useless for a process parked waiting to be
@@ -445,11 +458,11 @@ fn main() {
         log("residue", "registry", &format!("{live_plugins} live plugin(s)"));
         log("residue", "provisions", &format!("{live_services} service(s) provided"));
         if live_plugins == 0 && live_services == 0 {
-            println!("[{name}] NO-RESIDUE — the composition left nothing behind");
+            println!("[{proof_name}] NO-RESIDUE — the composition left nothing behind");
         } else {
-            println!("[{name}] RESIDUE-LEFT — see the residue lines above");
+            println!("[{proof_name}] RESIDUE-LEFT — see the residue lines above");
         }
     }
 
-    println!("[{name}] DOWN");
+    println!("[{proof_name}] DOWN");
 }
