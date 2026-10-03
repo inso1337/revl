@@ -51,7 +51,7 @@
     "reference": {
       "go": 2897,
       "java": 986,
-      "py": 669,
+      "py": 672,
       "rust": 1230,
       "ts": 285,
       "wasm": 1558
@@ -59,7 +59,7 @@
     "selfhost": {
       "go": 104,
       "java": 175,
-      "py": 103,
+      "py": 106,
       "rust": 286,
       "ts": 94,
       "wasm": 63
@@ -794,7 +794,7 @@
           "_ComponentEmitter._method": 4
         },
         "Method residuals: assign emits the same name/value form as the covered let path (port combines them); bound acquisition uses spawn/host runtime, with the witnessed bind specifically frontend-rejected; Map.cas undo checks the acquired boolean; deferred/await use retained runtime paths. Sync await, nested provide and unknown step are explicit errors. services_method_effects.rvl and witnessed.rvl pin supported unbound and compensated registration.": {
-          "_ComponentEmitter._method_step": 22
+          "_ComponentEmitter._method_step": 23
         },
         "Module emit residuals: non-dict/version/empty-document/duplicate-component errors; idempotent map and commutative/async/idempotent service metadata; inspect/ref cache; asyncio timer/lifecycle imports; test/fault trailers; async-arrow adapter; router runtime source. Named reproductions: stdlib/fs.rvl, stdlib/router.rvl, examples/lifecycle_wasm.rvl, emit_ts_corpus/services_async.rvl and tests/test_parallel_259.py. Reproducible decision survey: tools/selfhost_differential_survey.py --tiers py --json PATH, marker-aware revision eace0219, 913 tree documents at bed42b9c: 203 byte agreements, 54 byte divergences, 360 port_refusal statuses, 31 reference rejections, 265 compile rejections, zero port errors. Inspected first differences belong to harness/async/realm/router/@py-ref families; refusal marker counts overlap (host255, format112, await60, spawn8, instance-get4, subscribe2), not 360 independent semantic-invalid programs. The 49-document literal oracle list adopts useful agreeing branch coverage rather than all duplicates. These are the individually classified ABI/realm/runtime/harness boundaries, not cache, witnessed or ordinary functions. The declared-`Secret[Map[K, V]]` marking (item 481) adds the shape probe, the zeroing gate and the type-table rendering to `emit` itself, so three statements arrive with it and this is re-recorded 33 to 36 under the same reason. The table is emitted only for a document whose declared secret types reach a `Map`, and no emit_py_corpus document declares one. Issue #957's `Map` subscript arm adds seven statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 513 slice 2 (PR #1326) adds the two statements inside `if grammar_registry:`: the module-level `register_grammars(...)` call and the blank line after it. The guard is the point, because a document with no validated service crossing stays byte-identical to one compiled before the slice. No emit_py_corpus document declares a `response_grammar`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no grammar-registry arm at all (item-429(d)); the seam is pinned by tests/test_decode_grammar_seam_513s2.py instead.": {
           "emit": 45
@@ -857,9 +857,12 @@
         "Issue #1474, a provided method named after a Python keyword, soft keyword or `self`: `_method_def_name` is the one rename for the method's `def`, `_ComponentEmitter._provide` registers the contract name back on the provided class with `setattr`, and `_method_access` reaches it by `getattr(target, 'class')` at a static call site. No emit_py corpus document names a provided method after a Python keyword, and selfhost/emit_py.rvl does not port the rename, so a corpus document here would make the byte-agreement oracle diverge; the self-host port plus that document is the work that retires this entry. Not reached besides: the two refusals `_method_def_name` makes (a non-identifier, a `_revl` scaffolding name), which the frontend stops first. The input family is tests/test_keyword_method_names_1474.py.": {
           "_method_access": 1,
           "_method_def_name": 2
+        },
+        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run. `_ComponentEmitter._timer_compensation` registers the same compensation on a timer firing (issue #1589) and is unreached for the same reason; its one call on the async-timer path adds one statement to `_ComponentEmitter._timer`. The provide-method sites (#1592) are the same boundary: `_method_step` registers an emit statement's declared compensation (recorded with the method residuals), and `_value_emission_fire` registers a value emission's (`return emit put_row(m)`). selfhost/emit_py.rvl ports the extern-declared compensate at no site, so a corpus document carrying one would turn the byte oracle red rather than close the gap.": {
+          "_ComponentEmitter._value_emission_fire": 2
         }
       },
-      "uncovered_statements": 642
+      "uncovered_statements": 672
     },
     "rust": {
       "statements": 3771,
@@ -1852,9 +1855,13 @@
         },
         "witnessed_extern final miss after a nonempty table: legal matching fn acquires are covered, and unknown fn names are frontend-rejected. The lookup's None fallback mirrors the reference dictionary miss.": {
           "witnessed_extern": 1
+        },
+        "A value emission NESTED inside a larger provide-method expression (`return \"x\" + emit f(t)`): the reference fires it through `_revl_extern_emit` wherever it sits in the method body (`_route_value_emissions`), while this port routes only the whole-value shapes (`return emit f(x)`, `let r = emit f(x)`, an assignment, a branch condition) that services_value_emission.rvl covers, because `cexpr` carries no emitter state to route a nested call with. `reaches_value_emission` finds the nested call and `method_value` renders `<<UNSUPPORTED-NESTED-VALUE-EMISSION>>` instead of the bare call the WAL would never see, so the divergence is loud. A corpus document with the nested shape would turn the byte oracle red rather than close the gap; porting it (threading the routing state through `cexpr`) is what deletes this entry.": {
+          "method_value": 1,
+          "reaches_value_emission": 2
         }
       },
-      "uncovered_statements": 103
+      "uncovered_statements": 106
     },
     "rust": {
       "statements": 4092,
