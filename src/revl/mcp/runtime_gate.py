@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 from .._paths import backends_root
+from . import remedy
 
 #: Verbs that need a live composition, which only the runtime can boot.
 RUNTIME_VERBS = frozenset({
@@ -119,7 +120,9 @@ def refusal(name: str) -> dict:
         "ok": False,
         "refused": True,
         "unavailable": "cordis-py runtime",
-        "next": fix,
+        # one `next` schema across every refusal (issue #1691): no MCP call
+        # installs a runtime, so this remedy is an operator step
+        "next": remedy.operator_step(fix),
         "diagnostics": [{
             "severity": "error", "code": "REVL", "category": "runtime",
             "message": (f"`{name}` needs the cordis-py runtime, which this "
