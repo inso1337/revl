@@ -370,3 +370,13 @@ import RevL
 #print axioms RevL.G6Binding.inner_shadow_refused
 #print axioms RevL.G6Binding.fixtures_decided
 #print axioms RevL.G6Binding.binding_not_vacuous
+-- Issue #1807: G1 declared access over a component's real heads. Every
+-- access root (a call head's root that is no binding, callable, import, host
+-- family or constructor) is a declared requirement; decided per component by
+-- the oracle's `G1` row.
+#print axioms RevL.G1Access.accessB_iff
+#print axioms RevL.G1Access.undeclared_refused
+#print axioms RevL.G1Access.access_mono
+#print axioms RevL.G1Access.declaring_admits
+#print axioms RevL.G1Access.fixtures_decided
+#print axioms RevL.G1Access.g1_access_not_vacuous

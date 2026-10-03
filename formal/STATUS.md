@@ -45,7 +45,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 
 | Code | Formal status | Theorems | Oracle | The gap, and what kind of gap it is |
 |---|---|---|---|---|
-| **G1** declared access | partial | 2 | no | `declared_only_access` is real and witnessed, but its content is the shape of `Typed`/`ReachIn`: it says an undeclared access cannot be *written*, not that the checker *visits* every statement of a real component body. **Modelling limit** — L0 has no component bodies |
+| **G1** declared access | partial | 2 + 6 | **yes** (one G1 row per component; 21 agree-G1) | `declared_only_access` is real and witnessed, but its content is the shape of `Typed`/`ReachIn`: it says an undeclared access cannot be *written*, not that the checker *visits* every statement of a real component body. **Modelling limit** — L0 has no component bodies. Since issue #1807 the `G1` row decides `RevL.G1Access.AccessOK` over each component's ACCESS roots (`GA`): every call head's root at every nesting depth (after and inside `if`/`else`/`while`/`for`/guard blocks, in conditions), less the roots the checker resolves without a requirement, plus `intercept` targets. So the visiting half is measured against the checker on the corpus, through the exporter's walk, while the classification of a root as local, callable, import, host family or constructor is the exporter's and component-wide, not per scope |
 | **G2** provision disjointness | full | 4 | **yes** (V rows, 2 agree-G2) | stated over `(key, realm)` slots from the incremental `LinkOK`, and the oracle bites: change `Manifest.needs` to ignore the realm and four corpus files mismatch |
 | **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
 | **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 + 10 | **yes** (182 G rows, 25 P rows, 6 agree-G4; one AP row per marked crossing for the approval floor, whose 34 refusals file under agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits. The approval floor (item 246, issue #1455) is `RevL.G4Approval.CrossingOK` over three exported facts: the approval-required capability TOKENS (`AR`, keyed by token as `lower._approval_index` keys them), the tokens one marked crossing reaches (`AX`, as `lower._approval_crossed_caps` resolves them, a `compensate` slot's crossings included) and its `with` edge (`AE`, none for the value form); `crossingB_iff` bridges the printed verdict, and `approval_coverage` fails the gate unless the corpus carries a covered crossing, one refused under another edge, one refused with no edge and an unrequired one admitted. Not modelled there: a `[...]` class in a glob scope, an edge the exporter cannot name (read as none, fail-closed), and a required token declared in a `use`d module |
@@ -328,6 +328,12 @@ Three summary readings of that map:
 | `RevL.G6Binding.inner_shadow_refused` | G6 binding uniqueness — blocks see outward | **proved** | `propext` | rebinding an outer name inside a block is refused |
 | `RevL.G6Binding.fixtures_decided` | G6 binding uniqueness — the corpus shapes | **proved** | none | `g6_method_local_shadows_component.rvl`'s method refused and its unseeded twin admitted; sibling arms reusing a name admitted; a `let` then a `for` binder of the same name refused |
 | `RevL.G6Binding.binding_not_vacuous` | G6 binding uniqueness — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the corpus shape and admits the twin and the sibling arms, so it is neither always true nor always false |
+| `RevL.G1Access.accessB_iff` | G1 declared access — the bridge (issue #1807) | **proved** | `propext, Quot.sound` | `accessB declared roots = true ↔ AccessOK declared roots`: the printed `G1` verdict is exactly the rule |
+| `RevL.G1Access.undeclared_refused` | G1 declared access — the refusal | **proved** | none | one access root that is not a declared requirement refuses the component |
+| `RevL.G1Access.access_mono` | G1 declared access — monotone | **proved** | none | declaring more requirements never refuses |
+| `RevL.G1Access.declaring_admits` | G1 declared access — the fix | **proved** | none | declaring the missing key admits what it refused |
+| `RevL.G1Access.fixtures_decided` | G1 declared access — the corpus shapes | **proved** | none | `g1_undeclared_access.rvl`'s `Logger` refused, and admitted with `db` declared |
+| `RevL.G1Access.g1_access_not_vacuous` | G1 declared access — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the undeclared access and admits the declared one |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -937,6 +943,29 @@ Verdicts:
   modelled: pattern binders in a `match` arm, the body of an `every`
   timer, and the other G6 refusals (purity outside an effect form,
   reassigning an immutable binding).
+- **G1 rows (per component, G1 declared access, issue #1807)**:
+  `Oracle.accessRowB` — `RevL.G1Access.accessB` — over the component's
+  declared requirements (its `M` row) and its ACCESS roots (`GA`). An
+  access root is the root of a call head the component makes, at every
+  nesting depth, that is not a binding in the component (a `let`, `var`,
+  parameter, loop variable, arrow or `match` binder), a module `fn` or
+  `extern`, a name a `use` imports, a host family (`lower._HOST_CALLABLES`)
+  or a type or variant constructor; an `intercept` target that is not a
+  provision joins them (one on a provision is a different refusal, issue
+  #1809). The requirements are not dropped by the exporter, so the model
+  is what checks each root against them. `accessRowB_iff` proves the
+  printed Bool is `RevL.G1Access.AccessOK`, and the reference recomputes
+  the subset test. A G1 refusal files under `agree-G1` when the row fails
+  and under the fatal `missed-G1` when it does not; a failing row in an
+  accepted file is `formal-strict`. The 21 G1 refusals, 16 of them the
+  block-nesting fixtures, left the generic `out-of-fragment` bucket.
+  Blinding the printed verdict was seen to produce 21 `access`
+  mismatches and `missed-G1 21 FATAL`; making the decider admit every
+  root stops `accessB_iff` and `g1_access_not_vacuous` from elaborating.
+  `access_coverage` fails the gate unless the corpus carries a refused
+  component, an admitted one with a declared access root, and an admitted
+  one whose dropped roots include a local, a module callable and a host
+  family.
 
 ### The G7 row, and what it is evidence of
 
@@ -1110,13 +1139,13 @@ printed 1. Nothing compared the two, in either direction.
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
 **697 .rvl files -> 635 components -> 1559 statements = 445 modeled +
-223 componentless + 29 refused at parse**, and **9420 verdicts compared
+223 componentless + 29 refused at parse**, and **10055 verdicts compared
 (445 files + 635 components + 224 provide methods + 38 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1559
 confinements + 1559 surfaces + 423 teardowns + 503 provide-clause
 components + 83 config fields + 635 A2 bodies + 445 deferred-position
-files + 56 approval crossings + 899 binding scopes), 9420 agree, 0
-mismatches**.
+files + 56 approval crossings + 899 binding scopes + 635 access
+components), 10055 agree, 0 mismatches**.
 
 Checker alignment over the 445 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
@@ -1141,6 +1170,7 @@ layer.
 | --- | --- | --- |
 | `agree-A2` | 1 | informational |
 | `agree-A9` | 2 | informational |
+| `agree-G1` | 21 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
 | `agree-G4` | 131 | informational |
@@ -1151,11 +1181,12 @@ layer.
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
 | `missed-A9` | 0 | **FATAL** |
+| `missed-G1` | 0 | **FATAL** |
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
 | `missed-G6` | 0 | **FATAL** |
-| `out-of-fragment` | 70 | informational |
+| `out-of-fragment` | 49 | informational |
 | `out-of-fragment-G5` | 0 | ratcheted |
 | `out-of-fragment-G6` | 0 | ratcheted |
 

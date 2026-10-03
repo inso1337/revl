@@ -251,3 +251,9 @@ RevL.G6Binding.rebind_refused	necessity	RevL.G6Binding.binding_not_vacuous	two b
 RevL.G6Binding.inner_shadow_refused	necessity	RevL.G6Binding.binding_not_vacuous,RevL.G6Binding.fixtures_decided	an outer name rebound inside a block is refused; sibling blocks reusing a name are admitted (siblingArms), so the refusal is scoped
 RevL.G6Binding.fixtures_decided	concrete	-	the corpus shape refused and its unseeded twin admitted; sibling arms admitted; a let then a for binder of the same name refused
 RevL.G6Binding.binding_not_vacuous	concrete	-	shadowSeed refused, the unseeded twin and siblingArms admitted by the rule
+RevL.G1Access.accessB_iff	instance	RevL.G1Access.g1_access_not_vacuous,RevL.G1Access.fixtures_decided	accessB is false on Logger's undeclared db and true once db is declared, so the printed G1 verdict is mutation-sensitive
+RevL.G1Access.undeclared_refused	necessity	RevL.G1Access.g1_access_not_vacuous	one undeclared root refuses; the same root declared is admitted, so the refusal is not universal
+RevL.G1Access.access_mono	instance	RevL.G1Access.g1_access_not_vacuous	AccessOK [db] [db] holds and widening the requirements keeps it
+RevL.G1Access.declaring_admits	instance	RevL.G1Access.g1_access_not_vacuous	Logger is refused with no requirements and admitted once db is declared
+RevL.G1Access.fixtures_decided	concrete	-	g1_undeclared_access's Logger refused, admitted with db declared; a declared store admitted, refused against a db-only declaration
+RevL.G1Access.g1_access_not_vacuous	concrete	-	the undeclared access refused and the declared one admitted by the rule

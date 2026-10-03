@@ -11,6 +11,7 @@ import RevL.Theorems.A2_NoAcquisitionAfterProvision
 import RevL.Theorems.G4_DeferredPosition
 import RevL.Theorems.G4_ApprovalFloor
 import RevL.Theorems.G6_BindingUnique
+import RevL.Theorems.G1_KeyAccess
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -44,7 +45,11 @@ proved model itself**, not from a private restatement of it (roadmap item
   * `BU … binding=` is `bindingRowB`, which IS `RevL.G6Binding.bindingB`
     over one scope's seed names and its bind/enter/leave events (the `BE`
     rows); `bindingRowB_iff` PROVES it equals `RevL.G6Binding.BindingOK`
-    (G6 binding uniqueness, issue #1812).
+    (G6 binding uniqueness, issue #1812);
+  * `G1 … access=` is `accessRowB`, which IS `RevL.G1Access.accessB` over
+    the component's declared requirements (its `M` row) and its access
+    roots (the `GA` rows); `accessRowB_iff` PROVES it equals
+    `RevL.G1Access.AccessOK` (G1 declared access, issue #1807).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -170,6 +175,11 @@ Fact rows in (tab-separated, one fact per line):
                                              method): a name in view at its
                                              start, a binding, or a block
                                              boundary (G6, category `binding`)
+  GA <file> <comp> <root>                    one ACCESS root: a call head's
+                                             root that is no binding, module
+                                             callable, import, host family or
+                                             constructor, or an `intercept`
+                                             target (G1, issue #1807)
   DR <file> <fn|test|component> <owner> <extern> <call|arrow|value>
                                              one reach of a `deferred` emission
                                              extern and where it sits: a call,
@@ -263,6 +273,9 @@ Verdict rows out:
   BU <file> <comp> <scope> <binding=ok|fail>       G6 binding uniqueness over
                                                    one scope:
                                                    `RevL.G6Binding.bindingB`
+  G1 <file> <comp> <access=ok|fail>                G1 declared access:
+                                                   `RevL.G1Access.accessB`
+                                                   over the `GA` roots
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -1769,6 +1782,37 @@ theorem bindingRowB_iff (seed : List String) (evs : List RevL.G6Binding.Ev) :
 
 end BindingUnique
 
+/-! ## Deciding G1 declared access (issue #1807)
+
+A `GA` row is one access root of a component: a call head's root the
+checker can only resolve through a requirement. The verdict is the model's
+`RevL.G1Access.accessB` over the component's declared requirements (its `M`
+row) and its roots, and `accessRowB_iff` is the bridge to
+`RevL.G1Access.AccessOK`. -/
+
+section KeyAccess
+
+structure GARow where
+  path : String
+  comp : String
+  root : String
+
+def parseGA (f : List String) : Option GARow :=
+  match f with
+  | ["GA", path, comp, root] => some ⟨path, comp, root⟩
+  | _ => none
+
+/-- **Access decider**: the model's judgment over one component. -/
+def accessRowB (declared roots : List String) : Bool :=
+  RevL.G1Access.accessB declared roots
+
+/-- **The `G1` verdict is the model's rule.** -/
+theorem accessRowB_iff (declared roots : List String) :
+    accessRowB declared roots = true ↔ RevL.G1Access.AccessOK declared roots :=
+  RevL.G1Access.accessB_iff declared roots
+
+end KeyAccess
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1822,6 +1866,7 @@ def main (args : List String) : IO UInt32 := do
     let arrows' := fields.filterMap parseAR
     let axrows := fields.filterMap parseAX
     let berows := fields.filterMap parseBE
+    let garows := fields.filterMap parseGA
     let aerows := fields.filterMap parseAE
     -- An edge with no crossing, or two edges on one crossing, is a malformed
     -- export: refuse it rather than read one of them.
@@ -2062,6 +2107,13 @@ def main (args : List String) : IO UInt32 := do
         let evs := mine.filterMap beEvent
         let buv := if bindingRowB seed evs then "ok" else "fail"
         out := out ++ s!"BU\t{p}\t{k.1}\t{k.2}\tbinding={buv}\n"
+      -- G1 verdicts (declared access, issue #1807), one per component: the
+      -- model's rule over its declared requirements and its access roots.
+      let pga := garows.filter (fun r => r.path == p)
+      for m in fm do
+        let roots := (pga.filter (fun r => r.comp == m.name)).map (·.root)
+        let g1v := if accessRowB m.requires roots then "ok" else "fail"
+        out := out ++ s!"G1\t{p}\t{m.name}\taccess={g1v}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -2124,3 +2176,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.deferredOKB_iff
 #print axioms RevLOracle.approvalRowB_iff
 #print axioms RevLOracle.bindingRowB_iff
+#print axioms RevLOracle.accessRowB_iff
