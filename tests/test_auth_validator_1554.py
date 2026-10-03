@@ -548,6 +548,8 @@ class _FakeSession:
 
 
 class _FakeHttpd:
+    tls_context = None   # the listener attribute serve_http reads for its banner
+
     def __init__(self, host, port):
         self.server_address = (host, port)
 
@@ -565,7 +567,7 @@ def no_network(monkeypatch):
     binds: list = []
     _FakeSession.loads = []
 
-    def fake_bind(face, host, port):
+    def fake_bind(face, host, port, **_listener):
         binds.append(host)
         return _FakeHttpd(host, port)
 
@@ -574,8 +576,8 @@ def no_network(monkeypatch):
     return binds
 
 
-def _serve(host: str) -> int:
-    return main(["serve", "--http", "--host", host, "--port", "0", AUTH])
+def _serve(host: str, *listener: str) -> int:
+    return main(["serve", "--http", "--host", host, "--port", "0", *listener, AUTH])
 
 
 @pytest.mark.parametrize("host", ["0.0.0.0", "::", "192.0.2.10",
@@ -599,7 +601,11 @@ def test_the_dev_stub_still_starts_on_loopback(clean_env, no_network, host):
 
 
 def test_off_loopback_starts_without_the_dev_flag(configured, no_network):
-    assert _serve("0.0.0.0") == 0
+    # off loopback the listener needs TLS and, for a wildcard bind, the host
+    # names it answers to (issue #1463's exposure rule); the dev-stub check
+    # itself does not fire without the flag
+    assert _serve("0.0.0.0", "--tls-cert", "cert.pem", "--tls-key", "key.pem",
+                  "--allow-host", "api.example") == 0
     assert no_network == ["0.0.0.0"]
 
 

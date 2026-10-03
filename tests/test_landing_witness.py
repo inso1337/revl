@@ -554,8 +554,27 @@ def test_the_real_1305_stale_stranded_claim_is_caught(real_pins):
            "note": "merged into agent/1198-private-peer-pool. STRANDED: its "
                    "files are absent from main."}
     problems, _ = _check_real("1305", raw, real_pins)
-    assert any("src/revl/pool_receipt.py is absent, and it is PRESENT, "
-               "byte-identical" in p for p in problems), problems
+    # Which of the merge's files are still byte-identical on disk is decided by
+    # git here, not by the module under test, and not pinned to one file name:
+    # a later change to any one of them (#1534 edits pool_receipt.py) must not
+    # redden this. Every present file is flagged; only the identical ones say so.
+    identical = {p for p in raw["added"] if _same_as_at(p, raw["merge"])}
+    assert identical, ("no file the 1305 merge added is still byte-identical "
+                       "on disk, so this test cannot see the annotation")
+    for path in raw["added"]:
+        assert any(f"{path} is absent, and it is PRESENT" in p
+                   for p in problems), (path, problems)
+        annotated = any(f"{path} is absent, and it is PRESENT, byte-identical" in p
+                        for p in problems)
+        assert annotated == (path in identical), (path, problems)
+
+
+def _same_as_at(path: str, sha: str) -> bool:
+    """Whether the file on disk has the blob it had at `sha`, asked of git."""
+    def git(*args: str) -> str:
+        return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True,
+                              text=True, check=True).stdout.strip()
+    return git("hash-object", "--", path) == git("rev-parse", f"{sha}:{path}")
 
 
 @real
