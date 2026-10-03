@@ -29,7 +29,6 @@ Python package and a cordis-wasm checkout (CORDIS_WASM, default
 
 from __future__ import annotations
 
-import importlib.util
 import os
 import re
 import shutil
@@ -42,13 +41,17 @@ import pytest
 BACKEND = Path(__file__).resolve().parent
 ROOT = BACKEND.parents[1]
 sys.path.insert(0, str(ROOT / "src"))
+# tests/ is APPENDED, so its modules resolve only names nothing earlier on
+# sys.path provides; `_load_by_path` is the one wanted here (see
+# backends/java/test_reserved_word_idents_java.py).
+if str(ROOT / "tests") not in sys.path:
+    sys.path.append(str(ROOT / "tests"))
 
 from revl import compile_source  # noqa: E402
+from _load_by_path import load_by_path  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 
-_spec = importlib.util.spec_from_file_location("revl_wasm_emit_kw", BACKEND / "emit.py")
-emit = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(emit)
+emit = load_by_path("revl_wasm_emit_kw", BACKEND / "emit.py")
 
 #: WAT text-format keywords and plain instruction mnemonics (the dotted ones,
 #: `i32.add` and so on, are not revl identifiers).
@@ -162,10 +165,7 @@ def _cordis_runtime():
     path = Path(root) / "runtime.py"
     if not path.exists():
         pytest.skip(f"cordis-wasm runtime not found at {path} (set CORDIS_WASM)")
-    spec = importlib.util.spec_from_file_location("cordis_wasm_runtime_kw", path)
-    module = importlib.util.module_from_spec(spec)
-    sys.modules[spec.name] = module
-    spec.loader.exec_module(module)
+    module = load_by_path("cordis_wasm_runtime_kw", path)
     return module
 
 

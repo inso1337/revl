@@ -52,7 +52,7 @@
       "go": 2897,
       "java": 986,
       "py": 669,
-      "rust": 1200,
+      "rust": 1230,
       "ts": 285,
       "wasm": 1558
     },
@@ -865,7 +865,7 @@
       "statements": 3771,
       "uncovered": {
         "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
-          "_emit_step": 21,
+          "_emit_step": 24,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 1
         },
@@ -1017,7 +1017,7 @@
           "emit": 3
         },
         "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction.": {
-          "_body_has_compensation": 2,
+          "_body_has_compensation": 3,
           "_body_has_witnessed": 2,
           "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
@@ -1029,9 +1029,9 @@
           "_emit_teardown_begin": 3,
           "_emit_teardown_commit": 2,
           "_emit_witnessed_step": 26,
-          "_method_bodies_have_compensation": 1,
+          "_method_bodies_have_compensation": 2,
           "_method_bodies_have_witnessed": 1,
-          "_method_body_lines": 40,
+          "_method_body_lines": 41,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
@@ -1058,6 +1058,13 @@
           "_secret_method_params": 4,
           "_secret_result_lines": 8,
           "_stream_host_rust": 6
+        },
+        "Extern-declared compensate (item 254, issue #1592): `_emit_compensations` adds the compensation an emission extern declares to the ones an `emit` registers, `_reaches_declared` and `_declared_call` register one for a call in any other position of a provide method (a `let`, a `return`, an argument, a nested operand, an `if` arm) as a block expression, and `_as_fn_call` re-spells that slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_rust.rvl ports no compensation registration (the family the witnessed/compensation group above defers). The behaviour is pinned and executed against real cordis-rs by backends/rust/test_emit_rust.py::test_extern_declared_compensation_registers_at_every_site.": {
+          "_as_fn_call": 5,
+          "_component_has_effectful_methods": 1,
+          "_declared_call": 7,
+          "_emit_compensations": 4,
+          "_reaches_declared": 7
         }
       },
       "uncovered_statements": 1186
