@@ -54,7 +54,7 @@
       "py": 669,
       "rust": 1230,
       "ts": 285,
-      "wasm": 1558
+      "wasm": 1250
     },
     "selfhost": {
       "go": 155,
@@ -1190,11 +1190,9 @@
           "<module>": 12
         },
         "Component-only entry/ABI helpers: legacy component emission validates require imports and scalar service boundaries, rewrites $0 format templates, and encodes custom-section metadata strings. Pure modules use v3 interp/lit nodes and _wat_bytes data segments instead.": {
-          "_assert_imports_within_requires": 18,
+          "_assert_imports_within_requires": 15,
           "_emit_v1": 14,
-          "_format_parts": 20,
-          "_is_scalar_type": 1,
-          "_wat_string": 1
+          "_format_parts": 20
         },
         "Demand-generated Float formatting and k-ary string concatenation are selected by interpolation. All WASM interpolation is explicitly deferred; ordinary binary Str + uses the covered two-argument helper.": {
           "_V3Emitter._helper_f64_to_str": 1,
@@ -1283,7 +1281,7 @@
           "_V3Emitter._record_type": 2
         },
         "Remaining paths reject an empty document or duplicate module names and instantiate live component emitters; the selfhost oracle accepts the single pure functions module.": {
-          "_emit_v3": 6
+          "_emit_v3": 3
         },
         "Remaining paths resolve arrow-valued locals, collect capture/parameter scratch locals and inline their bodies. Inline arrows/closures are an explicit WASM oracle deferral; direct named function calls are covered.": {
           "_V3Emitter._arrow_callee": 2,
@@ -1357,47 +1355,41 @@
           "_V3Emitter._nullish_type": 4,
           "_V3Emitter._opt_payload": 4
         },
-        "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path.": {
-          "_ComponentEmitter.__init__": 64,
-          "_ComponentEmitter._boundary_wty": 6,
-          "_ComponentEmitter._called_names": 12,
-          "_ComponentEmitter._delegate": 15,
+        "The entire _ComponentEmitter is instantiated only for live components: it plans activation/provide calls, coeffect imports, spawn/instance handles, realm routing and witnessed undo/WAL custom sections. emit_wasm.rvl implements the separate pure _V3Emitter module ABI, not activation/deactivation or component service exports; even _delegate/_tail belong to that unentered component caller. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1601's refusal document, tests/fixtures/emit_wasm_refusals/compound_required_call.rvl, now emits a provider component and enters the consumer as far as the required call's refusal in `_op_spec`.": {
+          "_ComponentEmitter.__init__": 21,
+          "_ComponentEmitter._boundary_wty": 1,
+          "_ComponentEmitter._called_names": 2,
           "_ComponentEmitter._expr": 2,
           "_ComponentEmitter._import_module": 1,
           "_ComponentEmitter._job_id": 8,
-          "_ComponentEmitter._lower": 83,
+          "_ComponentEmitter._lower": 61,
           "_ComponentEmitter._lower_instance_get_call": 37,
           "_ComponentEmitter._lower_spawn": 26,
           "_ComponentEmitter._method_drain": 10,
           "_ComponentEmitter._method_undo_id": 6,
           "_ComponentEmitter._method_witnessed_step": 13,
-          "_ComponentEmitter._module": 113,
+          "_ComponentEmitter._module": 64,
           "_ComponentEmitter._module._dispatch": 13,
           "_ComponentEmitter._need_fn": 5,
-          "_ComponentEmitter._op_spec": 13,
-          "_ComponentEmitter._open_function": 13,
-          "_ComponentEmitter._plan": 27,
-          "_ComponentEmitter._provide": 213,
-          "_ComponentEmitter._provide_prefix": 1,
-          "_ComponentEmitter._realm_sections": 15,
+          "_ComponentEmitter._op_spec": 6,
+          "_ComponentEmitter._plan": 14,
+          "_ComponentEmitter._provide": 159,
+          "_ComponentEmitter._realm_sections": 9,
           "_ComponentEmitter._register_witnessed_calls": 10,
-          "_ComponentEmitter._restore_function_state": 1,
-          "_ComponentEmitter._route_helpers": 35,
+          "_ComponentEmitter._route_helpers": 32,
           "_ComponentEmitter._route_op_spec": 20,
-          "_ComponentEmitter._save_function_state": 1,
           "_ComponentEmitter._scalar_operator": 26,
-          "_ComponentEmitter._scoped_key": 2,
           "_ComponentEmitter._statement": 2,
-          "_ComponentEmitter._tail": 17,
-          "_ComponentEmitter._teardown_section": 7,
-          "_ComponentEmitter._to_v3": 37,
+          "_ComponentEmitter._tail": 7,
+          "_ComponentEmitter._teardown_section": 4,
+          "_ComponentEmitter._to_v3": 24,
           "_ComponentEmitter._wal_undo_name": 3,
           "_ComponentEmitter._witnessed_effect_step": 37,
           "_ComponentEmitter._witnessed_extern": 5,
-          "_ComponentEmitter.emit": 69
+          "_ComponentEmitter.emit": 45
         },
         "The item 130 required-`Stream[T]` coeffect refusal (`_refuse_required_stream`). This tier refuses the whole stream surface by design, having no async host seam, and the coeffect is refused with it at the component's DECLARATION. A corpus document declaring `requires <k>: Stream[T]` would be refused here rather than emitted, so it cannot be a byte-agreement case; the refusal is pinned by tests/test_stream_reactive.py instead.": {
-          "_refuse_required_stream": 3
+          "_refuse_required_stream": 1
         },
         "The item-458 short-circuit decision for a logical operator's right operand. Every accepting and refusing arm is now exercised: shortcircuit.rvl spells a trapping `%`, `/` and checked `*`, an index read, a `len`, a call, a `Str` comparison and a non-`!` unary, and arith.rvl/folding.rvl the constants, local reads and comparisons that keep the strict instruction. What stays unrun is the non-dict guard's refusal and the EmitError catch (with its refusal) for a leaf name the caller cannot resolve — a malformed node and an unbound name, neither of which a document that compiles can produce.": {
           "_trap_free_operand": 3
@@ -1414,11 +1406,11 @@
           "_V3Emitter._declare_local": 2
         },
         "declared out of every self-host slice: realm placements, routers, spawn/instances.": {
-          "_ComponentEmitter._provide_routed": 18,
+          "_ComponentEmitter._provide_routed": 15,
           "_assert_realm_label": 2
         }
       },
-      "uncovered_statements": 1548
+      "uncovered_statements": 1240
     }
   },
   "selfhost": {
