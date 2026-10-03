@@ -311,11 +311,14 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         f"(got keys: {', '.join(sorted(edit)) or 'none'})")
 
 
-def _apply_to_buffers(vs: dict, edits: list, default_target) -> list[dict]:
+def _apply_to_buffers(vs: dict, edits: list, default_target) \
+        -> tuple[list[dict], list[tuple[str, str]]]:
     """Apply every edit in order, each to the buffer its own `target` names (or
     the call's), so one call can change several files at once: a new import
-    and the definition it needs land together or not at all."""
+    and the definition it needs land together or not at all. Returns the echo
+    of each edit and the buffers they touched."""
     applied: list[dict] = []
+    touched: list[tuple[str, str]] = []
     for edit in edits:
         target = edit.get("target", default_target) if isinstance(edit, dict) \
             else default_target
@@ -325,7 +328,92 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) -> list[dict]:
         if buffer[0] != "source":
             echo["target"] = buffer[1]
         applied.append(echo)
-    return applied
+        if buffer not in touched:
+            touched.append(buffer)
+    return applied, touched
+
+
+# ---------------------------------------------------------------- the path jail
+
+def _use_paths(text: str, name: str) -> list[str]:
+    """Every `use` path in `text`, read off the tokens, so a `use` anywhere
+    (top level or inside a block) is seen and nothing has to parse past it.
+    Raises EditError when the text does not lex: then its imports cannot be
+    read, and the edit is refused rather than compiled (issue #1709)."""
+    from ..lexer import lex  # noqa: PLC0415
+
+    try:
+        tokens = lex(text, name)
+    except RevlError as error:
+        raise _JailError(
+            f"the patched {name} does not lex, so its `use` paths cannot be "
+            f"checked against the sanctioned roots ({error}); nothing was "
+            "compiled") from None
+    return [after.value for tok, after in zip(tokens, tokens[1:])
+            if tok.kind == "kw" and tok.value == "use" and after.kind == "string"]
+
+
+class _JailError(EditError):
+    """A patched buffer names a `use` path outside the sanctioned roots, or
+    cannot be read for its `use` paths. Nothing is compiled."""
+
+
+def _in_memory(vs: dict) -> set[str]:
+    """The absolute paths a compile reads from the session, never the disk."""
+    return ({os.path.abspath(k) for k in vs.get("modules") or {}}
+            | {os.path.abspath(p) for p in vs.get("files") or []})
+
+
+def _escaping_from_file(path: str, uses: list[str], vs: dict) -> list[str]:
+    """A loaded file's imports resolve against the file's own directory. One
+    that leaves the sanctioned roots is refused unless the operator's file on
+    disk already names it."""
+    from .server import _file_roots, _within_roots  # noqa: PLC0415 — cycle
+
+    on_disk = _read_disk(path)
+    operators = set(_use_paths(on_disk, path)) if on_disk is not None else set()
+    roots, base = _file_roots(), os.path.dirname(os.path.abspath(path))
+    escaping = []
+    for use in uses:
+        resolved = os.path.normpath(os.path.join(base, use))
+        if use in operators or resolved in _in_memory(vs):
+            continue
+        if not _within_roots(resolved, roots):
+            escaping.append(use)
+    return escaping
+
+
+def _escaping_inline(uses: list[str], vs: dict) -> list[str]:
+    """Inline text resolves from the server's directory, as at load, so the
+    load-time rule applies to the patched text: an absolute or upward path that
+    no in-memory module supplies is refused."""
+    from .server import _escaping_use  # noqa: PLC0415 — cycle
+
+    return [use for use in uses if _escaping_use(use)
+            and os.path.abspath(use) not in _in_memory(vs)]
+
+
+def check_imports(vs: dict, touched: list[tuple[str, str]]) -> None:
+    """Refuse the patch when a touched buffer's text, as it is AFTER every edit,
+    names a `use` path that leaves the sanctioned roots (issue #1709).
+
+    The pre-dispatch jail reads each edit's `replacement` on its own, and only
+    when it parses as a program by itself. What the compile reads is the
+    patched buffer, so an import split across two edits, or completed by text
+    already in the buffer, reached the compiler unchecked. This reads the
+    patched buffer instead, and fails closed when it cannot."""
+    escaping = []
+    for kind, key in touched:
+        text = _get_text(vs, (kind, key))
+        uses = _use_paths(text, key if kind != "source" else "source")
+        escaping += (_escaping_from_file(key, uses, vs) if kind == "file"
+                     else _escaping_inline(uses, vs))
+    if escaping:
+        named = ", ".join(f'`use "{p}"`' for p in sorted(set(escaping)))
+        raise _JailError(
+            f"refused: the patched source's {named} leaves the "
+            "operator-sanctioned root(s) — an import an edit writes may not name "
+            "an absolute path or a file outside them; nothing was compiled")
 
 
 def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:
@@ -435,8 +523,12 @@ def apply_edit(session, arguments: dict) -> dict:
 
     # Work on a copy: nothing about the session changes until an edit compiles.
     vs = copy.deepcopy(virtual_source(session))
-    applied = _apply_to_buffers(
+    applied, touched = _apply_to_buffers(
         vs, edits, arguments.get("target") or arguments.get("component"))
+    try:
+        check_imports(vs, touched)
+    except _JailError as error:
+        return _jail_refused(str(error))
 
     replacing = tuple(arguments.get("replacing") or ())
 
@@ -511,6 +603,14 @@ def apply_edit(session, arguments: dict) -> dict:
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, **_summary(ir), **state}
+
+
+def _jail_refused(message: str) -> dict:
+    return {"ok": False, "edited": False, "admitted": False, "swapped": False,
+            "diagnostics": [{"severity": "error", "code": "REVL",
+                             "category": "admission", "message": message}],
+            "note": "nothing was read or compiled; the running composition and "
+                    "the server-side source are untouched"}
 
 
 def _summary(ir: dict) -> dict:
