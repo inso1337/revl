@@ -268,10 +268,15 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         if "expr" not in edit:
             raise EditError("a hole edit needs `expr` (the fill expression)")
         start, end = _hole_span(text, int(edit["hole"]))
-        expr = str(edit["expr"])
-        return text[:start] + expr + text[end:], {
-            "form": "hole", "line": int(edit["hole"]),
-            "replaced": text[start:end], "expr": expr}
+        sent = str(edit["expr"])
+        # issue #1700: a terse fill is stored as `revl fmt` writes it
+        from .symbols import canonical  # noqa: PLC0415 - symbols imports edit
+        expr = canonical(sent).rstrip("\n") if "\n" not in sent.strip() else sent
+        echo = {"form": "hole", "line": int(edit["hole"]),
+                "replaced": text[start:end], "expr": expr}
+        if expr != sent:
+            echo["canonical"] = expr
+        return text[:start] + expr + text[end:], echo
 
     if "anchor" in edit:
         anchor = str(edit["anchor"])

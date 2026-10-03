@@ -39,9 +39,17 @@ revl fmt --migrate <files>  # §9: rewrite 1.x "$name" interpolation to `${name}
   begins with a closing bracket dedents to its enclosing level.
 - **One statement per line stays on its line.** The formatter is
   *line-preserving*: it re-indents and normalises horizontal spacing but never
-  moves a token onto a different logical line. Continuation lines (a wrapped
-  `undo`, `compensate`, …) are re-indented to their block, not visually aligned
-  under the effect above them.
+  moves a token onto a different logical line, with one exception below.
+  Continuation lines (a wrapped `undo`, `compensate`, …) are re-indented to
+  their block, not visually aligned under the effect above them.
+- **Each member of a `provide` block gets its own line** (issue #1700). A
+  one-line `provide k { fn a() = 1 fn b() = 2 }` becomes the block's opening
+  line, one line per member (an `async fn` keeps its `async`), and the closing
+  brace on its own line. That makes every method addressable by symbol
+  (`Comp.k.a`) in the MCP edit verbs. A few IR fields record a source line (a
+  `spawn` acquire does), so on a program where the split would move one of them
+  the IR-equivalence gate refuses the split, and the formatter keeps the
+  line-preserving layout for that file. The gate is never weakened.
 - **Horizontal spacing** is normalised to a single space between tokens:
   - tight around `.` / `?.`, and no space before `,` `:` `;` `)` `]`;
   - no space between a call/index and its bracket — `set(1, 2)`, `Opt[Str]`,
@@ -144,7 +152,8 @@ gate confirms — for real, per file — that nothing changed.
 
 ### Documented limitation
 
-The formatter does not re-flow statements across lines, and it does not reformat
+Apart from splitting `provide` members, the formatter does not re-flow
+statements across lines, and it does not reformat
 the interior of backtick templates or `@host` blocks (those are verbatim). Line
 re-flowing would need statement-boundary information only the parser holds;
 rather than edit the off-limits parser, that is left out by design.

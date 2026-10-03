@@ -428,9 +428,29 @@ expensive ones, so the edit path asks for as little text as it can:
   a whole-file `revl_swap`. For the reference change in
   `tests/test_mcp_terse_edits_1700.py` (one body in `examples/user_cache.rvl`)
   these are 77, 98, 420 and 1,290 bytes of arguments.
-- A member that shares a line with something else (a one-line
-  `provide k { fn m() = 1 }`) cannot be addressed alone; lay the provide block
-  out one member per line first (`revl_fmt` does not split lines).
+- `{symbol: "Comp.key.op", body}` for an `op` the provide block does not
+  define yet writes the method's frame from the service declaration
+  (`fn op(<its parameter names>)`) and puts the body in it. A provider must
+  implement every operation, so this is how a service gains an operation and
+  its implementation in one call: edit the service, then the body, in the same
+  `edits` list.
+- `revl_check` and `revl_swap` accept terse inline source too. They compile
+  it AS SENT, so every diagnostic names a line you wrote. `revl_swap` stores
+  the canonical form, which the formatter's IR-equivalence gate proved compiles
+  identically, and `revl_check` says what it would be. Both answer
+  `canonicalSource: {changed, digest}`, and the text itself with
+  `returnCanonical: true`. Text the formatter cannot read, or a rewrite its
+  gate refuses, is kept as written (`kept` says why). A files-loaded
+  composition is the operator's files and is not rewritten.
+- `revl_load` stores what it was sent, so a first load (or a draft) holds your
+  bytes and an anchor copied from them still matches. After a swap or an edit
+  that canonicalised (`changed: true`), the held text is the canonical one: an
+  `anchor` must quote it, which is why `{symbol, ...}` edits are the safer
+  form.
+- Since the formatter puts each `provide` member on its own line, a terse
+  one-line provide block swapped in has every method addressable by symbol. A
+  member that still shares a line (a first load, or a program where the gate
+  kept the old layout) cannot be addressed alone.
 
 An `{append}` edit adds new top-level declarations at the end of the buffer
 (the only one, or `target`), with no offset to compute. A name that is already

@@ -77,6 +77,7 @@ from .. import source_grammar as _source_grammar
 from . import fillspec
 from . import draft as _draft
 from . import proposal as _proposal
+from . import canonical as _canonical
 from . import edit as _edit
 from . import leases as _leases
 from . import operator as _operator
@@ -677,6 +678,15 @@ def _boundary_of(ir: dict) -> dict:
 
 SESSION = Session()
 
+# issue #1700: the verbs that store or check inline source answer with a digest
+# of its canonical form; this asks for the text as well
+_RETURN_CANONICAL = {
+    "returnCanonical": {"type": "boolean",
+                        "description": "true: include the canonical text of an "
+                                       "inline `source` in `canonicalSource` "
+                                       "(default: only its digest)"},
+}
+
 
 def _session_error(message: str, **extra) -> dict:
     return {"ok": False, "diagnostics": [{
@@ -960,11 +970,18 @@ def _tool_swap(arguments: dict) -> dict:
     if quarantined is not None:
         return quarantined
 
-    inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
     before = _edit.running_source(SESSION)
-    if not inline:
+    if all(part is None for part in _candidate_of(arguments)):
         return _with_touched(_swap_server_side(replacing), before)
 
+    # issue #1700: compiled as sent, stored canonical, and the answer says which
+    stored, canon = _canonical.canonical_arguments(arguments)
+    return _canonical.attach(_swap_inline(arguments, stored, replacing, before), canon)
+
+
+def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dict:
+    """The inline half of `revl_swap`: admit the candidate as sent, then swap it
+    in with `stored` (its canonical form) as the held source."""
     # issue #1446: like `revl_load` (#1444), a swap that does not succeed
     # changes nothing, so the candidate's host bodies are recorded only once it
     # is running. Compiled without `_compile`'s side effect for that reason.
@@ -993,7 +1010,7 @@ def _tool_swap(arguments: dict) -> dict:
         return rejected
     authored = _authored_host_bodies(full, source, modules)
     try:
-        state = SESSION.swap(full, origin=_origin(arguments))
+        state = SESSION.swap(full, origin=_origin(stored))
     except SessionError as error:
         return _session_error(str(error))
     except ApprovalRequired as exc:
@@ -2075,6 +2092,13 @@ def _tool_history_lifetime(arguments: dict) -> dict:
 
 
 def _tool_check(arguments: dict) -> dict:
+    """Compile a candidate AS SENT, so every diagnostic names a line the agent
+    wrote, and say what its canonical form is (issue #1700)."""
+    _stored, canon = _canonical.canonical_arguments(arguments)
+    return _canonical.attach(_check_as_sent(arguments), canon)
+
+
+def _check_as_sent(arguments: dict) -> dict:
     try:
         ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
@@ -2485,7 +2509,7 @@ def _tool_fmt(arguments: dict) -> dict:
     the same IR-equivalence proof the CLI runs: a rewrite that would change
     what the compiler sees is refused, never silently written."""
     from ..fmt import migrate_source
-    from ..formatter import FormatError, ir_equivalent, format_source
+    from ..formatter import FormatError, format_admitted, ir_equivalent
 
     source = arguments.get("source")
     if source is None:
@@ -2501,7 +2525,7 @@ def _tool_fmt(arguments: dict) -> dict:
             return _session_error(f"cannot migrate: {error}")
     else:
         try:
-            rewritten = format_source(source, filename)
+            rewritten, _gate = format_admitted(source, filename)
         except FormatError as error:
             return _session_error(f"cannot format: {error}")
 
@@ -2555,7 +2579,7 @@ TOOLS = [
                        "or structured diagnostics (code, guarantee, expected/actual, "
                        "fix hint) on rejection. A draft with holes compiles; it is "
                        "refused at admission until every hole is filled.",
-        "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
+        "inputSchema": {"type": "object", "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
     },
@@ -2784,7 +2808,7 @@ TOOLS = [
                        "generation, need not re-serialize the whole file.",
         "inputSchema": {
             "type": "object",
-            "properties": {**_SOURCE_INPUT,
+            "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "replacing": {"type": "array", "items": {"type": "string"},
                                          "description": "components withdrawn in this swap"}},
         },
