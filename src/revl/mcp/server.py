@@ -917,8 +917,9 @@ def _tool_swap(arguments: dict) -> dict:
         return quarantined
 
     inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
+    before = _edit.running_source(SESSION)
     if not inline:
-        return _swap_server_side(replacing)
+        return _with_touched(_swap_server_side(replacing), before)
 
     # issue #1446: like `revl_load` (#1444), a swap that does not succeed
     # changes nothing, so the candidate's host bodies are recorded only once it
@@ -957,7 +958,50 @@ def _tool_swap(arguments: dict) -> dict:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+    return _with_touched({"ok": True, "admitted": True, "swapped": True,
+                          **_summary(full), **state}, before)
+
+
+def _with_touched(result: dict, before: dict) -> dict:
+    """A swap that landed reports the top-level symbols it added, changed or
+    removed against what was running (issue #1714)."""
+    if result.get("swapped"):
+        result["touched"] = _edit._touched(before, _edit.running_source(SESSION))
+    return result
+
+
+def _tool_source(arguments: dict) -> dict:
+    """One declaration of the server-side source, by symbol (issue #1714).
+
+    Reads what the session holds (inline source, modules, or the loaded files
+    as last swapped in), or, with nothing loaded, the `files`/`source` given."""
+    from . import symbols as _symbols  # noqa: PLC0415
+
+    symbol = arguments.get("symbol")
+    if not symbol:
+        return _session_error("`symbol` is required: a declaration name, "
+                              "`<buffer>:Name`, or `<buffer>:<line>`")
+    try:
+        vs = _source_set(arguments)
+        result = _symbols.read(vs, symbol,
+                               deps="deps" in (arguments.get("with") or []),
+                               comments=arguments.get("comments", True) is not False)
+    except (_symbols.SymbolError, _edit.EditError) as error:
+        return _session_error(str(error))
+    return {"ok": True, **result}
+
+
+def _source_set(arguments: dict) -> dict:
+    if SESSION.loaded:
+        return _edit.running_source(SESSION)
+    if arguments.get("source") is not None:
+        return {"source": arguments["source"],
+                "modules": dict(arguments.get("modules") or {})}
+    if arguments.get("files"):
+        return _edit._files_source({"files": list(arguments["files"]),
+                                    "modules": arguments.get("modules")})
+    raise _edit.EditError("nothing is loaded: load a composition, or pass "
+                          "`files` or `source` to read from")
 
 
 def _swap_server_side(replacing: tuple) -> dict:
@@ -2540,7 +2584,10 @@ TOOLS = [
                        "edit's own `target` lets one call change several files (a `use` "
                        "between edited files resolves to the edited text), and the disk "
                        "is never written. With nothing loaded, pass `files` or `source` "
-                       "and this loads it first, then edits it.",
+                       "and this loads it first, then edits it. {symbol, replacement} "
+                       "replaces one top-level declaration by name (read it first with "
+                       "revl_source). A response that edited lists the `touched` "
+                       "symbols.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2570,6 +2617,11 @@ TOOLS = [
                             "target": {"type": "string",
                                        "description": "this edit's buffer, when it is "
                                                       "not the call's `target`"},
+                            "symbol": {"type": "string",
+                                       "description": "with `replacement`: replace the "
+                                                      "whole top-level declaration "
+                                                      "this names (as revl_source "
+                                                      "addresses it)"},
                         },
                     },
                 },
@@ -2595,6 +2647,42 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_edit,
+    },
+    {
+        "name": "revl_source",
+        "description": "Read ONE declaration of the server-side source by symbol, "
+                       "instead of the whole file. `symbol` is a top-level "
+                       "declaration's name (a component, service, type, fn, "
+                       "extern...), `<buffer>:Name` when the name is not unique, or "
+                       "`<buffer>:<line>` for the declaration containing that line; a "
+                       "buffer is a loaded file's path, an in-memory module's key, or "
+                       "`source`. `with: [\"deps\"]` adds the declarations it names "
+                       "(its services, the functions and types it uses), and "
+                       "`comments: false` returns the code alone in canonical form. "
+                       "Reads the running composition, or, with nothing loaded, "
+                       "`files`/`source`. Pairs with revl_edit's {symbol, "
+                       "replacement} edit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string",
+                           "description": "`Name`, `<buffer>:Name` or "
+                                          "`<buffer>:<line>`"},
+                "with": {"type": "array", "items": {"type": "string",
+                                                    "enum": ["deps"]},
+                         "description": "`deps`: also the declarations it names"},
+                "comments": {"type": "boolean",
+                             "description": "false: code only, canonical "
+                                            "(default true: verbatim)"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: files to read from"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: source to read from"},
+            },
+            "required": ["symbol"],
+        },
+        "annotations": {"readOnlyHint": True},
+        "handler": _tool_source,
     },
     {
         "name": "revl_gauntlet",

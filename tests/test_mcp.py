@@ -221,6 +221,8 @@ def test_initialize_and_tools_list():
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
                           "revl_tools", "revl_grammar", "revl_load", "revl_call",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
+                          # symbol-addressed reads (issue #1714)
+                          "revl_source",
                           # the session commit protocol (docs/design/245-session-commit.md)
                           "revl_commit", "revl_commit_confirm", "revl_abort",
                           # session branching (docs/design/250-session-branching.md)

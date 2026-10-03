@@ -320,10 +320,13 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) \
     applied: list[dict] = []
     touched: list[tuple[str, str]] = []
     for edit in edits:
-        target = edit.get("target", default_target) if isinstance(edit, dict) \
-            else default_target
-        buffer = _resolve_buffer(vs, target)
-        text, echo = _apply_one(_get_text(vs, buffer), edit)
+        if isinstance(edit, dict) and "symbol" in edit:
+            buffer, text, echo = _apply_symbol(vs, edit)
+        else:
+            target = edit.get("target", default_target) \
+                if isinstance(edit, dict) else default_target
+            buffer = _resolve_buffer(vs, target)
+            text, echo = _apply_one(_get_text(vs, buffer), edit)
         _set_text(vs, buffer, text)
         if buffer[0] != "source":
             echo["target"] = buffer[1]
@@ -331,6 +334,23 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) \
         if buffer not in touched:
             touched.append(buffer)
     return applied, touched
+
+
+def _apply_symbol(vs: dict, edit: dict) -> tuple[tuple[str, str], str, dict]:
+    """``{symbol, replacement}``: replace one top-level declaration, addressed
+    by name (issue #1714). The symbol may be qualified as `<buffer>:Name`."""
+    from . import symbols  # noqa: PLC0415
+
+    if not isinstance(edit.get("replacement"), str):
+        raise EditError("a symbol edit needs `replacement`, the declaration's "
+                        "new text")
+    symbol = edit["symbol"]
+    if edit.get("target") and ":" not in str(symbol):
+        symbol = f"{edit['target']}:{symbol}"
+    try:
+        return symbols.replace(vs, symbol, edit["replacement"])
+    except symbols.SymbolError as error:
+        raise EditError(str(error)) from None
 
 
 # ---------------------------------------------------------------- the path jail
@@ -522,7 +542,8 @@ def apply_edit(session, arguments: dict) -> dict:
         raise EditError("`edits` must be a non-empty array of patch operations")
 
     # Work on a copy: nothing about the session changes until an edit compiles.
-    vs = copy.deepcopy(virtual_source(session))
+    before = virtual_source(session)
+    vs = copy.deepcopy(before)
     applied, touched = _apply_to_buffers(
         vs, edits, arguments.get("target") or arguments.get("component"))
     try:
@@ -555,7 +576,7 @@ def apply_edit(session, arguments: dict) -> dict:
     if holes:
         session.draft = vs
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
-                "applied": applied, "holes": holes,
+                "applied": applied, "touched": _touched(before, vs), "holes": holes,
                 **_summary(ir),
                 "note": f"{len(holes)} open hole(s) remain — the edit was applied "
                         "to the server-side source and it compiles, but a hole may "
@@ -602,7 +623,24 @@ def apply_edit(session, arguments: dict) -> dict:
     state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
-            "applied": applied, **_summary(ir), **state}
+            "applied": applied, "touched": _touched(before, vs),
+            **_summary(ir), **state}
+
+
+def running_source(session) -> dict:
+    """The running composition's working set, ignoring any draft."""
+    draft, session.draft = getattr(session, "draft", None), None
+    try:
+        return virtual_source(session)
+    finally:
+        session.draft = draft
+
+
+def _touched(before: dict, after: dict) -> list[dict]:
+    """The top-level symbols a change added, changed or removed (issue #1714)."""
+    from . import symbols  # noqa: PLC0415
+
+    return symbols.touched(before, after)
 
 
 def _jail_refused(message: str) -> dict:

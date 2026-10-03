@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 55 verbs below, one section each.
+The advertised list is exactly the 56 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -58,6 +58,7 @@ the transition, so the running system keeps serving.
 | `revl_call` | no | no | `key`, `method` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` (source) |
+| `revl_source` | yes | no | `symbol` (source) |
 | `revl_gauntlet` | yes | no | - (source) |
 | `revl_quarantine` | yes | no | - (source) |
 | `revl_repair` | no | yes | `component` |
@@ -318,12 +319,46 @@ is what the session holds, and `revl_snapshot` returns it. With nothing loaded,
 pass `files` (or `source`) and the call loads it through `revl_load` first,
 then edits it.
 
+A `{symbol, replacement}` edit replaces one whole top-level declaration,
+addressed as `revl_source` addresses it, and keeps the comment block above it.
+Every response that edited, and every swap that landed, lists the `touched`
+symbols: `{symbol, kind, buffer, change}` with `change` one of `added`,
+`changed`, `removed`.
+
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
-  replacement}` / `{anchor, replacement, count?}`, each with an optional
-  `target`); `target` (which server-side buffer to edit: omit for the main
+  replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
+  each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
   inline source or the one loaded file, a loaded file's path, or an in-memory
   module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
   `config` to load first.
+
+### `revl_source`
+
+Read ONE top-level declaration of the server-side source by symbol, instead of
+the whole file (issue #1714). On `examples/app/notes.rvl` the whole file is
+about 4,858 tokens (ceil(chars / 4)); `NotesHttp` with the declarations it
+names and no comments is about 300.
+
+- `symbol`: a declaration's name (component, service, type, fn, extern, test,
+  ...); `<buffer>:Name` when the name is not unique across buffers; or
+  `<buffer>:<line>` for the declaration containing that line. A buffer is a
+  loaded file's path, an in-memory module's key, or `source`.
+- `with: ["deps"]`: also every other top-level declaration it names (the
+  services it provides and requires, the functions and types it uses), from
+  any buffer.
+- `comments: false`: the code alone, in the formatter's canonical form with
+  every comment dropped. The default is the verbatim text with the comment
+  block directly above the declaration.
+- Reads the running composition as the session holds it (edits included).
+  With nothing loaded, pass `files` or `source` to read from.
+
+A declaration's span runs from its first line to the line before the next
+top-level declaration, less the blank and comment lines between them, and is
+used only when it parses on its own as exactly that declaration. The answer is
+`{symbol, kind, buffer, line, text}`, plus `deps` as a list of the same shape.
+
+- Inputs: `symbol` (required); `with`; `comments`; `files` / `source` when
+  nothing is loaded.
 
 ### `revl_unload`
 
