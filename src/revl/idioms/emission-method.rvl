@@ -1,0 +1,15 @@
+// idiom: emission-method
+// summary: the body of a provide method whose operation is `emission[...]`: it may cross the boundary
+// rule: G4: a crossing is marked: `emit <key>.<operation>(...)`, through an `emission` operation of a required service
+// rule: a crossing is a permission, not an obligation: a pure body is also correct here
+// fill: emit db.put(key, "saved")
+// type: Str
+
+service Db { emission fn put(key: Str, value: Str) -> Str }
+service Store { emission[db] fn save(key: Str) -> Str }
+
+component Saver requires db: Db provides store: Store {
+  provide store {
+    fn save(key) = emit db.put(key, "saved")
+  }
+}

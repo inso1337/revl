@@ -604,6 +604,100 @@ def test_a_stale_block_is_reported_as_drift(harness, status, tmp_path,
     assert "| `formal-strict` | 0 |" in copy.read_text(encoding="utf-8")
 
 
+def test_the_block_stores_no_count_that_moves_with_the_corpus(harness, exported):
+    """Issue #1768. The census totals and the informational bucket counts used
+    to be rendered here, so every pull request that added a `.rvl` rewrote the
+    same lines and conflicted with every other one. Driven: the block rendered
+    over a corpus with more files, components, statements and agreeing files
+    is the same block."""
+    rows, facts, census = exported
+    ref = harness.reference_from_tsv(rows)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        harness.checker_alignment(facts, census["componentless"], ref, rows)
+    align = dict(harness._ALIGN)
+    block = harness.status_block(census, facts, census["componentless"],
+                                 census["refusals"], ref, align)
+    grown = {**census, "files": census["files"] + 7,
+             "components": census["components"] + 9,
+             "statements": census["statements"] + 11}
+    more = dict(align)
+    for k in more:
+        if k.startswith("agree-") or k == "out-of-fragment":
+            more[k] += 3
+    assert harness.status_block(grown, {**facts, "zz/new.rvl": {}},
+                                census["componentless"] + ["zz/none.rvl"],
+                                census["refusals"], ref, more,
+                                mismatches=4) == block
+    assert f"{census['files']} .rvl files" not in block
+
+
+def test_a_forgotten_regeneration_of_a_named_bucket_still_fails(
+        harness, status, monkeypatch):
+    """The currency check is as strict as before for everything the block
+    still holds: a file that joins a ratcheted bucket changes the block, and a
+    checkout that did not regenerate it fails `sync_status`."""
+    block, _fatal, _align, samples = status
+    bucket = harness.OOF_RATCHET_BUCKETS[0]
+    monkeypatch.setitem(harness._ALIGN_SAMPLES, bucket,
+                        list(samples.get(bucket, [])) + ["zz/joined.rvl"])
+    rows_block = harness.status_block({}, {}, [], {}, None, harness._ALIGN)
+    assert rows_block != block
+    assert harness.sync_status(rows_block, write=False) is not None
+
+
+def test_two_pull_requests_that_add_files_merge_in_the_block(harness, status):
+    """The exit test of issue #1768 for this file. Two pull requests each add
+    a file to a different ratcheted bucket, and so (in the corpus) a file to
+    the census. The block they write differs only in the named lines, which
+    git merges. The block they used to write also rewrote the census
+    paragraph and the count rows, and conflicted."""
+    from _merge_tree import git_has_merge_tree, merge  # noqa: PLC0415
+    if not git_has_merge_tree():
+        pytest.skip("git merge-tree --write-tree needs git 2.38")
+    block, _fatal, align, samples = status
+    first, second = harness.OOF_RATCHET_BUCKETS[0], harness.OOF_RATCHET_BUCKETS[-1]
+
+    def render(extra: dict[str, str]) -> str:
+        saved = {k: list(v) for k, v in harness._ALIGN_SAMPLES.items()}
+        try:
+            for k, rel in extra.items():
+                harness._ALIGN_SAMPLES[k] = sorted(
+                    list(harness._ALIGN_SAMPLES.get(k, [])) + [rel])
+            return harness.status_block({}, {}, [], {}, None, harness._ALIGN)
+        finally:
+            harness._ALIGN_SAMPLES.clear()
+            harness._ALIGN_SAMPLES.update(saved)
+
+    def old_layout(new_block: str, components: int,
+                   extra: dict[str, str]) -> str:
+        # The pre-#1768 block opened with the census totals: each added file
+        # moves them by its own number of components and verdicts.
+        counts = {k: v for k, v in align.items()}
+        for k in extra:
+            counts[k] = counts.get(k, 0) + 1
+        files = 590 + len(extra)
+        head = (f"**{files} .rvl files -> {components} components**, and "
+                f"**{components * 9} verdicts compared**.")
+        rows = "\n".join(f"| `{k}` | {counts.get(k, 0)} |"
+                         for k in sorted(counts))
+        return f"{head}\n\n{rows}\n\n{new_block}\n"
+
+    left = {first: "aa/left_joins.rvl"}
+    right = {second: "zz/right_joins.rvl"}
+    path = "formal/STATUS.md"
+    base_new, left_new, right_new = render({}), render(left), render(right)
+    assert base_new == block
+    clean, conflicted = merge({path: base_new}, {path: left_new},
+                              {path: right_new})
+    assert clean, conflicted
+    clean, conflicted = merge({path: old_layout(base_new, 461, {})},
+                              {path: old_layout(left_new, 463, left)},
+                              {path: old_layout(right_new, 464, right)})
+    assert not clean and conflicted == [path], (
+        "the old layout merged, so this test no longer measures the defect")
+
+
 def test_a_document_with_no_markers_is_drift_too(harness, status, tmp_path,
                                                  monkeypatch):
     """Deleting the markers must not read as agreement."""
@@ -803,6 +897,10 @@ def test_status_md_calls_the_two_buckets_ratcheted(status):
             encoding="utf-8"))
     for bucket in ("out-of-fragment-G5", "out-of-fragment-G6"):
         assert f"| `{bucket}` | {len(ledger[bucket])} | ratcheted |" in block
-    assert re.search(r"^\| `out-of-fragment` \| \d+ \| informational \|$",
-                     block, re.M), block
+    # Since issue #1768 the plain bucket's count is not in the block at all:
+    # the gate prints it, and a stored census count is what made every pull
+    # request that added a `.rvl` conflict here.
+    assert re.search(
+        r"^\| `out-of-fragment` \| printed by the gate \| informational \|$",
+        block, re.M), block
     assert "out_of_fragment_ledger.json" in block

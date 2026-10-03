@@ -458,6 +458,7 @@ step rather than mutating the live system.
 revl_timeline      {component?}                    // the recorded accumulator (all, or one component)
 revl_inspect_step  {k}                             // the composition's shape at step k (-1 = before every step)
 revl_step_back     {to, force?}                    // unwind to step k by running registered inverses
+revl_step_back     {}                              // revert the last session change, by its `undo` (#1703)
 revl_replay_bisect {assert, component?}            // git-bisect for an execution: first step a predicate holds
 revl_replay_forward {from}                         // re-run the tail after step k by re-invoking the service calls
 ```

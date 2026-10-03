@@ -53,13 +53,32 @@ def compiler_sha(root: Path) -> str:
         return "unknown"
 
 
+def _revl_loaded_from(root: Path) -> bool:
+    """Whether the `revl` this process already imported is `root`'s."""
+    module = sys.modules.get("revl")
+    path = getattr(module, "__file__", None) if module is not None else None
+    if not path:
+        return False
+    return Path(path).resolve().parent == (root / "src" / "revl").resolve()
+
+
 def load_compiler(root: Path):
-    src = str(root / "src")
-    if src in sys.path:
-        sys.path.remove(src)
-    sys.path.insert(0, src)
-    for mod in [m for m in list(sys.modules) if m == "revl" or m.startswith("revl.")]:
-        del sys.modules[mod]
+    """The compiler in `root`, imported from `root/src`.
+
+    When this process already runs `root`'s `revl`, that one is returned as
+    is. Purging it to import a second copy of the same tree split the process
+    in two (issue #1800): code that had imported `revl` earlier kept the old
+    `RevlError`, while every later lazy import inside the compiler resolved to
+    the new copy, so `except RevlError` stopped catching the compiler's own
+    refusals. A different `root` is still a fresh import, because that is what
+    `--compiler-root` asks for."""
+    if not _revl_loaded_from(root):
+        src = str(root / "src")
+        if src in sys.path:
+            sys.path.remove(src)
+        sys.path.insert(0, src)
+        for mod in [m for m in list(sys.modules) if m == "revl" or m.startswith("revl.")]:
+            del sys.modules[mod]
     from revl import RevlError, compile_source  # noqa: PLC0415
     from revl.diagnostics import classify  # noqa: PLC0415
     return compile_source, RevlError, classify

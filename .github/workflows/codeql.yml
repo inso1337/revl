@@ -3,6 +3,10 @@ name: "CodeQL Advanced"
 on:
   push:
     branches: [ "main" ]
+    # Issue #1817: a push that changes only documentation has no code to scan.
+    paths-ignore:
+      - "docs/**"
+      - "**/*.md"
   schedule:
     - cron: '40 14 * * 0'
   workflow_dispatch:
@@ -11,20 +15,25 @@ on:
 # roughly half of every queued job on a repository whose runner concurrency is
 # the throughput limit, and the ci workflow (which IS required for merge) was
 # queuing behind scans of code that had not landed yet. Everything that reaches
-# main is still scanned on the push, plus the weekly schedule, so no landed code
-# goes unscanned; what is lost is the pre-merge signal on a PR branch.
+# main is still scanned by a later push (see the concurrency note below) or the
+# weekly schedule, so no landed code goes unscanned; what is lost is the
+# pre-merge signal on a PR branch.
 # `workflow_dispatch` is here so a scan can be run on demand against a branch
 # when a change warrants it before merge.
 
 concurrency:
-  # The group carries the SHA on push, so a push to main is unique per commit
-  # and has nothing to cancel. A pull_request keeps a stable per-ref group, so a
-  # new push to the PR cancels the superseded run. Encoding the distinction in
-  # the GROUP rather than in cancel-in-progress is deliberate: the expression
-  # form cancelled main's runs anyway, which cost three merge commits their
-  # verdict.
-  group: codeql-${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || 'pr' }}
-  cancel-in-progress: true
+  # Issue #1817: one group per ref, so a burst of merges to main collapses. With
+  # cancel-in-progress false GitHub keeps at most one running analysis and one
+  # pending one, and a newer push replaces the pending one: the running scan
+  # always finishes, and the next scan is of the newest commit, which contains
+  # every commit it replaced. Cancelling the running scan as well could starve
+  # CodeQL while merges arrive faster than a queued scan starts and finishes.
+  # The group used to carry the SHA on push, so every merge queued its own six
+  # lanes (about 13 runner-minutes) on a repository whose runner concurrency is
+  # the throughput limit. What is given up is a verdict for each intermediate
+  # commit; what each scan covers is unchanged, since a scan reads the tree.
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   analyze:

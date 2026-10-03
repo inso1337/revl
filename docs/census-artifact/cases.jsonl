@@ -1,0 +1,2107 @@
+["admission:comment_only", "agree-admit"]
+
+["admission:empty_composition", "agree-admit"]
+
+["admission:interface_empty_service", "agree-admit"]
+
+["admission:interface_one_service", "agree-admit"]
+
+["admission:interface_scalar_alias", "agree-admit"]
+
+["admission:interface_two_services", "agree-admit"]
+
+["admission:near_miss_component", "agree-admit"]
+
+["admission:near_miss_duplicate_method", "no-objection-out-of-slice"]
+
+["admission:near_miss_duplicate_service", "no-objection-out-of-slice"]
+
+["admission:near_miss_fn_body", "agree-admit"]
+
+["admission:near_miss_generic_type", "agree-admit"]
+
+["admission:near_miss_record_alias", "agree-admit"]
+
+["admission:near_miss_shadows_builtin", "agree-admit"]
+
+["admission:near_miss_unknown_type", "agree-admit"]
+
+["backends/go/scenarios/accessor.rvl", "agree-admit"]
+
+["backends/go/scenarios/advance.rvl", "agree-admit"]
+
+["backends/go/scenarios/counter.rvl", "agree-admit"]
+
+["backends/go/scenarios/emitted/jsonwire/jsonwire.rvl", "no-objection-out-of-slice"]
+
+["backends/go/scenarios/emitted/timer/timer.rvl", "agree-admit"]
+
+["backends/go/scenarios/extern_compensate.rvl", "agree-admit"]
+
+["backends/go/scenarios/memkv.rvl", "agree-admit"]
+
+["backends/go/scenarios/method_compensate.rvl", "agree-admit"]
+
+["backends/go/scenarios/provide_method_witnessed.rvl", "agree-admit"]
+
+["backends/go/scenarios/records.rvl", "agree-admit"]
+
+["backends/go/scenarios/router.rvl", "agree-admit"]
+
+["backends/go/scenarios/secret_trace.rvl", "agree-admit"]
+
+["backends/go/scenarios/spawn.rvl", "agree-admit"]
+
+["backends/go/scenarios/tagger.rvl", "agree-admit"]
+
+["backends/go/scenarios/witnessed_teardown.rvl", "agree-admit"]
+
+["backends/go/testdata/module_fn_lifecycle_1669.rvl", "agree-admit"]
+
+["backends/go/testdata/opt_gaps_280.rvl", "agree-admit"]
+
+["backends/go/testdata/result_ctor_302.rvl", "agree-admit"]
+
+["backends/go/testdata/result_erased_1631.rvl", "agree-admit"]
+
+["backends/go/testdata/stream_130.rvl", "agree-admit"]
+
+["backends/go/testdata/stream_event_130.rvl", "agree-admit"]
+
+["backends/java/scenarios/instance_accessor.rvl", "agree-admit"]
+
+["backends/java/scenarios/method_witnessed.rvl", "agree-admit"]
+
+["backends/java/scenarios/router.rvl", "agree-admit"]
+
+["backends/java/scenarios/runtime_values.rvl", "agree-admit"]
+
+["backends/java/scenarios/secret_registry.rvl", "agree-admit"]
+
+["backends/java/scenarios/secret_registry_bytes.rvl", "agree-admit"]
+
+["backends/java/scenarios/secret_registry_shapes.rvl", "agree-admit"]
+
+["backends/java/scenarios/stream_130.rvl", "agree-admit"]
+
+["backends/java/scenarios/stream_event_130.rvl", "agree-admit"]
+
+["backends/rust/scenarios/jsonwire.rvl", "no-objection-out-of-slice"]
+
+["backends/rust/scenarios/probe.rvl", "agree-admit"]
+
+["backends/rust/scenarios/router.rvl", "agree-admit"]
+
+["backends/rust/scenarios/secret_registry.rvl", "agree-admit"]
+
+["backends/rust/scenarios/stream.rvl", "agree-admit"]
+
+["backends/rust/scenarios/timer.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/a2a_agent.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/async_agent_loop.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/async_fn_values.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/async_http.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/conformance.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/dynamic_reserved_key.rvl", "agree-refuse/T1"]
+
+["backends/typescript/tests/fixtures/empty_list_types.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/fr1_loop.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/fr3_json_int.rvl", "no-objection-out-of-slice"]
+
+["backends/typescript/tests/fixtures/match_sync_arms.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/str_scan.rvl", "agree-admit"]
+
+["backends/typescript/tests/fixtures/unique_writes.rvl", "agree-admit"]
+
+["backends/wasm/scenarios/crashproof/crashproof.rvl", "agree-admit"]
+
+["backends/wasm/scenarios/router.rvl", "agree-admit"]
+
+["demo/components/evolve.rvl", "agree-admit"]
+
+["demo/components/pg_database.rvl", "agree-refuse/G1"]
+
+["demo/components/services.rvl", "agree-admit"]
+
+["demo/components/user_cache.rvl", "agree-refuse/G1"]
+
+["demo/live_systems/app.rvl", "agree-admit"]
+
+["demo/live_systems/candidate.rvl", "agree-admit"]
+
+["demo/variants/pg_database.hotswap.rvl", "agree-refuse/G1"]
+
+["demo/variants/pg_database.rejected.rvl", "refuse-out-of-slice/G1"]
+
+["dogfood/scratch-plain-test.rvl", "no-objection-out-of-slice"]
+
+["dogfood/scratch-rejection.rvl", "agree-refuse/G4"]
+
+["examples/app/notes.rvl", "refuse-out-of-slice/G1"]
+
+["examples/async_timer.rvl", "agree-admit"]
+
+["examples/beacon.rvl", "agree-admit"]
+
+["examples/budget_attenuation.rvl", "agree-admit"]
+
+["examples/confinement_g6.rvl", "agree-admit"]
+
+["examples/counter_pair.rvl", "agree-admit"]
+
+["examples/durable_log.rvl", "agree-admit"]
+
+["examples/ecosystem-consumer-js/candidates/digit_tool.rvl", "agree-admit"]
+
+["examples/ecosystem-consumer-js/candidates/double_tool.rvl", "agree-admit"]
+
+["examples/ecosystem-consumer-js/candidates/undeclared_tool.rvl", "agree-refuse/G1"]
+
+["examples/ecosystem-consumer-js/candidates/unmarked_emission_tool.rvl", "agree-refuse/G4"]
+
+["examples/ecosystem-consumer-rs/candidates/digit_tool.rvl", "agree-admit"]
+
+["examples/ecosystem-consumer-rs/candidates/double_tool.rvl", "agree-admit"]
+
+["examples/ecosystem-consumer-rs/candidates/undeclared_tool.rvl", "agree-refuse/G1"]
+
+["examples/ecosystem-consumer-rs/candidates/unmarked_emission_tool.rvl", "agree-refuse/G4"]
+
+["examples/ecosystem-consumer/candidates/double_tool.rvl", "agree-admit"]
+
+["examples/ecosystem-consumer/candidates/draft_tool.rvl", "agree-admit"]
+
+["examples/ecosystem-consumer/candidates/leaky_tool.rvl", "agree-refuse/G1"]
+
+["examples/environment_contract.rvl", "agree-admit"]
+
+["examples/evolve_loop.rvl", "agree-admit"]
+
+["examples/fault_sweep_two_phase.rvl", "agree-admit"]
+
+["examples/gate_service.rvl", "agree-admit"]
+
+["examples/handoff_cache.rvl", "agree-admit"]
+
+["examples/heartbeat.rvl", "agree-admit"]
+
+["examples/interpose_observe.rvl", "agree-admit"]
+
+["examples/java_empty_reset.rvl", "agree-admit"]
+
+["examples/java_match.rvl", "agree-admit"]
+
+["examples/lifecycle_cache.rvl", "agree-admit"]
+
+["examples/lifecycle_leak.rvl", "agree-admit"]
+
+["examples/lifecycle_timer.rvl", "agree-admit"]
+
+["examples/lifecycle_wasm.rvl", "agree-admit"]
+
+["examples/live_counter.rvl", "agree-admit"]
+
+["examples/migrator.rvl", "agree-admit"]
+
+["examples/model_council.rvl", "agree-admit"]
+
+["examples/model_council_binding.rvl", "agree-admit"]
+
+["examples/model_placement.rvl", "agree-admit"]
+
+["examples/model_store.rvl", "agree-admit"]
+
+["examples/model_store_sqlite.rvl", "agree-admit"]
+
+["examples/outcome.rvl", "agree-admit"]
+
+["examples/placement/caprealm_app.rvl", "agree-admit"]
+
+["examples/placement/gate_consumer.rvl", "agree-admit"]
+
+["examples/placement/gate_provider.rvl", "agree-admit"]
+
+["examples/prop_test.rvl", "agree-admit"]
+
+["examples/pulse.rvl", "agree-admit"]
+
+["examples/rec.rvl", "agree-admit"]
+
+["examples/registry.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_6be27824.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_915660b0.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_ddb42280.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_e6afacd3.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_ead437e4.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_f4963252.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_letbind_valuetype.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_matchlit_typeswitch.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_go_vet_redundant_bool.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_rust_3c147169.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_rust_ca5feca4.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_wasm_ad4e66e8.rvl", "agree-admit"]
+
+["examples/regressions/fuzz_wasm_af371f9d.rvl", "agree-admit"]
+
+["examples/rejections/a1_alias_of_async.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_async_arrow_sync_type.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_async_compensate_suspends.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_async_effect_not_awaited.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_async_emit_step_not_awaited.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_async_extern_sync_method.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_async_op_sync_ternary.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_async_undo_suspends.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_await_emit_sync.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_await_in_method.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a1_effect_await_block.rvl", "refuse-out-of-slice/G1"]
+
+["examples/rejections/a1_effect_await_sync.rvl", "agree-refuse/A1"]
+
+["examples/rejections/a2_acquire_after_provide.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/a6_method_not_in_service.rvl", "agree-refuse/A6"]
+
+["examples/rejections/a9_provide_key_not_declared.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/a9_provides_without_block.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/arith_zero_divisor.rvl", "agree-refuse/TYPE"]
+
+["examples/rejections/foreign_bool_false.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_bool_true.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_const.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_cstyle_for.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_decrement.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_def.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_elif.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_for_in.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_increment.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_kwargs.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_lambda.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_len_builtin.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_print_builtin.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_python_ternary.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_slice.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_string_dict.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_throw.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_tuple.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_word_operator_and.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_word_operator_not.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/foreign_word_operator_or.rvl", "refuse-out-of-slice/FOREIGN"]
+
+["examples/rejections/g1_template_undeclared.rvl", "agree-refuse/G1"]
+
+["examples/rejections/g1_undeclared_access.rvl", "agree-refuse/G1"]
+
+["examples/rejections/g1_unknown_upper_host.rvl", "agree-refuse/G1"]
+
+["examples/rejections/g2_provision_conflict.rvl", "agree-refuse/G2"]
+
+["examples/rejections/g3_dependency_cycle.rvl", "agree-refuse/G3"]
+
+["examples/rejections/g4_approval_helper_reach.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_approval_scoped_extern.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_approval_value_form_method.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_arrow_param_emission.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_capability_not_declared.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_config_record_arrow.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_dotted_capability_key.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_emission_not_declared.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_extern_compensate_result.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_extern_config_alias_opaque.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_extern_undo_param_not_in_scope.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_extern_undo_self_call.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_extern_undo_undeclared_fn.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_extern_undo_wrong_arg_type.rvl", "agree-refuse/T1"]
+
+["examples/rejections/g4_fn_body_host_acquire.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_method_host_acquire.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_missing_undo.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g4_nested_approval_emission.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_emit_expression.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_emit_expression_host.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_host_emission_activation.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_host_emission_in_service_emit.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_host_emission_method.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_host_emission_scoped.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_host_emission_scoped_method.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_service_emission_in_host_emit.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_unmarked_emission.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_nested_unmarked_emission_method.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_spawn_widens_budget.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_spawn_widens_capability.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_spawn_widens_parameter.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_undo_host_acquire.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_unmarked_alias_emission.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_unmarked_emission.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_unmarked_handle_emission.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_unmarked_host_emission.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_unmarked_host_emission_acquire.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g4_unmarked_host_emission_helper.rvl", "agree-refuse/G4"]
+
+["examples/rejections/g5_undo_arrow_emission.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_fn_emission.rvl", "refuse-out-of-slice/G4"]
+
+["examples/rejections/g5_undo_fn_value_emission.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_handle_emission.rvl", "refuse-out-of-slice/G4"]
+
+["examples/rejections/g5_undo_handle_ref_arg.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_handle_ref_let.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_method_ref_alias.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_method_ref_if_arm.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_method_ref_let.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_method_ref_list.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_method_ref_match_arm.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g5_undo_method_ref_record.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g6_closure_mutates_capture.rvl", "agree-refuse/G6"]
+
+["examples/rejections/g6_impure_statement.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g6_method_local_shadows_component.rvl", "agree-refuse/G6"]
+
+["examples/rejections/g9_closure_capture_launders_taint.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g9_service_return_launders_taint.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/g9_spawn_config_launders_taint.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/gcouncilsplit_on_tie_allow.rvl", "agree-refuse/COUNCIL"]
+
+["examples/rejections/gmodelplace_confidential_off_device.rvl", "agree-refuse/MODEL"]
+
+["examples/rejections/gmodelplace_council_member_off_device.rvl", "agree-refuse/MODEL"]
+
+["examples/rejections/gretain_expired_at_persistence_sink.rvl", "refuse-out-of-slice/BAD"]
+
+["examples/rejections/gsecret_service_return_discloses.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/host_method_not_on_surface.rvl", "agree-refuse/HOST-METHOD"]
+
+["examples/rejections/lifecycle_config_unknown_field.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/lifecycle_double_load.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/lifecycle_no_swap.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/lifecycle_stmt_in_pure_test.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/lifecycle_unknown_assertion.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/lifecycle_unknown_component.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/lifecycle_unknown_operation.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/requires_in_component_body.rvl", "refuse-out-of-slice/G1"]
+
+["examples/rejections/service_compat_duplicate.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/shadowed_module_fn_call.rvl", "agree-refuse/G6"]
+
+["examples/rejections/t10_call_arity.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t11_field_through_opt.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t12_str_index.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t13_unknown_match_case.rvl", "agree-refuse/TYPE"]
+
+["examples/rejections/t14_optional_chain_on_nonoptional.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t15_generic_call_site.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t16_provide_method_missing_return.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t17_arrow_body_unchecked.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t18_type_alias_cycle.rvl", "agree-refuse/TYPE"]
+
+["examples/rejections/t19_union_type.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/t1_service_arg_type.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t20_int_literal_range.rvl", "refuse-out-of-slice/BAD"]
+
+["examples/rejections/t21_int32_narrow_implicit.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t22_int32_width_mix.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t23_int32_remainder.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t24_opaque_receiver_builtin.rvl", "agree-refuse/HOST-METHOD"]
+
+["examples/rejections/t25_explicit_tparam_heuristic_off.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t26_anon_record_update_wrong_type.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t27_anon_record_update_undeclared_field.rvl", "agree-refuse/TYPE"]
+
+["examples/rejections/t28_bitwise_non_int32.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t29_field_read_on_any.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t2_null_in_expression.rvl", "agree-refuse/T2"]
+
+["examples/rejections/t30_field_read_on_any_provide_method.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t31_index_non_int_provide_method.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t32_arrow_value_result_flows.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t33_arrow_value_arity.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t34_arrow_self_declared_async.rvl", "agree-refuse/A1"]
+
+["examples/rejections/t35_arrow_annotation_not_quantified.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t36_float_literal_range.rvl", "agree-refuse/TYPE"]
+
+["examples/rejections/t3_config_default_type.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t4_field_arg_type.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t5_destructure_nonrecord.rvl", "agree-refuse/TYPE"]
+
+["examples/rejections/t6_bare_generic.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t7_provide_param_annotation_mismatch.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t8_missing_return.rvl", "agree-refuse/T1"]
+
+["examples/rejections/t9_return_path_incomplete.rvl", "agree-refuse/T1"]
+
+["examples/rejections/v2_async_signature_mismatch.rvl", "agree-refuse/A1"]
+
+["examples/rejections/v2_compound_assign_on_let.rvl", "agree-refuse/G6"]
+
+["examples/rejections/v2_duplicate_let_block_scope.rvl", "agree-refuse/G6"]
+
+["examples/rejections/v2_dynamic_realm.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_extern_acquire_no_undo.rvl", "agree-refuse/G4"]
+
+["examples/rejections/v2_extern_unclassified.rvl", "agree-refuse/G8"]
+
+["examples/rejections/v2_fail_in_pure_fn.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_intercept_on_provision.rvl", "agree-refuse/G1"]
+
+["examples/rejections/v2_intercept_undeclared.rvl", "agree-refuse/G1"]
+
+["examples/rejections/v2_isolate_after_effect.rvl", "agree-refuse/PRELUDE"]
+
+["examples/rejections/v2_keyword_as_field_name.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_let_reassignment.rvl", "agree-refuse/G6"]
+
+["examples/rejections/v2_map_set_value_mismatch.rvl", "agree-refuse/T1"]
+
+["examples/rejections/v2_map_value_unknown_method.rvl", "agree-refuse/T1"]
+
+["examples/rejections/v2_match_nonexhaustive.rvl", "agree-refuse/T1"]
+
+["examples/rejections/v2_nullish_mixed_with_or.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_optional_chain_nonoptional.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_provide_emission_fn.rvl", "refuse-out-of-slice/BAD"]
+
+["examples/rejections/v2_same_realm_conflict.rvl", "agree-refuse/G2"]
+
+["examples/rejections/v2_undeclared_fn_var.rvl", "agree-refuse/G1"]
+
+["examples/rejections/v2_use_cycle.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_use_missing.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_use_private.rvl", "no-objection-out-of-slice"]
+
+["examples/rejections/v2_verified_direct_recursion.rvl", "refuse-out-of-slice/BAD"]
+
+["examples/tenant_attenuation.rvl", "agree-admit"]
+
+["examples/tenants.rvl", "agree-admit"]
+
+["examples/ts_host_body.rvl", "agree-admit"]
+
+["examples/user_cache.rvl", "agree-admit"]
+
+["examples/uxprobe2_draft.rvl", "agree-admit"]
+
+["examples/uxprobe2_fault.rvl", "agree-admit"]
+
+["examples/uxprobe2_jobs.rvl", "agree-admit"]
+
+["examples/uxprobe_cache.rvl", "agree-admit"]
+
+["examples/v2_use_private_lib.rvl", "agree-admit"]
+
+["examples/v3_step_scheduler.rvl", "agree-admit"]
+
+["examples/verified_effect.rvl", "agree-admit"]
+
+["examples/webui-entry/console.rvl", "no-objection-out-of-slice"]
+
+["oracle-accept:a bare emission bound covers a spawn-handle emit", "agree-admit"]
+
+["oracle-accept:a binding sharing a callable's name that never calls it", "agree-admit"]
+
+["oracle-accept:a bound name called only as a METHOD of a receiver", "agree-admit"]
+
+["oracle-accept:a bound spawn of a known component admits", "agree-admit"]
+
+["oracle-accept:a built-in Result constructor is a callable head", "agree-admit"]
+
+["oracle-accept:a cache external clause with a ttl bound is read", "agree-admit"]
+
+["oracle-accept:a cache pure trailing clause is read", "agree-admit"]
+
+["oracle-accept:a callable called in a fn that binds nothing of that name", "agree-admit"]
+
+["oracle-accept:a callable named as a value resolves", "agree-admit"]
+
+["oracle-accept:a catch-all arm covers the cases nothing names", "agree-admit"]
+
+["oracle-accept:a coerced arrow nested in a sync arrow does not leak", "agree-admit"]
+
+["oracle-accept:a commutative operation is read", "agree-admit"]
+
+["oracle-accept:a declared ADT case is a callable head", "agree-admit"]
+
+["oracle-accept:a destructuring binder ahead of the return", "agree-admit"]
+
+["oracle-accept:a dotted capability token on an emission extern", "agree-admit"]
+
+["oracle-accept:a fn whose only async reach is a coerced arrow stays sync", "agree-admit"]
+
+["oracle-accept:a fn with no declared return type need not return", "agree-admit"]
+
+["oracle-accept:a host acquisition in a fn no component reaches", "agree-admit"]
+
+["oracle-accept:a host acquisition in its bracket, the whole point of the rule", "agree-admit"]
+
+["oracle-accept:a host root used as a constructor receiver", "agree-admit"]
+
+["oracle-accept:a let inside a statement-block match arm", "agree-admit"]
+
+["oracle-accept:a let whose initialiser mentions its own name", "agree-admit"]
+
+["oracle-accept:a loop that may run zero times, followed by a return", "agree-admit"]
+
+["oracle-accept:a match arm head that shares a module callable's name", "agree-admit"]
+
+["oracle-accept:a match over a parameterized ADT draws no verdict", "agree-admit"]
+
+["oracle-accept:a match that covers every case", "agree-admit"]
+
+["oracle-accept:a match-arm binding is in scope in the arm", "agree-admit"]
+
+["oracle-accept:a multi-realm bind with a provider per realm admits", "agree-admit"]
+
+["oracle-accept:a multi-realm bind without a strategy admits", "agree-admit"]
+
+["oracle-accept:a one-case nominal is not an alias", "agree-admit"]
+
+["oracle-accept:a parameter sharing a callable's name that never calls it", "agree-admit"]
+
+["oracle-accept:a partial match over an Opt draws no exhaustiveness verdict", "agree-admit"]
+
+["oracle-accept:a plain every iteration's item stays untyped", "agree-admit"]
+
+["oracle-accept:a provide method binding a name the component does not hold", "agree-admit"]
+
+["oracle-accept:a provider inside a scoped emission extern's own bound", "agree-admit"]
+
+["oracle-accept:a provision through a service-typed arrow parameter, correctly marked", "agree-admit"]
+
+["oracle-accept:a route clause heading the operation is read", "agree-admit"]
+
+["oracle-accept:a routed key pinned afterwards still admits", "agree-admit"]
+
+["oracle-accept:a scoped emission extern reached through a helper fn", "agree-admit"]
+
+["oracle-accept:a service-typed arrow parameter not applied to a provision", "agree-admit"]
+
+["oracle-accept:a terminating chain of transparent aliases", "agree-admit"]
+
+["oracle-accept:a transparent alias through a service, a config field and a body", "agree-admit"]
+
+["oracle-accept:a validated emission is read", "agree-admit"]
+
+["oracle-accept:a validated emission with a retry budget is read", "agree-admit"]
+
+["oracle-accept:a while(true) whose only break targets a nested loop", "agree-admit"]
+
+["oracle-accept:a while(true) with no targeting break", "agree-admit"]
+
+["oracle-accept:a witnessed extern's declared scope meets a provide-method bound", "agree-admit"]
+
+["oracle-accept:an Upper-cased host acquisition is a callable head", "agree-admit"]
+
+["oracle-accept:an acquire extern whose undo is a builtin constructor", "agree-admit"]
+
+["oracle-accept:an acquire extern whose undo is a declared pure extern", "agree-admit"]
+
+["oracle-accept:an acquire extern with no return type and a legal inverse", "agree-admit"]
+
+["oracle-accept:an aliased spawn-handle provision, correctly marked `emit`", "agree-admit"]
+
+["oracle-accept:an arrow parameter is in scope in its body", "agree-admit"]
+
+["oracle-accept:an else-if chain whose every arm returns", "agree-admit"]
+
+["oracle-accept:an emission capability bound (control) is read", "agree-admit"]
+
+["oracle-accept:an emission extern declaring its optional compensate slot", "agree-admit"]
+
+["oracle-accept:an endorse slot on an emission is read", "agree-admit"]
+
+["oracle-accept:an if/else whose arms both return", "agree-admit"]
+
+["oracle-accept:arrow coerced into an Async[T] parameter admits", "agree-admit"]
+
+["oracle-accept:async method reaching a rule-2-colored fn admits", "agree-admit"]
+
+["oracle-accept:async op admits an async body", "agree-admit"]
+
+["oracle-accept:async provide method restates its return type", "agree-admit"]
+
+["oracle-accept:await in an async provide method composes", "agree-admit"]
+
+["oracle-accept:bare call of a builtin-named case in a multi-case variant", "agree-admit"]
+
+["oracle-accept:bitwise pure helper stays clean", "agree-admit"]
+
+["oracle-accept:boot component with a bounded environment contract", "agree-admit"]
+
+["oracle-accept:config field read is not a bare-value access", "agree-admit"]
+
+["oracle-accept:declared emission covers the body", "agree-admit"]
+
+["oracle-accept:disjoint sibling blocks reuse a name", "agree-admit"]
+
+["oracle-accept:emit with a compensation that emits", "agree-admit"]
+
+["oracle-accept:every callable universe member read by name", "agree-admit"]
+
+["oracle-accept:fault test between two components", "agree-admit"]
+
+["oracle-accept:fault test with a with-block between two components", "agree-admit"]
+
+["oracle-accept:handoff on a provided key composes", "agree-admit"]
+
+["oracle-accept:honest provider", "agree-admit"]
+
+["oracle-accept:intercept on a required key composes", "agree-admit"]
+
+["oracle-accept:isolate before every action composes (prelude ok)", "agree-admit"]
+
+["oracle-accept:item 309: a Secret[Str] key, past the qualifier", "agree-admit"]
+
+["oracle-accept:item 309: a bare idempotent emission", "agree-admit"]
+
+["oracle-accept:item 309: a key typed by an alias of Str", "agree-admit"]
+
+["oracle-accept:item 309: a keyed idempotent emission", "agree-admit"]
+
+["oracle-accept:item 309: a keyed idempotent scoped emission", "agree-admit"]
+
+["oracle-accept:item 309: an Int key", "agree-admit"]
+
+["oracle-accept:item 309: keyed idempotent after deferred", "agree-admit"]
+
+["oracle-accept:item 309: keyed idempotent before deferred", "agree-admit"]
+
+["oracle-accept:item 309: the checked-in deferred idempotent fixture", "agree-admit"]
+
+["oracle-accept:lifecycle test between two components", "agree-admit"]
+
+["oracle-accept:lifecycle, prop and fault stay ordinary identifiers", "agree-admit"]
+
+["oracle-accept:marked emission through a spawn handle admits", "agree-admit"]
+
+["oracle-accept:module-fn arrow into an Async[T] slot admits", "agree-admit"]
+
+["oracle-accept:per-tenant spawn narrowing composes", "agree-admit"]
+
+["oracle-accept:prop test between two components", "agree-admit"]
+
+["oracle-accept:provide method restates its return type", "agree-admit"]
+
+["oracle-accept:pure helper chain stays clean", "agree-admit"]
+
+["oracle-accept:realm separation breaks a would-be cycle", "agree-admit"]
+
+["oracle-accept:reassigning a host-provenance let", "agree-admit"]
+
+["oracle-accept:record destructuring of a nominal record", "agree-admit"]
+
+["oracle-accept:record destructuring of a structural record", "agree-admit"]
+
+["oracle-accept:same key in different realms composes", "agree-admit"]
+
+["oracle-accept:scoped declaration honored", "agree-admit"]
+
+["oracle-accept:scoped method whose spawn target stays in bound admits", "agree-admit"]
+
+["oracle-accept:timer body emitting through a declared key", "agree-admit"]
+
+["oracle-accept:timer body reaching an async operation", "agree-admit"]
+
+["oracle-accept:two disjoint keys compose", "agree-admit"]
+
+["oracle-accept:two for loops binding one name", "agree-admit"]
+
+["oracle-accept:two provide methods binding the same fresh local", "agree-admit"]
+
+["oracle-accept:var reassignment", "agree-admit"]
+
+["oracle-reject:G4 evidence names a repeated emission once", "agree-refuse/G4"]
+
+["oracle-reject:a G4 excess through a host extern", "agree-refuse/G4"]
+
+["oracle-reject:a G4 excess through a required key carries no host label", "agree-refuse/G4"]
+
+["oracle-reject:a G4 excess through a spawn-handle emit", "agree-refuse/G4"]
+
+["oracle-reject:a bad alias below a bad signature is still the alias", "agree-refuse/A1"]
+
+["oracle-reject:a bare Async as a value type", "agree-refuse/A1"]
+
+["oracle-reject:a bare Upper-cased call head in a method is undeclared (G1)", "agree-refuse/G1"]
+
+["oracle-reject:a bare Upper-cased call head in an activation body is undeclared (G1)", "agree-refuse/G1"]
+
+["oracle-reject:a bare builtin generic as a config field", "agree-refuse/T1"]
+
+["oracle-reject:a bare builtin generic as a fn parameter", "agree-refuse/T1"]
+
+["oracle-reject:a bare builtin generic as a fn return", "agree-refuse/T1"]
+
+["oracle-reject:a bare builtin generic as an extern parameter", "agree-refuse/T1"]
+
+["oracle-reject:a bare builtin generic as an extern return", "agree-refuse/T1"]
+
+["oracle-reject:a bare builtin generic nested in a type argument", "agree-refuse/T1"]
+
+["oracle-reject:a bind in an if arm with the call outside it", "agree-refuse/G6"]
+
+["oracle-reject:a binding that shadows a module extern it calls", "agree-refuse/G6"]
+
+["oracle-reject:a binding that shadows a module fn it calls", "agree-refuse/G6"]
+
+["oracle-reject:a builtin generic given too few arguments", "agree-refuse/T1"]
+
+["oracle-reject:a cache external clause with a ttl bound does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a cache pure trailing clause does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a call to a name nothing declares", "agree-refuse/G1"]
+
+["oracle-reject:a candidate requiring an ambient-only service, standalone", "agree-refuse/G1"]
+
+["oracle-reject:a closure assigning to a capture", "agree-refuse/G6"]
+
+["oracle-reject:a commutative operation does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a compensate slot through required keys keeps its order", "agree-refuse/G4"]
+
+["oracle-reject:a conditional reaching two host externs sorts them", "agree-refuse/G4"]
+
+["oracle-reject:a conditional while as the only returning path", "agree-refuse/T1"]
+
+["oracle-reject:a declared return the trailing bare if can fall past", "agree-refuse/T1"]
+
+["oracle-reject:a declared return whose body never returns", "agree-refuse/T1"]
+
+["oracle-reject:a deeper required-key crossing follows the sorted names", "agree-refuse/G4"]
+
+["oracle-reject:a for binding over a live name", "agree-refuse/G6"]
+
+["oracle-reject:a for loop as the only returning path", "agree-refuse/T1"]
+
+["oracle-reject:a key isolated twice is refused (G1)", "agree-refuse/G1"]
+
+["oracle-reject:a key routed twice is refused (ROUTE)", "agree-refuse/ROUTE"]
+
+["oracle-reject:a list transform whose free function nothing declares", "agree-refuse/G1"]
+
+["oracle-reject:a literal zero divisor", "agree-refuse/TYPE"]
+
+["oracle-reject:a marked reach through a helper carries no host label", "agree-refuse/G4"]
+
+["oracle-reject:a match arm naming a case the ADT does not declare", "agree-refuse/TYPE"]
+
+["oracle-reject:a match missing two cases", "agree-refuse/T1"]
+
+["oracle-reject:a match over a variant missing a case", "agree-refuse/T1"]
+
+["oracle-reject:a match over a variant with payloads misses one", "agree-refuse/T1"]
+
+["oracle-reject:a method local bound twice in one method body", "agree-refuse/G6"]
+
+["oracle-reject:a method local shadowing a component local", "agree-refuse/G6"]
+
+["oracle-reject:a method local shadowing the method's own parameter", "agree-refuse/G6"]
+
+["oracle-reject:a method the host stub surface does not name", "agree-refuse/HOST-METHOD"]
+
+["oracle-reject:a no-return extern's slot runs with no variables in scope", "agree-refuse/G4"]
+
+["oracle-reject:a non-timer emit reaching an async op is still A1", "agree-refuse/A1"]
+
+["oracle-reject:a parameter that shadows a module fn the body calls", "agree-refuse/G6"]
+
+["oracle-reject:a pinned key cannot also be routed (ROUTE)", "agree-refuse/ROUTE"]
+
+["oracle-reject:a plain provider reaching a host extern", "agree-refuse/G4"]
+
+["oracle-reject:a read of a name bound only inside a sibling block", "agree-refuse/G1"]
+
+["oracle-reject:a route after a provide block is refused (PRELUDE)", "agree-refuse/PRELUDE"]
+
+["oracle-reject:a route clause heading the operation does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a routed realm with no provider is refused (ROUTE)", "agree-refuse/ROUTE"]
+
+["oracle-reject:a spawn with no handle emit draws the spawn-bound verdict", "agree-refuse/G4"]
+
+["oracle-reject:a spawn-handle emit through a provision alias", "agree-refuse/G4"]
+
+["oracle-reject:a spawn-handle emit under a bound naming the child's key", "agree-refuse/G4"]
+
+["oracle-reject:a ternary with three undeclared arms names the condition", "agree-refuse/G1"]
+
+["oracle-reject:a ternary with three undeclared arms names the condition", "agree-refuse/G1"]
+
+["oracle-reject:a timer body reaching an undeclared key is still G1", "agree-refuse/G1"]
+
+["oracle-reject:a type alias cycle", "agree-refuse/TYPE"]
+
+["oracle-reject:a type alias cycle through a type application", "agree-refuse/TYPE"]
+
+["oracle-reject:a type alias that names itself", "agree-refuse/TYPE"]
+
+["oracle-reject:a valid extern before a malformed one", "agree-refuse/G4"]
+
+["oracle-reject:a validated emission does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a validated emission with a retry budget does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:a while(true) with a break targeting it", "agree-refuse/T1"]
+
+["oracle-reject:a1 async compensate suspends", "agree-refuse/A1"]
+
+["oracle-reject:a1 async effect not awaited", "agree-refuse/A1"]
+
+["oracle-reject:a1 async emit step not awaited", "agree-refuse/A1"]
+
+["oracle-reject:a1 async extern in sync method", "agree-refuse/A1"]
+
+["oracle-reject:a1 async extern passed as an argument", "agree-refuse/A1"]
+
+["oracle-reject:a1 async extern used as a value (async method)", "agree-refuse/A1"]
+
+["oracle-reject:a1 async op via sync ternary", "agree-refuse/A1"]
+
+["oracle-reject:a1 async undo suspends", "agree-refuse/A1"]
+
+["oracle-reject:a1 await emit on sync emission", "agree-refuse/A1"]
+
+["oracle-reject:a1 colored fn used as a value", "agree-refuse/A1"]
+
+["oracle-reject:a1 effect await on sync acquisition", "agree-refuse/A1"]
+
+["oracle-reject:a1 leaky arrow (sync-typed callback)", "agree-refuse/A1"]
+
+["oracle-reject:a1 leaky arrow in a module fn (pure twin)", "agree-refuse/A1"]
+
+["oracle-reject:a1 leaky arrow in a sync fn-parameter slot", "agree-refuse/A1"]
+
+["oracle-reject:a1 module fn uses an async callable as a value", "agree-refuse/A1"]
+
+["oracle-reject:a1 rule-2 param-colored fn in a sync method", "agree-refuse/A1"]
+
+["oracle-reject:a1 setup body reaches an async extern", "agree-refuse/A1"]
+
+["oracle-reject:a1 transitively-colored fn in sync method", "agree-refuse/A1"]
+
+["oracle-reject:acquire extern with compensate but no undo", "agree-refuse/G4"]
+
+["oracle-reject:acquire extern with no undo", "agree-refuse/G4"]
+
+["oracle-reject:an absent service operation in a provide method", "agree-refuse/A6"]
+
+["oracle-reject:an absent service operation in a setup effect bracket", "agree-refuse/A6"]
+
+["oracle-reject:an absent service operation under `emit` is A6, not G4", "agree-refuse/A6"]
+
+["oracle-reject:an alias of Async[T] (fixture: refused at the declaration, not the arrow)", "agree-refuse/A1"]
+
+["oracle-reject:an alias whose right-hand side is an async function type", "agree-refuse/A1"]
+
+["oracle-reject:an alias with Async nested in a type argument", "agree-refuse/A1"]
+
+["oracle-reject:an async function type outside a module fn parameter", "agree-refuse/A1"]
+
+["oracle-reject:an emission capability bound (control) does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:an emit step and its compensate slot sort as one node", "agree-refuse/G4"]
+
+["oracle-reject:an emit-marked binding carries no host label", "agree-refuse/G4"]
+
+["oracle-reject:an emit-marked binding through a handle notes no label", "agree-refuse/G4"]
+
+["oracle-reject:an endorse slot on an emission does not swallow the next operation", "agree-refuse/G4"]
+
+["oracle-reject:an extern slot must be a plain call", "agree-refuse/G4"]
+
+["oracle-reject:an extern slot refusal inside a list literal", "agree-refuse/G4"]
+
+["oracle-reject:an extern slot refusal inside a match arm", "agree-refuse/G4"]
+
+["oracle-reject:an if with no else", "agree-refuse/T1"]
+
+["oracle-reject:an if/else with only one returning arm", "agree-refuse/T1"]
+
+["oracle-reject:an index whose target and subscript are both undeclared names the target", "agree-refuse/G1"]
+
+["oracle-reject:an index whose target and subscript are both undeclared names the target", "agree-refuse/G1"]
+
+["oracle-reject:an iteration body is still walked for its own refusal", "agree-refuse/G4"]
+
+["oracle-reject:an undeclared name in an argument", "agree-refuse/G1"]
+
+["oracle-reject:an undeclared name left of an unmarked emission is still G1", "agree-refuse/G1"]
+
+["oracle-reject:an undeclared name left of an unmarked emission is still G1", "agree-refuse/G1"]
+
+["oracle-reject:an undeclared name read in a return", "agree-refuse/G1"]
+
+["oracle-reject:an undeclared name read inside a template", "agree-refuse/G1"]
+
+["oracle-reject:an undeclared requirement after a lifecycle test", "agree-refuse/G1"]
+
+["oracle-reject:an undeclared service in provides", "agree-refuse/G1"]
+
+["oracle-reject:an undeclared service in requires", "agree-refuse/G1"]
+
+["oracle-reject:an unknown arm outranks the missing cases", "agree-refuse/TYPE"]
+
+["oracle-reject:an unknown routing strategy is refused (ROUTE)", "agree-refuse/ROUTE"]
+
+["oracle-reject:an unmarked emission after a prop test", "agree-refuse/G4"]
+
+["oracle-reject:an unmarked emission left of an undeclared name is still G4", "agree-refuse/G4"]
+
+["oracle-reject:an unmarked emission left of an undeclared name is still G4", "agree-refuse/G4"]
+
+["oracle-reject:assignment to a name nothing bound", "agree-refuse/G1"]
+
+["oracle-reject:assignment to a parameter", "agree-refuse/G6"]
+
+["oracle-reject:async signature mismatch (A1)", "agree-refuse/A1"]
+
+["oracle-reject:await in a sync provide method (A1)", "agree-refuse/A1"]
+
+["oracle-reject:both operands of a binary op are undeclared: the LEFT one is named", "agree-refuse/G1"]
+
+["oracle-reject:both operands of a binary op are undeclared: the LEFT one is named", "agree-refuse/G1"]
+
+["oracle-reject:compensate slot binding an unbound result", "agree-refuse/G4"]
+
+["oracle-reject:compound assignment on a let", "agree-refuse/G6"]
+
+["oracle-reject:duplicate let in one straight-line scope", "agree-refuse/G6"]
+
+["oracle-reject:duplicate let inside one if arm", "agree-refuse/G6"]
+
+["oracle-reject:dynamic reserved key: a field read on a json_parse result", "agree-refuse/T1"]
+
+["oracle-reject:emission extern cannot declare undo", "agree-refuse/G4"]
+
+["oracle-reject:extern with no classification is G8", "agree-refuse/G8"]
+
+["oracle-reject:g1 bare call of a builtin type aliased single-case", "agree-refuse/G1"]
+
+["oracle-reject:g1 bare call of a type-application alias head", "agree-refuse/G1"]
+
+["oracle-reject:g1 required key used as a bare value", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared access", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in a setup compensate", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in a setup let", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in a setup undo", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in an after body", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in an every body", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in method", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in setup await", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in setup effect", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared bare value in setup emit", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared head awaited in a let-effect", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared head awaited in an effect", "agree-refuse/G1"]
+
+["oracle-reject:g1 undeclared receiver in method", "agree-refuse/G1"]
+
+["oracle-reject:g2 provision conflict", "agree-refuse/G2"]
+
+["oracle-reject:g2 same-realm conflict", "agree-refuse/G2"]
+
+["oracle-reject:g3 dependency cycle", "agree-refuse/G3"]
+
+["oracle-reject:g4 an extern undo slot's argument type", "agree-refuse/T1"]
+
+["oracle-reject:g4 capability not declared", "agree-refuse/G4"]
+
+["oracle-reject:g4 emission callable passed as a value", "agree-refuse/G4"]
+
+["oracle-reject:g4 emission not declared", "agree-refuse/G4"]
+
+["oracle-reject:g4 host acquire in a compensation", "agree-refuse/G4"]
+
+["oracle-reject:g4 host acquire in a component-reachable fn body", "agree-refuse/G4"]
+
+["oracle-reject:g4 host acquire in a provide-method let", "agree-refuse/G4"]
+
+["oracle-reject:g4 host acquire in a teardown slot", "agree-refuse/G4"]
+
+["oracle-reject:g4 host acquire in an emit expression", "agree-refuse/G4"]
+
+["oracle-reject:g4 host acquire wrapped inside an effect bracket's acquisition", "agree-refuse/G4"]
+
+["oracle-reject:g4 multi-hop named-call chain", "agree-refuse/G4"]
+
+["oracle-reject:g4 plain method spawns an emitting target", "agree-refuse/G4"]
+
+["oracle-reject:g4 scoped method spawns a target that widens its caps", "agree-refuse/G4"]
+
+["oracle-reject:g4 spawn widens a child's capability", "agree-refuse/G4"]
+
+["oracle-reject:g4 unmarked emission", "agree-refuse/G4"]
+
+["oracle-reject:g4 unmarked emission through a service-typed arrow parameter", "agree-refuse/G4"]
+
+["oracle-reject:g4 unmarked emission through a spawn handle", "agree-refuse/G4"]
+
+["oracle-reject:g4 unmarked emission through an aliased spawn-handle provision", "agree-refuse/G4"]
+
+["oracle-reject:handoff after an effect is refused (prelude)", "agree-refuse/PRELUDE"]
+
+["oracle-reject:handoff on a non-provided key is refused", "agree-refuse/HANDOFF"]
+
+["oracle-reject:intercept on a provision (G1)", "agree-refuse/G1"]
+
+["oracle-reject:intercept on an undeclared key (G1)", "agree-refuse/G1"]
+
+["oracle-reject:intercept twice on one key (G1)", "agree-refuse/G1"]
+
+["oracle-reject:isolate on an undeclared key is refused (G1)", "agree-refuse/G1"]
+
+["oracle-reject:item 309: a key naming no parameter", "agree-refuse/G4"]
+
+["oracle-reject:item 309: a key naming no parameter, after deferred", "agree-refuse/G4"]
+
+["oracle-reject:item 309: a key on an extern with no parameters", "agree-refuse/G4"]
+
+["oracle-reject:item 309: a key typed by an alias of a list", "agree-refuse/G4"]
+
+["oracle-reject:item 309: a key whose type is not a scalar", "agree-refuse/G4"]
+
+["oracle-reject:item 309: a pure extern declared idempotent", "agree-refuse/G4"]
+
+["oracle-reject:item 309: a witnessed extern declared idempotent", "agree-refuse/G4"]
+
+["oracle-reject:item 309: an acquire extern declared idempotent", "agree-refuse/G4"]
+
+["oracle-reject:item 309: an idempotent emission with an undo meets the class rule", "agree-refuse/G4"]
+
+["oracle-reject:let reassignment", "agree-refuse/G6"]
+
+["oracle-reject:let reassignment inside an if arm", "agree-refuse/G6"]
+
+["oracle-reject:no-return extern refuses a `result` binding", "agree-refuse/G4"]
+
+["oracle-reject:prelude intercept after effect", "agree-refuse/PRELUDE"]
+
+["oracle-reject:prelude isolate after effect", "agree-refuse/PRELUDE"]
+
+["oracle-reject:prelude isolate after provide", "agree-refuse/PRELUDE"]
+
+["oracle-reject:pure extern cannot declare compensate", "agree-refuse/G4"]
+
+["oracle-reject:record destructuring of a declared variant", "agree-refuse/TYPE"]
+
+["oracle-reject:record destructuring of a list", "agree-refuse/TYPE"]
+
+["oracle-reject:record destructuring of a scalar", "agree-refuse/TYPE"]
+
+["oracle-reject:requires is decided before provides", "agree-refuse/G1"]
+
+["oracle-reject:routing a provision is refused (ROUTE)", "agree-refuse/ROUTE"]
+
+["oracle-reject:routing an undeclared key is refused (G1)", "agree-refuse/G1"]
+
+["oracle-reject:single-line body: isolate after effect (PRELUDE)", "agree-refuse/PRELUDE"]
+
+["oracle-reject:spawn names an unknown component", "agree-refuse/SPAWN"]
+
+["oracle-reject:t10 a call at the wrong arity", "agree-refuse/T1"]
+
+["oracle-reject:t11 field read through an optional", "agree-refuse/T1"]
+
+["oracle-reject:t12 index on a Str", "agree-refuse/T1"]
+
+["oracle-reject:t14 an optional chain on a non-optional", "agree-refuse/T1"]
+
+["oracle-reject:t15 a generic fn's result at a call site", "agree-refuse/T1"]
+
+["oracle-reject:t17 an arrow body reaching through an optional", "agree-refuse/T1"]
+
+["oracle-reject:t2 null in an expression", "agree-refuse/T2"]
+
+["oracle-reject:t21 implicit Int -> Int32 narrowing at a return", "agree-refuse/T1"]
+
+["oracle-reject:t22 mixed-width arithmetic", "agree-refuse/T1"]
+
+["oracle-reject:t23 remainder on Int32 operands", "agree-refuse/T1"]
+
+["oracle-reject:t24 a stdlib method on a receiver no constructor pins", "agree-refuse/HOST-METHOD"]
+
+["oracle-reject:t25 an explicit [T] list turns the implicit heuristic off", "agree-refuse/T1"]
+
+["oracle-reject:t26 record update with a wrong field type", "agree-refuse/T1"]
+
+["oracle-reject:t27 record update naming a field the literal has not", "agree-refuse/TYPE"]
+
+["oracle-reject:t28 bitwise on non-Int32 operands", "agree-refuse/T1"]
+
+["oracle-reject:t29 field read on an erased Any", "agree-refuse/T1"]
+
+["oracle-reject:t32 an arrow value's result in a position that cannot hold it", "agree-refuse/T1"]
+
+["oracle-reject:t33 a call through an arrow value at the wrong arity", "agree-refuse/T1"]
+
+["oracle-reject:t35 an arrow annotation is not quantified", "agree-refuse/T1"]
+
+["oracle-reject:t36 a Float literal outside binary64", "agree-refuse/TYPE"]
+
+["oracle-reject:the first malformed extern in source order wins", "agree-refuse/G4"]
+
+["oracle-reject:the plain half of a spawn-handle emit", "agree-refuse/G4"]
+
+["oracle-reject:the refusal quotes a fn-type return spelling", "agree-refuse/T1"]
+
+["oracle-reject:the refusal quotes a generic return spelling", "agree-refuse/T1"]
+
+["oracle-reject:the second fn is the one refused", "agree-refuse/T1"]
+
+["oracle-reject:two boot components", "agree-refuse/BOOT"]
+
+["oracle-reject:two handoffs in one component are refused", "agree-refuse/HANDOFF"]
+
+["oracle-reject:two host externs in one statement sort by name", "agree-refuse/G4"]
+
+["oracle-reject:two host externs in one statement sort by name, plain half", "agree-refuse/G4"]
+
+["oracle-reject:two host externs in two statements keep source order", "agree-refuse/G4"]
+
+["oracle-reject:two host externs passed as values keep source order", "agree-refuse/G4"]
+
+["oracle-reject:two unmarked emissions in one expression name the first (G4)", "agree-refuse/G4"]
+
+["oracle-reject:two unmarked emissions in one expression name the first (G4)", "agree-refuse/G4"]
+
+["oracle-reject:unbound spawn in a method is refused", "agree-refuse/SPAWN"]
+
+["oracle-reject:unbound spawn in a setup body is refused", "agree-refuse/SPAWN"]
+
+["oracle-reject:undo slot cannot call the extern itself", "agree-refuse/G4"]
+
+["oracle-reject:undo slot may only call a declared fn, extern, or host builtin", "agree-refuse/G4"]
+
+["oracle-reject:undo slot sees only the implicit result binding", "agree-refuse/G4"]
+
+["oracle-reject:v2 a Map value's `set` against the map's V", "agree-refuse/T1"]
+
+["oracle-reject:v2 a method a Map value's stdlib surface does not name", "agree-refuse/T1"]
+
+["selfhost/checker.rvl", "frontier-declined"]
+
+["selfhost/compile.rvl", "no-objection-out-of-slice"]
+
+["selfhost/emit_go.rvl", "refuse-out-of-slice/BAD"]
+
+["selfhost/emit_java.rvl", "refuse-out-of-slice/BAD"]
+
+["selfhost/emit_py.rvl", "refuse-out-of-slice/BAD"]
+
+["selfhost/emit_rust.rvl", "frontier-declined"]
+
+["selfhost/emit_ts.rvl", "refuse-out-of-slice/BAD"]
+
+["selfhost/emit_wasm.rvl", "refuse-out-of-slice/BAD"]
+
+["selfhost/lexer.rvl", "agree-admit"]
+
+["selfhost/lower.rvl", "frontier-declined"]
+
+["selfhost/parser.rvl", "no-objection-out-of-slice"]
+
+["selfhost/types.rvl", "no-objection-out-of-slice"]
+
+["stdlib/a2a.rvl", "agree-admit"]
+
+["stdlib/admit.rvl", "agree-admit"]
+
+["stdlib/asset.rvl", "no-objection-out-of-slice"]
+
+["stdlib/auth.rvl", "no-objection-out-of-slice"]
+
+["stdlib/crypto.rvl", "agree-admit"]
+
+["stdlib/escape.rvl", "agree-admit"]
+
+["stdlib/framing.rvl", "no-objection-out-of-slice"]
+
+["stdlib/fs.rvl", "no-objection-out-of-slice"]
+
+["stdlib/http.rvl", "agree-admit"]
+
+["stdlib/json.rvl", "agree-admit"]
+
+["stdlib/list.rvl", "agree-admit"]
+
+["stdlib/reflect.rvl", "agree-admit"]
+
+["stdlib/render.rvl", "agree-admit"]
+
+["stdlib/router.rvl", "agree-admit"]
+
+["stdlib/server.rvl", "agree-admit"]
+
+["stdlib/shell.rvl", "no-objection-out-of-slice"]
+
+["stdlib/str.rvl", "agree-admit"]
+
+["stdlib/template.rvl", "no-objection-out-of-slice"]
+
+["stdlib/value.rvl", "agree-admit"]
+
+["stdlib/version.rvl", "agree-admit"]
+
+["tests/fixtures/angle_brackets_not_a_document_1120.rvl", "agree-admit"]
+
+["tests/fixtures/canary_candidate_diverge.rvl", "agree-admit"]
+
+["tests/fixtures/canary_candidate_inverse.rvl", "agree-admit"]
+
+["tests/fixtures/canary_candidate_same.rvl", "agree-admit"]
+
+["tests/fixtures/canary_candidate_wider_reach.rvl", "agree-admit"]
+
+["tests/fixtures/canary_emit_baseline.rvl", "agree-admit"]
+
+["tests/fixtures/canary_emit_candidates.rvl", "agree-admit"]
+
+["tests/fixtures/canary_moved_baseline.rvl", "agree-admit"]
+
+["tests/fixtures/canary_moved_candidate.rvl", "agree-admit"]
+
+["tests/fixtures/canary_tenants.rvl", "agree-admit"]
+
+["tests/fixtures/embedded_frontend_document_1120.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/accumulator_hygiene.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/accumulators.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/arith.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/arrow_captures.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/arrow_containers.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/bitwise.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/blob_probes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/builder_literal.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/calls.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/control.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/extern_config.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/float_rem.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/identifiers.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/in_file_tests.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/inference.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/lists.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/loop_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/match_edges.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/records.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/secrets.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/stdlib_surface.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/strings.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/transforms.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_corpus/variants.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_refusals/fault_test_section.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_refusals/opt_none_argument.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_refusals/opt_record_field_default.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_refusals/record_update.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_refusals/validated_emission_operation.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/adts.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/arith.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/bitwise.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/branch_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/calls.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_await.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_config_provide.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_config_req.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_fail.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_host_map.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_host_map_generic.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_multi_effect.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_realm_intercept.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/comp_realm_isolate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/component_branches.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/component_format.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/control.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/float_numeric.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/legacy_realms.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/legacy_void.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/lists.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/map_inference.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/map_inference_builtins.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/maps.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/match_ignored.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/metadata_null.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/optmatch.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/records.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/service.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/services_multi.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/stdlib_builtins.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/strings.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/transforms.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_corpus/v1_components.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_java_refusals/validated_emission_operation.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_async_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_builtin_shadow.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/adt.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/adt_inference.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/annotated_lets.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/arith.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/arrows.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/async_arrow_arg.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/async_colour.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/bitwise.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/braceless.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/branch_values.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/branches.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/cache_pure.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/checked_div.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/classify.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/control.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/declared_type_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/destructure.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/else_if.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/events.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/extern_config.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/extern_neighbours.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/externs.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/float_to_str.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/floats.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/generic_match.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/generics.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/holes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/hostroots.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/inline.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/maps.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/match_binder_scan.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/mixed.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/optionals.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/provide_returns.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/record_update_arg.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/record_writes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/records.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/reserved_keys.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/result.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/retention.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/return_paths.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/secrets.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/secrets_nested.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/service_call_surface.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_aliases.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_basic.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_body.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_config.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_control_flow.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_host.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_host_stream.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_interp.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_match.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_method_effects.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_methods.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/services_timers.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/shadowing_near_misses.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/streams.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/strings.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/transforms.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/type_aliases.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/type_aliases_control.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/types.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/value_accessors.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/variant_multiline.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/witnessed.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/witnessed_secret.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_corpus/witnessed_secret_unused.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_deferred_register.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_deferred_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_map_remove_nested.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_placement.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_spawn_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_stream_builtin_bind.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_test_sections.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_timer_compensate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_py_validated_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/arith.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/bitwise.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/borrow_boundaries.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/borrow_shadowing.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/branch_edges.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/calls.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/checked_div.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_await_job.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_body_steps.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_host_map.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_stream.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_timer.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/component_edges.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/config.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/config_effect.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/control.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/effect_emit.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/effect_undo.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/externs.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/float_pub.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/lengths.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/lists.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/loop_moves.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/maps.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/perf_arg_index.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/perf_field_index.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/perf_index.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/perf_iter.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/perf_shapes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/records.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/requires.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/reserved_names.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/service.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/services_multi.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/smart_ptr_methods.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/str_borrows.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/strings.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/transforms.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/v1_components.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/variants.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_refusals/required_stream_coeffect.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_refusals/validated_emission_operation.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/arith.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/async_arrow_emission.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/async_effects.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/async_module_arrow.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/async_module_extern.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/async_module_local.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/async_module_match.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/async_module_switch.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/bitwise.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/branch_edges.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/cas_runtime.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/classify.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/component_edges.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/component_exprs.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/components_await.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/components_mixed.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/config_default_comment.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/config_reserved.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/control.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/destructuring.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/extern_compensate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/instance_get.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/mixed.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/optionals.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/property_edges.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/realm_intercept.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/realm_isolate.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/records.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/ref_externs.rvl", "no-objection-out-of-slice"]
+
+["tests/fixtures/emit_ts_corpus/routed_timers.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/secrets.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/services_async.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/services_body.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/services_composite.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/services_composite_provide.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/services_config.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/services_method_block.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/services_methods.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/spawn.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/strings.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/transforms.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/unique_writes.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/v1_component_body.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/v2_intercept_only.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_corpus/v2_isolate_only.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_refusals/fault_test_section.rvl", "agree-admit"]
+
+["tests/fixtures/emit_ts_refusals/validated_emission_operation.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/arith.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/bitwise.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/builtins.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/calls.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/constfold.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/control.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/externs.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/folding.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/forloop.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/inference.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/listmem.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/loopctrl.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/reads.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/recmem.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/residuals.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/scratch_names.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/shortcircuit.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/string_ops.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/strlit.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/transforms.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/variants.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_corpus/widening.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/compound_required_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl", "agree-admit"]
+
+["tests/fixtures/erase_net.rvl", "agree-admit"]
+
+["tests/fixtures/erase_realms.rvl", "agree-admit"]
+
+["tests/fixtures/erase_receipt.rvl", "agree-admit"]
+
+["tests/fixtures/extern_idempotent_deferred.rvl", "agree-admit"]
+
+["tests/fixtures/g4_emit_arrow_argument_inline.rvl", "agree-admit"]
+
+["tests/fixtures/g4_emit_arrow_argument_let_arrow.rvl", "agree-admit"]
+
+["tests/fixtures/g4_emit_arrow_argument_let_value.rvl", "agree-admit"]
+
+["tests/fixtures/gate_block_nesting/g1_after_else.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_else_if.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_for.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_guard_else.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_guard_provide.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_guard_setup.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_if.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_nested_guard.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_oneline_guard.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_after_while.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_in_braceless_else.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_in_if_condition.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_in_oneline_else.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_in_oneline_if.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_in_oneline_while.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g1_in_while_condition.rvl", "agree-refuse/G1"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_after_else.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_after_for.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_after_guard_provide.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_after_guard_setup.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_after_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_after_while.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_in_braceless_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_in_multiline_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_in_oneline_else.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_in_oneline_for.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_in_oneline_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_approval_in_oneline_while.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_after_else.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_after_for.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_after_guard_provide.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_after_guard_setup.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_after_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_after_while.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_in_braceless_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_in_multiline_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_else.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_for.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_host_marker_in_oneline_while.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_marker_after_else.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_marker_after_for.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_marker_after_guard_provide.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_marker_after_guard_setup.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_marker_after_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_marker_after_while.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_after_else.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_after_for.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_after_guard.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_after_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_after_nested_blocks.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_after_while.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_braceless_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_if_condition.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_multiline_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_oneline_else.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_oneline_for.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_oneline_if.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_oneline_while.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/g4_upper_in_while_condition.rvl", "agree-refuse/G4"]
+
+["tests/fixtures/gate_block_nesting/ok_emit_after_else.rvl", "agree-admit"]
+
+["tests/fixtures/gate_block_nesting/ok_emit_after_for.rvl", "agree-admit"]
+
+["tests/fixtures/gate_block_nesting/ok_emit_after_guard.rvl", "agree-admit"]
+
+["tests/fixtures/gate_block_nesting/ok_emit_after_if.rvl", "agree-admit"]
+
+["tests/fixtures/gate_block_nesting/ok_emit_after_oneline_if.rvl", "agree-admit"]
+
+["tests/fixtures/gate_block_nesting/ok_emit_after_while.rvl", "agree-admit"]
+
+["tests/fixtures/policy_agents.rvl", "agree-admit"]
+
+["tests/fixtures/policy_tenants.rvl", "agree-admit"]
+
+["tests/fixtures/query_mesh.rvl", "agree-admit"]
+
+["tests/fixtures/realm_conformance/provider_a.rvl", "agree-admit"]
+
+["tests/fixtures/realm_conformance/provider_b.rvl", "agree-admit"]
+
+["tests/fixtures/realm_conformance/provider_other.rvl", "agree-admit"]
+
+["tests/fixtures/triple_string.rvl", "refuse-out-of-slice/BAD"]
+
+["tests/fixtures/v2_math_lib.rvl", "agree-admit"]
+
+["tests/fixtures/v2_math_main.rvl", "no-objection-out-of-slice"]
