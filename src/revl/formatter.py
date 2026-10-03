@@ -35,8 +35,12 @@ with the reference lexer, on EVERY file it writes (see `ir_equivalent`).
 
 ### Documented limitation (no parser change)
 
-The formatter is *line-preserving*: it re-indents and normalises horizontal
-spacing but never moves a token onto a different logical line.  It cannot
+The formatter is *line-preserving*, with one exception: it re-indents and
+normalises horizontal spacing but never moves a token onto a different logical
+line, except that every member of a `provide` block gets a line of its own
+(issue #1700, `_one_member_per_line`), so each method is addressable by symbol.
+A few IR fields carry a source line, so on some programs that split changes
+the IR; `format_admitted` then falls back to the line-preserving layout.  It cannot
 re-flow statements, and it does not reformat the interior of backtick
 templates or `@host` blocks (those are opaque verbatim spans).  Faithful
 re-flowing would require statement-boundary information that only the parser
@@ -439,7 +443,7 @@ def _depth_delta(pieces: list[_Piece]) -> int:
 
 
 def format_source(source: str, filename: str = "<source>", *,
-                  comments: bool = True) -> str:
+                  comments: bool = True, split_members: bool = True) -> str:
     """Return the canonical formatting of *source*.
 
     The formatting is a pure, deterministic function of the token stream, so
@@ -451,6 +455,8 @@ def format_source(source: str, filename: str = "<source>", *,
     token stream, and therefore the IR, is the same either way.
     """
     pieces = _scan(source, filename)
+    if split_members:
+        pieces = _one_member_per_line(pieces)
 
     # Split the piece stream into logical lines on NEWLINE markers.
     lines: list[list[_Piece]] = [[]]
@@ -486,6 +492,89 @@ def format_source(source: str, filename: str = "<source>", *,
             depth = 0
 
     return _finalize(rendered)
+
+
+def format_admitted(source: str, filename: str = "<source>"):
+    """`(formatted text, gate result)` under the IR-equivalence gate, for the
+    callers that write or store a formatting (`revl fmt`, `revl_fmt`, the MCP
+    canonicaliser).
+
+    The provide-member split is the one change that moves tokens to new
+    lines, and a few IR fields carry a source line (a `spawn` acquire does), so
+    on those programs the split changes the IR and the gate refuses it. The
+    line-preserving layout is then tried, which is what the formatter wrote
+    before the split existed. The gate is never weakened: whichever layout is
+    returned is one it admitted, or the refusal stands."""
+    split = format_source(source, filename)
+    gate = ir_equivalent(source, split, filename)
+    if gate.admitted:
+        return split, gate
+    plain = format_source(source, filename, split_members=False)
+    if plain != split:
+        plain_gate = ir_equivalent(source, plain, filename)
+        if plain_gate.admitted:
+            return plain, plain_gate
+    return split, gate
+
+
+def _one_member_per_line(pieces: list[_Piece]) -> list[_Piece]:
+    """Give every member of a `provide` block its own line (issue #1700).
+
+    The one break the formatter adds rather than keeps: inside
+    `provide <key> { ... }`, a member `fn` that shares its line with other code
+    starts a new line, and so does the block's closing brace. A one-line
+    `provide k { fn m() = 1 }` becomes three lines, which makes every method
+    addressable by symbol on its own. Newlines are not tokens, so the token
+    stream, and the IR, are unchanged; a second pass finds nothing to split.
+    """
+    out: list[_Piece] = []
+    blocks: list[list] = []     # per open provide block: [depth, has_member]
+    depth = 0
+    i = 0
+    while i < len(pieces):
+        piece = pieces[i]
+        if piece.kind == _PUNCT and piece.text in _OPENERS:
+            depth += 1
+            if piece.text == "{" and _opens_provide(pieces, i):
+                blocks.append([depth, False])
+        elif piece.kind == _PUNCT and piece.text in _CLOSERS:
+            if blocks and blocks[-1][0] == depth and piece.text == "}":
+                _, has_member = blocks.pop()
+                if has_member and not _line_start(out):
+                    out.append(_Piece(_NEWLINE, "\n"))
+            depth -= 1
+        elif piece.kind == _KW and piece.text == "fn" and blocks \
+                and blocks[-1][0] == depth:
+            blocks[-1][1] = True
+            # a member starts at its modifiers (`async fn`, and the `emission
+            # fn` the parser refuses with a hint), not at `fn`
+            start = len(out)
+            while start and out[start - 1].kind == _KW \
+                    and out[start - 1].text in _MEMBER_MODIFIERS:
+                start -= 1
+            if not _line_start(out[:start]):
+                out.insert(start, _Piece(_NEWLINE, "\n"))
+        out.append(piece)
+        i += 1
+    return out
+
+
+#: Words that can stand before a provide member's `fn` (parser.provide).
+_MEMBER_MODIFIERS = frozenset({"async", "emission"})
+
+
+def _opens_provide(pieces: list[_Piece], brace: int) -> bool:
+    """Whether the `{` at `brace` opens a `provide <key> {` block."""
+    code = [k for k in range(brace - 1, -1, -1)
+            if pieces[k].kind not in (_NEWLINE, _COMMENT)][:2]
+    return len(code) == 2 and pieces[code[0]].kind == _WORD \
+        and pieces[code[1]].kind == _KW and pieces[code[1]].text == "provide"
+
+
+def _line_start(out: list[_Piece]) -> bool:
+    """Whether the next piece would start a line (nothing but a newline, or
+    nothing at all, comes before it)."""
+    return not out or out[-1].kind == _NEWLINE
 
 
 def _finalize(lines: list[str]) -> str:
