@@ -119,6 +119,11 @@ BENCH_DEPENDENT_TESTS = (
     # as the entry above: the guard below is mention-based, and over-selecting
     # is the safe direction.
     "tests/test_census_artifact.py",
+    # Does not READ bench. Issue #1784's regenerator leaves `bench/results/`
+    # conflicts alone unless asked, and its tests build a synthetic
+    # `bench/results/` inside a throwaway repository to prove it. Declared
+    # because the guard below is mention-based.
+    "tests/test_regen_generated.py",
     # The self-host capstone oracle pins four `bench/results/…` candidate
     # documents as members of the emit_java corpus (roadmap item 146 gap 2's
     # located-gap ratchet), so a bench change must re-run it.
