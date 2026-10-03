@@ -181,6 +181,14 @@ def build_parser() -> argparse.ArgumentParser:
         "--check", action="store_true",
         help="exit 1 if grammar/ differs from a fresh derivation (the drift gate)")
 
+    # issue #1701: the minimal correct idiom for one construct
+    idiom = sub.add_parser(
+        "idiom", help="print the minimal admitted example of one construct "
+                      "(a provide method, an effect, a spawn, ...) and the rules "
+                      "that make it correct; with no name, list them")
+    idiom.add_argument("name", nargs="?", help="the idiom name, e.g. emission-method")
+    idiom.add_argument("--json", action="store_true", help="machine-readable output")
+
     # item 296: propose a safe adapter between a consumer's required service and
     # a candidate's provided service (proposed, not silent).
     adapt = sub.add_parser(

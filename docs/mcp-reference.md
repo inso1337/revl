@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 55 verbs below, one section each.
+The advertised list is exactly the 56 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -139,6 +139,18 @@ the refusal changes (issue #1694):
 Different arguments, a different verb, or a call that succeeds resets the count.
 A successful response is never rewritten.
 
+**Changes carry their undo.** Since issue #1703, a successful call to a verb
+that mutates the session answers with `undo: {tool, arguments}`: the one call
+that returns the session to where it was, byte for byte (the snapshot's
+`sources` and `manifest`). A load's undo is `revl_unload`, an unload's is a
+`revl_restore` of what ran, and a swap, edit, undo, rollback, restore or
+applied ship/repair answers with `revl_undo` back to the earlier generation; a
+fresh `revl_lease` claim answers with its release. A verb with no exact inverse
+says so: `undo: null` and an `undoReason` (an emission cannot be un-emitted, a
+halt or an approval is recorded evidence). `undoDepth` is how many changes
+`revl_step_back` with no arguments can still revert. A refused call changed
+nothing and carries no undo field.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
@@ -182,10 +194,11 @@ A successful response is never rewritten.
 | `revl_restore` | no | no | `snapshot` |
 | `revl_timeline` | yes | no | - |
 | `revl_inspect_step` | yes | no | `at` |
-| `revl_step_back` | no | yes | `to` |
+| `revl_step_back` | no | yes | - |
 | `revl_replay_bisect` | yes | no | `assert` |
 | `revl_replay_forward` | no | yes | `from` |
 | `revl_grammar` | yes | no | - |
+| `revl_idiom` | yes | no | - |
 | `revl_scaffold` | yes | no | `service` |
 | `revl_fmt` | yes | no | `source` |
 | `revl_explain` | yes | no | `code` |
@@ -338,6 +351,19 @@ context while generating. With no inputs it returns that prose summary
   filling a hole can constrain its decoder to that slot (each hole's
   `fillSpec.grammarCategory` names it). `category` without
   `format`, or a value outside these lists, is refused.
+
+### `revl_idiom`
+
+The minimal admitted example of one construct, with the one or two rules that
+make it correct (issue #1701). Every hole's `fillSpec` already carries the
+idiom of its construct (`construct`, `idiom`; [holes.md](holes.md) §8), so
+this tool is for asking about a construct before there is a hole in it.
+
+- Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`
+  or `spawn`, returns `{ok, idiom: {name, summary, rules, fill, example}}`.
+  With no `name` it returns `{ok, idioms: [{name, summary}]}`. An unknown name
+  is refused, listing the idioms. The same table is printed by
+  [`revl idiom`](commands-reference.md#revl-idiom).
 
 ---
 
@@ -925,13 +951,22 @@ emissions at or before k.
 
 ### `revl_step_back`
 
-Unwind the accumulator to step k by running the registered inverses from the top
-down, newest first - leaving the component LIVE, not torn down. Refuses if the
-range crosses an emission with no `compensate`; `force` crosses anyway and
-reports what was crossed. The guarantee is "the inverses ran in order", never
-"state was restored".
+With no arguments, revert the last change this session made, by running the
+exact `undo` that change's response carried (issue #1703). Each further call
+reverts the change before it; a change that answered `undo: null` is not on the
+stack, so it is skipped rather than half-undone. The answer names the reverted
+change, the undo it ran (`via`, through the same gates as any call) and the
+`redo` call, with `undoDepth` left. With nothing left to revert it is a refusal
+with `undoDepth: 0`.
 
-- Inputs: `to` (required; `-1` unwinds everything); `component`; `force`.
+With `to`, unwind the accumulator to step k by running the registered inverses
+from the top down, newest first - leaving the component LIVE, not torn down.
+Refuses if the range crosses an emission with no `compensate`; `force` crosses
+anyway and reports what was crossed. The guarantee is "the inverses ran in
+order", never "state was restored".
+
+- Inputs: none (revert the last change); or `to` (`-1` unwinds everything),
+  `component`, `force`.
 
 ### `revl_replay_bisect`
 

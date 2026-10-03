@@ -57,6 +57,18 @@ class NothingLoaded(SessionError):
     (`revl.mcp.remedy.load_next`, issue #1691) instead of parsing the prose."""
 
 
+def _note_spend(spends: list | None, entry: dict, use: int, ticket: dict) -> None:
+    """Remember one per-call spend so `Session.call` can write its
+    `approval-emission` once the crossing returns (issue #1781)."""
+    if spends is None:
+        return
+    capability = entry.get("capability") or ",".join(
+        ticket.get("classCCapabilities") or ticket.get("capabilities") or [])
+    spends.append({"requestId": entry["requestId"], "use": use,
+                   "capability": capability,
+                   "component": ticket.get("component")})
+
+
 class ApprovalRefused(SessionError):
     """A class-(c) crossing whose pending ticket an operator answered NO
     (`revl_revoke` with the ticket `hash`, issue #1553). Raised once, on the
@@ -370,6 +382,8 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # so restoring it would hand a failed load a fresh budget every time.
     "_tickets", "_ticket_rounds", "_ticket_refusals", "_ledger", "_grants",
     "_grants_consumed",
+    # issue #1781: the per-id spend index rides with the spends it numbers
+    "_spend_uses",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
     # The agent-loop axes (issue #1738). They count what the session did,
@@ -418,6 +432,7 @@ class _LoadCheckpoint:
                 self._contents[name] = contents
         self._bridges = [(bridge, bridge.current())
                          for bridge in (admit_bridge, reflect_bridge)]
+        self.had_no_loop = self._namespace.get("_loop") is None
 
     def restore(self, session: "Session") -> None:
         live = vars(session)
@@ -486,6 +501,12 @@ def _emitter_refused(refusal: BaseException) -> "SessionError":
     """The py emitter's refusal, as the `SessionError` the transport reports
     as `category: "session"` (issue #1406)."""
     return SessionError(f"the py emitter refused this composition: {refusal}")
+
+
+def _close_abandoned_loop(loop) -> None:
+    """Close the event loop of a Session that was collected (issue #1720)."""
+    if not loop.is_closed() and not loop.is_running():
+        loop.close()
 
 
 def _backend():
@@ -676,6 +697,12 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #1781: how many times each approval `requestId` has been spent
+        # in this session. Every `approval-consumed` and `approval-emission`
+        # record the session writes carries `use`, the 1-based index from here,
+        # so `(requestId, use)` names one spend of a multi-use grant. Never reset
+        # while the session lives, so an index never repeats for an id.
+        self._spend_uses: dict = {}
         # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
         # may be written into the durable, cross-session approval WAL when a
         # crossing is approved. "withheld" (the DEFAULT) records it as UNRECORDED
@@ -945,7 +972,46 @@ class Session:
     def _run(self, coro):
         if self._loop is None:
             self._loop = asyncio.new_event_loop()
+            # a session dropped while still loaded never reaches `_reset`;
+            # close its loop when it is collected rather than leave that to
+            # the loop's own finalizer and its ResourceWarning (issue #1720)
+            weakref.finalize(self, _close_abandoned_loop, self._loop)
         return self._loop.run_until_complete(coro)
+
+    def _close_loop(self) -> None:
+        """Close the event loop a torn-down session ran on (issue #1720).
+
+        An event loop holds descriptors (its selector and the self-pipe socket
+        pair), and nothing closed this one: every Session that ever loaded kept
+        three open for the life of the process. A long-running server that loads
+        and unloads, and the test suite, grew by three per session. The next
+        `load` opens a fresh loop through `_run`. Pending tasks are cancelled
+        first: with nothing loaded there is nothing for them to finish, and a
+        later `_run` would otherwise resume them against the next generation.
+        A loop still running (a teardown offloaded to a thread that has not
+        returned) is left alone; it is not ours to close yet."""
+        loop = self._loop
+        if loop is None or loop.is_closed() or loop.is_running():
+            return
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        if asyncio._get_running_loop() is not None:
+            # torn down from a coroutine on the HOST loop (`aclose`, `aabort`):
+            # this thread cannot drive a second loop, so a loop with work
+            # still pending is left to the finalizer, and an idle one closes
+            if not pending:
+                self._loop = None
+                loop.close()
+            return
+        self._loop = None
+        try:
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
 
     @property
     def loaded(self) -> bool:
@@ -984,6 +1050,10 @@ class Session:
             return self._boot(ir, config, record, origin)
         except BaseException as exc:
             checkpoint.restore(self)
+            if checkpoint.had_no_loop and self._driver is None:
+                # issue #1720: the failed load opened the loop; put that back
+                # too, so a refused load leaves no descriptor behind either
+                self._close_loop()
             _name_the_candidate(exc, ir)
             raise
 
@@ -2754,10 +2824,11 @@ class Session:
         # not a crash — the undo never bypasses admission.
         from ..errors import RevlError  # noqa: PLC0415
         from ..diagnostics import classify  # noqa: PLC0415
-        from .persist import _origin_from, _recompile  # noqa: PLC0415
+        from .persist import _origin_from, _recompile, admitted_name  # noqa: PLC0415
 
         try:
-            target_ir = _recompile(target["snapshot"]["sources"])
+            target_ir = _recompile(target["snapshot"]["sources"],
+                                   admitted_name(target["snapshot"]))
         except RevlError as error:
             diag = classify(error)
             return {
@@ -4297,8 +4368,9 @@ class Session:
             self.recorder.wal.close()
 
     def _close_wal(self) -> None:
-        if self.recorder is not None and self.recorder.wal is not None:
-            self.recorder.wal.close()
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is not None and getattr(wal, "is_open", True):
+            wal.close()
 
     def _reset(self) -> None:
         if self._driver is not None:
@@ -4319,6 +4391,13 @@ class Session:
         # trace the measurement reads lives on the driver.
         self._seal_generation()
         self._driver = None
+        self._close_loop()
+        # issue #1720: a plain unload left the generation's WAL file open, and
+        # the next `load` opens a new recorder and log, so every recorded load
+        # leaked one descriptor. Every record is already flushed and fsync'd,
+        # so closing changes nothing on disk; a closed log reads as absent to
+        # `_approval_wal`, exactly as after `commit_confirm` or `abort`.
+        self._close_wal()
         # the teardown boundary is the last generation boundary this session will
         # see, so settle any approval the outgoing generation spent before the
         # owner that recorded the spend is dropped — otherwise a fresh `load`
@@ -4945,7 +5024,9 @@ class Session:
         # `decision` records which authority the miss consumed, so the stored entry
         # binds to THAT grant/approval (not any that could have covered).
         decision: dict | None = {} if cache_active else None
-        self._approval_decide_call(key, method, args, record=decision)
+        spends: list = []
+        self._approval_decide_call(key, method, args, record=decision,
+                                   spends=spends)
         # issue #1738: the call is decided and about to cross, so it counts
         # toward the loop axes now, policy or not.
         self._loop_axes.record_call(self._loop_call_class(key, method))
@@ -4979,6 +5060,10 @@ class Session:
             runtime_mod.clear_session_owner()
             if self.recorder is not None:
                 self.recorder.activation_origin()
+        # issue #1781: the crossing returned, so each spend that authorized it
+        # gets its emission record (a raise above leaves the spend unmatched)
+        if spends:
+            self._record_spend_emissions(spends)
         # item 330: a per-turn source admitted through the in-language crossing
         # DURING this call was queued (the loop was busy); wire it now the call
         # has returned and the loop is free — the turn's keys become callable and
@@ -5428,15 +5513,37 @@ class Session:
             return True
         return False
 
-    def _consume_approval(self, entry: dict) -> None:
+    def _consume_approval(self, entry: dict) -> int:
         """Spend the token durably BEFORE the crossing fires (Decision 3,
         consume-before-fire). A crash between the spend and the fire leaves
         consumed-but-unfired: fail-closed, a fresh approval is demanded."""
         entry["consumed"] = True
+        use = self._next_spend_use(entry["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(entry["requestId"])
+            wal.record_approval_consumed(entry["requestId"], use=use)
         self._mint_admission_receipt(entry)
+        return use
+
+    def _next_spend_use(self, request_id: str) -> int:
+        """The 1-based index of the spend about to be recorded for `request_id`
+        (issue #1781)."""
+        use = self._spend_uses.get(request_id, 0) + 1
+        self._spend_uses[request_id] = use
+        return use
+
+    def _record_spend_emissions(self, spends: list) -> None:
+        """After the crossing a per-call spend authorized has returned, write
+        one `approval-emission` per spend, naming the same `requestId` and `use`
+        as its `approval-consumed` (issue #1781). Not called when the call
+        raised: that spend stays unmatched on the record, which reads as owed
+        or ambiguous, never as fired."""
+        wal = self._approval_wal()
+        if wal is None:
+            return
+        for spend in spends:
+            wal.record_approval_emission(spend["requestId"], spend["capability"],
+                                         spend["component"], use=spend["use"])
 
     # -- item 204: the two-phase spend the activation gate walks under --------
     #
@@ -5550,8 +5657,9 @@ class Session:
             elif release["kind"] == "auto":
                 self._auto_consumed += 1
                 self._persist_auto_spend(record)
+            use = self._next_spend_use(record["requestId"])
             if wal is not None:
-                wal.record_approval_consumed(record["requestId"])
+                wal.record_approval_consumed(record["requestId"], use=use)
             if release["kind"] == "approval":
                 # item 471 Slice 2: the activation gate's two-phase spend is a
                 # spend, so it mints the admission receipt too. Without this the
@@ -5574,7 +5682,8 @@ class Session:
             owner.approvals[bucket] += 1
 
     def _approval_decide_call(self, key: str, method: str, args,
-                              record: dict | None = None) -> None:
+                              record: dict | None = None,
+                              spends: list | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
@@ -5627,7 +5736,8 @@ class Session:
             raise ApprovalRefused(ticket, refusal)
         standing = self._find_standing_approval(ticket)
         if standing is not None:
-            self._consume_approval(standing)   # durable spend before the fire
+            use = self._consume_approval(standing)   # durable spend before fire
+            _note_spend(spends, standing, use, ticket)
             if record is not None:
                 record["scope"] = ("approval", standing["requestId"])
                 record["approvalExpiresAt"] = standing.get("expiresAt")
@@ -5639,7 +5749,8 @@ class Session:
         grants = self._find_standing_grant(ticket)
         if grants is not None:
             for g in grants:                   # every class-(c) cap is covered
-                self._consume_grant(g)         # durable spend before the fire
+                use = self._consume_grant(g)   # durable spend before the fire
+                _note_spend(spends, g, use, ticket)
             if record is not None:
                 record["scope"] = ("grants", [g["requestId"] for g in grants])
             return
@@ -5650,7 +5761,8 @@ class Session:
         # distiller only selected it.
         auto = self._find_auto_approve(ticket)
         if auto is not None:
-            self._consume_auto_rule(auto)      # durable spend before the fire
+            use = self._consume_auto_rule(auto)   # durable spend before fire
+            _note_spend(spends, auto, use, ticket)
             if record is not None:
                 record["scope"] = ("auto", auto["requestId"])
             return
@@ -7491,7 +7603,7 @@ class Session:
             return None
         return grants
 
-    def _consume_grant(self, grant: dict) -> None:
+    def _consume_grant(self, grant: dict) -> int:
         """Spend one use of a standing grant durably BEFORE the crossing fires
         (Decision 3, consume-before-fire — the Slice-2 WAL ordering still
         applies). Decrements `remainingUses`; a grant whose uses hit zero is
@@ -7504,9 +7616,11 @@ class Session:
             if grant["remainingUses"] <= 0:
                 grant["consumed"] = True
         self._grants_consumed += 1
+        use = self._next_spend_use(grant["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(grant["requestId"])
+            wal.record_approval_consumed(grant["requestId"], use=use)
+        return use
 
     # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
 
@@ -7727,7 +7841,7 @@ class Session:
                 return entry
         return None
 
-    def _consume_auto_rule(self, entry: dict) -> None:
+    def _consume_auto_rule(self, entry: dict) -> int:
         """Spend one use of a distilled rule durably BEFORE the crossing fires
         (consume-before-fire, reusing the 344 WAL ordering). A `uses`-bounded rule
         decrements `remainingUses` and marks `consumed` at zero, so an applied rule
@@ -7750,9 +7864,11 @@ class Session:
                 entry["consumed"] = True
         self._persist_auto_spend(entry)
         self._auto_consumed += 1
+        use = self._next_spend_use(entry["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(entry["requestId"])
+            wal.record_approval_consumed(entry["requestId"], use=use)
+        return use
 
     def mint_standing_grant(self, *, ticket_hash: str | None = None,
                             capability: str | None = None,

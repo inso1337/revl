@@ -267,6 +267,7 @@ revl_call           { key, method, args }        # accumulate some work
 revl_timeline       { component? }               # the recording
 revl_inspect_step   { component?, at }           # the composition at step k
 revl_step_back      { component?, to, force? }   # unwind, stay live
+revl_step_back      { }                          # revert the last session change (issue #1703)
 revl_replay_forward { component?, from }         # re-run the tail
 revl_replay_bisect  { component?, assert }       # git-bisect for the execution
 ```
