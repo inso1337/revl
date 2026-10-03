@@ -1330,6 +1330,9 @@ def main(argv: list[str] | None = None) -> int:
         return _run_attest(args)
     if args.command == "dash":
         return _run_dash(args)
+    if args.command == "act":
+        from .cli.interop import _run_act  # noqa: PLC0415 - lazy
+        return _run_act(args)
     if args.command == "recover":
         return _run_recover(args)
     if args.command == "estop":

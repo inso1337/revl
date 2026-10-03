@@ -14,8 +14,8 @@ compile  explain  grammar  adapt  doctor  scaffold  composition  layer
 audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
-dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
-profile  pool  attest  dash  repair  bundle  emit  verify  deploy
+dev  recover  act  estop  slo  branch  compare  replay  why  metrics
+trace  profile  pool  attest  dash  repair  bundle  emit  verify  deploy
 deploy-admit  truc
 ```
 <!-- docgen:cli-verbs end -->
@@ -1002,6 +1002,32 @@ when a teardown is legitimately long rather than wedged.
 
 `run --record` opens the replay REPL (`:timeline`, `:back`, `:forward`,
 `:inspect`, `:bisect`; see [replay.md](replay.md)).
+
+### `revl act`
+
+The agent tool loop in one call per action (issue #1708), the CLI form of the
+`revl_act` MCP verb ([mcp-reference.md](mcp-reference.md#revl_act)). Boots the
+composition in FILES under the approval gate with recording on, then reads
+proposed actions from stdin, one JSON object per line:
+
+    {"key": "ops", "method": "stash", "args": ["/srv/out/report.txt"]}
+
+and prints one JSON result per line: the action's `class`, `outcome`
+(`executed`, `deferred` or `ticket`), `receipt` and `residue`, exactly as
+`revl_act` returns them. At end of input it prints the commit manifest, which
+lists every action under `actions`.
+
+- `--commit` - confirm the manifest at end of input: flush the deferred actions
+  and keep the witnessed ones. Without it the session is aborted: nothing
+  deferred fires and the witnessed actions are undone.
+- `--wal FILE` - the session's write-ahead log (default: a file in the per-user
+  approval WAL directory).
+
+`revl act` has no operator, so it cannot approve a ticket: a class-(c) action
+stays a ticket and never fires. To approve one, run the loop over
+`revl mcp serve` instead ([harness-gate-guide.md](harness-gate-guide.md)). Exit
+status: `0` when every line was acted on, `1` when a line was malformed or
+refused or the composition did not boot.
 
 ### `revl recover`
 
