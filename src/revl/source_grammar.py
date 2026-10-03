@@ -941,6 +941,74 @@ CATEGORIES = {
 }
 
 
+def _terminals(expr):
+    """Every ("t", kind, value) term `expr` reads directly."""
+    if expr is None:
+        return
+    if expr[0] == "t":
+        yield expr
+    elif expr[0] in ("seq", "alt"):
+        for sub in expr[1]:
+            yield from _terminals(sub)
+    elif expr[0] == "star":
+        yield from _terminals(expr[1])
+
+
+def _reach_from(rules, starts, removed=frozenset()) -> set:
+    seen: set = set()
+    todo = [s for s in starts if s not in removed]
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        todo.extend(n for n in nonterminals(rules.get(name)) if n not in removed)
+    return seen
+
+
+def hole_category(derived=None) -> str:
+    """The category a hole's fill belongs to, read off the derived grammar
+    (issue #1664): the narrowest category whose start rule every parse of
+    the `hole` keyword passes through.
+
+    The rules that read the `hole` token are found by that token, not by a
+    method name. A category qualifies when its start reaches every one of
+    them and removing its start from the program cuts every path to them, so
+    every hole the parser can read sits inside a parse of that category, and
+    the hole's text can be replaced by any document of it. Of the qualifying
+    categories the one whose start reaches the fewest rules wins. `program`
+    always qualifies, so it is the answer when nothing narrower does."""
+    if derived is None:
+        return _default_hole_category()
+    rules = derived[0]
+    readers = {name for name, expr in rules.items()
+               if ("t", "kw", "hole") in set(_terminals(expr))}
+    if not readers:
+        raise ValueError("the derived grammar reads no `hole` keyword")
+    program = list(nonterminals(CATEGORIES["program"]))
+    best, best_size = "program", None
+    for name, start in CATEGORIES.items():
+        starts = list(nonterminals(start))
+        reached = _reach_from(rules, starts)
+        if not readers <= reached:
+            continue
+        if readers & _reach_from(rules, program, frozenset(starts)):
+            continue
+        if best_size is None or len(reached) < best_size:
+            best, best_size = name, len(reached)
+    return best
+
+
+_HOLE_CATEGORY: list = []
+
+
+def _default_hole_category() -> str:
+    """`hole_category()` of this tree's parser, derived once per process."""
+    if not _HOLE_CATEGORY:
+        _HOLE_CATEGORY.append(hole_category(derive()))
+    return _HOLE_CATEGORY[0]
+
+
 # --------------------------------------------------------------------------
 # rendering
 # --------------------------------------------------------------------------

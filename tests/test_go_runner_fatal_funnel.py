@@ -341,7 +341,9 @@ def test_every_goroutine_that_can_hold_a_value_carries_its_own_guard():
     serve = serve[:serve.index("})")]
     assert _GUARD_CROSSING in serve
     # registered before the crossing is invoked, or the panic is already past it
-    assert serve.index("defer guard(&name)()") < serve.index("emitted.RevlInvoke(")
+    # (issue #1567: the crossing dispatches through `invokeIn`, which resolves
+    # the key's realm and then calls `emitted.RevlInvoke`)
+    assert serve.index("defer guard(&name)()") < serve.index("invokeIn(")
 
     # the E-Stop watcher parses the latch file and composes the HALTED inventory
     # off the main goroutine, so its escapes reach no funnel either.
