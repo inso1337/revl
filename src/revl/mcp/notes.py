@@ -336,7 +336,8 @@ def refresh(session, vs: dict) -> None:
 def served(note: dict) -> dict:
     """A note as it rides: its body only if the ride policy allows it."""
     shown = {k: note[k] for k in ("id", "kind", "anchor", "author", "status",
-                                  "evidence", "supersedes", "supersededBy")
+                                  "evidence", "supersedes", "supersededBy",
+                                  "vendored")
              if note.get(k) is not None}
     untrusted = note["author"].get("trust") == "untrusted"
     allowed = (RIDE_POLICY == "all"
@@ -393,16 +394,95 @@ def load_sidecar(session, vs: dict) -> int:
 
 
 def sidecar_writes(session, vs: dict) -> list[tuple[str, str]]:
-    """(path, text) of every record not yet in the sidecar."""
+    """(path, text) of every record not yet in the sidecar. A vendored record is
+    the vendor's, so it never lands in the project's sidecar."""
     directory = sidecar_dir(vs)
     if directory is None:
         return []
     out = []
     for record in _records(session).values():
+        if record.get("vendored"):
+            continue
         path = os.path.join(directory, f"{record['id']}.json")
         if not os.path.exists(path):
             out.append((path, json.dumps(record, indent=2, sort_keys=True) + "\n"))
     return out
+
+
+# ---------------------------------------------------------------- vendored trucs
+
+def vendored_trucs(vs: dict) -> list[tuple[str, str, str]]:
+    """(truc name, loaded path, project dir) of every loaded file that is a
+    vendored truc's `trucs/<name>/component.rvl`."""
+    out = []
+    for path in vs.get("files") or []:
+        parts = os.path.normpath(os.path.abspath(path)).split(os.sep)
+        if len(parts) >= 3 and parts[-1] == "component.rvl" and parts[-3] == "trucs":
+            out.append((parts[-2], path, os.sep.join(parts[:-3]) or os.sep))
+    return out
+
+
+def _lock_row(project: str, name: str) -> dict | None:
+    try:
+        with open(os.path.join(project, "truc.lock"), encoding="utf-8") as handle:
+            lock = json.load(handle)
+    except (OSError, ValueError):
+        return None
+    rows = lock.get("trucs") if isinstance(lock, dict) else None
+    return next((r for r in rows or [] if isinstance(r, dict)
+                 and r.get("name") == name), None)
+
+
+def _holds_pinned_bytes(row: dict | None, text: str | None) -> bool:
+    """Whether the loaded component is the one the lock pins."""
+    pinned = (row or {}).get("sourceHash")
+    return bool(pinned) and text is not None \
+        and hashlib.sha256(text.encode("utf-8")).hexdigest() == pinned
+
+
+def _vendored_trust(row: dict | None, doc: dict, held: bool) -> str:
+    """`publisher` only when the add measured a signature over these records
+    and neither they nor the component changed since; `untrusted` otherwise."""
+    from .. import registry  # noqa: PLC0415
+
+    pin = (row or {}).get("knowledge") or {}
+    signed = pin.get("signed") is True and pin.get("hash") == registry._facet_hash(doc)
+    return "publisher" if signed and held else "untrusted"
+
+
+def load_vendored(session, vs: dict) -> int:
+    """Read the knowledge each loaded vendored truc carries (issue #1769).
+
+    A record is anchored to the loaded `component.rvl` and marked `vendored`
+    with the truc's name. While the component holds the bytes the lock pins, the
+    records are re-based on it, since they shipped with exactly that code; an
+    edit to it in the session then stales them as usual. A record
+    whose id the project already has is the project's, and is skipped."""
+    from .. import registry  # noqa: PLC0415
+
+    count = 0
+    for name, path, project in vendored_trucs(vs):
+        doc = registry.load_knowledge(os.path.dirname(path), regular_only=True)
+        if doc is None:
+            continue
+        row = _lock_row(project, name)
+        held = _holds_pinned_bytes(row, (vs.get("files_content") or {}).get(path))
+        trust = _vendored_trust(row, doc, held)
+        for record in doc["records"]:
+            if record["id"] in _records(session):
+                continue
+            anchor = {**(record.get("anchor") or {}), "path": path}
+            if held:
+                try:
+                    anchor["fingerprint"] = _anchor_of(
+                        session, vs, anchor.get("symbol") or "")["fingerprint"]
+                except NoteError:
+                    pass
+            _records(session)[record["id"]] = {
+                **record, "anchor": anchor, "vendored": name,
+                "author": {**(record.get("author") or {}), "trust": trust}}
+            count += 1
+    return count
 
 
 # ---------------------------------------------------------------- round trip
@@ -487,4 +567,5 @@ def _declarations(text: str, name: str) -> list:
 __all__ = ["KINDS", "EVIDENCE_KINDS", "QUERY_VERBS", "RERUNNABLE", "run_evidence",
            "NoteError", "notes", "add", "op_record",
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
+           "load_vendored", "vendored_trucs",
            "render", "import_marked"]
