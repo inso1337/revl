@@ -578,22 +578,28 @@ def _refuse_unlowered_stream_surface(node: dict, tier: str = CRATE) -> None:
     thread-local and the window would be armed on the provider's thread and
     advanced on the consumer's.
 
-    §4.5's `replay(…)` is the other one, and it is refused for a reason of its
-    own rather than for the clock. Replay is a DURABILITY claim, and the half
-    that makes it worth anything is §4.9's: a durable cursor is what turns a
-    crashed subscription from residue into a re-issuable descriptor, and that
-    recovery surface is the WAL's, which lives on the py reference tier. A tier
-    that emitted a subscription while silently dropping the backlog would
-    deliver only live items and call it replay. Refused at the provider's
-    declaration as well as at the consumer's request, because a declared backlog
-    nothing holds is the same vacuous claim one end earlier."""
-    if node.get("replay"):
+    §4.5's last-n `replay(<n>)` is lowered: `Stream.source(n)` holds the
+    declared backlog and `Stream.subscribeReplay` delivers it through the
+    provider's forward path before any live item. The py reference makes no
+    recovery claim for that form either, so the two tiers agree in full.
+
+    The durable `replay(from: "<name>")` cursor is refused, for a reason of its
+    own rather than for the clock. What makes it worth anything is §4.9: a
+    durable cursor is what turns a crashed subscription from residue into a
+    re-issuable descriptor, and that recovery surface is the WAL's, which lives
+    on the py reference tier. A tier that resumed an in-memory position and
+    called it durable would make a claim nothing backs. Refused at the
+    provider's declaration as well as at the consumer's request, and ahead of
+    the window, so a head carrying both names the same half every time."""
+    replay = node.get("replay")
+    if replay and "cursor" in replay:
         raise EmitError(
-            "a stream `replay(…)` is not lowered on the %s tier; replay is a "
-            "durability claim — the provider holds the backlog, and a durable "
-            "cursor is what makes a crashed subscription reconstructible rather "
-            "than residue — and that recovery surface is the py reference "
-            "tier's (item 130 §4.5, §4.9) — try `--backend py`" % tier)
+            "a durable stream `replay(from: …)` cursor is not lowered on the %s "
+            "tier; a durable cursor is what makes a crashed subscription "
+            "reconstructible rather than residue, and that recovery surface is "
+            "the py reference tier's WAL (item 130 §4.5, §4.9). The last-n "
+            "`replay(<n>)` form does lower here; try `--backend py` for the "
+            "cursor" % tier)
     if node.get("drain") is not None:
         raise EmitError(
             "a `drain` window is not lowered on the %s tier; the `block` policy "
@@ -2089,11 +2095,11 @@ def _expr(
         fn = node.get("fn")
         _refuse_missing_host_root(fn)
         if node.get("replay"):
-            # item 130 §4.5: a provider-side `replay(…)` declaration this tier
-            # cannot honour. Refused rather than dropped — a declared backlog
-            # nothing holds is the same vacuous durability claim the consumer's
-            # request would be, one end earlier.
+            # item 130 §4.5: a provider-side `replay(…)` declaration. The
+            # durable cursor is refused by name rather than dropped; the
+            # last-n form opens a source that holds that many items.
             _refuse_unlowered_stream_surface(node)
+            return "Stream.source(%d)" % int(node["replay"]["count"])
         host, _, method = fn.partition(".")
         args = ", ".join(
             _expr(a, ctx, rename, env) for a in node.get("args") or []
@@ -2342,6 +2348,12 @@ def _expr(
                                node.get("stages") or [], ctx, rename, env)
         policy = node.get("policy") or "error"
         capacity = int(node.get("buffer") or 0)
+        replay = node.get("replay")
+        if replay:
+            # §4.5: a last-n request delivers the provider's held backlog
+            # ahead of any live item (the cursor was refused just above).
+            return "Stream.subscribeReplay(%s, %d, %s, %d)" % (
+                stream, int(replay["count"]), _string(policy), capacity)
         return "Stream.subscribe(%s, %s, %d)" % (
             stream, _string(policy), capacity)
 
@@ -4032,6 +4044,14 @@ public static final class Stream {
     private String state = "open"; // "open" | "closed" | "faulted"
     private String faultReason = "";
     private boolean released = false;
+    // §4.5's last-n backlog: `replayCap` is the DECLARED `replay(<n>)`, 0 for
+    // the default of no backlog, and `backlog` holds the newest `replayCap`
+    // emitted items, oldest first. `emitGate` serialises an emission against a
+    // late subscriber's replay on a DECLARED provider only, so a live item can
+    // never overtake the backlog; an undeclared provider never takes it.
+    private int replayCap = 0;
+    private final java.util.ArrayDeque<String> backlog = new java.util.ArrayDeque<>();
+    private final Object emitGate = new Object();
 
     private Stream(String kind, int pending) {
         this(kind, pending, "", null, null, 0);
@@ -4052,6 +4072,19 @@ public static final class Stream {
     // source that outlives its owner shows up as residue.
     public static Stream source() {
         Stream stream = new Stream("source", 0);
+        synchronized (REGISTRY) {
+            STREAMS.add(stream);
+        }
+        record("stream.source open");
+        //@R1-INC
+        return stream;
+    }
+
+    // Open a provider that DECLARES `replay(<n>)` (design §4.5): it holds its
+    // newest `replay` items for a consumer that subscribes later.
+    public static Stream source(int replay) {
+        Stream stream = new Stream("source", 0);
+        stream.replayCap = replay;
         synchronized (REGISTRY) {
             STREAMS.add(stream);
         }
@@ -4156,9 +4189,28 @@ public static final class Stream {
     // refusal is never silent, and the line matches the py reference and ts
     // tiers byte for byte.
     public boolean emit(String item) {
+        if (replayCap > 0) {
+            synchronized (emitGate) {
+                return emitOpen(item);
+            }
+        }
+        return emitOpen(item);
+    }
+
+    private boolean emitOpen(String item) {
         synchronized (this) {
             if (!state.equals("open")) {
                 return false;
+            }
+            if (replayCap > 0) {
+                // §4.5: the declared backlog is recorded BEFORE delivery and
+                // whether or not anyone is listening, since a consumer that
+                // subscribes LATER is the case replay exists for (the py
+                // reference's `_hold`).
+                backlog.addLast(item);
+                while (backlog.size() > replayCap) {
+                    backlog.removeFirst();
+                }
             }
         }
         boolean accepted = forward(item);
@@ -4382,6 +4434,43 @@ public static final class Stream {
             sub.terminate(state, reason);
         }
         return sub;
+    }
+
+    // `subscribe <src> replay(<n>)` (design §4.5): the subscription `subscribe`
+    // opens, followed by the newest `n` items the provider holds, each traced
+    // `stream.replay <item>` and delivered through the PROVIDER's own forward
+    // path before any live item. So a replayed item takes the combinator chain,
+    // the declared buffer and the overflow policy exactly as a live one does:
+    // the py reference's `Stream.subscribe`, statement for statement. `src` may
+    // be a combinator chain; the backlog lives on the provider at its root, and
+    // the frontend refuses a replay on a `merge(a, b)` fan-in, so the walk up
+    // the chain ends at one source. The durable `replay(from: …)` cursor is
+    // refused by name at emit time: §4.9 is the py reference tier's WAL.
+    public static Subscription subscribeReplay(Stream src, int n, String policy, int capacity) {
+        Stream root = src;
+        while (true) {
+            Stream next;
+            synchronized (root) {
+                next = root.kind.equals("stage") && root.up.size() == 1 ? root.up.get(0) : root;
+            }
+            if (next == root) {
+                break;
+            }
+            root = next;
+        }
+        synchronized (root.emitGate) {
+            Subscription sub = subscribe(src, policy, capacity);
+            java.util.List<String> held;
+            synchronized (root) {
+                held = new java.util.ArrayList<>(root.backlog);
+            }
+            int skip = Math.max(0, held.size() - n);
+            for (String item : held.subList(skip, held.size())) {
+                record("stream.replay " + item);
+                root.forward(item);
+            }
+            return sub;
+        }
     }
 
     // The residue probe: unreleased providers plus live (un-closed)
