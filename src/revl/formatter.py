@@ -78,6 +78,9 @@ _NEWLINE = "newline"    # one physical line break
 
 _KEYWORDS = _lexer.KEYWORDS
 
+#: Keywords whose `[` is their own argument, not a list that follows them.
+_TIGHT_BRACKET_KEYWORDS = frozenset({"emission", "hole"})
+
 _OPENERS = {"(", "[", "{"}
 _CLOSERS = {")", "]", "}"}
 
@@ -86,6 +89,8 @@ _CLOSERS = {")", "]", "}"}
 class _Piece:
     kind: str
     text: str
+    start: int = 0      # source span (issue #1700: token-level anchor matching)
+    end: int = 0
 
 
 class FormatError(RevlError):
@@ -113,7 +118,16 @@ def _scan(source: str, filename: str) -> list[_Piece]:
     pieces: list[_Piece] = []
     i, n = 0, len(source)
     while i < n:
-        c = source[i]
+        i = _scan_one(source, filename, i, n, pieces)
+    return pieces
+
+
+def _scan_one(source: str, filename: str, i: int, n: int, pieces: list) -> int:
+    """Scan the one piece (or skipped whitespace) at `i` onto `pieces`, with
+    its source span, and return where scanning resumes."""
+    start, count = i, len(pieces)
+    c = source[i]
+    if True:  # one branch per piece kind, in lexer.lex's order
         if c == "\n":
             pieces.append(_Piece(_NEWLINE, "\n"))
             i += 1
@@ -167,7 +181,9 @@ def _scan(source: str, filename: str) -> list[_Piece]:
         else:
             line = source.count("\n", 0, i) + 1
             raise FormatError(filename, line, f"unexpected character {c!r}")
-    return pieces
+    if len(pieces) > count:
+        pieces[-1].start, pieces[-1].end = start, i
+    return i
 
 
 def _as_format_error(filename: str, line: int, error: RevlError) -> FormatError:
@@ -381,9 +397,10 @@ def _space_between(prev: _Piece, cur: _Piece,
     # never a space right after an opener
     if p in ("(", "["):
         return False
-    # capability annotation `emission[db]` binds its bracket tight, unlike the
-    # `return [1, 2]` list form where the keyword keeps its space
-    if c == "[" and p == "emission":
+    # a keyword that TAKES a bracket binds it tight: the capability scope
+    # `emission[db]` and the typed hole `hole[Str]` (issue #1822). A keyword
+    # that is followed by a list keeps its space: `return [1, 2]`
+    if c == "[" and p in _TIGHT_BRACKET_KEYWORDS:
         return False
     # call / index: `f(...)`, `xs[...]`, `Opt[Str]`, `)(...)` -- but a keyword
     # keeps its space (`return (x)`, `if (c)`)

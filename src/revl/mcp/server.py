@@ -865,7 +865,12 @@ def _tool_load(arguments: dict) -> dict:
         # issue #1727: a holed candidate opens a draft rather than failing.
         # Nothing boots, so nothing a lease fences happens yet: the lease is
         # checked when the draft boots (`_boot_draft`)
-        return _draft.open_draft(SESSION, arguments, ir)
+        # issue #1700: the draft is held canonical. Its hole lines cannot
+        # move (the IR records them, so the gate refuses any layout that would
+        # shift one), symbols are names, and an anchor copied from what was
+        # sent still matches by its tokens
+        stored, canon = _canonical.canonical_arguments(arguments)
+        return _canonical.attach(_draft.open_draft(SESSION, stored, ir), canon)
     if not SESSION.loaded:   # a load over a running composition is refused below
         refusal = _leases.check(SESSION, "load", arguments)
         if refusal is not None:
@@ -2765,7 +2770,7 @@ TOOLS = [
                        "keys and the lifecycle trace.",
         "inputSchema": {
             "type": "object",
-            "properties": {**_SOURCE_INPUT,
+            "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "config": {"type": "object",
                                       "description": "per-component config tables"},
                            "record": {"type": "boolean",

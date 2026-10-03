@@ -442,15 +442,24 @@ expensive ones, so the edit path asks for as little text as it can:
   `returnCanonical: true`. Text the formatter cannot read, or a rewrite its
   gate refuses, is kept as written (`kept` says why). A files-loaded
   composition is the operator's files and is not rewritten.
-- `revl_load` stores what it was sent, so a first load (or a draft) holds your
-  bytes and an anchor copied from them still matches. After a swap or an edit
-  that canonicalised (`changed: true`), the held text is the canonical one: an
-  `anchor` must quote it, which is why `{symbol, ...}` edits are the safer
-  form.
+- `revl_load` holds a DRAFT (a holed candidate) canonical, and answers with
+  `canonicalSource` too; a load that boots keeps the bytes it was sent (a
+  snapshot reproduces them). A draft's hole lines never move: the IR records
+  them, so the gate refuses any layout that would shift one, and a fillSpec's
+  `line` stays the held line.
+- An `anchor` that does not occur verbatim in the held text is matched by its
+  tokens, whitespace aside (echo `matched: "tokens"`), so an anchor copied
+  from what you sent still applies after the server stored a canonical
+  rewrite. Tokens and comments must match exactly and in order. `count`
+  bounds the sites as before. A `range` is a character offset into the HELD
+  text, which may be the canonical rewrite (`changed: true`): read it with
+  `revl_source` or `returnCanonical` before computing one. `{symbol, ...}`
+  and `{hole, expr}` edits are not affected.
 - Since the formatter puts each `provide` member on its own line, a terse
-  one-line provide block swapped in has every method addressable by symbol. A
-  member that still shares a line (a first load, or a program where the gate
-  kept the old layout) cannot be addressed alone.
+  one-line provide block swapped in (or loaded as a draft) has every method
+  addressable by symbol. A member that still shares a line (a booting first
+  load, or a program where the gate kept the old layout) cannot be addressed
+  alone.
 
 An `{append}` edit adds new top-level declarations at the end of the buffer
 (the only one, or `target`), with no offset to compute. A name that is already

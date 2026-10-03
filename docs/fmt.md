@@ -52,8 +52,10 @@ revl fmt --migrate <files>  # §9: rewrite 1.x "$name" interpolation to `${name}
   line-preserving layout for that file. The gate is never weakened.
 - **Horizontal spacing** is normalised to a single space between tokens:
   - tight around `.` / `?.`, and no space before `,` `:` `;` `)` `]`;
-  - no space between a call/index and its bracket — `set(1, 2)`, `Opt[Str]`,
-    `emission[db]` — while a keyword keeps its space (`return (x)`, `if (c)`);
+  - no space between a call/index and its bracket: `set(1, 2)`, `Opt[Str]`,
+    `emission[db]`, `hole[Str]` (a keyword whose bracket is its own argument
+    binds it tight, issue #1822), while a keyword keeps its space before
+    anything else (`return (x)`, `if (c)`, `return [1, 2]`);
   - one space after `,` and `:`; spaces around binary operators and `->`.
 - **Blank lines** collapse: at most one blank line between constructs, no
   leading or trailing blank lines, exactly one final newline.

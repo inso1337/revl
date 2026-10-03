@@ -285,7 +285,7 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
         replacement = str(edit.get("replacement", ""))
         occurrences = text.count(anchor)
         if occurrences == 0:
-            raise EditError(f"anchor {anchor!r} does not occur in the buffer")
+            return _token_anchor(text, anchor, replacement, edit.get("count"))
         count = edit.get("count")
         if count is None:
             new_text = text.replace(anchor, replacement)
@@ -494,6 +494,49 @@ def check_imports(vs: dict, touched: list[tuple[str, str]]) -> None:
             f"refused: the patched source's {named} leaves the "
             "operator-sanctioned root(s) — an import an edit writes may not name "
             "an absolute path or a file outside them; nothing was compiled")
+
+
+def _token_anchor(text: str, anchor: str, replacement: str, count):
+    """An anchor that does not occur verbatim, matched by its tokens instead
+    (issue #1700). The server may hold a canonical rewrite of what an agent
+    sent, so an anchor copied from the sent text differs only in whitespace.
+    Tokens and comments must match exactly, in order; only the whitespace
+    between them may differ. Refused, as before, when nothing matches."""
+    spans = token_spans(text, anchor)
+    if not spans:
+        raise EditError(f"anchor {anchor!r} does not occur in the buffer, "
+                        f"not even with its whitespace ignored")
+    if count is not None:
+        spans = spans[:int(count)]
+    new_text = text
+    for start, end in reversed(spans):
+        new_text = new_text[:start] + replacement + new_text[end:]
+    return new_text, {"form": "anchor", "anchor": anchor,
+                      "replacement": replacement, "sites": len(spans),
+                      "matched": "tokens"}
+
+
+def token_spans(text: str, anchor: str) -> list[tuple[int, int]]:
+    """The non-overlapping spans of `text` whose tokens and comments are
+    `anchor`'s, whitespace aside."""
+    from ..formatter import FormatError, _scan  # noqa: PLC0415
+
+    try:
+        hay = [p for p in _scan(text, "<buffer>") if p.kind != "newline"]
+        needle = [(p.kind, p.text) for p in _scan(anchor, "<anchor>")
+                  if p.kind != "newline"]
+    except (FormatError, RevlError):
+        return []
+    if not needle:
+        return []
+    out, i, m = [], 0, len(needle)
+    while i + m <= len(hay):
+        if all((hay[i + k].kind, hay[i + k].text) == needle[k] for k in range(m)):
+            out.append((hay[i].start, hay[i + m - 1].end))
+            i += m
+        else:
+            i += 1
+    return out
 
 
 def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:

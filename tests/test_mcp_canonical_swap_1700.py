@@ -166,10 +166,10 @@ def test_after_a_terse_swap_every_method_is_addressable():
 
 
 @needs_runtime
-def test_load_keeps_the_bytes_it_was_sent():
-    """A control: a first load holds what was sent, so an anchor copied from
-    it matches (tests/test_mcp_edit_gates.py and test_persistence.py rely on
-    that)."""
+def test_a_booting_load_keeps_the_bytes_it_was_sent():
+    """A control: a load that boots holds what was sent (a snapshot of it
+    reproduces those bytes, tests/test_persistence.py); only a draft is held
+    canonical."""
     result = _call("revl_load", {"source": TERSE})
     assert result["ok"] is True and "canonicalSource" not in result
     assert server_mod.SESSION.origin["source"] == TERSE
@@ -185,11 +185,10 @@ def test_a_terse_swap_is_stored_canonically():
     assert _call("revl_call", {"key": "clock", "method": "now"})["result"] == 8
 
 
-def test_check_and_swap_advertise_return_canonical():
+def test_the_three_verbs_advertise_return_canonical():
     tools = {t["name"]: t for t in server_mod._ADVERTISED}
-    for name in ("revl_check", "revl_swap"):
+    for name in ("revl_check", "revl_load", "revl_swap"):
         assert "returnCanonical" in tools[name]["inputSchema"]["properties"], name
-    assert "returnCanonical" not in tools["revl_load"]["inputSchema"]["properties"]
 
 
 # ------------------------------------------------ a new method from the service
@@ -239,3 +238,46 @@ def test_a_terse_hole_fill_is_stored_canonically():
     assert filled["applied"][0]["canonical"] == "3 * 4"
     assert "    fn now() = 3 * 4\n" in server_mod.SESSION.origin["source"]
     assert _call("revl_call", {"key": "clock", "method": "now"})["result"] == 12
+
+
+# ------------------------------------------------ a draft is held canonical
+
+DRAFT = ("service Clock { fn now() -> Int\n fn later(n: Int) -> Int }\n"
+         "component FixedClock provides clock: Clock {\n"
+         "  provide clock {\n"
+         "    fn now() = hole [Int]   \"the time\"\n"
+         "    fn later(n)=n+1\n"
+         "  }\n"
+         "}\n")
+
+
+def test_a_draft_is_held_canonical_with_its_hole_lines_unchanged():
+    opened = _call("revl_load", {"source": DRAFT})
+    assert opened.get("draft") is True, opened
+    assert opened["canonicalSource"]["changed"] is True
+    held = server_mod.SESSION.pending_draft["vs"]["source"]
+    assert held == format_source(DRAFT)
+    assert '    fn now() = hole[Int] "the time"\n' in held
+    # the hole is on the line the load reported, in the held text
+    line = opened["holes"][0]["line"]
+    assert "hole[Int]" in held.split("\n")[line - 1]
+
+
+@needs_runtime
+def test_an_anchor_copied_from_the_sent_text_still_applies():
+    opened = _call("revl_load", {"source": DRAFT})
+    line = opened["holes"][0]["line"]
+    # the agent quotes the line as it SENT it: `fn later(n)=n+1`
+    edited = _call("revl_edit", {"edits": [
+        {"anchor": "fn later(n)=n+1", "replacement": "fn later(n) = n + 2"},
+        {"hole": line, "expr": "5"}]})
+    assert edited.get("booted") is True, edited
+    assert edited["applied"][0]["matched"] == "tokens"
+    assert _call("revl_call", {"key": "clock", "method": "later", "args": [1]})["result"] == 3
+    assert _call("revl_call", {"key": "clock", "method": "now"})["result"] == 5
+
+
+def test_an_anchor_that_matches_no_tokens_is_still_refused():
+    from revl.mcp import edit
+    with pytest.raises(edit.EditError, match="not even with its whitespace ignored"):
+        edit._apply_one("fn a() = 1\n", {"anchor": "fn b() = 1", "replacement": "x"})
