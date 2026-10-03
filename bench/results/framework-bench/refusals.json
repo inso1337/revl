@@ -36,8 +36,8 @@
         },
         "rust": {
           "residual": 2,
-          "corpus": 40,
-          "reproduced": 38,
+          "corpus": 41,
+          "reproduced": 39,
           "documents": [
             "comp_stream.rvl",
             "component_edges.rvl"
@@ -74,7 +74,7 @@
         }
       },
       "total_residual": 27,
-      "total_corpus": 293,
+      "total_corpus": 294,
       "clean_tiers": [
         "java",
         "wasm"

@@ -1516,12 +1516,16 @@ fn render_field(node: Any, ctx: Ctx) -> Str {
   // Clone just the field instead: strictly less copied, still owned, so valid
   // in every position; a read-only caller then strips even this field clone
   // via `strip_index_clone`. The `.clone()` is 8 chars.
+  // item 104 (issue #1734): a property-form `.length` on a sized value in a
+  // component position stays a `field` node marked `sized_length`; it is the
+  // code-point / element count through the helper trait, not a struct field.
+  let sized = value_bool(value_field(node, "sized_length"))
   if (node_kind(tn) == "index" && target.endsWith(".clone()")) {
     let place = target.slice(0, target.length() - 8)
-    return `${place}.${mangle(value_str(value_field(node, "name")))}.clone()`
+    return sized ? `${place}.revl_length()` : `${place}.${mangle(value_str(value_field(node, "name")))}.clone()`
   }
   if (!is_atomic(node_kind(tn))) { target = `(${target})` }
-  return `${target}.${mangle(value_str(value_field(node, "name")))}`
+  return sized ? `${target}.revl_length()` : `${target}.${mangle(value_str(value_field(node, "name")))}`
 }
 
 // `record`: a nominal `Struct { f: v, .. }` literal. Each field value moves into
@@ -5508,6 +5512,29 @@ fn contains_stdlib(v: Any) -> Bool {
   return false
 }
 
+// `_uses_stdlib` (issue #1734): the helper traits are emitted when a stdlib node
+// appears in a component, a function or a test, the three sections the
+// reference walks. A sized `.length` field counts too: it stays a `field` node
+// marked `sized_length` and renders through `revl_length`. `contains_stdlib`
+// stays the borrow pass's narrower test (`_functions_use_stdlib`).
+fn uses_stdlib(ir: Any) -> Bool {
+  return stdlib_node_in(value_field(ir, "components")) || stdlib_node_in(value_field(ir, "functions"))
+    || stdlib_node_in(value_field(ir, "tests"))
+}
+
+fn stdlib_node_in(v: Any) -> Bool {
+  if (value_is_null(v)) { return false }
+  let k = node_kind(v)
+  if (k == "builtin" || k == "len" || (k == "field" && value_bool(value_field(v, "sized_length")))) { return true }
+  for (key of value_keys(v)) {
+    if (stdlib_node_in(value_field(v, key))) { return true }
+  }
+  for (x of value_list(v)) {
+    if (stdlib_node_in(x)) { return true }
+  }
+  return false
+}
+
 // The document assembly for a TYPES + FUNCTIONS v3 document (`_emit_v3`, subset):
 // the module header, then the user `type` items, then the free functions —
 // joined with newlines, right-stripped, and closed with a single trailing
@@ -5602,7 +5629,7 @@ pub fn emit_rust_src(ir: Any) -> Str {
   if (uses_timer(value_list(value_field(ir, "components"))) || tests_use_advance(ir)) {
     out = out.concat(revl_timer_preamble())
   }
-  if (contains_stdlib(functions) || contains_stdlib(types) || contains_stdlib(externs)) {
+  if (uses_stdlib(ir)) {
     out = out.concat(stdlib_helpers())
     out = out.push("")
   }
