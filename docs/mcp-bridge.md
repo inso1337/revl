@@ -427,6 +427,16 @@ refused. So is any edit, under the default untrusted authoring, to a
 composition whose files declare host externs of their own; such a composition
 is changed on disk by the operator, then swapped.
 
+The path jail reads the patched text, not the edits (issue #1709). Before
+anything compiles, every buffer an edit touched is scanned, as it reads after
+all the edits, for `use` paths. One that leaves the operator-sanctioned roots
+(resolved against the file's own directory for a loaded file) is refused with
+nothing compiled, however the edits assembled it; a buffer that no longer lexes
+is refused too, since its imports cannot be read. An import the operator's file
+already names on disk is not newly refused. This holds whatever the authoring
+trust: under `--author-trust trusted` the compile has no confinement of its
+own, and the jail is the only check.
+
 With nothing loaded, `revl_edit` also takes `files` (or `source`, `modules`,
 `config`) and loads them through `revl_load` itself before it edits, so an agent
 never has to learn that the edit needs a load first. The load answers to the
