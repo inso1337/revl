@@ -1587,6 +1587,7 @@ class _ComponentEmitter:
         `$g_wit_flag_<n>` records whether Ok was actually returned, since a
         step that ran is not the same as a mutation that registered one.
         """
+        _refuse_unscrubbed_secret_referent(ext, where)
         result_value = self._lower(acquire, scope, {}, where)
         if _wasm_ty(result_value.ty) != "i32":
             raise EmitError(
@@ -6291,6 +6292,44 @@ def _refuse_validated_emissions(ir: dict) -> None:
         refuse_validated_on_unvalidating_tier(ir, "wasm")
     except RevlError as exc:
         raise EmitError(exc.message) from None
+
+
+def _refuse_unscrubbed_secret_referent(ext: dict, where: str) -> None:
+    """Issue #1577: refuse an activation-registered witnessed extern whose
+    durable-WAL frame could carry a declared secret verbatim.
+
+    The record-mode WAL frame is the one place this tier's host reads module
+    memory and writes what it read into a file (`run_harness.py` relays the
+    witness Str, `revl.run_wasm` writes it to `$REVL_WAL`). The other tiers
+    register every declared secret, and every leaf of a declared container, at
+    the door it enters through, and they scrub host text against that registry.
+    This tier has no registry and no funnel. So a witnessed extern that takes a
+    `Secret[...]` parameter and hands it back, or one leaf of it, as an Ok
+    witness the author did not declare confidential put those bytes into the
+    WAL file in plaintext. That was measured on the live runtime, for a
+    `Secret[List[Str]]` element and for a `Secret[Str]` scalar alike.
+
+    Refused whatever the record mode, because the shape is a property of the
+    program and `REVL_WAL` is a property of one run of it. Refused rather than
+    scrubbed: the only scrub available here is the emit-time placeholder, and
+    imposing it on an undeclared witness would silently make the descriptor
+    unreplayable. The author can opt in to it by declaring the witness position
+    `Secret[...]` (`secret_witness`), which this check leaves alone."""
+    confidential = [] if ext.get("secret_witness") else [
+        p.get("name") for p in ext.get("params") or []
+        if isinstance(p, dict) and p.get("secret")]
+    if confidential:
+        raise EmitError(
+            f"{where}: witnessed extern `{ext.get('name')}` takes the declared "
+            f"confidential parameter `{confidential[0]}` and hands back an Ok "
+            f"witness that is not declared confidential. A run that records a "
+            f"WAL (REVL_WAL) writes that witness into it verbatim, and the wasm "
+            f"tier has no secret registry and no redaction funnel, so a "
+            f"`Secret[...]` value or any leaf of it handed back as the witness "
+            f"would reach the WAL file in plaintext (issue #1577). Declare the "
+            f"witness position confidential (`Result[Secret[W], E]`, or "
+            f"`Secret[...]` on the inverse's parameter) so the record frames "
+            f"{_REDACTED_SECRET!r}, or use a hosted tier")
 
 
 

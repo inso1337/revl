@@ -160,6 +160,34 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | `await` outside `Job.run(name)` | `` `await` on this tier supports only `Job.run(name)` `` — the runtime's async host op (A1) |
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
+| a witnessed extern that takes a `Secret[...]` parameter and returns an Ok witness not declared confidential | `` witnessed extern `x` takes the declared confidential parameter `p` ... (issue #1577) ``, see below |
+
+### Declared secrets and the host sinks (issue #1577)
+
+The other tiers register every declared `Secret[T]`, and every leaf of a
+declared container, at the door it enters through, and scrub host text against
+that registry. This tier has no registry and no funnel, so the question is
+which host sinks can see a module value at all. Measured on the live runtime:
+
+| sink | what reaches it |
+|---|---|
+| `[run] …` lines from `run_harness.py` | compile-time names (component, provision key), fiber states, counts |
+| `PASS`/`FAIL`/`SUMMARY` from `lifecycle_harness.py` | test names and step errors; calls cross Int/Bool only |
+| the runtime's `rt.log` (trap text, `trace`) | nothing: neither harness prints it |
+| `[run] HALTED` (`lifecycle.static_estop_line`) | the compile-time `revl:teardown` index |
+| the record-mode durable WAL (`REVL_WAL`) | **the Ok witness of an activation-registered witnessed effect, read out of module memory verbatim** |
+
+The WAL is the one sink that carries module bytes, so it is where a leaf
+leaked: a witnessed extern taking `v: Secret[Str]` that hands `v` back as a
+plain `Result[Str, E]` witness wrote the bytes of a `Secret[List[Str]]` element
+into the WAL file, and the `Secret[Str]` scalar too. The emitter refuses that
+shape by name, in every mode. Declaring the witness position confidential
+(`Result[Secret[W], E]`, or `Secret[...]` on the inverse's parameter) emits,
+and the record frames `<redacted:secret>`. The doors themselves: a `config`
+field is refused for every shape, a provide-method parameter emits but its
+witness is parked in `$__mw_head` and never framed, and `Secret[Map[...]]` is
+refused everywhere because `Map` does not lower. Pinned by
+`backends/wasm/test_secret_leaf_sinks_1577.py`.
 
 ## Witnessed-effects teardown (item 243 Slice 2b)
 
