@@ -343,6 +343,18 @@ def _note_spend(spends: list | None, entry: dict, use: int, ticket: dict) -> Non
                    "component": ticket.get("component")})
 
 
+def _note_spend(spends: list | None, entry: dict, use: int, ticket: dict) -> None:
+    """Remember one per-call spend so `Session.call` can write its
+    `approval-emission` once the crossing returns (issue #1781)."""
+    if spends is None:
+        return
+    capability = entry.get("capability") or ",".join(
+        ticket.get("classCCapabilities") or ticket.get("capabilities") or [])
+    spends.append({"requestId": entry["requestId"], "use": use,
+                   "capability": capability,
+                   "component": ticket.get("component")})
+
+
 class ApprovalRefused(SessionError):
     """A class-(c) crossing whose pending ticket an operator answered NO
     (`revl_revoke` with the ticket `hash`, issue #1553). Raised once, on the
@@ -7789,6 +7801,7 @@ class Session:
                 wal.record_approval_consumed(record["requestId"], use=use,
                                              scope="activation")
                 wal.record_approval_consumed(record["requestId"])
+                wal.record_approval_consumed(record["requestId"], use=use)
             if release["kind"] == "approval":
                 # item 471 Slice 2: the activation gate's two-phase spend is a
                 # spend, so it mints the admission receipt too. Without this the
@@ -7815,6 +7828,7 @@ class Session:
                               spends: list | None = None,
                               prefer_grant: str | None = None) -> None:
                               record: dict | None = None) -> None:
+                              spends: list | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and

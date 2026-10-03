@@ -2787,6 +2787,7 @@ class WriteAheadLog:
     def record_approval_consumed(self, request_id: str, *,
                                  use: int | None = None,
                                  scope: str | None = None) -> dict:
+                                 use: int | None = None) -> dict:
         """Append one SPEND, durably, BEFORE the authorized crossing runs (item
         246, Decision 3: consume-before-fire). A crash between this record and
         the fire leaves consumed-but-unfired, which is fail-closed: a fresh
@@ -2829,6 +2830,8 @@ class WriteAheadLog:
         this yes. The later emission record names the same ``requestId``; the
         audit joins the spend and the emission on it."""
         record = {"record": "approval-consumed", "requestId": request_id}
+        if use is not None:
+            record["use"] = use
         self._write(record)
         return record
 
