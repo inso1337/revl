@@ -60,6 +60,9 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    as `emit db.put(<k: Str>, <v: Str>)`. If it needs host code, `externs`
    says where the declaration goes (the top level of the file, never at the
    hole) and whether you may write one at all: an untrusted author may not.
+   Before filling, read `fillable`: a hole with `byThisAuthor: false` (also
+   listed under the response's `unfillable`) needs host code this author can
+   never write, so stop and ask the operator rather than spend effort on it.
    `idiom` is the smallest admitted example of the construct the hole stands
    in (`construct`), with the rules that make it correct: read it before
    writing the fill. `grammarCategory` names the syntactic slot the fill must be (today

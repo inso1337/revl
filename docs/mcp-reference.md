@@ -79,6 +79,18 @@ live in `src/revl/mcp/runtime_gate.py`, and `revl doctor` reports which case
 applies (the `mcp server runtime` line). Set `REVL_MCP_NO_REEXEC=1` to stay on
 the current interpreter (issue #1692).
 
+**Changes carry their undo.** Since issue #1703, a successful call to a verb
+that mutates the session answers with `undo: {tool, arguments}`: the one call
+that returns the session to where it was, byte for byte (the snapshot's
+`sources` and `manifest`). A load's undo is `revl_unload`, an unload's is a
+`revl_restore` of what ran, and a swap, edit, undo, rollback, restore or
+applied ship/repair answers with `revl_undo` back to the earlier generation; a
+fresh `revl_lease` claim answers with its release. A verb with no exact inverse
+says so: `undo: null` and an `undoReason` (an emission cannot be un-emitted, a
+halt or an approval is recorded evidence). `undoDepth` is how many changes
+`revl_step_back` with no arguments can still revert. A refused call changed
+nothing and carries no undo field.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
@@ -125,7 +137,7 @@ the current interpreter (issue #1692).
 | `revl_restore` | no | no | `snapshot` |
 | `revl_timeline` | yes | no | - |
 | `revl_inspect_step` | yes | no | `at` |
-| `revl_step_back` | no | yes | `to` |
+| `revl_step_back` | no | yes | - |
 | `revl_replay_bisect` | yes | no | `assert` |
 | `revl_replay_forward` | no | yes | `from` |
 | `revl_grammar` | yes | no | - |
@@ -1032,13 +1044,22 @@ emissions at or before k.
 
 ### `revl_step_back`
 
-Unwind the accumulator to step k by running the registered inverses from the top
-down, newest first - leaving the component LIVE, not torn down. Refuses if the
-range crosses an emission with no `compensate`; `force` crosses anyway and
-reports what was crossed. The guarantee is "the inverses ran in order", never
-"state was restored".
+With no arguments, revert the last change this session made, by running the
+exact `undo` that change's response carried (issue #1703). Each further call
+reverts the change before it; a change that answered `undo: null` is not on the
+stack, so it is skipped rather than half-undone. The answer names the reverted
+change, the undo it ran (`via`, through the same gates as any call) and the
+`redo` call, with `undoDepth` left. With nothing left to revert it is a refusal
+with `undoDepth: 0`.
 
-- Inputs: `to` (required; `-1` unwinds everything); `component`; `force`.
+With `to`, unwind the accumulator to step k by running the registered inverses
+from the top down, newest first - leaving the component LIVE, not torn down.
+Refuses if the range crosses an emission with no `compensate`; `force` crosses
+anyway and reports what was crossed. The guarantee is "the inverses ran in
+order", never "state was restored".
+
+- Inputs: none (revert the last change); or `to` (`-1` unwinds everything),
+  `component`, `force`.
 
 ### `revl_replay_bisect`
 

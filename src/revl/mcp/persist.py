@@ -206,14 +206,30 @@ def snapshot(session) -> dict:
 
 # ---------------------------------------------------------------- restore
 
-def _recompile(sources: dict) -> dict:
+def admitted_name(snap: dict | None) -> str:
+    """The file name a single-`source` snapshot's composition was admitted
+    under, as its manifest recorded it (an inline MCP admission compiles as
+    `<candidate>.rvl`). Re-admitting under the same name keeps an undo or a
+    restore byte for byte what ran (issue #1703); a snapshot whose manifest
+    names no single file falls back to `<snapshot>.rvl`."""
+    components = ((snap or {}).get("manifest") or {}).get("components") or []
+    names = {c.get("file") for c in components if isinstance(c, dict)}
+    if len(names) == 1:
+        name = names.pop()
+        if isinstance(name, str) and name:
+            return name
+    return "<snapshot>.rvl"
+
+
+def _recompile(sources: dict, name: str = "<snapshot>.rvl") -> dict:
     """Compile the snapshotted sources through the very entry points a live
     `revl_load` uses. This *is* the gate: parse + check + lower run here, so a
-    component the current checker rejects raises `RevlError` right here."""
+    component the current checker rejects raises `RevlError` right here.
+    `name` is the file a single-`source` snapshot compiles as (`admitted_name`)."""
     source = sources.get(ORIGIN_SOURCE)
     modules = sources.get(ORIGIN_MODULES)
     if source is not None:
-        return compile_source(source, "<snapshot>.rvl", modules=modules)
+        return compile_source(source, name, modules=modules)
 
     files = sources.get(ORIGIN_FILES)
     if files:
@@ -348,7 +364,7 @@ def restore(session, snap: dict) -> dict:
     _refuse_policy_downgrade(session, meta)
 
     try:
-        ir = _recompile(sources)
+        ir = _recompile(sources, admitted_name(snap))
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic
