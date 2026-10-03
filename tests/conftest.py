@@ -193,6 +193,42 @@ def pytest_runtest_makereport(item, call):
     return report
 
 
+# Issue #1720: a test file that leaves file descriptors open.
+#
+# The root suite is one process, so what one file leaves open every later file
+# inherits; the leaks were silent until #1716 hit FD_SETSIZE. Each file's
+# descriptor count is checked against tests/_fd_budget.py when the file ends,
+# and an overrun errors that file's last test by name. The anchor that this
+# check is not vacuous is tests/test_fd_budget_1720.py.
+
+def _fd_budget():
+    spec = importlib.util.spec_from_file_location(
+        "revl_tests_fd_budget", Path(__file__).with_name("_fd_budget.py"))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_FD = _fd_budget()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def _descriptor_budget(request):
+    if not _FD.available():
+        yield
+        return
+    before = _FD.open_fds()
+    yield
+    rel = Path(str(request.node.path)).resolve()
+    try:
+        name = rel.relative_to(_ROOT).as_posix()
+    except ValueError:
+        name = rel.as_posix()
+    message = _FD.verdict(name, _FD.leaked(before))
+    if message is not None:
+        pytest.fail(message, pytrace=False)
+
+
 def _reset_cordis_globals() -> None:
     """Drop the process-wide runtime state one test can leave for the next.
 
@@ -223,6 +259,21 @@ def _reset_cordis_globals() -> None:
     set_clock = getattr(timer, "set_clock", None)
     if callable(set_clock):
         set_clock(None)
+
+    # issue #1720: a test that leaves a session loaded leaves it bound as the
+    # admit/reflect bridge target, the runtime's session owner and its trace
+    # sink, so it (with its event loop and open log) outlives the test. A test
+    # run alone starts with all of them unbound.
+    clear_owner = getattr(runtime, "clear_session_owner", None)
+    if callable(clear_owner):
+        clear_owner()
+    set_trace = getattr(runtime, "set_trace", None)
+    if callable(set_trace):
+        set_trace(None)   # the loaded driver's host-event sink
+    for bridge in ("revl.mcp.admit_bridge", "revl.mcp.reflect_bridge"):
+        bind = getattr(sys.modules.get(bridge), "bind", None)
+        if callable(bind):
+            bind(None)
 
 
 @pytest.fixture(autouse=True)
