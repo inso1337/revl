@@ -169,12 +169,18 @@ into the calling module's memory** (the module exports `memory`, so a host —
 or the cordis-wasm runtime — can read the result). This is the *same* canonical
 ABI the value model uses, and it applies to v1/v2 components as much as v3:
 the boundary is `_boundary_wty`, and its gate is `_check_type`. In practice:
+type: a scalar is an `i64`/`i32` **value**, a compound type an **`i32`
+pointer**. Which memory that pointer names decides what is lowerable:
 
 - **A provider's export** (`provide:<key>.<op>`): **Int, Int32, Float, Bool,
   Str, Bytes, List, record, variant, Opt, Result** params and returns,
   compound ones by pointer into the provider's own memory. The module exports
   `memory`, so a HOST that calls the export reads a compound result out of the
   right memory.
+- **A provider's export** (`provide:<key>.<op>`): **Int, Bool, Str, Bytes,
+  List, record, variant, Opt, Result** params and returns, compound ones by
+  pointer into the provider's own memory. The module exports `memory`, so a
+  HOST that calls the export reads a compound result out of the right memory.
 - **A consumer's required call to a key another component of the same
   composition provides**: **Int, Bool and Float only.** That provider is
   another cordis-wasm instance with its own linear memory, and the runtime
@@ -187,11 +193,23 @@ the boundary is `_boundary_wty`, and its gate is `_check_type`. In practice:
   scalar (Int/Bool/Float) values cross a service another component provides on
   this tier ``. The routed require and the spawn instance accessor draw the
   same line for the same reason.
+  composition provides**: **Int and Bool only.** That provider is another
+  cordis-wasm instance with its own linear memory, and the runtime forwards
+  the call's arguments and result as the integers they are, so a compound
+  value would arrive as an address in the wrong memory. Measured before this
+  was refused (issue #1601): a three-element list arrived with length 0, an
+  index into it trapped in `$list_slot`, and a `Str` read correctly only when
+  both modules happened to pool the same literal at the same offset. Refused
+  by name: `` <key>.<op>: param 0 is 'Str', and only scalar (Int/Bool) values
+  cross a service another component provides on this tier ``. The routed
+  require and the spawn instance accessor draw the same line for the same
+  reason.
 - **A consumer's required call to a key no component provides**: the host's.
   cordis-wasm hands a host-provided coeffect the calling fiber, so the host
   reads a compound argument out of the caller's memory, which is the right
   one. Compound values stay allowed here.
 - **Map and function types**: refused everywhere with the named
+- **Float, Map, function types**: refused everywhere with the named
   `_check_type` diagnostic above.
 - **Int, Bool, Str, Bytes, List, record, variant, Opt, Result** params and
   returns: supported (compound ones by pointer).

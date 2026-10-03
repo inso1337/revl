@@ -98,6 +98,7 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   a required call to a host-provided key may pass one too. A required call to
   a key another component of the composition provides stays scalar
   (Int/Bool/Float): that provider is another instance with its own memory, so a
+  (Int/Bool): that provider is another instance with its own memory, so a
   compound value would arrive as an address in the wrong one, and it is
   refused by name (issue #1601).
   service param or return crosses as a pointer into the module's memory —

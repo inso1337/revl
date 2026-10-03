@@ -290,7 +290,7 @@ was corrected by hand and had drifted back within a day.
 | vision.md | current | 0 |  |
 | wasm-capabilities.md | needs-work | 39 | yes |
 | vision.md | current | 8 |  |
-| wasm-capabilities.md | needs-work | 36 | yes |
+| wasm-capabilities.md | needs-work | 34 | yes |
 | webapp-competitiveness-report.md | needs-work | 33 |  |
 | why-runtime.md | needs-work | 29 |  |
 | why-traces.md | needs-work | 26 |  |
