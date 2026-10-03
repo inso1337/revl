@@ -15,6 +15,7 @@ admitted. Retries are not free; a refused draft still cost the tokens it took to
 write. The report also keeps each invocation's model-turn count paired with
 its recorded input tokens, so a per-turn average cannot hide how many turns a
 run took. This module computes it deterministically from the committed corpus,
+write. This module computes it deterministically from the committed corpus,
 exactly the way `rescore.py`/`demand.py` recompute their numbers — no model, no
 provider, no cost.
 
@@ -26,6 +27,9 @@ tokens or the Cline model-turn count. `run.py` now records `tokens_in` and
 `turn_count` per invocation when the runner reports them; this module keeps
 those pairs per attempt and never fills historical gaps with estimates. It
 also reports two output-spend measures, and is explicit about which is which:
+was billed, from the provider's own usage) but it does *not* record the token
+counts behind that cost — `run.py` only kept `totalCost`. So this module reports
+two things, and is explicit about which is which:
 
   * **est. output tokens** — a DETERMINISTIC PROXY tokenised from the committed
     generation files (the exact source each attempt emitted, saved under
@@ -145,6 +149,7 @@ def _as_run_cost(run: str) -> dict[tuple[str, str], dict]:
     if not path.is_file():
         return out
     for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
@@ -168,6 +173,7 @@ def _recorded_output_tokens(run: str) -> dict[tuple[str, str, int], int]:
     if not path.is_file():
         return out
     for line in path.read_text(encoding="utf-8").splitlines():
+    for line in path.read_text().splitlines():
         line = line.strip()
         if not line:
             continue
@@ -240,6 +246,7 @@ def compute_run(run: str, compiler_root: Path) -> list[dict]:
             for path in attempts:
                 n = int(re.search(r"attempt-(\d+)", path.name).group(1))
                 est = count_tokens(path.read_text(encoding="utf-8"))
+                est = count_tokens(path.read_text())
                 spent += est
                 key = (spec_dir.name, variant, n)
                 usage = attempt_usage.get(key, {})

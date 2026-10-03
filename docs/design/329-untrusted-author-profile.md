@@ -1,8 +1,10 @@
 # 329: the untrusted-author admission profile (and 330's admit crossing)
+# 329 — the untrusted-author admission profile (and 330's admit crossing)
 
 Roadmap items 329 (the profile) and 330 (the in-language admit+run crossing).
 This note records what the first cut delivers, and what the fuller wasm-import
 path (deliberately deferred) still needs.
+path — deliberately deferred — still needs.
 
 ## The problem (item 24 / G8)
 
@@ -19,6 +21,9 @@ ADMITS and RUNS arbitrary host code, because G8's boundary is "verbatim host
 code (unchecked inside)" (item 24: *the gate does not sandbox host code*). When
 the AUTHOR of the source is untrusted (the lighthouse code-mode direction,
 where a model emits an arbitrary revl program every turn), that is an injection
+code — unchecked inside" (item 24: *the gate does not sandbox host code*). When
+the AUTHOR of the source is untrusted — the lighthouse code-mode direction,
+where a model emits an arbitrary revl program every turn — that is an injection
 hole: the turn is composed against a granted tool surface, but nothing stops it
 from declaring its own escape hatch.
 
@@ -26,14 +31,18 @@ from declaring its own escape hatch.
 
 The delivered cut is `revl.admit_profile.AdmissionProfile`: a compile-time
 admission profile and a **compile refusal**, not a runtime policy check:
+`revl.admit_profile.AdmissionProfile` — a compile-time admission profile, a
+**compile refusal**, not a runtime policy check:
 
 - **`no_extern`**: the admitted source may declare no new `extern`/host-block.
+- **`no_extern`** — the admitted source may declare no new `extern`/host-block.
   Scoped to the ROOT module (the source being admitted), not the pre-granted
   imported closure. Refused structurally on the parsed AST, before any host body
   is lowered or run. Closes G8 for the untrusted author: it may only COMPOSE
   pre-granted services, never declare its own host code.
 
 - **`granted`**: an allowlist of the service NAMES the admitted program may
+- **`granted`** — an allowlist of the service NAMES the admitted program may
   reach. A service a component `requires` must be in the granted set, unless the
   requirement BINDS to the turn's own provision. Bounds an admitted turn to a
   subset of a running composition's ambient services instead of all of them
@@ -65,18 +74,22 @@ turn into the LIVE driver with the session owner active, so the turn's crossings
 (and the granted providers' crossings it drives) register into the enclosing 245
 frame: commit persists them, abort reverts them, residue-free. The refusal is a
 verdict (`AdmitVerdict`), handed back as data (the repair signal), never raised
+frame — commit persists them, abort reverts them, residue-free. The refusal is a
+verdict (`AdmitVerdict`), handed back as data — the repair signal — never raised
 into the turn.
 
 `stdlib/admit.rvl` + `revl.mcp.admit_bridge` expose this as a **classified
 `emission` crossing** a running composition invokes in-language
 (`admission.admit(source, granted)`). That is the whole of 330: the
 admit-decision (the type judgment that IS the permission decision) is now a
+admit-decision — the type judgment that IS the permission decision — is now a
 declared, classified boundary on the G8 audit surface, not undeclared host py
 reaching sideways into the compiler. Host code stays only as a classified extern
 body (`host_admit`), per the workload's rule.
 
 A turn admitted through the crossing while a call is driving the loop is QUEUED
 and wired the moment that call returns; a turn is never wired mid-call, exactly
+and wired the moment that call returns — a turn is never wired mid-call, exactly
 as `demo/evolve_bridge.propose` never swaps synchronously. The crossing is
 additive-only: a turn that would replace a running component is refused (hot-swap
 is a separate, operator-gated verb).
@@ -111,6 +124,8 @@ directory is not the operator's: its source keys are paths the CALLER wrote,
 so that directory is not an import root. It passes `disk_relative_use=False`
 and a relative `use` resolves only out of the supplied sources and the
 installed search path (issue #3152). A trusted author's
+relative import that stays inside the admitting directory, and every import
+written in a file read from disk, which a human put there. A trusted author's
 compile of the same source (`profile=None`, the CLI, `over_the_transport=
 False`) is untouched. The transport predicate `_escaping_use` delegates to
 `compiler.escaping_use_path`, so the two doors cannot drift apart. Evidence:
@@ -122,6 +137,7 @@ through to the on-disk file of the same name, admitting text the caller never
 submitted (`gate_service.admit` passed its keys through verbatim).
 
 ## DEFERRED: the wasm-import path (item 45's confinement)
+## DEFERRED — the wasm-import path (item 45's confinement)
 
 The no-extern cut forbids host code for the untrusted author. The fuller answer
 item 329 names is to *allow* a per-turn host body but make its confinement
@@ -130,6 +146,8 @@ tier's canonical ABI, `backends/wasm/canonical.py`) with the granted tools wired
 in as **host imports**, run it under wasmtime's component model, and let an
 escape attempt be a **wasm trap** (caught by the runtime; the host is never
 touched) rather than a compile refusal.
+escape attempt be a **wasm trap** — caught by the runtime, the host never
+touched — rather than a compile refusal.
 
 Why deferred:
 
@@ -141,6 +159,7 @@ Why deferred:
 - Pure confinement also SEVERS the granted tool reach: a component that cannot
   touch the host cannot call a granted host-backed tool either. The wasm-import
   path has to thread the granted tools back in as controlled host imports: a
+  path has to thread the granted tools back in as controlled host imports — a
   real design, not a flag.
 - The canonical ABI still cannot lower Float / Map / resources / function-values
   across the boundary (see `quarantine.py` module docstring, verdict

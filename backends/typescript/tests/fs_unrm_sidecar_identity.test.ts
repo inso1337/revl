@@ -35,6 +35,7 @@
 // or malformed string is refused `EIDENTITY`, not read as an absent key.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -163,6 +164,9 @@ function readable(real: string): boolean {
 // below cannot be satisfied by an inverse that simply refuses always. The first
 // control also asserts the positive direction of the digest, which is the one
 // assertion here that needs the new park capture.
+// The non-vacuity controls: an honest unrm is unchanged and stays quiet. They
+// pass before this change as well as after it, so the refusals below cannot be
+// satisfied by an inverse that simply refuses always.
 // ===========================================================================
 
 describe('an untampered unrm is unchanged', () => {

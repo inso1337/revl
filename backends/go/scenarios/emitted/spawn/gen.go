@@ -198,6 +198,7 @@ func Worker(cfg WorkerConfig) stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			probe, err := stc.Service[Probe](ctx, _keyProbe)
 			if err != nil {
 				return nil, err
@@ -246,6 +247,7 @@ func Supervisor() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			probe, err := stc.Service[Probe](ctx, _keyProbe)
 			if err != nil {
 				return nil, err

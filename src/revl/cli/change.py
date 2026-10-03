@@ -287,6 +287,7 @@ def _run_undo(args) -> int:
                 # for the unload below (issue #3381)
                 session.rehold_compensation_residue(
                     session.swap(ir, origin=origin, agent_authored=False))
+                session.swap(ir, origin=origin)
         result = session.undo(to_session)
         session.rehold_compensation_residue(result)
     except (SessionError, RevlError) as error:
@@ -458,6 +459,7 @@ def _estop_outstanding(wal_path: str | None) -> dict:
     still owed, and exactly what `revl recover` would replay. A recover that
     replayed one writes the runtime's `aborted` record naming it, which settles
     it too (issue #1477, `wal.settled_descriptor_seqs`). Counting them
+    still owed, and exactly what `revl recover` would replay. Counting them
     here re-derives the inventory from the durable log rather than trusting the
     dead process's memory."""
     if not wal_path:
@@ -504,6 +506,7 @@ def _estop_outstanding_placement(index_path: str, index: dict) -> dict:
 def _estop_outstanding_wal(wal_path: str) -> dict:
     """The outstanding entries of one WAL."""
     from ..wal import WALIntegrityError, read_wal, settled_descriptor_seqs  # noqa: PLC0415
+    from ..wal import WALIntegrityError, read_wal  # noqa: PLC0415
     try:
         wal = read_wal(wal_path)
     except (OSError, WALIntegrityError) as error:
@@ -514,6 +517,15 @@ def _estop_outstanding_wal(wal_path: str) -> dict:
     settled = settled_descriptor_seqs(records)
     descriptors = [r for r in records if r.get("record") == "discharge-descriptor"]
     owed = [d for d in descriptors if d.get("seq") not in settled]
+    discharged: set = set()
+    descriptors: list[dict] = []
+    for record in wal.get("records") or []:
+        kind = record.get("record")
+        if kind == "discharge":
+            discharged.update(record.get("discharged") or [])
+        elif kind == "discharge-descriptor":
+            descriptors.append(record)
+    owed = [d for d in descriptors if d.get("seq") not in discharged]
     return {
         "known": True,
         "wal": wal_path,
@@ -551,17 +563,22 @@ def _render_estop(report: dict) -> str:
     outstanding = report.get("outstanding") or {}
     lines.append("")
     if outstanding.get("entries") is not None:
+    if outstanding.get("known"):
         lines.append(f"  outstanding ({outstanding['count']}):")
         for entry in outstanding["entries"] or []:
             key = entry.get("idempotency")
             where = f"[{entry['process']}] " if entry.get("process") else ""
             lines.append(
                 f"    {where}seq {entry.get('seq')}  {entry.get('entry')}  "
+                f"    seq {entry.get('seq')}  {entry.get('entry')}  "
                 f"{entry.get('receiver')}.{entry.get('method')}"
                 + (f"  [idempotency {key}]" if key else ""))
         if not outstanding["entries"] and outstanding.get("known"):
             lines.append(_nothing_outstanding(outstanding))
     if not outstanding.get("known"):
+        if not outstanding["entries"]:
+            lines.append("    (none on the WAL — nothing durable was registered)")
+    else:
         lines.append(f"  outstanding: {outstanding.get('note', 'unknown')}")
     lines.append("")
     lines.append("  The instance is DEAD; there is no resume (item 443).")
@@ -705,6 +722,10 @@ def _run_recover(args) -> int:
         if world is not None:
             report["binding"] = world.describe()
     except (RecoveryError, WALIntegrityError, OSError, ValueError) as error:
+        report = recover(args.wal, session=session, snapshot=snapshot,
+                         reissue=reissue,
+                         forward_admissions=getattr(args, "forward", False))
+    except (RecoveryError, WALIntegrityError, OSError) as error:
         # A corrupt or unreadable WAL is a diagnostic, not a traceback: recover
         # is the tool an operator reaches for AFTER a crash, so a mid-file
         # corruption (WALIntegrityError) or an unreadable log (OSError) must
@@ -916,6 +937,7 @@ def _run_replay(args) -> int:
     crossing is refused, or when the candidate is refused. With `--probe`: 0
     when the report is produced, 2 on an unreadable or malformed input, because
     the probe does not decide anything to exit on.
+    crossing is refused, or when the candidate is refused.
     """
     if getattr(args, "under", None):
         return _run_counterfactual(args)
@@ -951,6 +973,9 @@ def _run_counterfactual(args) -> int:
     """The `--under POLICY` half of `revl replay`: counterfactual incident
     replay over the WAL (roadmap item 467). Reads the record and compiles the
     candidate; fires no effect.
+    candidate; fires no effect."""
+    from ..counterfactual import (CounterfactualError, replay_under,  # noqa: PLC0415
+                                  render)
 
     With `--probe` it builds the probe report over every `--candidate`
     composition (item 2806, Slice 1). `--candidate` is collected as a list of
@@ -981,6 +1006,7 @@ def _run_counterfactual(args) -> int:
     files = compositions[0] if compositions else None
     try:
         doc = replay_under(args.wal, args.under, candidate=files)
+        doc = replay_under(args.wal, args.under, candidate=args.candidate)
     except CounterfactualError as error:
         print(f"error: {error}", file=sys.stderr)
         return 2
@@ -1062,6 +1088,8 @@ def _run_repair(args) -> int:
                 Path(p).read_text(encoding="utf-8")
             arguments["candidate"] = {
                 "files": [os.path.abspath(p) for p in args.candidate]}
+                "source": "\n".join(Path(p).read_text(encoding="utf-8")
+                                    for p in args.candidate)}
         except OSError as error:
             print(f"error: cannot read candidate: {error}", file=sys.stderr)
             return 1
@@ -1103,6 +1131,11 @@ def _run_quarantine(args) -> int:
     to fail on), 1 when it was trapped, timed out, rejected, or refused
     (unconfined), and (with --require-runtime) 3 when the substrate toolchain
     is absent so the candidate could not be proven."""
+    unavailable) and, with --policy, the admission decision. Exit status: 0 when
+    the candidate passed (or was deferred/unavailable — nothing to fail on), 1
+    when it was trapped, timed out, or rejected, and (with --require-runtime) 3
+    when the substrate toolchain is absent so the candidate could not be
+    proven."""
     from ..mcp import quarantine as _quarantine  # noqa: PLC0415
     from ..mcp.session import Session  # noqa: PLC0415
 
@@ -1129,6 +1162,7 @@ def _run_quarantine(args) -> int:
 
     verdict = report.get("verdict")
     if verdict in ("trapped", "timeout", "rejected", "refused"):
+    if verdict in ("trapped", "timeout", "rejected"):
         return 1
     if verdict == "unavailable" and getattr(args, "require_runtime", False):
         return 3
@@ -1142,6 +1176,7 @@ def _render_quarantine(report: dict) -> str:
     glyph = {"passed": "PASS", "trapped": "TRAP", "timeout": "TIMEOUT",
              "rejected": "REJECT", "deferred": "DEFER",
              "unavailable": "SKIP", "refused": "REFUSE"}.get(verdict, "?")
+             "unavailable": "SKIP"}.get(verdict, "?")
     lines = [f"quarantine: {glyph}  ({verdict})", f"  {report.get('note', '')}"]
     sub = report.get("substrate") or {}
     counts = sub.get("counts") or {}

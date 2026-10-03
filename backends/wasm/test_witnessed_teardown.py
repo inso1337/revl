@@ -8,6 +8,8 @@ against the same contract: three entry kinds over ACTIVATION-REGISTERED
 entries (a method-time compensation stays refused unless it is the extern's own
 DECLARED `compensate`, which item 564/#1979 registers into a runtime
 accumulator — docs/wasm-capabilities.md), a two-phase abort, and a
+entries (method-time compensation stays refused — the wasm accumulator is
+fixed at activation, docs/wasm-capabilities.md), a two-phase abort, and a
 commit path that discharges `transactional`/`compensation` entries while a
 `bracket` still releases.
 
@@ -19,6 +21,9 @@ Two layers, mirroring the split `backends/wasm/emit.py` and
   Float witness uses the 8-byte slot representation rather than a narrowed
   i32, the same "never silently degrade" contract every other wasm-tier
   refusal test in this directory checks;
+  text and on `EmitError` refusals (Float-in-witness, method-time
+  compensation), the same "never silently degrade" contract every other
+  wasm-tier refusal test in this directory checks;
 * execution-level tests (gated by `pytest.importorskip("wasmtime", ...)`,
   the same pattern `test_spawn_exec.py`/`test_accessor_exec.py` use) run the
   compiled module on a live wasmtime instance and observe the three-way
@@ -169,10 +174,15 @@ def test_compensation_entry_is_phase_two_only():
 
 
 def test_float_in_witness_goes_through_the_slot_representation():
+def test_float_in_witness_is_refused_not_mis_emitted():
     """A witnessed extern's witness type goes through the SAME `_check_type`
     gate every other value on this tier does, and `Result[Float, ...]` is now a
     lowered value: the payload stores the f64 bit pattern in its 8-byte slot
     (never a narrowed i32), so the witness position is not silently degraded."""
+    gate every other value on this tier does (item 301: the refusal has to
+    recurse into every value position, not just the obvious ones) — a
+    `Result[Float, ...]` witness is refused by name, never silently narrowed
+    into an i32 slot that does not fit an f64."""
     src = '''
     extern witnessed[t] fn markf(v: Float) -> Result[Float, Str]
         undo revertf(result)
@@ -186,6 +196,8 @@ def test_float_in_witness_goes_through_the_slot_representation():
     wat = emitter.emit(compile_source(src, "t.rvl"))["ProbeFloat"]
     assert "f64.reinterpret_i64" in wat, wat
     assert "f64.const 0x1.8000000000000p+0" in wat, wat
+    with pytest.raises(emitter.EmitError, match="Float"):
+        emitter.emit(compile_source(src, "t.rvl"))
 
 
 def test_method_time_compensation_stays_refused():
@@ -202,6 +214,8 @@ def test_method_time_compensation_stays_refused():
     registrable — a compensation spelled at the SITE, where the tier cannot see
     how many times it is owed. The prefix is unchanged; the tail now says which
     spelling survives and why."""
+    silently admitted now that compensation entries are real. The wasm
+    accumulator is fixed at activation; nothing in this slice lifts that."""
     src = '''
     service Bus { emission fn send(x: Int) -> Int }
     service S { emission fn f(x: Int) -> Int }

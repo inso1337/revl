@@ -81,6 +81,11 @@ remains the strongest tool for a whole job at once. And everything here reads
 the workflows, with one exception: the gates that make a skip a failure
 (`REVL_CROSS_TIER_SLOW`, `REVL_SWEEP_ALL_TIERS`, `REVL_REQUIRE_*`) must also be
 set by a suite `make pre-merge` can run (issue #2210), see the last section.
+there: a toolchain-probe skip that does NOT go through a `revl.test` tier
+runner. tests/test_time_coeffect.py probing for backends/python/.venv by hand is
+one; `pytest.importorskip` anywhere is another. Those remain per-file, and the
+`backend-wasm` job's junit skip audit remains the strongest tool for a whole
+job at once.
 """
 
 from __future__ import annotations
@@ -434,6 +439,7 @@ def _pytest_targets(run: str) -> list[str]:
     targets: list[str] = []
     for line in run.splitlines():
         if "pytest" not in line or line.lstrip().startswith("#"):
+        if "pytest" not in line:
             continue
         prefix = ""
         # `cd backends/python && .venv/bin/pytest -q` runs in a subdirectory,
@@ -459,6 +465,7 @@ def _pytest_targets(run: str) -> list[str]:
         # whole tree (issue #2210), which is the one answer it cannot give.
         if any(_RUN_TIME_SELECTION.fullmatch(a) for a in args):
             continue
+        args = line.split("pytest", 1)[1].split()
         paths = [
             a for a in args
             if not a.startswith("-") and (a.endswith(".py") or "/" in a)
@@ -466,6 +473,7 @@ def _pytest_targets(run: str) -> list[str]:
         if not paths:
             targets.append(prefix or ".")
         targets += [_normalized(prefix + p) for p in paths]
+        targets += [prefix + p for p in paths]
     return targets
 
 
@@ -692,6 +700,17 @@ def _executing_steps(doc: dict) -> list[tuple[str, dict, dict, dict]]:
                     _when(step.get("if"), e) is not False for e in events):
                 continue
             out.append((job, spec, step, {**job_env, **(step.get("env") or {})}))
+def _steps_setting(name: str) -> list[tuple[str, str]]:
+    """(job, run-command) for every workflow step whose `env:` sets `name`."""
+    out: list[tuple[str, str]] = []
+    for path in sorted(WORKFLOWS.rglob("*.yml")) + sorted(WORKFLOWS.rglob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job, spec in (doc.get("jobs") or {}).items():
+            job_env = (spec or {}).get("env") or {}
+            for step in (spec or {}).get("steps") or []:
+                step_env = {**job_env, **((step or {}).get("env") or {})}
+                if name in step_env:
+                    out.append((job, str((step or {}).get("run", ""))))
     return out
 
 
@@ -896,6 +915,25 @@ _REQUIRE_ENV = "REVL_REQUIRE_TIERS"
 # file -- it may only shrink, `test_no_stale_tier_exemptions` sees to that, and
 # `test_local_declaration_carries_a_real_reason`'s rules apply to the prose.
 _TIER_NOT_REQUIRED_IN_CI: dict[str, str] = {
+    "rust": (
+        "`conformance` installs a rust toolchain, but `RUNNERS['rust']` also "
+        "reaches for crates.io to resolve cordis-rs and answers an absent-"
+        "toolchain skip when the index is unreachable. Requiring the tier would "
+        "turn a network blip into a red build on an unrelated PR, so closing "
+        "this means vendoring or caching the crate registry in that job first. "
+        "The tier still executes there when the index answers; what is missing "
+        "is the guarantee, not the coverage."
+    ),
+    "java": (
+        "`RUNNERS['java']` compiles against in-repo stubs unless "
+        "REVL_CORDIS4J_CLASSES points at real cordis4j classes, and that "
+        "variable is set only in `backend-java`, which never collects tests/ -- "
+        "the hole already enumerated in _KNOWN_WRONG_JOB above. Requiring the "
+        "java tier before that pairing is fixed would demand the stub path in "
+        "the job that has a JDK while the real path stays unmeasured, which "
+        "buys a green tick and no coverage. Close it with _KNOWN_WRONG_JOB, "
+        "in one change, not before."
+    ),
     "wasm": (
         "The wasm tier needs BOTH wasmtime and a cordis-wasm checkout, and only "
         "`backend-wasm` provisions the second (a pinned clone plus its own "
@@ -904,6 +942,14 @@ _TIER_NOT_REQUIRED_IN_CI: dict[str, str] = {
         "gates enumerated verbatim. Requiring the tier in a job that has no "
         "cordis-wasm would red the build for a substrate it was never given; "
         "the coverage is real and it lives there."
+    ),
+    "go": (
+        "`conformance` and `frontend-cordis` both pin go 1.26, so the tier does "
+        "execute in CI, and tools/conformance.py --execute --require-execution "
+        "already fails that job when the go runtime is missing. What is not "
+        "wired is this switch on the go-driving files, which needs the same "
+        "green-first proof the py/ts step below got before being turned on. It "
+        "is a follow-on of one step, not a missing toolchain."
     ),
 }
 
@@ -1014,8 +1060,10 @@ def _tier_test_sources() -> list[Path]:
 
 def _tier_test_files() -> dict[Path, set[str]]:
     """Test file -> the tiers it actually drives a runner or a probe on."""
+    """Test file -> the tiers it actually drives a runner on."""
     out: dict[Path, set[str]] = {}
     for path in _tier_test_sources():
+    for path in _test_sources():
         try:
             tree = ast.parse(path.read_text(encoding="utf-8"))
         except SyntaxError:  # pragma: no cover - a broken test file is its own failure
@@ -1027,6 +1075,7 @@ def _tier_test_files() -> dict[Path, set[str]]:
                 out[path] = probed
             continue
         tiers = _tier_names_in(tree) | probed
+        tiers = _tier_names_in(tree)
         # `RUNNERS[tier]` with a parametrized `tier`: the literal subscript scan
         # finds nothing, so fall back to what the module parametrizes over.
         if "RUNNERS[" in text and not tiers:
@@ -1048,6 +1097,21 @@ def _require_steps() -> list[tuple[str, str, set[str]]]:
     """(job, run-command, required tiers) for each gating step setting the switch."""
     return [(job, str(step.get("run", "")), _required_in(env))
             for job, _spec, step, env in _gating_steps() if _REQUIRE_ENV in env]
+    """(job, run-command, required tiers) for each step setting the switch."""
+    out: list[tuple[str, str, set[str]]] = []
+    for path in sorted(WORKFLOWS.rglob("*.yml")) + sorted(WORKFLOWS.rglob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job, spec in (doc.get("jobs") or {}).items():
+            job_env = (spec or {}).get("env") or {}
+            for step in (spec or {}).get("steps") or []:
+                step_env = {**job_env, **((step or {}).get("env") or {})}
+                if _REQUIRE_ENV not in step_env:
+                    continue
+                raw = str(step_env[_REQUIRE_ENV])
+                names = {n for n in raw.replace(",", " ").split() if n}
+                tiers = set(_TIERS) if "all" in names else names
+                out.append((job, str((step or {}).get("run", "")), tiers))
+    return out
 
 
 def test_every_tier_test_is_required_to_actually_run_in_some_ci_job():
@@ -1442,6 +1506,7 @@ def _runtime_provisioning_jobs() -> list[tuple[str, list[str]]]:
     separate steps of the same job, and it is the job that carries the venv
     from one to the other. Only steps that execute and can fail the build
     count (`_gating_steps`), so a job nothing starts provisions nothing.
+    from one to the other.
     """
     by_job: dict[int, tuple[str, list[str]]] = {}
     for job, spec, step, _env in _gating_steps():
@@ -1454,6 +1519,17 @@ def _runtime_provisioning_jobs() -> list[tuple[str, list[str]]]:
         for run in runs:
             targets += _pytest_targets(_command_lines(run))
         out.append((job, targets))
+    for path in sorted(WORKFLOWS.rglob("*.yml")) + sorted(WORKFLOWS.rglob("*.yaml")):
+        doc = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        for job, spec in (doc.get("jobs") or {}).items():
+            runs = [str((step or {}).get("run", ""))
+                    for step in (spec or {}).get("steps") or []]
+            if not any(_CORDIS_SETUP in run for run in runs):
+                continue
+            targets: list[str] = []
+            for run in runs:
+                targets += _pytest_targets(_command_lines(run))
+            out.append((job, targets))
     return out
 
 

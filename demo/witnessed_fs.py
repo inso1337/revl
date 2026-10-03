@@ -88,6 +88,7 @@ def demo_commit(stack):
     session.unload()  # clean unload == implicit commit
     print("1. COMMIT: the mutation is the deliverable, no prompt")
     print(f"     artifact.txt = {(root / 'artifact.txt').read_text(encoding='utf-8')!r} (was 'v1')")
+    print(f"     artifact.txt = {(root / 'artifact.txt').read_text()!r} (was 'v1')")
     print(f"     stale.txt exists: {(root / 'stale.txt').exists()} (removed, stays removed)")
 
 
@@ -102,6 +103,8 @@ def demo_abort(stack):
     print(f"2. ABORT ({state}): reverts residue-free")
     print(f"     artifact.txt = {(root / 'artifact.txt').read_text(encoding='utf-8')!r} (restored)")
     print(f"     stale.txt = {(root / 'stale.txt').read_text(encoding='utf-8')!r} (un-removed)")
+    print(f"     artifact.txt = {(root / 'artifact.txt').read_text()!r} (restored)")
+    print(f"     stale.txt = {(root / 'stale.txt').read_text()!r} (un-removed)")
     print(f"     leftover snapshot/garbage residue: {residue or 'none'}")
 
 

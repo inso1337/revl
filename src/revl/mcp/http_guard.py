@@ -27,6 +27,10 @@ its body when:
     that sends neither header (curl, an MCP client) is not browser-driven and
     passes, as the MCP transport spec requires;
   * it carries any of those headers more than once.
+  * it carries an `Origin` that is not listed in `--allow-origin`. A request with
+    no `Origin` (every non-browser client) passes this check. The MCP transport
+    spec requires exactly this (`Origin` present and invalid: 403);
+  * it carries either header more than once.
 
 It also holds the one dispatch lock both listeners use (`DispatchLock`): a
 live `Session` runs one asyncio loop with `run_until_complete`, so two request
@@ -285,6 +289,7 @@ class Listener(ThreadingHTTPServer):
     thread so one slow client cannot stall `accept`. It binds with
     `REVL_HTTP_BACKLOG` (default `DEFAULT_BACKLOG`) rather than socketserver's
     default of 5, so a connection burst waits in the queue, not in `connect`."""
+    thread so one slow client cannot stall `accept`."""
 
     daemon_threads = True
 

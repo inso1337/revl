@@ -46,9 +46,14 @@ def test_a_leak_is_caught():
     lifecycle assertion catches it at runtime, on both halves (R4 and R1).
     (Until issue #1859 the leak was a non-inverse `undo`, which the checker
     now refuses.)"""
+def test_a_leaky_undo_is_caught():
+    """examples/lifecycle_leak.rvl passes every static check — G4 sees an
+    acquisition with an `undo` and cannot know it is not the inverse. The
+    lifecycle assertion catches it at runtime."""
     result = _revl_test(str(EXAMPLES / "lifecycle_leak.rvl"))
     assert result.returncode == 1
     assert "FAIL a composition left loaded leaves residue" in result.stdout
+    assert "FAIL a leaky undo leaves residue" in result.stdout
     assert "host resources never released" in result.stdout
     assert "open() with no close()" in result.stdout
     assert "(R1)" in result.stdout

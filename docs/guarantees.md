@@ -69,6 +69,17 @@ does not support it.
 | "The compiler is formally verified." | The Lean layer proves statements about a model of the admission judgment, and a differential oracle compares that model with the shipped checker on a corpus. Say that, and link formal/STATUS.md. | always: no proof covers the compiler itself |
 | "The ledger records 182 oracle rows." | Do not copy theorem or oracle-row totals into prose, they change with every formal landing. Point to formal/STATUS.md. | always: the total belongs to the ledger, not to prose |
 <!-- docgen:formal-wording end -->
+| Code | Guarantee (one line) | Enforced at | Origin |
+| ---- | -------------------- | ----------- | ------ |
+| [G1](rejections.md#g1--declared-access) | declared access: a component reads only what it requires | lower (name-scoped) | Cordis paradigm (paper Def. 25) |
+| [G2](rejections.md#g2--provision-disjointness) | provision disjointness: one provider per key (per realm) | linker | Cordis paradigm (paper Def. 43) |
+| [G3](rejections.md#g3--acyclic-dependencies) | acyclic dependencies: a cycle can never activate | linker | Cordis paradigm (paper section 6.5) |
+| [G4](rejections.md#g4--inverse-or-emit) | every mutation carries an inverse, or admits irreversibility with `emit` | lower (emission fixed point) | Cordis paradigm (paper Def. 8, section 6.1) |
+| [G5](rejections.md#g5--teardown-cannot-register-effects) | teardown cannot register effects | by construction (grammar) | Cordis paradigm lifecycle-reentrancy hardening (DESIGN.md anchor "DS mod 6 / PR #39") |
+| [G6](rejections.md#g6--purity-outside-effect-forms) | purity outside effect forms | parser / checker | Cordis paradigm (paper Def. 48, confinement) |
+| [G7](rejections.md#g7--derived-lifo-teardown) | derived LIFO teardown | by lowering (+ totality check) | Cordis paradigm (paper Thm. 16) |
+| [G8](rejections.md#g8--the-boundary-surface-is-enumerable) | the boundary surface is enumerable | parser (extern classification) + `revl audit` | Cordis paradigm (paper section 6.1) |
+| G9 | untrusted data cannot create authority without a declared declassification | lower (taint flow) | revl-original (no paper anchor; roadmap item 249) |
 
 ## Ordering and async rules (the A family)
 
@@ -86,6 +97,12 @@ source docs. A4 and A7 are not assigned. Definitions are quoted from the
 | [A5](rejections.md#a5-compensation-accompanies-an-emission) | compensation accompanies an emission: a verb whose reversibility class is `compensatable` must fill its `compensate` slot, and one whose class has no inverse may not | parser (extern declaration), via the `ui_family` registry; reported as G4 / `reversibility` | revl-original (emission/compensation design, DESIGN.md section 3.5; computer-use reversibility registry, `src/revl/ui_family.py`, roadmap item 522) |
 | [A6](rejections.md#a6-provide-methods-match-the-service-signature) | provide-methods match the service signature | lower / compat gate | other (standard signature checking, revl service model); origin unconfirmed |
 | [A8](rejections.md#a8-mid-body-failure-reverts-and-contains) | mid-body failure reverts and contains (L-Raise) | lower (+ runtime) | Cordis paradigm (L-Raise failure transition) |
+| [A1](rejections.md#a1--iteration-boundaries-exist-only-during-activation) | iteration boundaries exist only during activation (`await` only in a component body) | lower | Cordis paradigm (paper section 4.3.2, cited in rejections.md#a1) |
+| [A2](rejections.md#a2--no-acquisition-after-a-provision) | no acquisition after a provision | linker | Cordis paradigm lifecycle ordering (LIFO + withdrawal guard); explicit paper anchor unconfirmed |
+| [A3](rejections.md#a3--host-safe-identifiers) | host-safe identifiers (renames, never refuses) | lowering transform | revl-original (lowering rename transform) |
+| [A5](rejections.md#a5--compensation-accompanies-an-emission) | compensation accompanies an emission | by construction | revl emission/compensation design (DESIGN.md section 3.5); origin unconfirmed |
+| [A6](rejections.md#a6--provide-methods-match-the-service-signature) | provide-methods match the service signature | lower / compat gate | other (standard signature checking, revl service model); origin unconfirmed |
+| [A8](rejections.md#a8--mid-body-failure-reverts-and-contains) | mid-body failure reverts and contains (L-Raise) | lower (+ runtime) | Cordis paradigm (L-Raise failure transition) |
 | A9 | a provide key is declared in the component's `provides` clause | lower | origin: unconfirmed (declared-provision rule, both directions: a block's key is in the clause, and every clause key has a block or a `realms(...)` route, issue #1172; see rejections.md "A9") |
 
 ## Type-layer rejections (T1 to T4)
@@ -102,6 +119,10 @@ tier.
 | [T2](rejections.md#t2-absence-is-optt) | absence is `Opt[T]`; `null` has no type | checker | other (option types / null-free; revl design choice, syntax-2.0 section 2) |
 | [T3](rejections.md#t3-a-hole-is-an-obligation) | a hole is an obligation: it checks, but never runs (admission refuses open holes) | admission gate | revl-original (holes, docs/holes.md) |
 | [T4](rejections.md#t4-no-field-read-off-an-erased-value-any--value) | no field read off an erased value (`Any` / `Value`) | checker (frontend) | revl-original (roadmap item 380) |
+| [T1](rejections.md#t1--declared-types-are-checked) | declared types are checked (arity, args, returns, exhaustiveness, fields) | checker | other (standard static type checking) |
+| [T2](rejections.md#t2--absence-is-optt) | absence is `Opt[T]`; `null` has no type | checker | other (option types / null-free; revl design choice, syntax-2.0 section 2) |
+| [T3](rejections.md#t3--a-hole-is-an-obligation) | a hole is an obligation: it checks, but never runs (admission refuses open holes) | admission gate | revl-original (holes, docs/holes.md) |
+| [T4](rejections.md#t4--no-field-read-off-an-erased-value-any--value) | no field read off an erased value (`Any` / `Value`) | checker (frontend) | revl-original (roadmap item 380) |
 
 ## Confidentiality and taint (qualifiers, G9, Secret families)
 
@@ -169,6 +190,10 @@ its discharge descriptor: the inverse is reconstructed from the `Ok` witness, so
 the witness is the field a crash log keeps. That field shows the placeholder too when the author marks the witness confidential on either end of the call:
 `Result[Secret[W], E]` on the extern or `Secret[W]` on the inverse's parameter.
 See `docs/design/243-witnessed-externs.md` rule 4.
+the witness is the field a crash log keeps, and an author who declared the
+witness confidential — on either end of the call, `Result[Secret[W], E]` on the
+extern or `Secret[W]` on the inverse's parameter — gets the placeholder there
+too. See `docs/design/243-witnessed-externs.md` rule 4.
 
 ## Sandbox isolation rungs
 

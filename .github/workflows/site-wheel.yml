@@ -68,6 +68,11 @@ on:
   # tool itself and this file. `tests/test_workflow_path_filters_2872.py`
   # derives that set from those constants and reds when a path below stops
   # covering one, so the list cannot quietly fall behind the tool.
+  # Every push to main. No `paths:` filter on purpose: the contract spans
+  # pages.yml, the builder, pyproject's version and the two pages that fetch the
+  # wheel by name — a filter listing them is one more thing that can be silently
+  # wrong, and the job is a stdlib-only zip build measured in seconds against a
+  # 13-job matrix that runs on the same event.
   push:
     branches: [main]
     paths:

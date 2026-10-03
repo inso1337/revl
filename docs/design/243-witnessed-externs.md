@@ -66,6 +66,7 @@ extern witnessed[fs] fn rm(path: Str) -> Result[FsWitness, FsError]
    The witness is also **declarable confidential**, and when it is, the durable
    descriptor must not carry it in the clear. The author says so from either end
    of the call, on the producing side with `Result[Secret[W], E]`, or on the
+   of the call — on the producing side with `Result[Secret[W], E]`, or on the
    receiving side by declaring the inverse's parameter `Secret[W]`:
 
        extern witnessed fn lease(...) -> Result[Str, Str] undo release(result)
@@ -77,6 +78,8 @@ extern witnessed[fs] fn rm(path: Str) -> Result[FsWitness, FsError]
    behind; every tier's WAL writer frames its placeholder off that stamp. The
    The declaration authorises disclosure to the *receiver*, not to the recorder.
    A `$REVL_WAL` is a plaintext file at rest that `revl recover` replays.
+   declaration authorises disclosure to the *receiver*, not to the recorder — a
+   `$REVL_WAL` is a plaintext file at rest that `revl recover` replays.
 5. **Idempotent replay.** Abort replay can crash mid-way and `revl recover` replays
    again; inverses must be idempotent (or replay checkpointed). Rename-back run
    twice must not clobber.
@@ -148,8 +151,11 @@ tiers (Slice 2b) follow this contract.
    LIFO is preserved for free, but only for effects fired from the ACTIVATION
    body; point 5 states the rule for effects fired mid-session, from a provide
    method)
+   LIFO is preserved for free — for effects fired from the ACTIVATION body;
+   point 5 states the rule for effects fired mid-session, from a provide method)
    and, at disposal time, replays `undo(witness)`
    iff `not frame._committed` (abort) and otherwise discharges, dropping both
+   iff `not frame._committed` (abort) and otherwise discharges — dropping both
    the inverse and the witness references (witness GC). A bracket (`acquire`)
    still `yield lambda: <undo>`s and replays unconditionally: the two entry
    kinds are now observably distinct at runtime (clean unload reverts the
@@ -161,6 +167,9 @@ tiers (Slice 2b) follow this contract.
    That call uses the extern's own `undo` with the `Ok` payload bound as
    `result`; on `Err`, it registers nothing. There is no site-spelled undo; the
    accumulator owns it.
+   yields `_revl_frame.transactional((lambda result: <declared undo>), x.value)`
+   — the extern's own `undo` with the `Ok` payload bound as `result`; on `Err`
+   it registers nothing. There is no site-spelled undo; the accumulator owns it.
    emit keys this off the acquisition calling a `witnessed` extern (the externs
    table), so no new IR step field is required and every non-witnessed program
    emits byte-identically.
@@ -169,6 +178,7 @@ tiers (Slice 2b) follow this contract.
    consuming the IR; it did NOT touch `src/revl/lower.py`. A witnessed call in
    effect position without a site undo (`effect rm(p)`) is still refused by the
    lowerer, enabling that surface (auto-attaching the declared undo, stamping
+   lowerer — enabling that surface (auto-attaching the declared undo, stamping
    the step) is a lower.py slice that belongs with 245's commit UX, kept out of
    Slice 2a to avoid colliding with item 312's live lower/main work. The runtime
    seam is proven against the IR the future lowerer will emit (a standard
@@ -177,6 +187,7 @@ tiers (Slice 2b) follow this contract.
 
 5. **Mid-session (post-activation) witnessed effects replay LIFO across the
    whole frame, item 318 seam, item 369 fix.** Points 1–2 reason about the
+   whole frame — item 318 seam, item 369 fix.** Points 1–2 reason about the
    ACTIVATION body, whose disposers the host runtime unwinds LIFO. But the real
    agent case is a witnessed effect fired from a PROVIDE METHOD, per tool call,
    AFTER the component activated. Such an effect has no body generator to
@@ -186,10 +197,12 @@ tiers (Slice 2b) follow this contract.
    deliverable). So `Frame.transactional_method` PARKS the entry in
    `_deferred_transactional` and `Frame.drain` disposes it once the
    commit-vs-abort bit is settled; commit discharges it; abort replays its
+   commit-vs-abort bit is settled — commit discharges it, abort replays its
    inverse.
 
    The contract: **a mid-session witnessed inverse replays in reverse
    INVOCATION order (LIFO) across the whole frame, identical to an
+   INVOCATION order (LIFO) across the whole frame — identical to an
    activation-body inverse, and consistent with G7.** `_deferred_transactional`
    is appended newest-last as each provide method fires, so `drain` must dispose
    it newest-FIRST (`reversed`). On a commit the order is immaterial (every
@@ -198,6 +211,11 @@ tiers (Slice 2b) follow this contract.
    idempotent-and-total, so a second replay is a no-op. If the oldest inverse
    runs first, it finds nothing and silently no-ops; the newer inverse then
    undoes into the hole. A FIFO drain therefore leaves residue or DESTROYS
+   entry no-op discharges); on an ABORT it is load-bearing: two inverses whose
+   paths OVERLAP must undo newest-first, or — because every stdlib/fs.rvl
+   inverse is idempotent-and-total ("a second replay is a no-op") — the oldest
+   inverse runs first, finds nothing, silently no-ops, and the newer inverse
+   then undoes into the hole. A FIFO drain therefore leaves residue or DESTROYS
    pre-session data while abort still reports `noResidue: true`, silently
    voiding the item 246 auto-approve of a class-(a) crossing. Three-line
    reproducers (`mv a b ; mv b c`; `rm a ; touch a`; `write "V2" ; write "V3"`,

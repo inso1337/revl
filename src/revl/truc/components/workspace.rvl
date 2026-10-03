@@ -7,6 +7,8 @@ use "../externs.rvl" {
   host_manifest_read, host_read, host_exists, host_read_sources,
   host_commit_add, host_commit_rm, host_write_assembly, host_vendored_drift,
   host_print, host_stack_check, host_apply
+  host_commit_add, host_commit_rm, host_write_assembly, host_print,
+  host_stack_check, host_apply
 }
 
 pub service Workspace {

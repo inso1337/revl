@@ -131,10 +131,12 @@ def test_a_replacing_host_write_reverts_on_the_runtime_abort(root, session):
 
     fs.write_witnessed("notes.txt", "v2")
     assert target.read_text(encoding="utf-8") == "v2"
+    assert target.read_text() == "v2"
 
     _abort(owner, frame)
 
     assert target.read_text(encoding="utf-8") == "v1"
+    assert target.read_text() == "v1"
     assert not any((root / ws.PREIMAGE_DIRNAME).iterdir())
 
 
@@ -185,10 +187,12 @@ def test_three_host_writes_revert_newest_first_on_the_runtime_abort(root, sessio
     fs.write_witnessed("doc.txt", "v3")
     fs.write_witnessed("doc.txt", "v4")
     assert target.read_text(encoding="utf-8") == "v4"
+    assert target.read_text() == "v4"
 
     _abort(owner, frame)
 
     assert target.read_text(encoding="utf-8") == "v1"
+    assert target.read_text() == "v1"
 
 
 def test_a_drifted_sidecar_reaches_the_report_through_the_runtime_abort(root, session):
@@ -219,6 +223,7 @@ def test_a_drifted_sidecar_reaches_the_report_through_the_runtime_abort(root, se
     # and the drifted snapshot was NOT installed: the abort left the forward
     # mutation and NAMED it, which is what residue means.
     assert target.read_text(encoding="utf-8") == "v2"
+    assert target.read_text() == "v2"
 
 
 def test_a_withdrawn_frame_escrows_the_host_write_until_the_verdict(root, session):
@@ -236,11 +241,13 @@ def test_a_withdrawn_frame_escrows_the_host_write_until_the_verdict(root, sessio
 
     frame.drain()                               # verdict still None: escrow
     assert target.read_text(encoding="utf-8") == "v2"           # held, neither replayed nor discharged
+    assert target.read_text() == "v2"           # held, neither replayed nor discharged
 
     owner.begin_abort()
     owner.finalize_abort()
 
     assert target.read_text(encoding="utf-8") == "v1"
+    assert target.read_text() == "v1"
 
 
 # ===========================================================================
@@ -270,6 +277,7 @@ def test_nonvacuity_a_deferred_inverse_still_replays_on_this_drive(root, session
 
     assert replayed == [{"path": str(target), "was": "v1"}]
     assert target.read_text(encoding="utf-8") == "v1"
+    assert target.read_text() == "v1"
 
 
 def test_nonvacuity_a_committing_drive_keeps_the_host_write(root, session):
@@ -289,6 +297,7 @@ def test_nonvacuity_a_committing_drive_keeps_the_host_write(root, session):
     _commit(owner, frame)
 
     assert target.read_text(encoding="utf-8") == "v2"
+    assert target.read_text() == "v2"
 
 
 def test_the_commit_discharges_the_entry_rather_than_leaving_it_unsettled(root, session):

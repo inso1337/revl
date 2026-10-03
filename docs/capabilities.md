@@ -411,3 +411,4 @@ and an `x-revl.guarantee` that names the witnessed bound.
 | MCP | `src/revl/mcp/schema.py` — `_tool`, `_method_effects` |
 | tests | `tests/test_capabilities.py`, `tests/test_247_capability_reach_spellings.py`, `examples/rejections/g4_capability_not_declared.rvl`, `tests/test_witnessed_service_op_1912.py` (the reversible class) |
 | the reversible class | `src/revl/parser.py` — `MethodDecl.witnessed`; `src/revl/emission_analysis.py` — `_witnessed_hint`, `_method_emissions(irreversible_only=True)`; `src/revl/lower.py` — the `decl.witnessed` arm of the G4 check |
+| tests | `tests/test_capabilities.py`, `tests/test_247_capability_reach_spellings.py`, `examples/rejections/g4_capability_not_declared.rvl` |

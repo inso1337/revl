@@ -51,6 +51,7 @@ from typing import Optional
 
 from . import policy as _policy
 from .cap_order import CapError, split_ceilings, parse_stored_cap
+from .cap_order import CapError, split_ceilings, parse_cap
 from .wal import KIND_EFFECT, read_wal, scope_host_confined, WALIntegrityError
 
 #: The three verdicts one recorded action can carry. `UNDECIDED` is not a
@@ -130,6 +131,7 @@ LEGS = (
         "the approval edges threaded onto the composition, which an IR carries "
         "and a WAL does not, and the issue-#1982 never-standing clause bounding "
         "which capabilities one operator yes may cover standing"),
+        "and a WAL does not"),
     Leg("register", "unmodelled",
         "the declared register of the token, a declaration fact"),
     Leg("evidence", "unmodelled",
@@ -184,6 +186,7 @@ def _cap_token(raw: object) -> tuple:
     text = str(raw)
     try:
         cap = parse_stored_cap(text)
+        cap = parse_cap(text)
     except CapError:
         return text, None, {}
     resource, ceilings = split_ceilings(cap)
@@ -330,6 +333,7 @@ def _approval_rows(policy, token: str) -> tuple:
     """The ONE approval rule the ordinary approval leg reads for this token, as
     the driver computes it — plus the issue-#1982 never-standing clause that
     bounds the token.
+    the driver computes it.
 
     `policy.py:2414` reads `policy.approval_rule_for(token)`, which is the
     FIRST rule whose glob covers the token (`policy.py:587-594`), and the gate
@@ -350,6 +354,7 @@ def _approval_rows(policy, token: str) -> tuple:
     `unchanged`, the one wrong answer this surface can give. `never_standing_for`
     returns the first covering clause for the same shadowing reason."""
     rows = []
+    one for some origin has to stay in."""
     rule = policy.approval_rule_for(token)
     if rule is not None:
         rows.append((rule.pattern, rule.ttl_ms))
@@ -357,6 +362,9 @@ def _approval_rows(policy, token: str) -> tuple:
     if never is not None:
         rows.append(("never-standing", never.pattern))
     return _rows(rows)
+    if rule is None:
+        return ()
+    return _rows(((rule.pattern, rule.ttl_ms),))
 
 
 def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
@@ -371,6 +379,7 @@ def _evidence_rows(policy, name: str, token: str, realms) -> tuple:
     gate, so it is not part of this leg's surface. Including it would mark a
     recorded pair undecided and report widening when the operator only added an
     advisory grade, while changing the grade would move nothing."""
+    text would miss."""
     rows = []
     for rule in policy.evidence_rules:
         if rule.outcome is not None:

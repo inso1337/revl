@@ -18,6 +18,8 @@ the bundler eats that sentence, none of it reaches the person shipping.
 Measured on `origin/main` at ad6a5025c, over a composition with a `Float`
 return, which wasm refused then and the other five tiers emitted (wasm has
 since learned `Float`, so the MAP composition below stands in for it now):
+Measured on `origin/main` at ad6a5025c, over the FLOAT composition below (wasm
+refuses a `Float` return; the other five tiers emit it):
 
     $ revl bundle app.rvl --out app.revlbundle
     wrote bundle app.revlbundle
@@ -71,16 +73,23 @@ from revl.__main__ import main  # noqa: E402
 
 
 # wasm refuses a `Map` value by name; python/typescript/rust/java/go all emit
+# wasm refuses a `Float` return by name; python/typescript/rust/java/go all emit
 # this composition. One document, one refusing tier, five emitting ones, which
 # is exactly the shape the issue describes.
 MAP = """
 service Table {
   fn echo(x: Map[Str, Int]) -> Map[Str, Int]
+FLOAT = """
+service Temp {
+  fn read() -> Float
 }
 
 component TableSvc provides table: Table {
   provide table {
     fn echo(x) = x
+component TempSvc provides temp: Temp {
+  provide temp {
+    fn read() = 1.5
   }
 }
 """
@@ -111,6 +120,22 @@ ABSENT_REASON = "emitter unavailable here"
 WASM_EMIT_ERROR = B._emitter("wasm").EmitError
 
 
+@pytest.fixture(autouse=True)
+def _restore_emitter_cache():
+    """`bundle._EMITTERS` is a module-global cache. A test that repoints
+    `_BACKENDS_ROOT` has to clear it to be served the tree it points at, so put
+    it back afterwards.
+
+    It is restored rather than cleared up front, and that matters: clearing it
+    reloads `emit.py` and produces a SECOND, unrelated `EmitError` class, which
+    `WASM_EMIT_ERROR` would then no longer match. That is the same fact the
+    `_refusal_class` docstring records, met here by accident first."""
+    saved = dict(B._EMITTERS)
+    yield
+    B._EMITTERS.clear()
+    B._EMITTERS.update(saved)
+
+
 def _write(tmp_path: Path, name: str, source: str) -> str:
     path = tmp_path / name
     path.write_text(source, encoding="utf-8")
@@ -129,6 +154,7 @@ def _norm_ir(source: str) -> dict:
 
 def _wasm_refusal_sentence() -> str:
     """The sentence the wasm emitter itself raises for MAP.
+    """The sentence the wasm emitter itself raises for FLOAT.
 
     Taken from the emitter rather than written out here on purpose: the point of
     the issue is that the bundle carries the EMITTER'S sentence, so a test that
@@ -138,6 +164,7 @@ def _wasm_refusal_sentence() -> str:
     module = B._emitter("wasm")
     with pytest.raises(WASM_EMIT_ERROR) as caught:
         module.emit(copy.deepcopy(_norm_ir(MAP)))
+        module.emit(copy.deepcopy(_norm_ir(FLOAT)))
     return str(caught.value)
 
 
@@ -173,6 +200,7 @@ def _backends_root_without(tmp_path: Path, missing: str) -> Path:
             (root / backend).mkdir()
             continue
         (root / backend).symlink_to(B._BACKENDS_ROOT / backend)
+    B._EMITTERS.clear()  # or the cache answers from the real tree
     return root
 
 
@@ -196,6 +224,7 @@ def test_the_wasm_tier_still_refuses_this_composition_by_name():
     nothing if the sentence stops being raised."""
     sentence = _wasm_refusal_sentence()
     assert "Map" in sentence
+    assert "Float" in sentence
     assert "not lowerable" in sentence
 
 
@@ -203,6 +232,7 @@ def test_five_tiers_do_emit_this_composition():
     """The defect is a bundle that looks complete. That only bites when the
     other tiers succeed, so pin that they do."""
     norm = _norm_ir(MAP)
+    norm = _norm_ir(FLOAT)
     emitted = [b for b in B.DEFAULT_BACKENDS
                if B._emit_files(b, norm)[0] is not None]
     assert emitted == ["python", "typescript", "rust", "java", "go"]
@@ -212,6 +242,7 @@ def test_five_tiers_do_emit_this_composition():
 
 def test_a_refusal_is_recorded_with_the_emitters_own_sentence(tmp_path):
     src = _write(tmp_path, "app.rvl", MAP)
+    src = _write(tmp_path, "app.rvl", FLOAT)
     out = tmp_path / "app.revlbundle"
     B.build_bundle([src], str(out))
 
@@ -259,6 +290,7 @@ def test_emit_files_separates_refused_absent_and_emitted(monkeypatch):
     """The three outcomes at the one function the issue names, including the
     bare-`ValueError` control for the same call."""
     norm = _norm_ir(MAP)
+    norm = _norm_ir(FLOAT)
 
     files, refusal = B._emit_files("python", norm)
     assert refusal is None and files and "components.py" in files
@@ -290,6 +322,7 @@ def test_an_emitter_with_no_emiterror_class_cannot_swallow_anything(monkeypatch)
 
 def test_revl_bundle_exits_4_and_prints_the_emitters_sentence(tmp_path, capsys):
     src = _write(tmp_path, "app.rvl", MAP)
+    src = _write(tmp_path, "app.rvl", FLOAT)
     code = B.run_bundle(_Args([src], tmp_path / "app.revlbundle"))
     assert code == B.REFUSED_EXIT == 4
 
@@ -323,6 +356,7 @@ def test_the_cli_returns_the_refusal_exit_code(tmp_path, capsys):
     """Through `revl.__main__.main`, so the code the shell sees is the one
     `run_bundle` returns and nothing flattens it on the way out."""
     src = _write(tmp_path, "app.rvl", MAP)
+    src = _write(tmp_path, "app.rvl", FLOAT)
     code = main(["bundle", src, "--out", str(tmp_path / "app.revlbundle")])
     assert code == 4
     assert _wasm_refusal_sentence() in capsys.readouterr().err
@@ -330,6 +364,7 @@ def test_the_cli_returns_the_refusal_exit_code(tmp_path, capsys):
 
 def test_json_output_carries_the_refusal_and_still_exits_4(tmp_path, capsys):
     src = _write(tmp_path, "app.rvl", MAP)
+    src = _write(tmp_path, "app.rvl", FLOAT)
     code = B.run_bundle(_Args([src], tmp_path / "app.revlbundle", json=True))
     assert code == 4
     captured = capsys.readouterr()
@@ -350,6 +385,7 @@ def _tier(report, name: str):
 
 def test_verify_re_checks_a_recorded_refusal(tmp_path):
     src = _write(tmp_path, "app.rvl", MAP)
+    src = _write(tmp_path, "app.rvl", FLOAT)
     out = tmp_path / "app.revlbundle"
     B.build_bundle([src], str(out))
 
@@ -380,6 +416,7 @@ def test_a_recorded_refusal_that_no_longer_holds_is_a_mismatch(tmp_path):
 
 def test_a_recorded_refusal_with_a_different_diagnostic_is_a_mismatch(tmp_path):
     src = _write(tmp_path, "app.rvl", MAP)
+    src = _write(tmp_path, "app.rvl", FLOAT)
     out = tmp_path / "app.revlbundle"
     B.build_bundle([src], str(out))
     manifest = _manifest(out)

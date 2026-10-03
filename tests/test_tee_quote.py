@@ -52,6 +52,7 @@ from revl.tee_quote import (  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "tee"
 MANIFEST = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
+MANIFEST = json.loads((FIXTURES / "manifest.json").read_text())
 NOW = datetime(2026, 6, 1, tzinfo=timezone.utc)
 
 

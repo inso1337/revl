@@ -176,6 +176,7 @@ component Sup { let w = effect spawn Worker with { tag: "x" } undo w.dispose() }
 
 FIXTURE = (ROOT / "examples" / "rejections"
            / "g4_spawn_widens_capability.rvl").read_text(encoding="utf-8")
+           / "g4_spawn_widens_capability.rvl").read_text()
 
 
 def test_renaming_the_wiring_key_cannot_launder_a_boundary():

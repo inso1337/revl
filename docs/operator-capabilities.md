@@ -107,6 +107,9 @@ Grammar (blank lines and `#` comments ignored):
   inside `may swap on tenant_a*, tenant_b*` (or two such lines), and inside a
   grant on its name. A component with no realm is selected by its name or by
   `*` only. A `may not` applies when **any** of the component's labels matches.
+  *or* any **realm** it is isolated into. `tenant_a*` matches the realm
+  `tenant_a` and the component `tenant_a_cache` alike; `*` matches anything.
+  Omit `on <subject>` to mean `on *`.
 * **allow vs deny** — `may` contributes a capability; `may not` prohibits, and
   **deny wins** over any allow (exactly as in the boundary policy). An operator
   is **closed by default**: a verb with no allow that selects the target is
@@ -357,6 +360,7 @@ and sends the raw `R || S` hex as `asProof`. `sign_cast` needs the
 to a session the quorum does not trust, and the pure-Python signer's timing
 leaks the key (issue #1460). For a session on your own machine,
 `sign_cast(..., network_exposed=False)` keeps the pure path. Retiring the credential is one
+and sends the raw `R || S` hex as `asProof`. Retiring the credential is one
 line, effective on the next cast:
 
 ```
@@ -424,6 +428,7 @@ policy-style why:
 The target set is computed **before** the action runs, from the composition
 that would run: the session's IR for a change to the running composition, the
 candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
+The target set is computed **before** the action runs, from the session's IR:
 
 * **swap** — the components the candidate actually *changes*: those added,
   removed, or whose IR entry differs (modulo provenance) from the running
@@ -438,6 +443,7 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
   not` is matched against the union of both sides, so a swap that moves a
   component out of a realm is still selected by a `may not` rule on the realm
   it leaves. A no-op or server-side re-admit targets the whole composition.
+  one. A no-op or server-side re-admit targets the whole composition.
 * **load** — every component in the candidate (a cold boot instantiates all).
 * **restore**: every component the snapshot's `sources` compile to, the
   composition that actually boots. The document's `manifest` and
@@ -447,6 +453,7 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
   compile whose disk reads differ from the gate's (another path, or a changed
   text) is refused, so a file changed between the decision and the boot
   cannot load.
+* **restore** — every component named in the snapshot manifest.
 * **unload / edit / snapshot / undo / rollback** — the whole running
   composition (each operates on all of it).
 * **estop** (item 443) — the whole running composition too, and deliberately:
@@ -454,12 +461,15 @@ candidate's compile for a `load`, the snapshot's `sources` for a `restore`.
   `may estop on tenant_a*` authorizes only while every live component is
   isolated only into `tenant_a*` realms; an operator who must always be able
   to hit the button needs
+  `may estop on tenant_a*` authorizes only while every live component is in
+  `tenant_a*`; an operator who must always be able to hit the button needs
   `may estop on *`.
 * **deploy** (item 476, issue #830) — the whole running composition, because a
   deploy reconfigures it as ONE coordinated unit across a machine boundary: a
   subject-scoped `may deploy on tenant_a*` authorizes only while every live
   component is isolated only into `tenant_a*` realms. It has its own verb
   rather than folding into
+  component is in `tenant_a*`. It has its own verb rather than folding into
   `swap` because a deploy crosses a machine boundary, which an operator must be
   able to authorize separately from a same-host swap: being trusted to hot-swap
   a component locally is not the same as being trusted to push the composition
@@ -588,5 +598,6 @@ not. The one deliberate exception is `revl_approvals` (issue #2991): it is
 read-only but gated under `approve`, because the pending questions and their
 blast radius are inside the approval boundary rather than diagnostics about
 it. The profile is the **pre-networking safeguard** — opt-in for networked and
+not. The profile is the **pre-networking safeguard** — opt-in for networked and
 multi-operator use, so that when the management plane is exposed it already has
 declared, checked capability bounds instead of implicit root.

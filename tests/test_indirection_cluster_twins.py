@@ -280,11 +280,14 @@ def test_undo_through_a_handle_to_a_plain_operation_compiles():
     `Map.new()` must be released by its own `drop()` and an `extern acquire`
     by its declared inverse, so neither can carry a teardown through the
     handle at all."""
+    NON-emission operation. What is refused is the crossing, not the handle."""
     _ok(WORKER + """
 service Box { fn put(k: Str) -> Int }
 component Sup requires net: Net, box: Box {
+component Sup requires net: Net {
   let w = effect spawn Worker with { } undo w.dispose()
   let m = effect box.put("k") undo w.task.status()
+  let m = effect Map.new() undo w.task.status()
 }
 """)
 
@@ -295,6 +298,7 @@ def test_undo_through_a_pure_local_arrow_compiles():
     follows the indirection rather than refusing every indirect call. The
     write is keyed by the same expression, so the `undo` is still its table
     inverse (issue #1945)."""
+    follows the indirection rather than refusing every indirect call."""
     _ok("""
 service Cache { fn set(key: Str) }
 component C provides cache: Cache {
@@ -303,6 +307,7 @@ component C provides cache: Cache {
     fn set(key) {
       let f = (x: Str) => x
       effect store.insert(f(key), "v")
+      effect store.insert(key, "v")
       undo   store.remove(f(key))
       return
     }
@@ -352,14 +357,17 @@ def test_undo_of_a_computed_value_reached_through_a_container_compiles():
     The container is a spelling, not a boundary, in both directions. The write
     is keyed by the same projection, so the `undo` is still its table inverse
     (issue #1945)."""
+    The container is a spelling, not a boundary, in both directions."""
     _ok(MINT + """
       let box = { k: emit mint_token(u) }
       effect store.insert(box.k, "v")
+      effect store.insert("k", "v")
       undo   store.remove(box.k)
 """ + MINT_TAIL)
     _ok(MINT + """
       let ts = [emit mint_token(u)]
       effect store.insert(ts[0], "v")
+      effect store.insert("k", "v")
       undo   store.remove(ts[0])
 """ + MINT_TAIL)
 

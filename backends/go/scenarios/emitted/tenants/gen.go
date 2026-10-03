@@ -195,6 +195,7 @@ func TenantAStore() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			var store *Map[string]
 			if err := ctx.Effect(func() stc.Inverse {
 				store = MapNew[string]()
@@ -238,6 +239,7 @@ func TenantBStore() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			var store *Map[string]
 			if err := ctx.Effect(func() stc.Inverse {
 				store = MapNew[string]()
@@ -281,6 +283,7 @@ func TenantAApp() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			kv, err := stc.Service[Kv](ctx, _keyKv)
 			if err != nil {
 				return nil, err
@@ -307,6 +310,7 @@ func TenantBApp() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			kv, err := stc.Service[Kv](ctx, _keyKv)
 			if err != nil {
 				return nil, err

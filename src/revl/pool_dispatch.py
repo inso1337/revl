@@ -80,6 +80,7 @@ link                         what it means
 ``peer-state``               the peer could not record the task id before
                              running it, so it ran nothing: a run it cannot
                              remember is a run it could repeat
+                             cannot be re-run for a second receipt
 ``bundle-path``              a multi-file task names a file by a path that
                              would leave the workspace, collide with another,
                              or read as a flag (`pool_bundle`). Named
@@ -150,8 +151,6 @@ over a confidential channel is roadmap item 118's mTLS work
 than a second implementation of it.
 
 Signing off loopback needs the constant-time backend
-====================================================
-
 Both ends sign with ECDSA. `revl.tee_quote`'s pure-Python signer takes time
 that depends on the secret nonce, and a peer bound off loopback signs a receipt
 in answer to every task a remote party sends it, which is exactly the setting
@@ -160,6 +159,7 @@ So a non-loopback ``serve`` and a dispatch to a non-loopback ``--peer-addr``
 refuse to start without the ``revl[crypto]`` extra, and name it. On loopback
 the pure path is kept; if you tunnel that loopback port to another machine you
 have made it network-exposed, and the extra is what you need.
+=======
 """
 
 from __future__ import annotations
@@ -196,6 +196,7 @@ TASK_VERSION = "1.1"
 #: The shape before issue #2720. Kept as a named constant so the version field
 #: decides which members are required, never the presence of a member.
 TASK_VERSION_V1 = "1.0"
+TASK_VERSION = "1.0"
 
 #: Distinct from every other domain in the pool protocols, for the reason
 #: `peer_pool` and `pool_receipt` each give: without separation one protocol's
@@ -559,6 +560,7 @@ def build_task(*, pool_id: str, charter_digest: str, peer_id: str,
                at: Optional[datetime] = None,
                grant: Optional[Mapping[str, Any]] = None,
                policy_digest: Optional[str] = None) -> dict:
+               at: Optional[datetime] = None) -> dict:
     """The task BODY, before it is signed.
 
     ``artifact_digest`` is computed here from what is carried rather than
@@ -574,9 +576,11 @@ def build_task(*, pool_id: str, charter_digest: str, peer_id: str,
     shape so a direct caller is not made to invent authority it does not have.
     The peer echoes both into its receipt, and the operator checks the echo
     against this signed record."""
+    peer can name a missing, extra or altered file."""
     body = {
         "kind": TASK_KIND,
         "version": TASK_VERSION_V1,
+        "version": TASK_VERSION,
         "pool_id": pool_id,
         "charter_digest": charter_digest,
         "peer_id": peer_id,
@@ -607,16 +611,19 @@ def build_task(*, pool_id: str, charter_digest: str, peer_id: str,
 def sign_task(body: Mapping[str, Any],
               identity: peer_identity.PeerIdentity, *,
               network_exposed: bool = False) -> dict:
+              identity: peer_identity.PeerIdentity) -> dict:
     """Sign a task under the operator's identity key pair.
 
     Asymmetric, so the peer holds only a public key. A peer that could verify a
     task under a SHARED key could also mint one, and a peer that can mint its
     own work has no bound at all. ``network_exposed`` is passed to
     :func:`revl.peer_identity.sign_record` (issue #1460)."""
+    own work has no bound at all."""
     if not isinstance(identity, peer_identity.PeerIdentity):
         raise DispatchError("signing a task needs the operator's PeerIdentity")
     return peer_identity.sign_record(TASK_DOMAIN, body, identity,
                                      network_exposed=network_exposed)
+    return peer_identity.sign_record(TASK_DOMAIN, body, identity)
 
 
 def _task_shape(record: Any) -> str:
@@ -628,6 +635,7 @@ def _task_shape(record: Any) -> str:
     without its grant and policy digest is malformed, never read as a 1.0 task
     that happened to drop them: guessing is how a missing member becomes a
     passing check."""
+    whatever the first field access happened to raise."""
     if not isinstance(record, Mapping):
         return "the record is not an object"
     if record.get("kind") != TASK_KIND:
@@ -740,6 +748,7 @@ class DeliveryLedger:
                  runner: str, effect_class: str,
                  bundle: Optional[Mapping[str, Any]] = None,
                  task: Optional[Mapping[str, Any]] = None) -> dict:
+                 bundle: Optional[Mapping[str, Any]] = None) -> dict:
         """Record that a task went out. Refuses a task id that was used
         before, so a captured task id cannot open a second slot to deliver
         into.
@@ -755,6 +764,7 @@ class DeliveryLedger:
         written before this field existed simply has none, and its receipts are
         the old shape, which cannot count as evidence for a promotion that
         requires the binding."""
+        a task ran and not only the digest that covers them."""
         if task_id in self.tasks:
             prior = self.tasks[task_id]
             self._event("dispatch-refused", task_id, link=LINK_REPLAYED_TASK,
@@ -998,6 +1008,8 @@ def _runner_argv(runner: str, names: list[str]) -> list[str]:
 def execute(runner: str, source: Artifact, workspace: Path,
             *, timeout: float = 300.0) -> tuple[dict, float]:
     """Run one artifact in one workspace and return ``(result, wall_seconds)``.
+            *, timeout: float = 300.0) -> dict:
+    """Run one artifact in one workspace and return the result record.
 
     The artifact is written under ``workspace`` and named RELATIVELY on the
     command line, with ``workspace`` as the working directory, so no absolute
@@ -1015,6 +1027,7 @@ def execute(runner: str, source: Artifact, workspace: Path,
     ``timed_out`` stays in the result because it is deterministic: it is the
     peer's own observation of the call it made. A program is free to exit 124,
     so the receipt never infers a timeout from the exit code."""
+    the runner is handed its ``.rvl`` files in path order."""
     if runner not in RUNNERS:
         raise DispatchError(f"unknown runner {runner!r}")
     workspace.mkdir(parents=True, exist_ok=True)
@@ -1037,6 +1050,8 @@ def execute(runner: str, source: Artifact, workspace: Path,
         # whatever `pool serve` was started with.
         done = _childproc.run(argv, cwd=str(workspace), capture_output=True,
                               stdin=subprocess.DEVNULL,
+        done = subprocess.run(argv, cwd=str(workspace), capture_output=True,
+                              stdin=subprocess.DEVNULL, text=True,
                               timeout=timeout, check=False)
         code, out, err = done.returncode, done.stdout, done.stderr
     except subprocess.TimeoutExpired:
@@ -1048,6 +1063,9 @@ def execute(runner: str, source: Artifact, workspace: Path,
               "exit_code": code, "stdout": _scrub(out, workspace),
               "stderr": _scrub(err, workspace), "timed_out": timed_out}
     return result, round(time.monotonic() - started, 6)
+    return {"kind": RESULT_KIND, "version": RESULT_VERSION, "runner": runner,
+            "exit_code": code, "stdout": _scrub(out, workspace),
+            "stderr": _scrub(err, workspace)}
 
 
 def _receive_bundle(record: Mapping[str, Any], task_id: str
@@ -1168,6 +1186,7 @@ class PeerRunner:
         self.network_exposed = False
         if network_exposed:
             self.mark_network_exposed("a pool peer's receipts")
+                 workspace: Path, timeout: float = 300.0):
         self.charter_record = dict(charter_record)
         self.charter_digest = peer_pool.canonical_digest(self.charter_record)
         self.identity = identity
@@ -1235,6 +1254,7 @@ class PeerRunner:
         it is not)."""
         _require_backend(purpose)
         self.network_exposed = True
+        self.seen: dict[str, str] = {}
 
     def handle(self, record: Any) -> dict:
         """Check one task and, if it passes every check, run it and sign a
@@ -1267,11 +1287,13 @@ class PeerRunner:
                                 f"{type(error).__name__}: {error}")
 
     def _handle(self, record: Any, received: datetime) -> dict:
+        touch `seen`."""
         if pool_health.is_probe(record):
             return pool_health.answer_probe(
                 record, charter_record=self.charter_record,
                 identity=self.identity, operator_public=self.operator_public,
                 network_exposed=self.network_exposed)
+                identity=self.identity, operator_public=self.operator_public)
         shape = _task_shape(record)
         if shape:
             return _refusal(LINK_TASK_SHAPE, f"not a task: {shape}")
@@ -1377,11 +1399,14 @@ class PeerRunner:
                 # reproducible.
                 "budget_consumed": {"wall_seconds": wall_seconds},
             }
+        result = execute(runner, source, self.workspace / task_id,
+                         timeout=self.timeout)
         receipt = pool_receipt.issue_receipt(
             pool_id=record["pool_id"], task_id=task_id,
             artifact_digest=actual, result=result, identity=self.identity,
             bundle=_bundle_of(source), network_exposed=self.network_exposed,
             **binding)
+            bundle=_bundle_of(source))
         self.seen[task_id] = pool_receipt.receipt_digest(receipt)
         return {"ok": True, "task_id": task_id, "receipt": receipt,
                 "result": result}
@@ -1439,6 +1464,9 @@ def _read_frame(conn: socket.socket, *, deadline: Optional[float] = None,
     frame gets ``FRAME_READ_DEADLINE`` from now, so no read is unbounded."""
     if deadline is None:
         deadline = time.monotonic() + FRAME_READ_DEADLINE
+def _read_frame(conn: socket.socket, limit: int = MAX_FRAME_BYTES) -> bytes:
+    """One newline-terminated frame, bounded. A far side that never sends a
+    newline cannot make the near side grow without limit."""
     chunks: list[bytes] = []
     total = 0
     while True:
@@ -1578,6 +1606,45 @@ def serve(runner: PeerRunner, *, host: str = "127.0.0.1", port: int = 0,
                 pending.release()
                 conn.close()
                 raise
+            with conn:
+                # A connection that says nothing must not hold the worker.
+                # This loop serves one task at a time, so an unauthenticated
+                # party that connects and never writes would otherwise take
+                # the peer off the pool with no packets at all.
+                conn.settimeout(runner.timeout)
+                try:
+                    frame = _read_frame(conn)
+                    response = runner.handle(json.loads(frame))
+                except (DispatchError, ValueError) as error:
+                    response = _refusal(LINK_TASK_SHAPE,
+                                        f"unreadable frame: {error}")
+                except Exception as error:   # noqa: BLE001 - see below
+                    # The frame is parsed BEFORE any signature is checked, so
+                    # an unauthenticated party reaches this code. A worker that
+                    # a stranger can kill is a worker a stranger can take off
+                    # the pool, so the loop survives anything one frame can do
+                    # and answers with a refusal. `handle` is written never to
+                    # raise and the corpus pins that; this is the backstop for
+                    # what the corpus has not thought of, not a substitute.
+                    response = _refusal(
+                        LINK_TASK_SHAPE,
+                        f"the frame could not be processed: "
+                        f"{type(error).__name__}")
+                try:
+                    conn.sendall(json.dumps(response, sort_keys=True).encode()
+                                 + b"\n")
+                except OSError as error:
+                    # The far side went away between its request and its
+                    # answer. Nothing to do about it and nothing to stop for:
+                    # the work either ran or was refused, and both are already
+                    # recorded on this side.
+                    response = _refusal(
+                        LINK_PEER_UNREACHABLE,
+                        f"the answer could not be sent back: {error}",
+                        task_id=response.get("task_id", ""))
+            served += 1
+            if on_event is not None:
+                on_event(response)
             if once:
                 worker.join()
                 break
@@ -1606,9 +1673,11 @@ def send_task(task_record: Mapping[str, Any], *, host: str, port: int,
         with socket.create_connection((host, port),
                                       timeout=remaining) as conn:
             conn.settimeout(max(deadline - time.monotonic(), 0.001))
+        with socket.create_connection((host, port), timeout=timeout) as conn:
             conn.sendall(payload)
             conn.shutdown(socket.SHUT_WR)
             frame = _read_frame(conn, deadline=deadline)
+            frame = _read_frame(conn)
     except (OSError, DispatchError) as error:
         return _refusal(LINK_PEER_UNREACHABLE,
                         f"peer at {host}:{port} did not answer: {error}",
@@ -1640,6 +1709,7 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
                     when: Optional[datetime] = None,
                     network_exposed: bool = False,
                     task: Optional[Mapping[str, Any]] = None) -> dict:
+                    when: Optional[datetime] = None) -> dict:
     """Check what came back: the hash first, then the receipt.
 
     In that order deliberately. A hash failure says the bytes in hand are not
@@ -1667,6 +1737,8 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
                         task_id=str(receipt.get("task_id", "")))
     attestation = pool_receipt.attest_receipt(
         receipt, identity=attesting_identity, network_exposed=network_exposed)
+    attestation = pool_receipt.attest_receipt(receipt,
+                                              identity=attesting_identity)
     check = pool_receipt.check_receipt(
         receipt, attestation, pool_id=str(charter_record.get("pool_id", "")),
         peer_id=member.peer_id, artifact_digest=member.artifact_digest,
@@ -1675,6 +1747,7 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
         directory=directory, when=when,
         task=task if isinstance(task, Mapping) else None,
         require_bound=True)
+        directory=directory, when=when)
     if check.link:
         return _refusal(LINK_RECEIPT_REFUSED,
                         f"the receipt was refused on {check.link}: "
@@ -1705,6 +1778,7 @@ def _note_contact(pool_dir, peer_id: str, state: str, host: str, port: int,
 def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
              task_id: str, dispatch_identity: peer_identity.PeerIdentity,
              network_exposed: bool = False) -> dict:
+             task_id: str) -> dict:
     """Everything before the task leaves, as one transaction under the pool
     lock: the checks, the signed task, and the dispatch written into the
     ledger.
@@ -1718,10 +1792,13 @@ def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
 
     The grant and policy digest come from the MEMBER and the CHARTER, the two
     parties the pool already trusts for them, never from a caller's parameter.
+    lock: the checks, and the dispatch written into the ledger.
 
     Returns the refusal, or ``{"ok": True, ...}`` with what the send and the
     settlement need. Holds the lock only for local work (the checks, a compile
     and a local signature), never across the network."""
+    settlement need. Holds the lock only for local work (the checks and a
+    compile), never across the network."""
     with pool_state.locked(pool_dir):
         charter_record, roster = peer_pool.load_pool(pool_dir)
         ledger = load_ledger(pool_dir)
@@ -1777,6 +1854,7 @@ def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
                                   artifact_digest=digest, runner=runner,
                                   effect_class=effect_class.value,
                                   bundle=bundle, task=task)
+                                  bundle=bundle)
         if not written.get("ok"):
             return written
         roster.outstanding = ledger.outstanding()
@@ -1786,6 +1864,7 @@ def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
             "digest": digest, "effect_class": effect_class,
             "surface": surface, "task_id": task_id, "bundle": bundle,
             "task": task}
+            "surface": surface, "task_id": task_id, "bundle": bundle}
 
 
 def _settle(*, pool_dir, peer_id: str, task_id: str,
@@ -1793,6 +1872,7 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
             attesting_identity: peer_identity.PeerIdentity,
             network_exposed: bool = False,
             task: Optional[Mapping[str, Any]] = None) -> dict:
+            attesting_identity: peer_identity.PeerIdentity) -> dict:
     """Everything after the answer came back, as a second transaction under the
     pool lock.
 
@@ -1808,12 +1888,14 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
         ledger = load_ledger(pool_dir)
         outcome = _record_answer(ledger, roster=roster,
                                  charter_record=charter_record,
+        outcome = _record_answer(ledger, charter_record=charter_record,
                                  directory=directory, peer_id=peer_id,
                                  task_id=task_id, member=member,
                                  answer=answer,
                                  attesting_identity=attesting_identity,
                                  network_exposed=network_exposed,
                                  task=task)
+                                 attesting_identity=attesting_identity)
         roster.outstanding = ledger.outstanding()
         peer_pool.save_roster(pool_dir, roster)
         save_ledger(pool_dir, ledger)
@@ -1882,6 +1964,7 @@ def _record_refusal_violation(roster: peer_pool.Roster, peer_id: str,
 
 def _record_answer(ledger: "DeliveryLedger", *, roster: peer_pool.Roster,
                    charter_record, directory,
+def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
                    peer_id: str, task_id: str, member: peer_pool.Membership,
                    answer: Mapping[str, Any],
                    attesting_identity: peer_identity.PeerIdentity,
@@ -1895,6 +1978,8 @@ def _record_answer(ledger: "DeliveryLedger", *, roster: peer_pool.Roster,
     member-level record an operator reads in `pool status`. It changes no
     authority; the entry stays a record until a charter policy says otherwise.
     """
+                   attesting_identity: peer_identity.PeerIdentity) -> dict:
+    """Decide what the answer means and write it into ``ledger``."""
     if not answer.get("ok"):
         link = str(answer.get("link", LINK_RECEIPT_REFUSED))
         if link != LINK_PEER_UNREACHABLE:
@@ -1908,6 +1993,7 @@ def _record_answer(ledger: "DeliveryLedger", *, roster: peer_pool.Roster,
                               member=member, directory=directory,
                               attesting_identity=attesting_identity,
                               network_exposed=network_exposed, task=task)
+                              attesting_identity=attesting_identity)
     if not verdict.get("ok"):
         _record_refusal_violation(roster, peer_id, verdict,
                                   receipt=answer.get("receipt"),
@@ -1953,10 +2039,12 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
     written down and then never signed would read as outstanding work that was
     never sent."""
     exposed = signer_exposure(host, f"a dispatch to the remote peer {host}")
+    ledger entry, the task and the receipt all follow from it."""
     prepared = _prepare(pool_dir=pool_dir, peer_id=peer_id, source=source,
                         runner=runner, task_id=task_id,
                         dispatch_identity=dispatch_identity,
                         network_exposed=exposed)
+                        runner=runner, task_id=task_id)
     if not prepared.get("ok"):
         return prepared
     charter_record = prepared["charter_record"]
@@ -1964,10 +2052,17 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
     effect_class = prepared["effect_class"]
     task = prepared["task"]
     answer = send_task(task, host=host, port=port, timeout=timeout)
+    body = build_task(pool_id=str(charter_record.get("pool_id", "")),
+                      charter_digest=peer_pool.canonical_digest(charter_record),
+                      peer_id=peer_id, task_id=task_id, artifact=source,
+                      runner=runner, effect_class=effect_class)
+    answer = send_task(sign_task(body, dispatch_identity), host=host,
+                       port=port, timeout=timeout)
     outcome = _settle(pool_dir=pool_dir, peer_id=peer_id, task_id=task_id,
                       member=prepared["member"], answer=answer,
                       attesting_identity=attesting_identity,
                       network_exposed=exposed, task=task)
+                      attesting_identity=attesting_identity)
     if answer.get("link") == LINK_PEER_UNREACHABLE:
         _note_contact(pool_dir, peer_id, pool_health.HEALTH_UNREACHABLE,
                       host, port, link=LINK_PEER_UNREACHABLE,
@@ -2036,6 +2131,10 @@ def serve_command(args) -> int:
                   "remembered across a restart; a task is still refused when "
                   "its issued_at is outside the charter's window",
                   file=sys.stderr, flush=True)
+        runner = PeerRunner(charter_record=charter_record, identity=identity,
+                            operator_public=operator_public,
+                            workspace=workspace or Path(scratch),
+                            timeout=args.timeout)
 
         def announce(host, port):
             print(f"peer {identity.peer_id} listening on {host}:{port} "

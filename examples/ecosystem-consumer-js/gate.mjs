@@ -14,6 +14,8 @@
 // `revl` name on PyPI belongs to an unrelated project, so never
 // `pip install revl`) is the full reference compiler and can both refuse and
 // ADMIT. This module cannot ADMIT ANYTHING.
+// The py gate (`pip install revl`, `revl.gate.admit`) is the full reference
+// compiler and can both refuse and ADMIT. This module cannot ADMIT ANYTHING.
 // It is `crates/revl-gate` packaged for wasm: the composition and guarantee
 // layer (G1..G4, A1, PRELUDE, and parse failures as BAD) and NOT the reference
 // type layer. So `verdict.admitted` is `false` on every arm — that is the WIT

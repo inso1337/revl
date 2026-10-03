@@ -43,6 +43,7 @@ type ArrowN   = { params: List[ParamN], body: Expr, ret: Str }
 // exist; only the two lowerings that can see them read `blk`/`blkTail`.
 pub type ArmLetN = { name: Str, mutable: Bool, ty: Str, value: Expr }
 pub type ArmN = { pat: Str, bind: Str, body: Expr, blk: List[ArmLetN], blkTail: Expr, isBlk: Bool }
+pub type ArmN = { pat: Str, bind: Str, body: Expr }
 type MatchN   = { scrut: Expr, arms: List[ArmN] }
 pub type PartN = { kind: Str, text: Str, e: Expr }
 type TemplN   = { parts: List[PartN] }
@@ -170,6 +171,7 @@ fn render_arms(xs: List[ArmN]) -> Str {
     let body = a.isBlk ? render_arm_block(a.blk, a.blkTail) : render(a.body)
     out = out.push("(arm ".concat(a.pat).concat(" ").concat(b).concat(" ")
                    .concat(body).concat(")"))
+                   .concat(render(a.body)).concat(")"))
     i += 1
   }
   return out.join(" ")
@@ -985,6 +987,14 @@ fn p_arms(ts: List[Token], i: Int, d: Int) -> Arms {
           }
         }
         if (blk) {
+        let b = p_expr_d(ts, j + 1, d)
+        if (is_bad(b.e)) { ok = false }
+        if (!is_bad(b.e)) {
+          let bnd = bind
+          xs = xs.push({ pat: pat, bind: bnd, body: b.e })
+          j = b.i
+          // the reference breaks when an arm is not followed by `,`; the
+          // comma must be tested BEFORE it is consumed
           if (at(ts, j, ",")) { j += 1 } else { go = false }
         }
         if (!blk) {
@@ -1039,6 +1049,7 @@ fn p_inits(ts: List[Token], i: Int, d: Int) -> Inits {
 // Inverse of the lexer's `esc`: a left-to-right scan, so "%%p" reads back
 // as "%p" rather than as "|".
 pub fn unesc(s: Str) -> Str {
+fn unesc(s: Str) -> Str {
   var out = ""
   var i = 0
   let n = s.length()

@@ -33,6 +33,7 @@ import sys
 
 from . import ui_family
 from .errors import RevlError, foreign_increment_refusal
+from .errors import RevlError
 from .lexer import Token, lex
 
 
@@ -775,6 +776,7 @@ class ModelRouteArm:
     another arm, and an arm that does not write it is ordered by `candidates`
     alone. SYNTAX ONLY, as above: `revl.model_route` decides whether the arm
     it is written on can be ranked at all."""
+    `revl.model_route`."""
     origin: str
     role: str
     line: int
@@ -1085,6 +1087,12 @@ class RemoteRowDecl:
     self-host lexer needs no sync and no program using any of those words as an
     ordinary name is broken. `in` and `realm` are already keywords and are
     reused verbatim from `isolate`.
+    `remote`, `at`, `host`, `through`, `on_failure` and `redirect` are
+    CONTEXTUAL keywords,
+    recognised only in this one position inside a `composition` block. The
+    lexer's KEYWORDS set is untouched, so the self-host lexer needs no sync and
+    no program using any of those words as an ordinary name is broken. `in` and
+    `realm` are already keywords and are reused verbatim from `isolate`.
     """
     label: str
     key: str                       # the provision key the row claims
@@ -1504,6 +1512,7 @@ class LayerOp:
     concept the gate does not have.
     """
     op: str                   # "add" | "remove" | "replace" | "configure" | "resolve" | "place" | "grant"
+    op: str                   # "add" | "remove" | "replace" | "configure" | "resolve" | "place"
     line: int
     address: Address | None = None
     row: RowDecl | None = None                    # add / replace
@@ -1652,6 +1661,7 @@ class Derivation:
 class ExternDecl:
     name: str
     classification: str  # 'pure' | 'acquire' | 'emission' | 'witnessed' | 'local'
+    classification: str  # 'pure' | 'acquire' | 'emission' | 'witnessed'
     params: list[FnParam]
     returns: str | None
     undo: object | None
@@ -2778,6 +2788,8 @@ class Parser:
             return None
         block.reverse()
         return "\n".join(block)
+    def err(self, line: int, message: str, hint: str | None = None) -> RevlError:
+        return RevlError(self.filename, line, message, hint)
 
     # -- item 157: `;` as an optional statement separator/terminator
 
@@ -2914,6 +2926,8 @@ class Parser:
         line 1711 of `selfhost/emit_go.rvl` (as it was before the file was split)
         with a template complaint at line 1341: the wrong kind of error, 370
         lines from the statement that caused it.
+        `selfhost/emit_go.rvl:1711` with a template complaint at line 1341:
+        the wrong kind of error, 370 lines from the statement that caused it.
         Keeping the reword inside the tail costs the item-365 case nothing,
         since its failures land on the very next token after the stray close,
         and it leaves every failure outside the tail with the diagnostic the
@@ -3545,6 +3559,7 @@ class Parser:
                 prefer_resident = True
             arms.append(ModelRouteArm(origin, role, origin_tok.line,
                                       tuple(alternates), prefer_resident))
+                                      tuple(alternates)))
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -3583,6 +3598,11 @@ class Parser:
             # the HINT instead — that field is the reference's own and is not
             # mirrored — and the message catches up in the same slice that
             # mirrors `local` into the gate.
+        # 243) is a CONTEXTUAL keyword recognised only in this classification
+        # slot, so the self-hosted lexer's KEYWORDS set needs no sync and no
+        # program that used `witnessed` as an ordinary name is broken.
+        if self.peek().value not in ("pure", "acquire", "emission", "witnessed") \
+                or (not self.at("kw") and not self.at("ident", "witnessed")):
             raise self.err(
                 line,
                 "unclassified extern — expected `pure`, `acquire`, `emission`, or "
@@ -3593,6 +3613,8 @@ class Parser:
                      "accumulator auto-registers (docs/design/243-witnessed-externs.md), "
                      "and `local` is a durable write to local state that crosses no "
                      "boundary and so asks no owner (docs/syntax-2.0.md §6.1)",
+                     "and `witnessed` is a reversible mutation whose declared `undo` the "
+                     "accumulator auto-registers (docs/design/243-witnessed-externs.md)",
             )
         classification = self.next().value
         # Capability scope, `witnessed[fs]` / `emission[gateway.send]`
@@ -3605,6 +3627,7 @@ class Parser:
         # so the parse is still refused on them and the surface stays honest;
         # `local` (item 2146) writes durable local state and leaves the system
         # nowhere either, so it names no capability and is refused alike.
+        # so the parse is still refused on them and the surface stays honest.
         capabilities: tuple[str, ...] = ()
         if self.at("["):
             if classification not in ("witnessed", "emission"):
@@ -3867,6 +3890,7 @@ class Parser:
                           idempotency_key=idempotency_key, cache=cache,
                           validated=validated, retry=retry_budget,
                           derivation=derivation)
+                          validated=validated, retry=retry_budget)
 
     def _retry_budget(self) -> int:
         """The positive integer literal after a `retry` modifier (item 257 §5.2).
@@ -4166,6 +4190,8 @@ class Parser:
         with `confined:` and `idempotent(key: ...)`, the name is NOT resolved
         here - lower checks it against the declaration's actual parameter list.
         The parse funnels through `cap_order.make_cap`, the ONE canonical point: it
+        Values are STATIC literals (a string or a non-negative integer). The
+        parse funnels through `cap_order.make_cap`, the ONE canonical point: it
         validates against the CLOSED parameter registry (an unknown name like
         `pth=` refuses HERE, at parse, never silently inert), canonicalizes a
         path value (trailing slash dropped, `.`/`..`/`//`/`"/"` refused), refuses
@@ -4182,6 +4208,7 @@ class Parser:
         `_capability_decl` validated it, and `cap_order` reads the order back off
         the canonical VALUE — so a bound spelling round-trips through every fold
         that re-reads it."""
+        single point."""
         if not self.at("("):
             return token
         from . import cap_order  # noqa: PLC0415 - lazy, avoids an import cycle
@@ -4191,6 +4218,9 @@ class Parser:
         while not self.at(")"):
             name = self.expect("ident", what="a capability parameter name").value
             if self.at("="):
+            self.expect("=", what="`=` after a capability parameter name")
+            vtok = self.peek()
+            if vtok.kind in ("string", "int"):
                 self.next()
                 vtok = self.peek()
                 if vtok.kind in ("string", "int"):
@@ -4226,15 +4256,36 @@ class Parser:
                              "resolves the per-instance value), or `host=host` for "
                              "an argument-bound destination")
                 raw.append((name, value))
+                value: object = vtok.value
+            elif vtok.kind == "kw" and vtok.value == "config":
+                # a per-instance value (item 294 Slice 2): `path=config.job_root`
+                # names a config field the spawn site's `with { }` block binds to
+                # a literal; opaque to the static order until then.
+                self.next()
+                self.expect(".", what="`.` after `config` in a per-instance "
+                                      "capability value")
+                field = self.expect(
+                    "ident", what="a config field name after `config.`").value
+                value = cap_order.Symbol("config." + field)
             else:
                 # issue #1985: `network.call(host)` - the positional shorthand for
                 # `host=host`, where the destination IS the argument `host`.
                 raw.append((name, cap_order.Symbol(name)))
+                raise self.err(
+                    vtok.line,
+                    "a capability parameter value must be a string literal, an "
+                    "integer, or a per-instance `config.<field>` value, found "
+                    f"{vtok.value!r}",
+                    hint='write `path="/data/incoming"`, `calls=10`, or '
+                         "`path=config.job_root` (a spawn `with { }` binding "
+                         "resolves the per-instance value)")
+            raw.append((name, value))
             if self.at(","):
                 self.next()
         self.expect(")")
         try:
             return cap_order.make_cap(token, raw, declared).to_str()
+            return cap_order.make_cap(token, raw).to_str()
         except cap_order.CapError as exc:
             raise self.err(line, str(exc), hint=exc.hint) from exc
 
@@ -4757,6 +4808,7 @@ class Parser:
             while (self.at("kw") and self.peek().value in ("emission", "async", "commutative", "idempotent")) \
                     or self.at("ident", "endorse") or self.at("ident", "validated") \
                     or self.at("ident", "retry") or self.at("ident", "witnessed"):
+                    or self.at("ident", "retry"):
                 if self.at("ident", "endorse"):
                     endorse_origins = endorse_origins | self._endorse_slot()
                     continue
@@ -5336,6 +5388,7 @@ class Parser:
                     "expected `slo`, `row`, `remote`, `host`, `seam`, `place`, "
                     f"`grant`, `use`, `stack`, `site`, or `}}` in composition "
                     f"{name}, "
+                    f"`use`, `stack`, `site`, or `}}` in composition {name}, "
                     f"found {tok.value!r}",
                     hint="a composition document declares rows: "
                          '`row @label from "path.rvl" provides key`, '
@@ -5344,6 +5397,7 @@ class Parser:
                          '`seam @label on key("k") observe with @observer`, or '
                          'places one: `place @label on process "p" backend rust`, '
                          'or grants one its reach: `grant @label with { key }`. '
+                         'places one: `place @label on process "p" backend rust`. '
                          'It may also declare the service-level objectives the '
                          'rollout must hold, and what a live breach of each '
                          'one does: `slo { p95_latency: 250ms on breach divert '
@@ -5355,6 +5409,7 @@ class Parser:
                                site=site, remotes=remotes, hosts=hosts,
                                seams=seams, places=places, grants=grants,
                                slo=slo,
+                               seams=seams, places=places, slo=slo,
                                slo_responses=slo_responses,
                                slo_windows=slo_windows)
 
@@ -6012,10 +6067,12 @@ class Parser:
             f"expected `add`, `remove`, `replace`, `configure`"
             f"{', `resolve`, `place`, `grant`' if site else ''}, `touches`, "
             f"or `}}` in "
+            f"{', `resolve`, `place`' if site else ''}, `touches`, or `}}` in "
             f"layer `{layer}`, found {tok.value!r}",
             hint="there are four operations and no more (426 §3.2)"
                  + (", plus the site layer's `resolve`, `place` and `grant`"
                     if site else "")
+                 + (", plus the site layer's `resolve` and `place`" if site else "")
                  + ". There is no positional operation: load order is derived "
                    "from the wiring, not declared, so no layer gets to reorder "
                    "anything")
@@ -6040,6 +6097,7 @@ class Parser:
             seen.add(field_name)
             self.expect(":")
             out.append((field_name, self.row_config_value(), fline))
+            out.append((field_name, self.literal(), fline))
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -6054,6 +6112,8 @@ class Parser:
         at host("h:port") [pinned "<sha256-hex>"] [through <ident>]
         [on_failure(withdraw|result)] [redirect(refuse|same_origin)]
         [long_running]`
+        at host("h:port") [through <ident>] [on_failure(withdraw|result)]
+        [redirect(refuse|same_origin)] [long_running]`
 
         Item 424 D-424c.1, slice C2. Every word this clause introduces is a
         CONTEXTUAL keyword read only here (`remote`, `at`, `host`, `through`,
@@ -6236,6 +6296,7 @@ class Parser:
                              long_running=long_running,
                              long_running_line=long_running_line,
                              host_line=host_line, pin=pin, pin_line=pin_line)
+                             host_line=host_line)
 
     def host_row_decl(self, composition: str) -> HostRowDecl:
         """`host @label provides <key>: <Service> [in realm("r")]`
@@ -6415,6 +6476,7 @@ class Parser:
             seen.add(field_name)
             self.expect(":")
             out.append((field_name, self.row_config_value(), fline))
+            out.append((field_name, self.literal(), fline))
             if self.at(","):
                 self.next()
         self.expect("}")
@@ -6608,6 +6670,7 @@ class Parser:
                     )
                 acquire, undo, line, setup, is_async, mode, replay = \
                     self.effect_form(tok.line, bind=bind)
+                    self.effect_form(tok.line)
                 return LetEffect(bind, acquire, undo, line, setup, verified_effect,
                                  is_async, mode=mode, replay=replay)
             # item 130: `let sub = subscribe <stream> undo sub.close()` — a
@@ -6859,6 +6922,8 @@ class Parser:
                 name = self.realm_placeholder()
                 self._saw_realm_placeholder = True
                 return IsolateStmt(key, f"?{name}", tok.line, placeholder=name)
+                realms, strategy = self.realms_route()
+                return RouteStmt(key, realms, strategy, tok.line)
             return IsolateStmt(key, self.realm_label(), tok.line)
         if tok.kind == "ident" and tok.value == "route" \
                 and self.peek_ahead(1).kind == "ident" \
@@ -7052,6 +7117,7 @@ class Parser:
         return EmitStmt(expr, line, compensate, approval, is_async, acting)
 
     def effect_form(self, line: int, bind: str | None = None):
+    def effect_form(self, line: int):
         self.expect("kw", "effect")
         # item 308 (issue #96): the ownership mode a plain acquisition may carry
         # is threaded out as the final tuple element; `owned` for spawn/lease and
@@ -7238,6 +7304,8 @@ class Parser:
             message, hint, fields = missing_undo_refusal(_describe_expr(acquire),
                                                          bind=bind)
             raise self.err(line, message, hint=hint, **fields)
+            message, hint = missing_undo_refusal(_describe_expr(acquire))
+            raise self.err(line, message, hint=hint)
         self.next()
         undo = self.pure_expr()
         return acquire, undo, line, setup, is_async, mode, replay
@@ -7928,6 +7996,7 @@ class Parser:
         return label
 
     def realms_route(self) -> tuple[list[str], str | None, list]:
+    def realms_route(self) -> tuple[list[str], str | None]:
         """`realms("w1", "w2", ...) [strategy(<ident>)]` — the multi-realm bind
         (item 162), the plural of `realm("<label>")`. Same static-string-literal
         rule as `realm_label` (a realm is not config-derived, else G2 would be
@@ -7941,6 +8010,9 @@ class Parser:
         until `realm_placeholders.bind` replaces it. Two placeholders are not
         refused here for sharing a name: what they mean is the binding's, so
         the repeat is checked after binding, against the bound realms."""
+        unsound). Returns the ordered realm list and the strategy name (or
+        `None`). The order is preserved as written — a router's rotation is
+        defined over the list in declaration order."""
         line = self.expect("ident", "realms").line
         self.expect("(")
         if self.at(")"):
@@ -8016,6 +8088,7 @@ class Parser:
             strategy = self.expect("ident", what="a strategy name").value
             self.expect(")")
         return realms, strategy, held
+        return realms, strategy
 
     def record_literal(self) -> dict:
         """`{ field: literal | [literal, ...], ... }` — static metadata (v2)."""
@@ -8310,6 +8383,7 @@ class Parser:
             eq = self.next()
             # issue #2187: same stray-`=` shape as the provide-method `=` above
             self._reject_equals_block_body(eq.line, name)
+            self.next()
             body = [ReturnStmt(self.pure_expr(), line)]
             return FnDecl(name, params, returns, body, public, line, verified,
                           source=self.filename, type_params=type_params,
@@ -8317,6 +8391,7 @@ class Parser:
                           ensures=ensures,
                           idents=_idents_between(self.toks, start, self.pos),
                           derivation=derivation)
+                          endorse_origins=endorse_origins, cache=cache)
         self.expect("{")
         body = []
         while True:
@@ -8390,6 +8465,7 @@ class Parser:
             f"a spec (`ensures`) is only supported on a top-level `fn`, not on {where}",
             hint="state the claim on a top-level `fn` and call that from here "
                  "(docs/function-specs.md)")
+                      endorse_origins=endorse_origins, cache=cache)
 
     def test_decl(self, lifecycle: bool = False) -> TestDecl:
         line = self.expect("kw", "test").line
@@ -9181,6 +9257,7 @@ class Parser:
 
     def _eq(self):
         return self._bin(self._cmp, EQUALITY_OPS)
+        return self._bin(self._cmp, ("==", "===", "!=", "!=="))
 
     def _cmp(self):
         return self._bin(self._shift, ("<", ">", "<=", ">="))
@@ -9857,11 +9934,19 @@ class Parser:
             sign = "-"
         if sign is None:
             return
+        word = "increment" if sign == "+" else "decrement"
         # postfix `--` errors on the token PAST the operator pair; point the
         # diagnostic back at the operator itself.
         line = toks[i - 1].line if sign == "-" else tok.line
         raise foreign_increment_refusal(
             self.filename, line, f"{sign}{sign}")
+        raise self.err(
+            line,
+            f"revl has no `{sign}{sign}` {word} operator — expressions are pure "
+            "(syntax-2.0 §3.3)",
+            hint=f"mutate a `var` with `{sign}= 1` (write `i {sign}= 1`), inside "
+                 "a `while`/`for` loop body",
+        )
 
     def _arrow_body(self):
         """The body of an arrow `=> …`. A closure body is a single pure
@@ -10046,6 +10131,7 @@ class Parser:
                 # names the `=` before the record-literal parse misreports the
                 # statement keyword as a bad field name.
                 self._reject_equals_block_body(eq.line, mname)
+                self.next()
                 body = [ReturnStmt(self.pure_expr(), mline)]
             else:
                 self.expect("{")
@@ -10177,6 +10263,8 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
     Returns `(message, hint, fields)`: the prose both positions share, and the
     structured `acquire` / `declaredClass` / `repairs` a record carries
     (issue #2684).
+def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None) -> tuple[str, str]:
+    """The ONE rendering of G4's bare-acquisition refusal: `(message, hint)`.
 
     Two positions raise it and neither may drift from the other. The parser
     refuses at the point it can prove the acquisition is not a bare name
@@ -10211,6 +10299,7 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
 
     `bind` is the name the acquisition is bound to, where the caller has it
     (`let pool = effect …`). It only sharpens the `site-undo` repair's text."""
+    is the right one for every refusal it still raises."""
     spelling = head.strip("`")
     handle = bind or "<name>"
     if declared_local:
@@ -10290,6 +10379,7 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
                            "declared `emission`, and mark its call `emit`: an "
                            "emission is admitted as irreversible"},
             ]))
+        return message, hint
     return (
         f"effect has no `undo` and {head} is not pure",
         f"write `effect {spelling}(...) undo <expr>`, or mark the call `emit` "
@@ -10307,6 +10397,7 @@ def missing_undo_refusal(head: str, declared: tuple[str, str] | None = None,
                        "`emission`, and mark its call `emit`: an emission is "
                        "admitted as irreversible"},
         ]))
+        f"if it deliberately crosses the system boundary (G4)")
 
 
 def _dotted_path(expr) -> str | None:
@@ -10322,6 +10413,8 @@ def _dotted_path(expr) -> str | None:
 
 
 def parse_file(path: str) -> Program:
+    import os
+
     with open(path, encoding="utf-8") as handle:
         return parse_text(handle.read(), path)
 
@@ -10334,6 +10427,7 @@ def parse_text(text: str, path: str) -> Program:
     reports the text it compiled, and the session anchors knowledge records to
     it). `parse_file` is this, one read earlier, and is byte-identical."""
     program = Parser(text, path).parse()
+        program = Parser(handle.read(), path).parse()
     # provenance is recorded relative to the invocation cwd so IR documents
     # stay machine-independent when compiled from the project root; a file on
     # another Windows drive has no relative path and keeps its absolute one
@@ -10341,6 +10435,8 @@ def parse_text(text: str, path: str) -> Program:
     from ._paths import relpath_or_abs  # noqa: PLC0415
 
     source = relpath_or_abs(path)
+    # stay machine-independent when compiled from the project root
+    source = os.path.relpath(path)
     for component in program.components:
         component.source = source
     for composition in program.compositions:

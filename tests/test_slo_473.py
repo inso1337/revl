@@ -440,6 +440,7 @@ def test_a_live_breach_takes_the_declared_response_and_writes_the_latch(tmp_path
     assert verdict["action"] == slo.HALT
     assert monitor.dispatch["armed"] is True
     record = json.loads(latch.read_text(encoding="utf-8"))
+    record = json.loads(latch.read_text())
     assert record["halted"] is True and record["verdict"] == "halted"
     assert record["resumable"] is False
     assert "p95_latency_ms" in record["reason"]
@@ -459,6 +460,7 @@ def test_a_datum_with_no_declared_response_pauses_rather_than_carrying_on(tmp_pa
     verdict = monitor.observe()
     assert verdict["action"] == slo.PAUSE
     record = json.loads(latch.read_text(encoding="utf-8"))
+    record = json.loads(latch.read_text())
     assert record["verdict"] == "paused" and record["resumable"] is True
 
 
@@ -716,6 +718,7 @@ def test_the_cli_measures_dispatches_signs_verifies_and_gates(tmp_path, capsys):
     assert code == 1
     assert "breached" in out and "p95_latency_ms" in out
     assert json.loads(latch.read_text(encoding="utf-8"))["verdict"] == "halted"
+    assert json.loads(latch.read_text())["verdict"] == "halted"
 
     assert main(["slo", "--verify", "--receipt", str(receipt),
                  "--key", str(tmp_path / "key")]) == 0

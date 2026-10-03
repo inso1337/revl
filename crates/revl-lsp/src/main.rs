@@ -41,6 +41,8 @@ environment:
   REVL_LSP_CACHE          absolute cache root the versioned runtime is extracted
                           under (default: an absolute XDG_CACHE_HOME, else
                           $HOME/.cache; never the shared temp dir)
+  REVL_LSP_CACHE          cache root the versioned runtime is extracted under
+                          (default: the platform cache dir)
   REVL_LSP_RUNTIME_PIN    override the pin the runtime cache is keyed by
   REVL_LSP_NATIVE_ONLY    do not fall back to the reference for hover and
                           definition, so the native answers are observable on

@@ -74,6 +74,7 @@ import math
 from . import model_answer as _model_answer
 from ._paths import relpath_or_abs
 from .errors import RevlError, foreign_increment_refusal
+from .errors import RevlError
 
 # reserved keys carried inside the `types` table (type names never start
 # with an underscore, so these cannot collide)
@@ -166,6 +167,10 @@ def _scrutinee_spec(types: dict, scrutinee_t: str | None) -> dict | None:
     reads `Jj`'s payload as `Int` through `applied_variant_spec`. Before it,
     every arm over an applied user generic bound an unknown-typed value, so
     `Jj(x) => x` compiled in a function returning `Str` over an `Mb[Int]`.
+    Scoped to those two on purpose. A user ADT keeps the existing behaviour:
+    widening the lookup for every generic changes what the compiler admits for
+    programs that have nothing to do with model councils, and that belongs to
+    whoever owns the general rule.
     """
     spec = types.get(scrutinee_t or "")
     if spec is not None:
@@ -206,6 +211,7 @@ def match_arm_payload(cases_by_name: dict | None, scrutinee_t: str | None,
         if pattern == "Err":
             return args[1]
     return None
+    return _model_answer.applied_spec(scrutinee_t)
 
 
 def parse_type(name: str | None) -> tuple[str | None, list[str]]:
@@ -456,11 +462,14 @@ def _check_type_wf(filename: str, line: int, type_name: str | None,
             example = {"Opt": "Opt[Int]", "List": "List[Int]",
                        "Map": "Map[Str, Int]", "Result": "Result[Int, Str]"}[head]
             hint = f"write e.g. `{example}` — a bare `{head}` is not a type"
+        example = {"Opt": "Opt[Int]", "List": "List[Int]",
+                   "Map": "Map[Str, Int]", "Result": "Result[Int, Str]"}[head]
         raise RevlError(
             filename, line,
             f"`{head}` takes {arity} type argument(s), got {len(args)} "
             f"(`{type_name}`)",
             hint=hint,
+            hint=f"write e.g. `{example}` — a bare `{head}` is not a type",
         )
     for i, arg in enumerate(args):
         # Only the *immediate* function type's return position may carry an
@@ -1155,6 +1164,7 @@ def compatible(expected: str | None, actual: str | None,
         if ahead != "Async":
             return compatible(eargs[0] if eargs else None, actual, types)
     if ehead in _FUNCTION_TYPE_HEADS and ahead in _FUNCTION_TYPE_HEADS:
+    if ehead == FN_HEAD:
         # A function value flows where a function type is expected only if it
         # accepts everything that position will pass it and returns something
         # the position can use: parameters contravariant, result covariant.
@@ -1173,6 +1183,8 @@ def compatible(expected: str | None, actual: str | None,
         # the test names both heads, the two spellings of one function type
         # still meet each other in either direction.
         if len(eargs) != len(aargs):
+        # hands the callee a Float.
+        if ehead != ahead or len(eargs) != len(aargs):
             return False
         return (all(compatible(a, e, types) for e, a in zip(eargs[:-1], aargs[:-1]))
                 and compatible(eargs[-1], aargs[-1], types))
@@ -1230,8 +1242,10 @@ def join(a: str | None, b: str | None, types: dict | None = None) -> str | None:
         return None
     if compatible(a, b, types):
         return _fill_unknown_args(a, b)
+        return a
     if compatible(b, a, types):
         return _fill_unknown_args(b, a)
+        return b
     return None
 
 
@@ -1349,6 +1363,7 @@ def mismatch(filename: str, line: int, where: str,
     mismatch knows the required and the actual type but not the minimal edit,
     so it carries an explicit `known: False` repair instead of omitting the
     field."""
+    `T1`/`type-mismatch`, byte for byte."""
     hint = None
     target = f"{relpath_or_abs(filename)}:{line} {where}"
     repair = None
@@ -1403,6 +1418,7 @@ def mismatch(filename: str, line: int, where: str,
                      f"{where} expects `{expected}`, got `{actual}`", hint,
                      code="T1", category="type-mismatch",
                      expected=expected, actual=actual, repair=repair)
+                     expected=expected, actual=actual)
 
 
 def incomparable(filename: str, line: int, op: str,
@@ -1870,6 +1886,12 @@ _BUILTIN_SIG = {
     "checked_add": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_sub": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_mul": ("Int", ["Int"], "Result[Int, Str]"),
+    # The total, value-returning forms (docs/arithmetic.md, "Still open"):
+    # same rounding convention as their faulting counterparts, but a zero
+    # divisor yields `Err(reason)` instead of faulting — `fail` cannot serve
+    # here (it is a component construct, refused in a pure fn), so the error
+    # travels as a value. The Err payload is `Str` because it is the one
+    # type every tier can hold in a Result without new representation.
     "checked_div_trunc": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_floor": ("Int", ["Int"], "Result[Int, Str]"),
     "checked_div_euclid": ("Int", ["Int"], "Result[Int, Str]"),
@@ -2118,6 +2140,7 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
                   filename: str | None, line: int,
                   types: dict | None = None,
                   receiver_name: str | None = None) -> str | None:
+                  types: dict | None = None) -> str | None:
     """Type a stdlib method call; raises on definite mismatches.
 
     `types` is the declared-type table, passed through to `compatible` so a
@@ -2181,6 +2204,7 @@ def builtin_check(method: str, target_type: str | None, arg_types: list,
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`",
                             hint=hint, fix=fix)
+                            f"builtin `{method}` needs a Str/Bytes/List receiver, got `{render_type(target_type)}`")
         if family in ("List", "Str", "Int", "Int32", "Map", "Value") and thead != family:
             raise RevlError(filename, line,
                             f"builtin `{method}` needs a {family} receiver, got `{render_type(target_type)}`")
@@ -2429,6 +2453,8 @@ def infer_memo():
 
 def infer_memo_active() -> bool:
     return _INFER_MEMO.get() is not None
+        tenv[stmt.name] = (declared if declared is not None
+                           else infer_ast(stmt.value, tenv, types, filename))
 
 
 def infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> str | None:
@@ -2800,9 +2826,11 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
             # the callee and both are CHECKED by `call_function_value` here:
             # `is_function_type` covers `->` and `Fn[...]`, so admitting the
             # generic spelling cannot leave a call unchecked (issue #2544).
+            # top-level fn or ADT case
             local = tenv.get(name)
             head = parse_type(local)[0]
             if is_function_type(local):
+            if parse_type(local)[0] == FN_HEAD:
                 return call_function_value(expr, local, f"`{name}`", arg_types,
                                            tenv, types, filename, line)
             # issue #2544: a binder whose type is NOT a function cannot be the
@@ -2849,11 +2877,22 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                 # read; for the three builtin cases it used to be
                 # `arg_types[0]`, which on an empty list threw a bare
                 # `IndexError` out of the checker.
+                # A case call with NO argument. Zero args at a payload-carrying
+                # case is deliberately ACCEPTED here — the payload check above
+                # skips it on `arg_types and arg_types[0]`, and
+                # tests/test_selfhost_checker.py pins `Circle()` as accepted
+                # alongside the widening and unknown-argument cases — so the
+                # only question is what it infers. For a user ADT that is
+                # `case["adt"]` below and there is nothing to read; for the
+                # three builtin cases it used to be `arg_types[0]`, which on an
+                # empty list threw a bare `IndexError` out of the checker.
+                # `fn k() -> Opt[Int] { return Some() }` was enough to do it.
                 #
                 # `Any` is the answer the two lines already reach for when an
                 # argument's type cannot be worked out, and a missing argument
                 # is that same absence of information, so it needs no second
                 # rule, just the guard the list read never had. Found by
+                # rule — just the guard the list read never had. Found by
                 # tools/fuzz_frontend.py.
                 first = arg_types[0] if arg_types else None
                 if name == "Some":
@@ -2928,6 +2967,8 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                 for i, (p, a, arg) in enumerate(zip(inst, arg_types, expr.args)):
                     refuse_nested_widening(arg, p, a, tenv, types, filename,
                                            f"argument {i + 1} of `{name}(...)`")
+                _check_arrow_args(expr.args, [substitute(p, subst) for p in params],
+                                  tenv, types, filename, f"`{name}(...)`")
                 return substitute(sig["returns"], subst)
         if isinstance(expr.callee, ExprField):
             # a constructor form (`Map.new()`, `Pool.open(..)`) infers the
@@ -2969,11 +3010,14 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
                              if isinstance(expr.callee.target, ExprVar) else None)
             return builtin_check(expr.callee.name, target_t, arg_types, filename,
                                  line, types, receiver_name=receiver_name)
+                                 line, types)
         # any other callee expression: an arrow applied in place, a function
         # value read out of a `let` chain, …
         callee_t = infer_ast(expr.callee, tenv, types, filename)
         if is_function_type(callee_t):
             return call_function_value(expr, callee_t, IN_PLACE_CALLEE,
+        if parse_type(callee_t)[0] == FN_HEAD:
+            return call_function_value(expr, callee_t, "this call's callee",
                                        arg_types, tenv, types, filename, line)
         return None
     if isinstance(expr, ExprMatch):
@@ -2992,6 +3036,12 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
             if bind is not None:
                 bind_local(inner, bind,
                            match_arm_payload(cases_by_name, scrutinee_t, pattern))
+                payload = (cases_by_name.get(pattern)
+                           if cases_by_name is not None else None)
+                if payload is not None:
+                    inner[bind] = payload
+                else:
+                    inner.pop(bind, None)
             t = infer_ast(body, inner, types, filename)
             result = t if result is None else join(result, t, types)
         return result
@@ -3032,6 +3082,10 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
             # absent — it is still this body's local, and it must shadow an
             # outer name of the same spelling rather than fall through to it.
             bind_local(inner, param, ptype)
+            if ptype:
+                inner[param] = ptype
+            else:
+                inner.pop(param, None)
         independent = not arrow_depends_on_unknown_param(expr, annotations)
         written_return = getattr(expr, "written_returns", None)
         if written_return and independent and filename:
@@ -3041,6 +3095,7 @@ def _infer_ast(expr, tenv: dict, types: dict, filename: str | None = None) -> st
             # check could only pass vacuously or misfire.
             check_ast(expr.body, written_return, inner, types, filename,
                       ARROW_BODY_WHERE)
+                      "the body of this arrow (from its return annotation)")
             returns = written_return
         else:
             # the body is walked either way — it is an ordinary expression over
@@ -3216,6 +3271,7 @@ def _check_arrow_args(args, params, tenv: dict, types: dict,
     for i, (arg, param) in enumerate(zip(args, params)):
         phead, pargs = parse_type(param)
         if isinstance(arg, ExprArrow) and is_function_type(param):
+        if isinstance(arg, ExprArrow) and phead == FN_HEAD:
             check_ast(arg, param, tenv, types, filename,
                       f"argument {i + 1} of {what}")
         elif not isinstance(arg, ExprArrow) and phead == FN_HEAD and pargs \
@@ -3499,11 +3555,13 @@ def check_function_value_arity(what: str, fn_type: str, params: list,
     """Refuse a call through a value of function type that does not supply
     exactly its declared arity. Shared by the AST and IR call arms."""
     if filename and given != len(params):
+    if filename and len(expr.args) != len(params):
         rendered = ", ".join(render_type(p) or "_" for p in params) or "no arguments"
         raise RevlError(
             filename, line,
             f"{what} is a `{render_type(fn_type)}` and takes {len(params)} "
             f"argument(s), {given} given",
+            f"argument(s), {len(expr.args)} given",
             hint=f"its parameters are `({rendered})` — revl has no default, "
                  "optional, or variadic parameters, so every call supplies "
                  "exactly the declared arity",
@@ -3516,6 +3574,7 @@ def function_value_result(what: str, params: list, returns: str,
                           filename: str | None, line: int) -> str | None:
     """Hold each argument to its parameter type and answer the call's type.
     Shared by the AST and IR call arms."""
+    _check_arrow_args(expr.args, params, tenv, types, filename, what)
     if filename:
         for i, (p, a) in enumerate(zip(params, arg_types)):
             if p and a and not compatible(p, a, types):
@@ -3555,6 +3614,7 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
         infer_ast(expr, tenv, types, filename)
         return
     if ehead not in _FUNCTION_TYPE_HEADS:
+    if ehead != FN_HEAD:
         raise RevlError(
             filename, line,
             f"{where} expects `{render_type(expected)}`, got an arrow",
@@ -3589,6 +3649,10 @@ def _check_arrow(expr, expected: str, ehead, eargs, tenv: dict, types: dict,
                            want, written)
         resolved.append(written or want)
         bind_local(inner, name, resolved[-1])
+        if resolved[-1]:
+            inner[name] = resolved[-1]
+        else:
+            inner.pop(name, None)
     # The body is checked against the *unwrapped* return: the async color is a
     # tier property, not part of the value's shape (item 92 §2). `_resolve_arrow`
     # still writes the async-headed `want_return` back onto the node, so the
@@ -3653,6 +3717,8 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
     """Bidirectional check of a parser-AST expression against `expected`."""
     from .parser import ExprArrow, ExprBlockArm, ExprCall, ExprIf, ExprList, \
         ExprMatch, ExprRecord, ExprRecordUpdate
+    from .parser import ExprArrow, ExprBlockArm, ExprIf, ExprList, ExprMatch, \
+        ExprRecord, ExprRecordUpdate
 
     line = getattr(expr, "line", 0)
     # a hole in check position takes the expectation as its type and is done:
@@ -3682,6 +3748,7 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
                             f"record literal for `{expected}` has {'; '.join(parts)}",
                             repair=record_repair(filename, line, expected,
                                                  missing, extra))
+                            f"record literal for `{expected}` has {'; '.join(parts)}")
         for name, value in expr.fields:
             check_ast(value, declared.get(name), tenv, types, filename,
                       f"field `{name}` of `{expected}`")
@@ -3722,6 +3789,12 @@ def check_ast(expr, expected: str | None, tenv: dict, types: dict,
             if bind is not None:
                 bind_local(inner, bind,
                            match_arm_payload(cases_by_name, scrutinee_t, pattern))
+                payload = (cases_by_name.get(pattern)
+                           if cases_by_name is not None else None)
+                if payload is not None:
+                    inner[bind] = payload
+                else:
+                    inner.pop(bind, None)
             check_ast(body, expected, inner, types, filename, where)
         return
     if isinstance(expr, ExprRecordUpdate):
@@ -4359,6 +4432,7 @@ def check_ir(node, expected: str | None, tenv: dict, types: dict,
                             f"record literal for `{expected}` has {'; '.join(parts)}",
                             repair=record_repair(filename, line, expected,
                                                  missing, extra))
+                            f"record literal for `{expected}` has {'; '.join(parts)}")
         for name, value in node.get("fields") or []:
             check_ir(value, declared.get(name), tenv, types, services, filename,
                      line, f"field `{name}` of `{expected}`")

@@ -61,6 +61,8 @@ def test_every_method_body_and_the_effect_value_are_holes():
     expected = sorted(o["expected"] for o in doc["obligations"])
     # the effect resource, its inverse (#1846) and the provide-method return
     assert expected == ["AnalysisResource", "Str", "Unit"]
+    # the effect resource and the provide-method return
+    assert expected == ["AnalysisResource", "Str"]
 
 
 def test_each_obligation_carries_its_fill_spec():
@@ -104,6 +106,8 @@ def test_a_correctly_filled_hole_checks_with_one_fewer_obligation():
     ir = compile_source(filled, "csv_analyzer.rvl")
     # the fill type-checks; only the effect's acquisition and inverse are left
     assert [h["type"] for h in ir.get("holes", [])] == ["AnalysisResource", "Unit"]
+    # the fill type-checks; only the effect-resource obligation is left
+    assert [h["type"] for h in ir.get("holes", [])] == ["AnalysisResource"]
 
 
 # ---- 5. conservative capability: an un-injected boundary stays a hole -------
@@ -186,6 +190,7 @@ def test_cli_writes_the_file_and_reports_obligations(tmp_path):
                   "--out", str(out))
     assert result.returncode == 0
     text = out.read_text(encoding="utf-8")
+    text = out.read_text()
     assert "emission[filesystem]" in text
     assert "hole[Str]" in text
     # the open holes are reported on stderr, like a `revl compile` draft
@@ -203,5 +208,6 @@ def test_cli_json_carries_skeleton_obligations_and_fill_specs():
     doc = json.loads(result.stdout)
     assert doc["admissible"] is False
     assert doc["holeCount"] == 3
+    assert doc["holeCount"] == 2
     assert "component AnalysisProvider" in doc["source"]
     assert all("fillSpec" in o for o in doc["obligations"])

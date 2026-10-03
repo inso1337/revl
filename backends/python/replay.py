@@ -415,6 +415,7 @@ class Step:
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
                  "compensation", "note", "error", "scope", "undo_idempotent",
                  "inverse_op", "within", "wal_seq")
+                 "inverse_op")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -642,6 +643,7 @@ class Timeline:
             if adjacent is not None and adjacent.compensation is None:
                 return adjacent
         return None
+            self._wal.append_step(step, self.component)
 
     # -- recording ---------------------------------------------------------
 
@@ -734,6 +736,7 @@ class Timeline:
 
     def record_yield(self, value: Any, effect_label: Optional[str],
                      emission: Optional[Step] = None) -> tuple:
+    def record_yield(self, value: Any, effect_label: Optional[str]) -> tuple:
         """Classify one yield out of a recorded effect generator.
 
         Returns ``(step, value_to_yield)``.  For anything with an inverse the
@@ -800,6 +803,7 @@ class Timeline:
             if emission is None:
                 emission = (self._emission_sites.get((file, lineno - 1))
                             if lineno else None)
+            emission = self._emission_sites.get((file, lineno - 1)) if lineno else None
             if emission is not None:
                 step = self._add(
                     KIND_COMPENSATION, f"compensate {emission.label}", effect_label,
@@ -1473,10 +1477,12 @@ class _ServiceProxy:
                     "_revl_transparent_frame" in frame.f_code.co_varnames:
                 frame = frame.f_back
             step = timeline.record_emission(
+            timeline.record_emission(
                 key, name, args, service,
                 (frame.f_code.co_filename, frame.f_lineno)
                 if frame is not None else (None, None))
             return _call_within(_crossing_ref(timeline, step), attr, args, kwargs)
+            return attr(*args, **kwargs)
 
         return emission
 
@@ -1676,6 +1682,7 @@ class _RecordingContext:
                                  outcome, error, observed=observed)
 
     def _revl_record_extern(self, name: str, args: tuple) -> Step:
+    def _revl_record_extern(self, name: str, args: tuple) -> None:
         """Record a DIRECT free host-extern emission (`emit announce(msg)`, a
         kind-3/4 crossing) on THIS component's timeline (item 414).
 
@@ -1705,6 +1712,7 @@ class _RecordingContext:
                 "_revl_transparent_frame" in frame.f_code.co_varnames:
             frame = frame.f_back
         return object.__getattribute__(self, "_revl_timeline").record_emission(
+        object.__getattribute__(self, "_revl_timeline").record_emission(
             name, name, tuple(args), None,
             (frame.f_code.co_filename, frame.f_lineno)
             if frame is not None else (None, None))
@@ -1887,6 +1895,7 @@ class Recorder:
 
     def open_wal(self, path: str, generation: Optional[int] = None, *,
                  allow_unsynced: bool = False) -> "WriteAheadLog":
+    def open_wal(self, path: str, generation: Optional[int] = None) -> "WriteAheadLog":
         """Open a durable write-ahead log; every step recorded from now on is
         appended to it as it commits.
 
@@ -1912,6 +1921,7 @@ class Recorder:
             self.wal.close()
         self.wal = WriteAheadLog(path, self._ir, generation,
                                  allow_unsynced=allow_unsynced).open()
+        self.wal = WriteAheadLog(path, self._ir, generation).open()
         for timeline in self.timelines.values():
             timeline.attach_wal(self.wal, self._ir)
         return self.wal
@@ -2210,6 +2220,7 @@ def _last_newline_offset(handle, size: int) -> int:
 
 
 def _seal_torn_tail(path: str, *, allow_unsynced: bool = False) -> None:
+def _seal_torn_tail(path: str) -> None:
     """Truncate a never-acknowledged partial trailing write so the WAL ends at a
     clean record boundary before it is appended to (issue #535).
 
@@ -2248,6 +2259,8 @@ def _seal_torn_tail(path: str, *, allow_unsynced: bool = False) -> None:
                     "write-ahead log fsync failed while sealing the torn tail; "
                     "the log is not known to be durable"
                 ) from error
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
 
 
 def _next_seq(path: str) -> int:
@@ -2361,6 +2374,7 @@ class WriteAheadLog:
     def __init__(self, path: str, ir: Optional[dict] = None,
                  generation: Optional[int] = None, *,
                  allow_unsynced: bool = False) -> None:
+                 generation: Optional[int] = None) -> None:
         self.path = path
         self._allow_unsynced = allow_unsynced
         self._ir = ir
@@ -2394,6 +2408,7 @@ class WriteAheadLog:
         # this generation's records append onto a clean newline boundary instead
         # of merging into it and corrupting the file mid-flight (issue #535).
         _seal_torn_tail(self.path, allow_unsynced=self._allow_unsynced)
+        _seal_torn_tail(self.path)
         # Resume this session's monotonic seq space from whatever is already on
         # disk. On the first open the log is new (or empty) and this is 0; on a
         # --watch reload the same file already carries the prior generation's
@@ -2427,6 +2442,9 @@ class WriteAheadLog:
                          "composition": composition_digest(self._ir)})
         if self._allow_unsynced:
             self._write({"record": "durability-opt-out", "fromSeq": self._seq})
+            self._write({"record": "header", "walVersion": WAL_VERSION,
+                         "generation": self._generation,
+                         "guarantee": WAL_GUARANTEE})
         return self
 
     def __enter__(self) -> "WriteAheadLog":
@@ -2481,6 +2499,8 @@ class WriteAheadLog:
         if ceiling:
             record["ceiling"] = ceiling
         self._write(record)
+        except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
+            pass
 
     def append_step(self, step: "Step", component: str) -> dict:
         """Write one committed effect ahead of it mattering."""
@@ -2539,6 +2559,7 @@ class WriteAheadLog:
             undo_idempotent: bool = False,
             register: Optional[str] = None,
             offsets: Optional[int] = None) -> dict:
+            register: Optional[str] = None) -> dict:
         """Append the WAL discharge-descriptor for one witnessed (`transactional`)
         inverse or one `compensation` (docs/design/teardown-contract.md, "WAL
         descriptor"; owned by the witnessed-wal-recover slice on the py tier).
@@ -2575,6 +2596,7 @@ class WriteAheadLog:
         # record says so with `null` rather than a list that looks complete.
         safe_args = (None if args is None
                      else confidential.redact_args(args, secret, _describe))
+        safe_args = confidential.redact_args(args, secret, _describe)
         safe_witness = _describe(witness)
         record = {
             "record": "discharge-descriptor",
@@ -2799,6 +2821,14 @@ class WriteAheadLog:
             record["use"] = use
         if scope is not None:
             record["scope"] = scope
+    def record_approval_consumed(self, request_id: str) -> dict:
+        """Append the single-use SPEND, durably, BEFORE the extern body runs
+        (item 246, Decision 3: consume-before-fire). A crash between this record
+        and the emission leaves consumed-but-unfired — an owed action that needs a
+        FRESH approval, which is fail-closed: the world saw at most one fire on
+        this yes. The later emission record names the same ``requestId``; the
+        audit joins the spend and the emission on it."""
+        record = {"record": "approval-consumed", "requestId": request_id}
         self._write(record)
         return record
 
@@ -3022,6 +3052,13 @@ class WriteAheadLog:
         runtime path's single-use spends. A spend with no matching emission is
         an owed or ambiguous crossing, never a silent gap. Consumes no seq: it
         names a fact about a fire that already happened."""
+                                 component: str) -> dict:
+        """Append the ``approval-emission`` record AFTER a typed-approval crossing
+        fires (item 246, Decision 3), naming the same ``requestId`` the spend
+        did. The audit joins the ``approval-consumed`` spend and this emission on
+        ``requestId``: a spend with no matching emission is a visible owed action
+        (crossing unverified), never a silent gap. Consumes no seq — it names a
+        fact about a fire that already happened."""
         record = {"record": "approval-emission", "requestId": request_id,
                   "capability": capability, "component": component}
         if use is not None:
@@ -3304,6 +3341,10 @@ class WriteAheadLog:
         as this one's (issue #3147).  A trailing half-written line (a genuine
         ``kill -9`` can leave one) is tolerated and reported as ``torn`` rather
         than crashing the recovery that exists to handle exactly that.
+        ``complete`` is whether the terminal ``activation-complete`` marker is
+        present.  A trailing half-written line (a genuine ``kill -9`` can leave
+        one) is tolerated and reported as ``torn`` rather than crashing the
+        recovery that exists to handle exactly that.
 
         Two integrity gates run first (item 413), fail-closed via
         :class:`WALIntegrityError`: a header ``walVersion`` outside

@@ -1075,6 +1075,7 @@ def test_the_erasure_receipt_modules_retention_disclaimer_is_now_out_of_date():
     is not implemented. This file is that half, so the paragraph is updated
     there; this test is what keeps the two from drifting apart again."""
     text = (ROOT / "src" / "revl" / "erasure_receipt.py").read_text(encoding="utf-8")
+    text = (ROOT / "src" / "revl" / "erasure_receipt.py").read_text()
     assert "revl.retention" in text
 
 

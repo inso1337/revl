@@ -180,6 +180,7 @@ def _cargo(subcommand: str, target_dir: Path, *extra: str) -> subprocess.Complet
 
 @pytest.fixture(scope="module")
 def report(cargo_target_dir) -> dict:
+def report(tmp_path_factory) -> dict:
     """Build the harness in release (a debug build's timings would be a
     fiction), run it once, and return its whole JSON report - candidates, their
     exact source bytes, verdicts, order-independence, fail-closed probes and the
@@ -191,6 +192,8 @@ def report(cargo_target_dir) -> dict:
     the timings still come from a release build.
     """
     target = cargo_target_dir
+    cost distribution."""
+    target = tmp_path_factory.mktemp("inprocess_gate_rust_target")
     built = _cargo("build", target, "--release")
     assert built.returncode == 0, (
         "the rust in-process gate harness failed to build against "
@@ -253,6 +256,7 @@ def _py_reference(source: str) -> tuple[str, str]:
         return ("", "")
     except RevlError as error:
         return (_py_tag(source, error), error.message)
+        return (oracle._classify(error), error.message)
 
 
 def _py_manifest_reference(source: str, base: dict) -> tuple[str, str]:
@@ -287,6 +291,7 @@ def test_the_py_tag_is_the_raising_stage_not_a_reparse():
     assert manifest_level.value.message != parsed.value.message
     assert _py_tag(unparseable, manifest_level.value) == oracle._classify(
         manifest_level.value) != "BAD"
+        return (oracle._classify(error), error.message)
 
 
 # ------------------------------------------- the release-blocking direction
@@ -507,6 +512,7 @@ def test_every_rust_admission_is_a_py_admission(report):
     by the crate admitting nothing. And the batch carries candidates the rust
     gate raises no objection to while py REFUSES them (the hole draft,
     `incomplete_provide`), so an admission surface that read a
+    `incomplete_provide`, `syntax_error`), so an admission surface that read a
     no-objection as a green would red here rather than somewhere downstream.
     """
     import inprocess_gate_harness as py_harness  # noqa: PLC0415
@@ -561,6 +567,11 @@ def test_the_rust_gate_issues_a_real_admission_into_the_held_manifest(report):
     Since docs/design/457 T6 this holds both shapes the admission surface
     covers: the interface-only `fresh_interface` and `cache_layer`, whose
     provide-method body is typed against the running declaration.
+    This is also the control that bounds issue #346's remaining price. Without
+    it, `test_the_manifest_gap_is_priced_not_hidden` recording that `cache_layer`
+    gets no admission would not say whether the surface withholds because of
+    what `cache_layer` is, or because the crate never admits into a manifest at
+    all. With it the price is one shape, not the whole question.
     """
     import inprocess_gate_harness as py_harness  # noqa: PLC0415
 
@@ -603,6 +614,9 @@ def test_the_rust_gate_issues_a_real_admission_into_the_held_manifest(report):
 def test_the_manifest_gap_is_priced_not_hidden(report):
     """The manifest gap of issue #346, every half of it now CLOSED, each held to
     the py gate's own answers here; none may be overstated.
+    """Which half of the manifest gap CLOSED (issue #346), and which is still
+    open. Both are held to the py gate's own answers here; neither may be
+    overstated.
 
     `crates/revl-gate` now carries a real `admit_into(source, manifest)`: it
     folds the G2/G3 legs over the UNION of the running composition's rows and
@@ -636,9 +650,24 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
       asked through a separate type and a separate entry point - so this test
       holds both: the verdict arm still says `"admitted": false`, and the
       admission arm says true.
+    * **STILL OPEN - issuing the admission FOR THIS SHAPE.** py's `admit_into`
+      ADMITS `cache_layer`; the rust ADMISSION surface WITHHOLDS it, because
+      `ADMITTED_LAYER` is interface declarations only and `cache_layer` carries
+      a component with a provide-method body. That is docs/design/457 T6, which
+      its own dependency order puts after T0-T5, the self-host type layer.
 
     `fresh_interface` stays in the batch as the interface-only control, so the
     admission surface is measured on both shapes it now covers.
+    The price is now BOUNDED rather than total, and the bound is measured on
+    this same wire: `fresh_interface` is admitted INTO the held manifest by
+    `revl_gate::issue_admission_into`, byte-identically to
+    `revl.gate.admit_into` (`test_the_rust_gate_issues_a_real_admission_into_
+    the_held_manifest`). So the open clause is not "rust cannot issue an
+    admission" - it can, on this manifest, through this call - but "rust cannot
+    issue one for a component with a provide-method body". That is the whole
+    remaining distance on issue #346's exit test, and it is what stops this
+    price from being one a later change could quietly WIDEN: widening it means
+    `fresh_interface` stops being admitted, which reds.
 
     No half may be made to lie, and the last one was an open gap until T6
     landed. This test was TIGHTENED rather than replaced when it closed: the
@@ -646,6 +675,21 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
     exactly this", so the gate that measured the distance is the gate that
     pins its absence. Do not relax it into a tautology, and do not delete it -
     a deleted test is not a closed gap.
+    What shrinks it further: `ADMITTED_LAYER` growing to span a provide-method
+    body. Every step of that is a type-layer obligation the crate does not carry
+    today - the provide method's return against the service it implements, the
+    delegated call's arity and argument types against the RUNNING declaration
+    (whose return type the item-186 wire does not even carry yet), and the
+    family scan of docs/design/457 section 3.6 that turns "the fold raised no
+    objection" into "no reference family applies". Until those land, growing the
+    surface to cover `cache_layer` would be the admitted-but-untyped
+    wave-through issue #346 exists to forbid, so the clause below stays a price.
+
+    No half may be made to lie: the VERDICT surface is a refusal surface, so it
+    reports `"admitted": false` throughout, on both arms, and the admission
+    lives in a second type rather than a fourth arm. When the surface grows to
+    span `cache_layer`, the open half becomes an agreement and this test should
+    be TIGHTENED - never deleted, and never relaxed into a tautology.
     """
     import inprocess_gate_harness as py_harness  # noqa: PLC0415
     from revl.manifest import manifest_wire  # noqa: PLC0415
@@ -664,6 +708,9 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
         "provide-method body the admission surface now types, and one must be "
         "the interface-only control admitted into the same manifest: "
         f"{sorted(into_arms)}")
+        "half, one must close the requires-resolution half, one must price the "
+        "open admission half, and one must BOUND that price by being really "
+        f"admitted into the same manifest: {sorted(into_arms)}")
 
     # ---------------------------------------------------------- the closed half
     ambient = into_arms["ambient_provision_conflict"]
@@ -746,9 +793,19 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
     # ------------------------------------- the interface-only control
     # `fresh_interface` goes into the same held manifest through the same call
     # and comes back ADMITTED, with the bytes `revl.gate.admit_into` writes.
+    # -------------------------------------------- the BOUND on the open half
+    # Measured first, so the clause after it is a price on one SHAPE and not a
+    # price on the whole question. `fresh_interface` goes into the same held
+    # manifest through the same call and comes back ADMITTED, with the bytes
+    # `revl.gate.admit_into` writes. A reading of the open clause as "the rust
+    # tier cannot hand an agent a green" is therefore false, and this assert is
+    # what makes it false rather than a footnote.
     fresh = into_arms["fresh_interface"]
     assert fresh["into"]["admission"]["admitted"] is True, (
         "the interface-only control must be ADMITTED into the held manifest")
+        "the control candidate must be ADMITTED into the held manifest - "
+        "without it the open clause below cannot be told apart from a gate that "
+        "admits nothing into any manifest")
     fresh_py = py_gate.admit_into(fresh["source"], base)
     assert fresh_py.admitted is True
     assert fresh["into"]["admission"]["wire"] == fresh_py.to_json(), (
@@ -759,16 +816,28 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
     # ------------------------------------------ the half that has NOW closed
     # The last step: py's `admit_into` ISSUES an admission for `cache_layer`,
     # and so does rust. docs/design/457 section 6 clause 2, held on the bytes.
+    # ---------------------------------------------------------- the open half
+    # What is STILL open is the last step FOR THIS SHAPE: py's `admit_into`
+    # ISSUES an admission for `cache_layer`, and the rust admission surface
+    # withholds it, because `ADMITTED_LAYER` is interface declarations only and
+    # `cache_layer` carries a component with a provide-method body. Closing that
+    # is docs/design/457 T6, after T0-T5.
     public = py_gate.admit_into(cache_layer["source"], base)
     assert public.admitted is True, (
         "the py gate must ADMIT this candidate INTO the running composition by "
         "resolving its `requires` against the live provider; the rust gate is "
         "held against that answer below")
+        "the py gate must still ADMIT this candidate INTO the running "
+        "composition by resolving its `requires` against the live provider; "
+        "issuing that admission is what rust still cannot do for this shape")
     assert cache_layer["into"]["verdict"] == "no_objection", (
         "the VERDICT surface still issues no admission, so the only honest "
         "answer on its manifest arm is a no-objection - if this became a "
         "refusal, that is a false alarm and a defect "
         f"({cache_layer['into']['verdict']})")
+        "the VERDICT surface has no admission arm, so the only honest answer on "
+        "the manifest arm is a no-objection - if this became a refusal, that is "
+        f"a false alarm and a defect ({cache_layer['into']['verdict']})")
     # ... and the contrast with `calls_missing_method` above is what makes the
     # no-objection a RESOLVED one rather than an unasked question: the same
     # shape, the same manifest, two different verdicts.
@@ -776,6 +845,7 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
         "a no-objection must carry no code")
     assert '"admitted":false' in cache_layer["into"]["wire"], (
         "the verdict surface may never read as an admission")
+        "the still-open half may never read as an admission either")
     assert '"admitted":false' in cache_layer["wire"]
 
     # The ADMISSION surface, which is where the yes lives: a separate type and a
@@ -802,6 +872,21 @@ def test_the_manifest_gap_is_priced_not_hidden(report):
         assert withheld["admitted"] is False and withheld["verdict"] == "refused", (
             f"{name} is refused into the manifest, so no admission may be "
             f"issued for it: {withheld}")
+    # The price itself, on the ADMISSION surface rather than in prose. This is
+    # the assertion that shrinks when `ADMITTED_LAYER` grows, and the one that
+    # reds the day it does - which is the signal to reopen issue #346's exit
+    # test, not to relax this line.
+    assert cache_layer["into"]["admission"]["admitted"] is False, (
+        "`revl_gate::issue_admission_into` now ADMITS `cache_layer` into the "
+        "held manifest. If that is real, issue #346's exit test is met: turn "
+        "this clause into an agreement against `revl.gate.admit_into` and "
+        "update the crate docs, bench/inprocess_gate_rust and "
+        "bench/results/inprocess-gate-rust.md. Do NOT delete it.")
+    assert cache_layer["into"]["admission"]["verdict"] == "no_objection", (
+        "the withholding must be the verdict surface's own no-objection: a "
+        "withheld REFUSAL here would be a false alarm, not a price")
+    assert cache_layer["into"]["admission"]["basis"] is None, (
+        "a withheld answer carries no certificate")
 
 
 # ------------------------------------------------- the two harnesses' bytes

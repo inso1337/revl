@@ -144,6 +144,7 @@ def _capture(argv: list, **kwargs) -> subprocess.CompletedProcess:
                             encoding="utf-8", errors="surrogateescape",
                             **kwargs)
     return _captured(list(argv), result.returncode, result.stdout, result.stderr)
+_EMITTERS: dict[str, types.ModuleType] = {}
 
 
 def _emitter(backend: str) -> types.ModuleType:
@@ -156,6 +157,16 @@ def _emitter(backend: str) -> types.ModuleType:
     from .placement import backend_emit_module  # noqa: PLC0415 - off the compile graph
 
     return backend_emit_module(backend, root=BACKENDS)
+    """Load a backend emitter under a unique module name (a bare ``import
+    emit`` would collide across backends when more than one is loaded)."""
+    if backend not in _EMITTERS:
+        spec = importlib.util.spec_from_file_location(
+            f"revl_{backend}_emit", BACKENDS / backend / "emit.py")
+        assert spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _EMITTERS[backend] = module
+    return _EMITTERS[backend]
 
 
 def _fault(ir: dict, module=None) -> list:
@@ -369,6 +380,8 @@ def _render_report(results: list, report: str, function_specs: list | None = Non
     `ensures` clauses this run checked; a document without one renders the
     same JSON it did before.
     """
+def _render_report(results: list, report: str) -> str:
+    """Serialize per-test results for `--report json|tap` (py tier)."""
     if report == "tap":
         lines = ["TAP version 13", f"1..{len(results)}"]
         for index, result in enumerate(results, 1):
@@ -484,6 +497,7 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
         if report is not None:
             print(_render_report([], report))
         return ("pass", _passed(0) + "; no tests emitted by the backend")
+        return ("pass", "no tests emitted by the backend")
 
     failures = 0
     results = []  # per-test {"name", "status", "duration_ms"} for --report
@@ -517,6 +531,10 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
     # per-kind segments follow. `summary[0]` is filled in at the end.
     ran_total = len(entries)
     summary = [""]
+    summary = []
+    if entries:
+        summary.append(f"{len(entries) - failures} of {len(entries)} test(s) passed"
+                       if failures else f"{len(entries)} test(s) passed")
     # `--report` owns stdout for the test blocks; the fault/prop/round-trip
     # runners' banners would corrupt the machine-readable payload, so silence
     # them (their verdicts still feed the exit code unchanged).
@@ -584,8 +602,10 @@ def run_py(ir: dict, verbose: bool = False, report: str = None) -> tuple[str, st
                              function_specs=function_specs or None))
     summary[0] = (f"{ran_total - failures} of {ran_total} test(s) passed"
                   if failures else _passed(ran_total))
+        print(_render_report(results, report))
     if failures:
         return ("fail", "; ".join(summary))
+        return ("fail", "; ".join(summary) or f"{failures} test(s) failed")
     return ("pass", "; ".join(summary))
 
 
@@ -636,6 +656,8 @@ def _node_version() -> "tuple[int, int] | None":
         return None
     try:
         probe = _capture(["node", "--version"], timeout=30)
+        probe = subprocess.run(["node", "--version"], capture_output=True,
+                               text=True, timeout=30)
     except (OSError, subprocess.TimeoutExpired):
         return None
     match = re.match(r"^v(\d+)\.(\d+)\.", probe.stdout.strip())
@@ -769,6 +791,10 @@ def _ts_runtime_contract(path: Path) -> tuple[str, str]:
         result = _ts_foreground(
             ["node", str(runner), str(path)], BACKENDS / "typescript",
             _ts_timeout_seconds(),
+        result = subprocess.run(
+            ["node", str(runner), str(path)],
+            cwd=BACKENDS / "typescript",
+            capture_output=True, text=True, timeout=180,
         )
     except subprocess.TimeoutExpired:
         return ("fail", "the emitted module did not terminate under plain node "
@@ -805,6 +831,8 @@ def run_ts(ir: dict) -> tuple[str, str]:
     re-run the same module under plain node (issue #295, above)."""
     vitest = vitest_command()
     if vitest is None:
+    vitest = BACKENDS / "typescript" / "node_modules" / ".bin" / "vitest"
+    if not vitest.exists():
         return ("skip", Absent(
             "vitest not installed (`cd backends/typescript && npm ci`), or no "
             "node on PATH"))
@@ -812,6 +840,7 @@ def run_ts(ir: dict) -> tuple[str, str]:
         _ts_timeout_seconds()
     except _TsTimeoutInvalid as error:
         return ("fail", str(error))
+            "vitest not installed (`cd backends/typescript && npm ci`)"))
     note = _fault_note(ir, "ts")
     try:
         source = _emitter("typescript").emit(_without_fault_tests(ir),
@@ -864,6 +893,12 @@ def run_ts(ir: dict) -> tuple[str, str]:
             # `subprocess.TimeoutExpired` traceback: an unnamed crash rather
             # than "this composition ran out of the host's time".
             return ("fail", _ts_timeout_message(ir, bound))
+        result = subprocess.run(
+            [str(vitest), "run", str(path)],
+            cwd=BACKENDS / "typescript",
+            capture_output=True, text=True, timeout=180,
+            env={**os.environ, "CI": "1"},
+        )
         output = (result.stdout + result.stderr).strip()
         if output:
             print(output)
@@ -887,6 +922,7 @@ def run_ts(ir: dict) -> tuple[str, str]:
     if contract == "skip":
         return ("skip", detail)
     return ("pass", f"vitest: {_passed(ran)}" + detail + note)
+    return ("pass", "vitest: all emitted tests passed" + detail + note)
 
 
 _CRATES_IO: bool | None = None
@@ -935,6 +971,8 @@ def run_rust(ir: dict) -> tuple[str, str]:
         (tmp / "src" / "lib.rs").write_text(source, encoding="utf-8")
         (tmp / "Cargo.toml").write_text(cargo_toml, encoding="utf-8")
         result = _capture(["cargo", "test"], cwd=tmp, timeout=600)
+        result = subprocess.run(["cargo", "test"], cwd=tmp,
+                                capture_output=True, text=True, timeout=600)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
@@ -948,6 +986,7 @@ def run_rust(ir: dict) -> tuple[str, str]:
     if mismatch:
         return ("fail", mismatch)
     return ("pass", f"cargo test: {_passed(ran)}" + note)
+    return ("pass", "cargo test: all emitted tests passed" + note)
 
 
 #: `run_go`'s stc-go resolve probe: ``""`` = not probed yet, ``None`` =
@@ -1031,6 +1070,10 @@ def run_go(ir: dict) -> tuple[str, str]:
                 # tier's `Absent` skip, even where go is not required: a pinned
                 # module that cannot be obtained is a provisioning break rather
                 # than an absent toolchain.
+                # tier's `Absent` skip: `go` is exempt from REVL_REQUIRE_TIERS
+                # (tests/test_env_gated_skips_run_somewhere.py), so no job would
+                # catch the skip, and a pinned module that cannot be obtained is
+                # a provisioning break rather than an absent toolchain.
                 return ("fail", f"stc-go could not be resolved: {reason}")
             # the module is in the cache now; an offline resolve is the gate
             env["GOPROXY"] = "off"
@@ -1047,6 +1090,9 @@ def run_go(ir: dict) -> tuple[str, str]:
         # semantics to satisfy a linter (architect decision, roadmap 314).
         result = _capture([go, "test", "-vet=off", "-v", "./..."], cwd=tmp,
                           timeout=600, env=env)
+        result = subprocess.run([go, "test", "-vet=off", "./..."], cwd=tmp,
+                                capture_output=True, text=True, timeout=600,
+                                env=env)
         output = (result.stdout + result.stderr).strip()
     if output:
         print(output)
@@ -1057,6 +1103,7 @@ def run_go(ir: dict) -> tuple[str, str]:
     if mismatch:
         return ("fail", mismatch)
     return ("pass", f"go test: {_passed(ran)}" + note)
+    return ("pass", "go test: all emitted tests passed" + note)
 
 
 def _java_toolchain() -> tuple[str, str] | str:
@@ -1185,14 +1232,19 @@ def run_java(ir: dict) -> tuple[str, str]:
         if real_classes:
             compile_components = _capture(
                 [javac, "--release", "21", "-cp", classpath,
+            compile_components = subprocess.run(
+                [javac, "--release", "21", "-cp", str(out) + os.pathsep + real_classes,
                  "-d", str(out), str(pkg / "Components.java")],
                 timeout=600)
+                capture_output=True, text=True, timeout=600)
         else:
             stubs = [str(s) for s in sorted((BACKENDS / "java" / "stubs").rglob("*.java"))]
             compile_components = _capture(
+            compile_components = subprocess.run(
                 [javac, "--release", "21", "-d", str(out)] + stubs
                 + [str(pkg / "Components.java")],
                 timeout=600)
+                capture_output=True, text=True, timeout=600)
         if compile_components.returncode != 0:
             return ("fail", f"javac failed: {compile_components.stderr.strip()}")
 
@@ -1206,21 +1258,29 @@ def run_java(ir: dict) -> tuple[str, str]:
             "            ran++;\n"
             "        }\n"
             "        System.out.println(\"REVL_TESTS_OK \" + ran);\n"
+            "        revl.Components.REVL_TESTS.forEach(Runnable::run);\n"
+            "        System.out.println(\"REVL_TESTS_OK\");\n"
             "    }\n"
             "}\n",
             encoding="utf-8")
         compile_runner = _capture(
             [javac, "--release", "21", "-cp", classpath, "-d", str(out), str(runner)],
             timeout=600)
+        compile_runner = subprocess.run(
+            [javac, "--release", "21", "-cp", str(out), "-d", str(out), str(runner)],
+            capture_output=True, text=True, timeout=600)
         if compile_runner.returncode != 0:
             return ("fail", f"javac runner failed: {compile_runner.stderr.strip()}")
         run = _capture([java, "-cp", classpath, "RunRevlTests"], timeout=600)
+        run = subprocess.run([java, "-cp", str(out), "RunRevlTests"],
+                             capture_output=True, text=True, timeout=600)
         run_output = run.stdout
 
     if run.returncode != 0:
         return ("fail", run.stderr.strip() or f"JVM exited {run.returncode}")
     done = re.findall(r"REVL_TESTS_OK (\d+)", run_output)
     if not done:
+    if "REVL_TESTS_OK" not in run_output:
         return ("fail", "REVL_TESTS did not complete")
     lifecycle = _lifecycle_count(ir)
     ran = int(done[-1])
@@ -1228,6 +1288,7 @@ def run_java(ir: dict) -> tuple[str, str]:
     if mismatch:
         return ("fail", mismatch)
     detail = f"JVM: {_passed(ran)}"
+    detail = "JVM: all REVL_TESTS ran"
     if lifecycle:
         detail += (f", including {lifecycle} lifecycle test(s) "
                    "(load -> call -> unload -> no-residue)")
@@ -1266,6 +1327,7 @@ def _run_wasm_pure(ir: dict, wasmtime: str, note: str) -> tuple[str, str] | None
         return ("fail", f"emitter refused: {error}")
     if not exports:
         return ("pass", _passed(0) + "; no tests emitted by the backend" + note)
+        return ("pass", "no tests emitted by the backend" + note)
     source = modules.get("functions")
     if source is None:
         return ("fail", "emitter produced no functions module for the tests")
@@ -1277,6 +1339,9 @@ def _run_wasm_pure(ir: dict, wasmtime: str, note: str) -> tuple[str, str] | None
         for tname, export in exports:
             run = _capture(
                 [wasmtime, "--invoke", export, str(wat)], timeout=600)
+            run = subprocess.run(
+                [wasmtime, "--invoke", export, str(wat)],
+                capture_output=True, text=True, timeout=600)
             if run.returncode != 0:
                 failures += 1
                 detail = (run.stderr.strip().splitlines() or [""])[-1]
@@ -1287,6 +1352,7 @@ def _run_wasm_pure(ir: dict, wasmtime: str, note: str) -> tuple[str, str] | None
     if failures:
         return ("fail", f"{failures} of {len(exports)} test(s) failed" + note)
     return ("pass", f"wasmtime: {_passed(len(exports))}" + note)
+    return ("pass", f"wasmtime: {len(exports)} test(s) passed" + note)
 
 
 def _run_wasm_lifecycle(ir: dict, lifecycle: list) -> tuple[str, str]:
@@ -1366,8 +1432,10 @@ def _run_wasm_lifecycle(ir: dict, lifecycle: list) -> tuple[str, str]:
         spec_file = Path(tmpd) / "lifecycle.spec.json"
         spec_file.write_text(json.dumps(spec), encoding="utf-8")
         result = _capture(
+        result = subprocess.run(
             [_cordis_wasm_python(), str(harness), str(spec_file)],
             timeout=600, env=env)
+            capture_output=True, text=True, timeout=600, env=env)
     output = (result.stdout + result.stderr).strip()
     for line in output.splitlines():
         if line.startswith("SUMMARY "):
@@ -1406,6 +1474,8 @@ def _wasm_pass_total(present: list) -> str | None:
     rest = _LEADING_COUNT.sub("", lifecycle, count=1)
     others = [m for o, m in present if m not in (pure, lifecycle) and m]
     return "; ".join([_passed(total), pure, rest, *others])
+    return ("pass", f"cordis-wasm: {ran} lifecycle test(s) ran (boot -> call -> "
+                    f"unload -> no-residue)" + tail)
 
 
 def _combine_wasm_verdicts(*verdicts: tuple[str, str] | None) -> tuple[str, str]:
@@ -1420,6 +1490,7 @@ def _combine_wasm_verdicts(*verdicts: tuple[str, str] | None) -> tuple[str, str]
         return ("fail", messages)
     if any(o == "pass" for o, _ in present):
         return ("pass", _wasm_pass_total(present) or messages)
+        return ("pass", messages)
     # The join above flattens every reason to a plain `str`, which would drop
     # the `Absent` marker and quietly exempt the wasm tier from
     # REVL_REQUIRE_TIERS. Carry it: if any portion skipped because the runtime
@@ -1454,6 +1525,7 @@ def run_wasm(ir: dict) -> tuple[str, str]:
         # (including the "no tests emitted" pass for a tests-free document).
         return pure_verdict if pure_verdict is not None else (
             "pass", _passed(0) + "; no tests emitted by the backend" + note)
+            "pass", "no tests emitted by the backend" + note)
 
     lifecycle_verdict = _run_wasm_lifecycle(ir, lifecycle)
     return _combine_wasm_verdicts(pure_verdict, lifecycle_verdict)
@@ -1823,6 +1895,7 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
                  mock_requires: bool = False, schedule_seed=None,
                  schedule_seeds: int = None, fault_profile=None,
                  fault_profile_events: int = None, list_tests: bool = False,
+                 schedule_seeds: int = None, list_tests: bool = False,
                  filter_pattern=None, verbose: bool = False,
                  report: str = None) -> int:
     """Run the document's `test` blocks on the chosen tier(s); exit code.
@@ -1856,6 +1929,8 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
     document as a pass (`tier_verdict_for_selection`). `--mock-requires` runs
     lifecycle test units and therefore honours the selection; `--sweep`,
     `--schedule-*` and `--fault-profile` do not run named units at all, so combining them with a
+    lifecycle test units and therefore honours the selection; `--sweep` and
+    `--schedule-*` do not run named units at all, so combining them with a
     filter is also a usage error rather than a filter that quietly does
     nothing.
 
@@ -1879,12 +1954,16 @@ def test_command(ir: dict, backend: str, sweep: bool = False,
             # `--sweep` sweeps every top-level body step of every component,
             # `--schedule-*` every interleaving and `--fault-profile` a seeded
             # draw of those steps; none runs named test units,
+        if sweep or schedule_seed is not None or schedule_seeds is not None:
+            # `--sweep` sweeps every top-level body step of every component and
+            # `--schedule-*` every interleaving; neither runs named test units,
             # so a filter over test names cannot select inside them. Refusing
             # is the honest answer: a filter that appeared to select while the
             # whole sweep ran anyway is exactly the silent mismatch #843 is
             # about.
             print("error: --filter selects test units by name, and --sweep / "
                   "--schedule-* / --fault-profile sweep the composition's steps or interleavings "
+                  "--schedule-* sweep the composition's steps or interleavings "
                   "rather than running named units; run them separately "
                   "(issue #843)", file=sys.stderr)
             return 2

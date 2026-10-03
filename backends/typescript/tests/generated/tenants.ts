@@ -33,6 +33,7 @@ export const TenantAStore = {
             $revl_frame.journalBegin()
             store.insert(k, v)
             return $revl_frame.guard(() => store.remove(k))
+            return () => store.remove(k)
           })
         },
       } satisfies Kv)
@@ -60,6 +61,7 @@ export const TenantBStore = {
             $revl_frame.journalBegin()
             store.insert(k, v)
             return $revl_frame.guard(() => store.remove(k))
+            return () => store.remove(k)
           })
         },
       } satisfies Kv)

@@ -226,6 +226,7 @@ def _lower_camel(name: str) -> str:
 
 def _key_var(name: str) -> str:
     return "_key" + _key_ident(name)
+    return "_key" + _camel(name)
 
 
 def _realm_helper_name() -> str:
@@ -538,6 +539,8 @@ def _safe_local(name: str) -> str:
     """Rename a revl identifier that collides with a *Go* keyword (or a name
     the emitted lifecycle driver binds at the user's scope) so it emits as a
     usable Go local (roadmap item 165, issue #3053).
+    """Rename a revl identifier that collides with a *Go* keyword so it emits
+    as a usable Go local (roadmap item 165).
 
     The rename must be a pure function of the name (declaration site and use
     sites agree without a table) AND INJECTIVE: two distinct revl identifiers
@@ -554,6 +557,9 @@ def _safe_local(name: str) -> str:
     a helper-namespace name (`_REVL_HELPER_PREFIX_RE`), and escape it by exactly
     ONE `_`. Names whose underscore-stripped root is reserved shift up one rung
     of the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
+    it by dropping trailing `_` is a Go keyword, and escape it by exactly ONE
+    `_`. Names whose underscore-stripped root is a keyword shift up one rung of
+    the `kw`/`kw_`/`kw__` ladder (`func` -> `func_`, `func_` -> `func__`),
     which is injective; every other name is returned unchanged and can never
     equal a shifted name, because a shifted name's root is reserved and an
     unchanged name's root is not. The output is never itself reserved: no member
@@ -561,11 +567,16 @@ def _safe_local(name: str) -> str:
     is reserved can change, so a program that binds no reserved name emits
     byte-identically to before; binding one of the driver's own spellings now
     moves the USER name one rung clear (issue #3053)."""
+    equal a shifted name, because a shifted name's root is a keyword and an
+    unchanged name's root is not. The output is never itself a keyword: no
+    member of `_GO_KEYWORDS` ends in `_`. Only a name whose root is a keyword
+    can change, so no existing program's output moves."""
     n = str(name)
     root = n
     while root:
         if (root in _GO_KEYWORDS or root in _EMITTER_RESERVED
                 or _REVL_HELPER_PREFIX_RE.match(root) is not None):
+        if root in _GO_KEYWORDS:
             return n + "_"
         if not root.endswith("_"):
             break
@@ -586,6 +597,7 @@ def _bind_field(name: str) -> str:
     """
     return _safe_local(_lower_camel(str(name))
                        + "_" * (len(str(name)) - len(str(name).rstrip("_"))))
+    return _lower_camel(name)
 
 
 def _req_field(name: str) -> str:
@@ -679,6 +691,7 @@ def _comp_int64(operand: str) -> str:
     decimal constant (the `0` of unary minus, a literal operand) converts
     implicitly in Go, so it is left as written."""
     return operand if operand.isdigit() else "int64(%s)" % operand
+    return _lower_camel(name)
 
 
 def _expr(node, env: _Env, expected=None) -> str:
@@ -702,9 +715,14 @@ def _expr(node, env: _Env, expected=None) -> str:
     # and go did not build (issue #2715). Both conversions are spelled here
     # exactly as the v3 renderer spells them.
     if node.get("widen") in ("Float", "Int"):
+    # An implicit Int -> Float coercion site (docs/arithmetic.md): go's
+    # untyped-constant rule used to absorb it silently; the marker makes the
+    # conversion explicit in the emitted source.
+    if node.get("widen") == "Float":
         inner = {k: v for k, v in node.items() if k != "widen"}
         return ("float64(%s)" if node.get("widen") == "Float"
                 else "int64(%s)") % (_expr(inner, env, expected),)
+        return "float64(%s)" % (_expr(inner, env, expected),)
     kind = node.get("kind")
     if kind == "name":
         return env.name_ref(node["id"])
@@ -746,6 +764,11 @@ def _expr(node, env: _Env, expected=None) -> str:
             count = _replay_count(node, "cordis-go")
             if count is not None:
                 return "%s(%d)" % (go, count)
+            # §4.5: a provider-side `replay(…)` declaration this tier cannot
+            # honour. Refused rather than dropped — a declared backlog nothing
+            # holds is exactly the vacuous durability claim §4.5 keeps off the
+            # wire, one end earlier than the consumer's request.
+            _refuse_unlowered_stream_surface(node, "cordis-go")
         return "%s(%s)" % (go, args)
     if kind == "subscribe":
         # item 130 Slice 3 (design §4.6, the go row): this tier ERASES the async
@@ -755,6 +778,7 @@ def _expr(node, env: _Env, expected=None) -> str:
         # `next` is parked: teardown never has to wait for the provider.
         _flag_stream()
         replay = _replay_count(node, "cordis-go")
+        _refuse_unlowered_stream_surface(node, "cordis-go")
         stream = _stream_chain(node.get("stream") or {},
                                node.get("stages") or [], env, "cordis-go")
         policy = node.get("policy") or "error"
@@ -774,9 +798,13 @@ def _expr(node, env: _Env, expected=None) -> str:
         drain = node.get("drain")
         if drain is None:
             return "%s(%s, %s, %d)" % (call, head, _go_string(policy), capacity)
+            return "StreamSubscribe(%s, %s, %d)" % (stream, _go_string(policy),
+                                                    capacity)
         _flag_stream_drain()
         return "%s(%s, %s, %d, %d)" % (
             call, head, _go_string(policy), capacity, int(drain))
+        return "StreamSubscribe(%s, %s, %d, %d)" % (
+            stream, _go_string(policy), capacity, int(drain))
     if kind == "call":
         # A built-in Opt/Result constructor arriving as call(callee=Some, ...).
         callee = node.get("callee")
@@ -865,6 +893,8 @@ def _expr(node, env: _Env, expected=None) -> str:
         if typed is not None:
             return typed
         return "(%s %s %s)" % (left, go_op, right)
+        return "(%s %s %s)" % (_expr(node["left"], env), go_op,
+                               _expr(node["right"], env))
     if kind == "un":
         operand = _expr(node.get("operand"), env)
         if node.get("op") == "!":
@@ -881,6 +911,8 @@ def _expr(node, env: _Env, expected=None) -> str:
             if node.get("operands") == "Int32":
                 # negating Int32.MIN overflows the same way (issue #2262)
                 return _comp_checked_int32("revlSubI32", "0", operand)
+                env.needs_overflow = True
+                return "revlSub(0, %s)" % operand
             return "(-%s)" % operand
         raise EmitError("unsupported unary operator: %r" % (node.get("op"),))
     if kind == "if":  # ternary
@@ -900,10 +932,12 @@ def _expr(node, env: _Env, expected=None) -> str:
         if elem is None and items:
             elem = _v3_list_elem([_comp_infer(it, env) for it in items],
                                  _V3_TYPES)
+            elem = _comp_infer(items[0], env)
         go_elem = _go_type(elem) if elem else "any"
         # issue #2471: the element type is each item's flow target, so a
         # nullary `Nn` in `[Jj(n), Nn]` builds an `MbNn[int64]`
         rendered = ", ".join(_expr(it, env, elem) for it in items)
+        rendered = ", ".join(_expr(it, env) for it in items)
         return "[]%s{%s}" % (go_elem, rendered)
     if kind == "maplit":
         # `Map.empty()` (docs/stdlib-2.0.md §Map): same positional-inference
@@ -979,6 +1013,7 @@ def _expr(node, env: _Env, expected=None) -> str:
             # issue #1369: a computer-use crossing in a value position
             return _ui_cross_call(node, call, env, _declared_comp(node))
         return _declared_call(node, call, env)
+        return _declared_call(node, "%s(%s)" % (name, args), env)
     if kind == "record":
         # v3 typed-core only: a record literal needs the document's declared
         # record type for its field set (the v1/v2 tier carries none).
@@ -997,6 +1032,7 @@ def _expr(node, env: _Env, expected=None) -> str:
         case = node.get("case")
         if _V3_MODE and _V3_TYPED_COMPONENTS and case in _v3_case_layout():
             return _v3_comp_construct(node, env, expected)
+            return _v3_comp_construct(node, env)
         raise EmitError(_OPT_VALUE_REFUSAL)
     if kind == "match":
         if _V3_MODE:
@@ -1119,6 +1155,7 @@ def _v3_comp_case_type(instance: str, case: str) -> str:
 
 
 def _v3_comp_construct(node, env: _Env, expected=None) -> str:
+def _v3_comp_construct(node, env: _Env) -> str:
     """A user-ADT construction in a component body: `<Variant><Case>{Value: ..}`
     (or `<Variant><Case>{}` for a nullary case) — mirroring
     `_go_v3_construct`'s user-variant branch, the tagged-union shape the v3
@@ -1135,6 +1172,9 @@ def _v3_comp_construct(node, env: _Env, expected=None) -> str:
     _v3_refuse_unbound(instance, case, _V3_TYPES)
     args = [_expr(a, env, payload) for a in arg_nodes]
     struct = _v3_comp_case_type(instance, case)
+    payload = _v3_case_payload(adt, case)
+    args = [_expr(a, env) for a in node.get("args") or []]
+    struct = "%s%s" % (_v3_ident(adt, "type name"), case)
     if payload is None:
         if args:
             raise EmitError(f"variant case `{case}` takes no payload")
@@ -1229,6 +1269,7 @@ def _go_comp_match(node, env: _Env, expected) -> str:
         lines.append("\tvar _s %s = %s" % (_go_type(iface) or "any", scrutinee))
         operand = "_s"
     lines.append("\tswitch _m := %s.(type) {" % operand)
+    lines.append("\tswitch _m := %s.(type) {" % scrutinee)
     has_wild = False
     saved_types = dict(env.var_types)
     try:
@@ -1244,6 +1285,7 @@ def _go_comp_match(node, env: _Env, expected) -> str:
             generic = _v3_generic_variant(st, _V3_TYPES)
             adt = (generic[0] if generic is not None
                    else st if (isinstance(st, str) and st in _V3_TYPES)
+            adt = (st if (isinstance(st, str) and st in _V3_TYPES)
                    else layout.get(pattern, (None, None))[0])
             if not adt or adt not in _V3_TYPES \
                     or _V3_TYPES[adt].get("kind") != "variant":
@@ -1253,6 +1295,8 @@ def _go_comp_match(node, env: _Env, expected) -> str:
             payload = _comp_arm_binding(st if generic is not None else adt, pattern)
             case_type = _v3_comp_case_type(st if generic is not None else adt,
                                            pattern)
+            payload = _v3_case_payload(adt, pattern)
+            case_type = "%s%s" % (_v3_ident(adt, "type name"), pattern)
             lines.append("\tcase %s:" % case_type)
             # `bind == "_"` is a wildcarded payload (`Case(_) => ..`): there is
             # no name to hold the value, so it is discarded exactly like an
@@ -1301,6 +1345,9 @@ def _go_comp_match_tuple(node, env: _Env, expected, st, is_opt, is_result,
             and scrut_node.get("method") in _GO_CHECKED_FORMS:
         # the total forms: the stc-go Result tuple, multi-value
         scrutinee = _comp_checked_expr(scrut_node, env)
+            and scrut_node.get("method") in _GO_CHECKED_DIV:
+        # the total division forms: the stc-go Result tuple, multi-value
+        scrutinee = _comp_checked_div_expr(scrut_node, env)
     else:
         scrutinee = _expr(scrut_node, env, st)
     saved_types = dict(env.var_types)
@@ -1433,6 +1480,7 @@ def _instance_get_expr(node, env: _Env) -> str:
     key = node.get("key")
     if not isinstance(key, str) or not all(
             p.isidentifier() for p in key.split(KEY_NAMESPACE_SEP)):
+    if not isinstance(key, str) or not key.isidentifier():
         raise EmitError("instance-get: bad key %r" % (key,))
     svc = _camel(service)
     return ("func() %s { _svc, _ := stc.Service[%s](%s.Ctx(), %s); return _svc }()"
@@ -1466,6 +1514,7 @@ def _comp_infer(node, env: _Env):
     if k == "list":
         items = node.get("items") or []
         el = _v3_list_elem([_comp_infer(it, env) for it in items], _V3_TYPES)
+        el = _comp_infer(items[0], env) if items else None
         return "List[%s]" % (el or "Int")
     if k == "index":
         tt = _comp_infer(node.get("target"), env)
@@ -1520,6 +1569,10 @@ def _comp_infer(node, env: _Env):
             t = _v3_comp_applied(t, node.get("case"), None,
                                  node.get("args") or [], env)[0]
         return t
+        t = node.get("type")
+        if t:
+            return t
+        return _v3_case_layout().get(node.get("case"), (None, None))[0]
     if k == "fn":
         # a call to a top-level `fn` (or extern) by name: its declared return
         # type, off the per-emit registry. Without this a `firsts(xs).length()`
@@ -1548,6 +1601,8 @@ def _comp_infer(node, env: _Env):
         # #1834): the first arm whose body infers a type, with the arm's binding
         # in scope, the way `_go_comp_match` picks its result type
         return _comp_infer_match(node, env)
+        # a match's value type is its scrutinee's
+        return _comp_infer(node.get("scrutinee"), env)
     if k == "field":
         tt = _comp_infer(node.get("target"), env)
         if isinstance(tt, str) and tt in _V3_TYPES \
@@ -1879,6 +1934,13 @@ def _comp_builtin(method, recv_surface, target, args):
         # Result-typed method. A bare value use would emit Go that cannot
         # compile, so it is refused here with the way out named (mirrors the
         # Opt tuple convention on this tier).
+    if method in _GO_CHECKED_DIV:
+        # The total division forms answer a Result, which the stc-go world
+        # carries as a (T, E, bool) tuple — only valid in the two positions
+        # that accept a multi-value expression: a `match` scrutinee and a
+        # `return` against a Result-typed method. A bare value use would
+        # emit Go that cannot compile, so it is refused here with the way
+        # out named (mirrors the Opt tuple convention on this tier).
         raise EmitError(
             f"{method} is only lowerable on the cordis-go tier as a `match` "
             f"scrutinee or in a Result-returning `return` (Result is a "
@@ -1893,6 +1955,13 @@ def _comp_checked_expr(node, env: _Env) -> str:
     `checked_add/sub/mul`, a zero divisor or the one overflowing quotient for
     the division forms), else the value. Only valid where a multi-value
     expression is: a `match` scrutinee or a Result-returning `return`."""
+def _comp_checked_div_expr(node, env: _Env) -> str:
+    """The total division forms (docs/arithmetic.md) as the stc-go tier's
+    Result tuple `(T, E, bool)`: an immediately-applied func literal that
+    evaluates each operand once, returns `(0, reason, false)` on a zero
+    divisor (and on the Int.MIN / -1 overflow for the truncating form), else
+    the quotient. Only valid where a multi-value expression is: a `match`
+    scrutinee or a Result-returning `return`."""
     method = node.get("method")
     target = _expr(node.get("target"), env)
     args = [_expr(a, env) for a in node.get("args") or []]
@@ -1900,6 +1969,7 @@ def _comp_checked_expr(node, env: _Env) -> str:
         raise EmitError(f"{method} takes exactly one argument")
     if method in _GO_CHECKED_ARITH:
         return _comp_checked_arith_expr(method, target, args[0])
+        raise EmitError(f"{method} takes exactly one divisor")
     if method != "checked_div_trunc":
         # revlDivFloor / revlDivEuclid / revlMod live in the pure-tier
         # int-arith preamble, which the stc-go component path does not emit —
@@ -1915,6 +1985,7 @@ def _comp_checked_expr(node, env: _Env) -> str:
         f'if _b == 0 {{ return 0, "{_GO_DIV_ZERO_MSG}", false }}; '
         "if _a == (-9223372036854775807 - 1) && _b == -1 "
         f'{{ return 0, "{_GO_INT_OVERFLOW_MSG}", false }}; '
+        '{ return 0, "revl: Int overflow", false }; '
         f"return ({quotient}), \"\", true }}()"
     )
 
@@ -2123,6 +2194,7 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
                        binds, reqs, has_config, out):
     """Emit the impl struct + methods for one `provide` block."""
     struct = "%s_%s" % (comp_name, _host_key(prov_name))
+    struct = "%s_%s" % (comp_name, prov_name)
     svc = services.get(service_name, {})
     svc_methods = svc.get("methods", {})
 
@@ -2243,6 +2315,8 @@ def _emit_go_router_struct(cname, key, service_name, route, services, out):
     """
     struct = "revlRouter%s%s" % (cname, _key_ident(key))
     ctor = "newRevlRouter%s%s" % (cname, _key_ident(key))
+    struct = "revlRouter%s%s" % (cname, _camel(key))
+    ctor = "newRevlRouter%s%s" % (cname, _camel(key))
     svc = _camel(service_name)
     realms = list(route.get("realms") or [])
     strategy = route.get("strategy") or "round_robin"
@@ -2358,6 +2432,7 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                                                  False))
             else:
                 surface = _comp_infer(value_node, env)
+            surface = _comp_infer(step.get("value"), env)
             if surface is not None:
                 env.var_types[step["name"]] = surface
             value = _expr(step["value"], env, surface)
@@ -2414,6 +2489,7 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             # (`receiver.revlFrame`, wired at provide construction).
             env.declared_skip = step.get("expr")
             emit_call = _expr(step["expr"], env)
+            out.append("%s%s" % (pad, _expr(step["expr"], env)))
             env.declared_skip = None
             if not _is_ui_crossing(step.get("expr"), env):
                 emit_call = _journal_service_emit(step.get("expr"), emit_call)
@@ -2427,10 +2503,14 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             # one compensation per crossing, registered after the fire: the
             # site-spelled clause, else the extern's own declared one (item
             # 254, issues #1592 and #1902).
+            # the site-spelled clause, then the extern's own declared one
+            # (item 254, issue #1592), each registered after the fire.
             for comp_node in _emit_compensations(step):
                 compensate_call = _journal_service_comp(comp_node, _expr(comp_node, env))
+                compensate_call = _expr(comp_node, env)
                 key, method = _call_descriptor(comp_node)
                 frame = env.ui_scope or "%s.revlFrame" % env.receiver
+                frame = "%s.revlFrame" % env.receiver
                 # By-value capture for the offset, on the same footing as an
                 # `undo` (see `_emit_pins`). The offset runs in Phase 2 of an
                 # abort, so a `var` the body reassigns afterwards would move what
@@ -2483,6 +2563,7 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
                 out.append("%s\treturn %s.Guard(func() error { if %s { %s }; return nil })"
                            % (pad, jref, bind, _expr(undo, env)))
             elif undo is not None:
+            if undo is not None:
                 out.append("%s\treturn func() error { if %s { %s }; return nil }"
                            % (pad, bind, _expr(undo, env)))
             else:
@@ -2607,6 +2688,11 @@ def _emit_return(expr, ret_surface, env: _Env, out, pad):
         # (T, E, bool) tuple: the multi-value IIFE returns straight into the
         # method's tuple signature.
         out.append("%sreturn %s" % (pad, _comp_checked_expr(expr, env)))
+            and expr.get("method") in _GO_CHECKED_DIV:
+        # The total division forms answer a Result, carried on this tier as
+        # the (T, E, bool) tuple: the multi-value IIFE returns straight into
+        # the method's tuple signature.
+        out.append("%sreturn %s" % (pad, _comp_checked_div_expr(expr, env)))
         return
     out.append("%sreturn %s" % (pad, _expr(expr, env, ret_surface)))
 
@@ -2655,6 +2741,8 @@ def _emit_effect_step(step, env: _Env, out, indent):
     elif undo is not None:
         out.append("%s\treturn func() error { %s; return nil }"
                    % (pad, _expr(undo, env)))
+    if undo is not None:
+        out.append("%s\treturn func() error { %s; return nil }" % (pad, _expr(undo, env)))
     else:
         out.append("%s\treturn nil" % pad)
     out.append("%s})" % pad)
@@ -2998,6 +3086,7 @@ def _emit_component(comp, services, out):
                 # `_REQ_SERVICE` is this component's `requires` keyed by raw
                 # key AND by binding -- the same table `_by_binding` rebuilt.
                 host = _acquire_value_go_type(acquire, services, _REQ_SERVICE)
+                host = _acquire_value_go_type(acquire, services, requires)
                 _BIND_IS_PTR[bind] = False
             _BIND_HOST[bind] = host
 
@@ -3026,6 +3115,7 @@ def _emit_component(comp, services, out):
     if provides:
         out.append("\t\tProvide: []stc.Key{%s}," % ", ".join(_key_var(p) for p in provides))
     _emit_apply_header(body, out)
+    out.append("\t\tApply: func(ctx *stc.Context) (stc.Inverse, error) {")
 
     # item 243/247: a component using a witnessed effect or a compensation
     # needs the per-activation teardown accumulator. `_revlFrame` is created
@@ -3063,8 +3153,13 @@ def _emit_component(comp, services, out):
             tail.append("_revlFrame.runCompensationPhase()")
         if needs_journal:
             tail.append("_revlJournal.Judge()")
+    if needs_frame:
+        global _COMP_NEEDS_TEARDOWN
+        _COMP_NEEDS_TEARDOWN = True
+        out.append("\t\t\t_revlFrame := newRevlFrame()")
         out.append("\t\t\tif err := ctx.Effect(func() stc.Inverse {")
         out.append("\t\t\t\treturn func() error { %s; return nil }" % "; ".join(tail))
+        out.append("\t\t\t\treturn func() error { _revlFrame.runCompensationPhase(); return nil }")
         out.append("\t\t\t}); err != nil {")
         out.append("\t\t\t\treturn nil, err")
         out.append("\t\t\t}")
@@ -3078,6 +3173,7 @@ def _emit_component(comp, services, out):
         if rname in routes:
             out.append("\t\t\t%s := newRevlRouter%s%s(ctx)" %
                         (_req_field(rname), cname, _key_ident(rname)))
+                        (_req_field(rname), cname, _camel(rname)))
             continue
         out.append("\t\t\t%s, err := stc.Service[%s](ctx, %s)" %
                     (_req_field(rname), _camel(svc), _key_var(rname)))
@@ -3743,15 +3839,23 @@ def _emit_compensations(step) -> list:
     own declared one (item 254, issue #1592); the declared one is the default
     only when the site spells none. The rule the py reference keeps. An extern
     is matched as a `fn`-kind call naming it (backends/python/emit.py
+    """The compensations an `emit` step registers, in order: the site-spelled
+    `compensate` clause, then the emitted extern's own declared one (item 254,
+    issue #1592). The order the py reference registers them in. An extern is
+    matched as a `fn`-kind call naming it (backends/python/emit.py
     `_compensated_extern`)."""
+    out = []
     if step.get("compensate") is not None:
         return [step["compensate"]]
+        out.append(step["compensate"])
     expr = step.get("expr")
     if _COMPENSATED_EXTERNS and isinstance(expr, dict) and expr.get("kind") == "fn":
         ext = _COMPENSATED_EXTERNS.get(expr.get("name"))
         if ext is not None:
             return [_as_fn_call(ext["compensate"])]
     return []
+            out.append(_as_fn_call(ext["compensate"]))
+    return out
 
 
 def _timer_has_compensate(step) -> bool:
@@ -3985,6 +4089,7 @@ def _wal_referent(ext: dict) -> str:
     stored, the way the java and rust WAL sinks scrub every descriptor argument
     and the py tier's `confidential.redact_args` does by value. A program that
     declares no `Secret[T]` has no registry and emits the call byte-identically."""
+    positional and known before the program runs."""
     if ext.get("secret_witness"):
         return _go_string(_REDACTED_SECRET)
     if _SECRET_MODE:
@@ -4141,6 +4246,7 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
                    % (inner, env.ui_scope, _go_string(undo_name)))
     else:
         out.append("%s%s.registerMethodWitnessed(func() (_revlErr error) {" % (inner, frame))
+    out.append("%s%s.registerMethodWitnessed(func() (_revlErr error) {" % (inner, frame))
     out.append("%sif %s.committed {" % (inner2, frame))
     out.append("%s\t// item 318 a5a: discharge — the mutation is the deliverable" % inner2)
     out.append("%s\t// and persists; witness GC'd (out of scope)." % inner2)
@@ -4171,6 +4277,8 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
 def _replay_count(node, tier: str):
     """The item-130 §4.5 last-n `replay(<n>)` a stream node carries, or None;
     refuse the durable cursor, the one stream surface this tier does not lower.
+def _refuse_unlowered_stream_surface(node, tier: str) -> None:
+    """Refuse the item-130 stream surface this tier does not lower.
 
     Slice 2 arrived in three landings and nothing of it outlived them: the
     derived combinator chain (`map`/`filter`/`take`) is lowered as derived
@@ -4183,6 +4291,21 @@ def _replay_count(node, tier: str):
     The other two blocking tiers still refuse the window, each for a reason of
     its own: rust has a clock but a `thread_local!` one, and java has no clock
     at all (it refuses an `advance` step by name).
+    Only §4.5's `replay(…)` is left here. Slice 2 arrived in three landings and
+    nothing of it outlived them: the derived combinator chain
+    (`map`/`filter`/`take`) is lowered as derived stream links inside the
+    subscription's acquisition (see `_stream_chain`); all four §4.4 backpressure
+    policies mirror the py reference's `Subscription._deliver` arm for arm; and
+    the §8 `block` drain WINDOW now arms against this tier's own clock coeffect
+    (`revlScheduleAfter`/`RevlClockAdvance`, item 57), so its resume is the same
+    deterministic timeline step it is on the reference rather than an early
+    wall-clock guess. The window was refused here for as long as the reason held
+    — "no deterministic clock on this tier" — and that reason stopped being true
+    once the clock coeffect landed; the refusal outlived it. The other two
+    blocking tiers still refuse the window, each for a reason of its own: rust
+    has a clock but a `thread_local!` one, so a window would be armed by the
+    provider's thread and advanced by the consumer's and would never fire, and
+    java has no clock at all (it refuses an `advance` step by name).
 
     §4.5's last-n backlog is lowered too. The provider holds the newest n items
     in memory and a subscription that asks for k of them receives them through
@@ -4203,6 +4326,16 @@ def _replay_count(node, tier: str):
     if not replay:
         return None
     if "cursor" in replay:
+    Replay is refused for a reason of its own rather than for a clock. It is a
+    DURABILITY claim, and the half that makes it worth anything is §4.9's: a
+    durable cursor is what turns a crashed subscription from residue into a
+    re-issuable descriptor, and that recovery surface is the WAL's, which lives
+    on the py reference tier. A tier that emitted a subscription while silently
+    dropping the backlog would deliver only live items and call it replay.
+    Refused at the provider's declaration as well as at the consumer's request,
+    because a declared backlog nothing holds is the same vacuous claim one end
+    earlier."""
+    if node.get("replay"):
         raise EmitError(
             "a durable stream `replay(from: …)` cursor is not lowered on the %s "
             "tier; a durable cursor is what makes a crashed subscription "
@@ -4211,6 +4344,11 @@ def _replay_count(node, tier: str):
             "`replay(<n>)` form does lower here; try `--backend py` for the "
             "cursor" % tier)
     return int(replay["count"])
+            "a stream `replay(…)` is not lowered on the %s tier; replay is a "
+            "durability claim — the provider holds the backlog, and a durable "
+            "cursor is what makes a crashed subscription reconstructible rather "
+            "than residue — and that recovery surface is the py reference "
+            "tier's (item 130 §4.5, §4.9) — try `--backend py`" % tier)
 
 
 def _document_holds_stream(ir: dict) -> bool:
@@ -4478,6 +4616,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
                 out.append("%s%s.Begin()" % (inner, jref))
             out.append("%s%s = %s" % (inner, _bind_field(bind), acquire))
             if jrn and _is_map_cas(step["acquire"]):
+            if undo is not None and _is_map_cas(step["acquire"]):
                 # item 397: result-guarded undo — identity inverse on a `false`
                 # CAS, so teardown never removes the winner's entry.
                 out.append("%sreturn %s.Guard(func() error { if %s { %s }; return nil })"
@@ -4485,6 +4624,8 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             elif jrn:
                 out.append("%sreturn %s.Guard(func() error { %s; return nil })"
                            % (inner, jref, _expr(undo, env)))
+                out.append("%sreturn func() error { if %s { %s }; return nil }"
+                           % (inner, _bind_field(bind), _expr(undo, env)))
             elif undo is not None:
                 if _is_map_cas(step["acquire"]):
                     out.append("%sreturn func() error { if %s { %s }; return nil }"
@@ -4492,6 +4633,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
                 else:
                     out.append("%sreturn func() error { %s; return nil }"
                                % (inner, _expr(undo, env)))
+                out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
             else:
                 out.append("%sreturn nil" % inner)
             out.append("%s}); err != nil {" % pad)
@@ -4518,6 +4660,8 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             elif undo is not None:
                 out.append("%sreturn func() error { %s; return nil }"
                            % (inner, _expr(undo, env)))
+            if undo is not None:
+                out.append("%sreturn func() error { %s; return nil }" % (inner, _expr(undo, env)))
             else:
                 out.append("%sreturn nil" % inner)
             out.append("%s}); err != nil {" % pad)
@@ -4559,9 +4703,14 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # emitted extern's own declared one (item 254, issues #1592 and
         # #1902), as the py reference registers it. The emission fires inside
         # it.
+        emit_call = _expr(step["expr"], env)
+        # the site-spelled clause, then the emitted extern's own declared one
+        # (item 254, issue #1592): one entry each, in that order, as the py
+        # reference registers them. The emission fires inside the first.
         compensations = _emit_compensations(step)
         for index, comp_node in enumerate(compensations):
             compensate_call = _journal_service_comp(comp_node, _expr(comp_node, env))
+            compensate_call = _expr(comp_node, env)
             key, method = _call_descriptor(comp_node)
             out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
             if index == 0:
@@ -4611,6 +4760,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
                                 % (em.get("step"),))
             out.append("%s\t%s" % (inner, _journal_service_emit(
                 em.get("expr"), _expr(em.get("expr"), env))))
+            out.append("%s\t%s" % (inner, _expr(em.get("expr"), env)))
             # an emitted extern that declares its own `compensate` registers it
             # on every firing, after the fire (item 254, issue #1592). A firing
             # runs after activation, so it parks on the frame exactly like a
@@ -4620,6 +4770,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
                 out.append("%s\t_revlFrame.registerMethodCompensation(%s, %s, func() error { %s; return nil })"
                            % (inner, _go_string(key), _go_string(method),
                               _journal_service_comp(comp_node, _expr(comp_node, env))))
+                           % (inner, _go_string(key), _go_string(method), _expr(comp_node, env)))
                 _COMP_NEEDS_TEARDOWN = True
                 _COMP_NEEDS_METHOD_WITNESSED = True
         out.append("%s})" % inner)
@@ -4639,10 +4790,12 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         out.append("%s}" % pad)
     elif s == "fail":
         out.append("%sreturn nil, %s" % (pad, _go_fail_error(step.get("message"), env)))
+        out.append("%sreturn nil, fmt.Errorf(%s)" % (pad, _expr(step.get("message"), env)))
     elif s == "provide":
         pname = step["name"]
         svc = step["service"]
         struct = "%s_%s" % (cname, _host_key(pname))
+        struct = "%s_%s" % (cname, pname)
         # resolve method return types from service decl for the impl emit
         for m in step.get("methods", []):
             decl = services.get(svc, {}).get("methods", {}).get(m["name"], {})
@@ -4665,8 +4818,10 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         for r in (comp.get("requires", {}) or {}).keys():
             fields.append("%s: %s" % (_req_field(r), _req_field(r)))
         out.append("%s_impl%s := &%s{%s}" % (pad, _key_ident(pname), struct, ", ".join(fields)))
+        out.append("%s_impl%s := &%s{%s}" % (pad, _camel(pname), struct, ", ".join(fields)))
         out.append("%sif _, err := ctx.Provide(%s, %s(_impl%s)); err != nil {" %
                    (pad, _key_var(pname), _camel(svc), _key_ident(pname)))
+                   (pad, _key_var(pname), _camel(svc), _camel(pname)))
         out.append("%sreturn nil, err" % inner)
         out.append("%s}" % pad)
     elif s == "stream-iter":
@@ -5087,6 +5242,10 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 cname = _camel(component)
                 cfg = step.get("config") or {}
                 out.append("\t{")
+                fields = ", ".join(
+                    "%s: %s" % (_camel(fname), _expr(cfg[fname], env, ftype))
+                    for fname, ftype in _component_config_fields(component, components)
+                    if fname in cfg)
                 if _component_has_config(component, components):
                     # issue #2263: a field the step does not name keeps its
                     # declared default, as on py/ts and in RevlLoad. A bare
@@ -5103,8 +5262,10 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                             for fname, ftype in _component_config_fields(component, components))
                         default = "%sConfig{%s}" % (cname, fields)
                     sig = "Load%s(root, %s)" % (cname, default)
+                    sig = "Load%s(root, %sConfig{%s})" % (cname, cname, fields)
                 else:
                     sig = "Load%s(root)" % cname
+                out.append("\t{")
                 out.append("\t\t_f := %s" % sig)
                 # issue #2505: tracked before `Ready`, as py records the plug
                 # before `_revl_load_failed`, so a failed load is disposed too.
@@ -5115,6 +5276,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 out.append('\t\t\trevlT.Fatalf("%%s: %%v", %s, err)'
                            % _go_string(where + ": load " + component))
                 out.append("\t\t}")
+                out.append("\t\t_fibers[%s] = _f" % _go_string(component))
                 out.append("\t}")
             elif kind == "unload":
                 component = step["component"]
@@ -5196,6 +5358,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 out.append("\tif !(%s) {" % _go_lifecycle_assert(
                     step["expr"], bind_types, env, where))
                 out.append("\t\trevlT.Fatalf(%s)" % _go_string(where_f + ": assertion failed"))
+                out.append("\t\trevlT.Fatalf(%s)" % _go_string(where + ": assertion failed"))
                 out.append("\t}")
             elif kind == "assert_no_residue":
                 out.append("\t_revlAt = %s" % _go_string("assert no_residue"))
@@ -5222,6 +5385,7 @@ def _emit_stc_lifecycle_tests(ir, out) -> None:
                 out.append("\tif misses := RevlJournalMisses(); len(misses) > 0 {")
                 out.append("\t\trevlT.Fatalf(%s, len(misses), misses)"
                            % _go_string(where_f + ": residue — %d un-reversed host-map write(s) (R4): %v"))
+                           % _go_string(where + ": residue — %d fiber(s), %d host resource(s) (R4/R1)"))
                 out.append("\t}")
             elif kind == "advance":
                 # item 102: drive the clock coeffect forward (go has the same
@@ -5940,6 +6104,7 @@ func MapNew[V any]() *Map[V] {
 	return &Map[V]{m: map[string]V{}}
 }
 @JOURNAL_DROP@
+func (m *Map[V]) Drop() { hostRecord("map.drop"); revlHostRelease() }
 func (m *Map[V]) Insert(k string, v V) {
 	@JOURNAL_INSERT@
 	m.mu.Lock()
@@ -6439,6 +6604,21 @@ _GO_RESERVED = {
     "float64", "imag", "int", "int8", "int16", "int32", "int64", "len", "make",
     "max", "min", "new", "panic", "print", "println", "real", "recover", "rune",
     "string", "uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+    # Only the ACTUALLY-emitted subset is reserved, not the whole predeclared
+    # list: a predeclared identifier the emitter never spells (`clear`, `close`,
+    # `cap`, `new`, `min`/`max`, …) cannot be shadowed because nothing references
+    # it, and over-reserving would rename a user `clear`/`cap` that the
+    # self-hosted `selfhost/emit_go.rvl` (keyword-escape only) leaves alone —
+    # breaking the byte-agreement oracle
+    # (`tests/test_selfhost_emit_go.py::test_selfhosted_emitter_is_byte_identical`,
+    # which `emit_go_corpus/accumulators.rvl`'s `clear` parameter exercises)
+    # without a matching change to that digest-input file. Go service methods
+    # are emitted capitalized (`r.Close()`), so they never reach `_v3_ident`'s
+    # predeclared check and need no exclusion. None of these end in `_`, so the
+    # ladder stays injective and a mangled name never re-enters the set.
+    "any", "append", "bool", "byte", "comparable", "copy", "delete", "error",
+    "float64", "int", "int32", "int64", "len", "make", "panic", "rune",
+    "string", "uint32",
 }
 
 _V3_PRIM = {
@@ -6465,11 +6645,18 @@ def _v3_ident(name, role: str) -> str:
     A `revl*` user binding is escaped for the same reason a keyword is: the
     emitter's bare helper call inside the function must keep binding the
     helper (issue #3168)."""
+    name reachable from it by dropping trailing `_` is a Go keyword, by exactly
+    one `_`. The plain "reserved -> name + '_'" map sent both `func` and the
+    equally legal revl identifier `func_` to `func_`, so two distinct revl
+    locals became one Go local and `go build` reported "no new variables on
+    left side of :=" — a loud break here, a SILENT capture on the python tier
+    from the same shape."""
     if not isinstance(name, str) or not name:
         raise EmitError(f"invalid {role} identifier: {name!r}")
     root = name
     while root:
         if (root in _GO_RESERVED or _REVL_HELPER_PREFIX_RE.match(root) is not None):
+        if root in _GO_RESERVED:
             return name + "_"
         if not root.endswith("_"):
             break
@@ -6856,6 +7043,7 @@ class _V3GoCtx:
         # `{binding: declared type}` the current body hands each local on to;
         # see `_v3_flow_hints`.
         self.flow_hints: _FlowHints = _FlowHints()
+        self.flow_hints: dict = {}
         # feature flags set during rendering / used at module assembly
         self.needs_fmt = False
         self.used_stdlib = False
@@ -6881,6 +7069,10 @@ class _V3GoCtx:
         # import block via a `//revl:import [alias] <path>` directive (see
         # _emit_v3_go_externs). A verbatim extern body cannot carry its own
         # `import`, so the directive is the principled seam.
+        # Stdlib packages an extern @go body asked to be hoisted into the
+        # module's import block via a `//revl:import <path>` directive
+        # (see _emit_v3_go_externs). A verbatim extern body cannot carry its
+        # own `import`, so the directive is the principled seam.
         self.extern_imports: set[str] = set()
         # spec -> where it was first asked for (`extern `x`: '//revl:import
         # ...'`), so an alias clash in the import block names the directive
@@ -6915,6 +7107,7 @@ class _V3GoCtx:
         `return`, an assignment, an argument, a field of a known record), and
         only a target whose field-set matches exactly counts; with none the
         literal is refused rather than guessed."""
+    def record_type_for_fields(self, fields: list) -> str:
         key = tuple(sorted(fields))
         candidates = self.records_with_fields.get(key, [])
         if isinstance(expected, str) and expected in candidates:
@@ -6935,6 +7128,7 @@ class _V3GoCtx:
 
     def record_type_for_fields(self, fields: list, expected=None) -> str:
         return _v3_ident(self.resolve_record(fields, expected), "type name")
+        return _v3_ident(name, "type name")
 
 
 # The total, value-returning forms (docs/arithmetic.md): same value as the
@@ -6942,6 +7136,8 @@ class _V3GoCtx:
 # otherwise. `checked_add/sub/mul` answer the overflow; the division forms
 # answer a zero divisor too.
 _GO_CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
 _GO_CHECKED_DIV = ("checked_div_trunc", "checked_div_floor",
                    "checked_div_euclid", "checked_mod")
 _GO_CHECKED_FORMS = _GO_CHECKED_ARITH + _GO_CHECKED_DIV
@@ -6989,14 +7185,19 @@ def _v3_builtin_ret_type(method, recv_type):
     # The rendering builtin (docs/stdlib-2.0.md §Int.to_str), and its
     # one-code-point sibling (issue #2285, §Int.to_char).
     if method in ("to_str", "to_char"):
+    # The rendering builtin (docs/stdlib-2.0.md §Int.to_str).
+    if method == "to_str":
         return "Str"
     if method == "to_int32":
         return "Int32"
     # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
     if method in ("startsWith", "endsWith") or method in _GO_CHAR_CLASS:
+    if method in ("startsWith", "endsWith"):
         return "Bool"
     # The total forms (docs/arithmetic.md) produce a Result value.
     if method in _GO_CHECKED_FORMS:
+    if method in ("checked_div_trunc", "checked_div_floor",
+                  "checked_div_euclid", "checked_mod"):
         return "Result[Int, Str]"
     if method in ("charAt", "repeat", "join"):
         return "Str"
@@ -7084,6 +7285,10 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
         el = _v3_list_elem([_go_v3_infer_type(it, ctx) for it in items],
                            ctx.types)
         return f"List[{el}]" if el else None
+        if items:
+            el = _go_v3_infer_type(items[0], ctx)
+            return f"List[{el}]" if el else None
+        return None
     if kind == "call":
         callee = node.get("callee") or {}
         if callee.get("kind") == "var":
@@ -7147,6 +7352,7 @@ def _go_v3_infer_type(node, ctx: _V3GoCtx):
             return _go_v3_infer_ctor(case, node.get("args") or [], ctx)
         return (_go_v3_applied_variant(ctx, case, None, node.get("args") or [])
                 or ctx.case_adt.get(case))
+        return ctx.case_adt.get(case)
     return None
 
 
@@ -7162,6 +7368,7 @@ def _v3_fn_value_ret(surface):
 
 
 def _v3_fill_erased(surface, declared, types=None):
+def _v3_fill_erased(surface, declared):
     """`surface` with each erased top-level `any` type argument of a built-in
     Opt/Result filled from `declared`, a type of the same family (else
     `surface` unchanged). `Ok(1)` infers `Result[Int, any]`: the error side is
@@ -7169,6 +7376,7 @@ def _v3_fill_erased(surface, declared, types=None):
     it is taken from where the value flows (a declared return or parameter, or
     the other operand of an `==`). With `types`, an applied generic user
     variant fills the same way (`Mb[any]` from `Mb[Int]`, issue #2471)."""
+    the other operand of an `==`)."""
     if not (isinstance(surface, str) and isinstance(declared, str)):
         return surface
     have_v = _v3_generic_variant(surface, types)
@@ -7406,6 +7614,22 @@ def _v3_flow_hints(body, ret_type, ctx) -> dict:
             "record each literal builds")
     targets.clear()
     walk()
+    `RevlResult[int64, any]` Go would refuse to return."""
+    hints: dict = {}
+    for node in _v3_walk_nodes(body):
+        if node.get("step") == "return" and ret_type:
+            expr = node.get("expr")
+            if isinstance(expr, dict) and expr.get("kind") == "var":
+                hints.setdefault(expr.get("name"), ret_type)
+        if node.get("kind") == "call":
+            callee = node.get("callee") or {}
+            name = callee.get("name") if callee.get("kind") == "var" else None
+            params = (ctx.function_params.get(name)
+                      or ctx.extern_params.get(name) or [])
+            for arg, declared in zip(node.get("args") or [], params):
+                if (isinstance(arg, dict) and arg.get("kind") == "var"
+                        and isinstance(declared, str)):
+                    hints.setdefault(arg.get("name"), declared)
     return hints
 
 
@@ -7781,6 +8005,7 @@ def _go_v3_construct(ctx: _V3GoCtx, case: str, arg_renders: list, expected,
     adt = ctx.case_adt.get(case)
     if adt is not None:
         # user variant: `<Variant><Case>{...}`, instantiated when generic
+        # user variant (monomorphic): `<Variant><Case>{...}`
         payload = ctx.case_payload.get(case)
         struct = f"{_v3_ident(adt, 'type name')}{case}"
         instance = _go_v3_applied_variant(ctx, case, expected, arg_nodes)
@@ -7878,6 +8103,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
     if kind == "adt":
         arg_nodes = node.get("args") or []
         payload = _go_v3_variant_payload(ctx, node["case"], expected, arg_nodes)
+        payload = ctx.case_payload.get(node["case"])
         args = [_go_v3_expr(a, ctx, payload) for a in arg_nodes]
         return _go_v3_construct(ctx, node["case"], args, expected,
                                 arg_nodes=arg_nodes)
@@ -7924,6 +8150,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                     # fill each side's erased type arguments from the other,
                     # so both still emit as ONE instantiation.
                     merged = _v3_fill_erased(lt, rt, ctx.types)
+                    merged = _v3_fill_erased(lt, rt)
                     if merged != lt or merged != rt:
                         exp = merged
                 left = _go_v3_expr(node["left"], ctx, exp)
@@ -8009,6 +8236,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         generic = None
         if cname in ctx.case_adt:
             param_types = [_go_v3_variant_payload(ctx, cname, expected, arg_nodes)]
+            param_types = [ctx.case_payload.get(cname)]
         elif cname and not is_ctor:
             param_types = (ctx.function_params.get(cname)
                            or ctx.extern_params.get(cname))
@@ -8025,6 +8253,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
                     a, rendered, (ctx.function_params.get(cname) or [None] * (i + 1))[i],
                     generic[2])
             arg_renders.append(rendered)
+            arg_renders.append(_go_v3_expr(a, ctx, exp))
         if is_ctor:
             return _go_v3_construct(ctx, cname, arg_renders, expected,
                                     arg_nodes=arg_nodes)
@@ -8087,6 +8316,8 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         fields = node.get("fields") or []
         raw_type = ctx.resolve_record([k for k, _ in fields], expected)
         type_name = _v3_ident(raw_type, "type name")
+        type_name = ctx.record_type_for_fields([k for k, _ in fields])
+        raw_type = ctx.record_by_fields[tuple(sorted(k for k, _ in fields))]
         field_types = ctx.types[raw_type].get("fields") or {}
         body = ", ".join(
             f"{_v3_field_ident(k)}: {_go_v3_expr(v, ctx, field_types.get(k))}"
@@ -8107,6 +8338,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         if elem is None and items:
             elem = _v3_list_elem([_go_v3_infer_type(it, ctx) for it in items],
                                  ctx.types)
+            elem = _go_v3_infer_type(items[0], ctx)
         go_elem = _go_v3_type(elem, ctx.types) if elem else "any"
         rendered = ", ".join(_go_v3_expr(it, ctx, elem) for it in items)
         return f"[]{go_elem}{{{rendered}}}"
@@ -8207,6 +8439,7 @@ def _go_v3_expr(node, ctx: _V3GoCtx, expected=None) -> str:
         arg_expected = _v3_push_elem(
             node, lambda n: _go_v3_infer_type(n, ctx), ctx.types)
         args = [_go_v3_expr(a, ctx, arg_expected) for a in node.get("args") or []]
+        args = [_go_v3_expr(a, ctx) for a in node.get("args") or []]
         return _go_v3_builtin(ctx, node.get("method"), target_node, target, args)
 
     if kind == "interp":
@@ -8429,6 +8662,11 @@ def _go_v3_builtin(ctx, method, target_node, target, args):
     # value. An immediately-applied func literal evaluates each operand
     # exactly once; the Ok/Err arms are the two-value RevlResult struct
     # (item 434 (d)).
+    # The total forms (docs/arithmetic.md): same quotient as the faulting
+    # operation, but a zero divisor yields Err(reason) instead of panicking —
+    # `fail` is refused in a pure fn, so the error travels as a value. An
+    # immediately-applied func literal evaluates each operand exactly once;
+    # the Ok/Err arms are the two-value RevlResult struct (item 434 (d)).
     if method in _GO_CHECKED_DIV:
         if method != "checked_div_trunc":
             ctx.needs_int_arith = True
@@ -8748,6 +8986,7 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
     if not exp_t:
         for arm in arms:
             exp_t = _go_v3_type(_v3_infer_arm_body(arm, st, ctx), ctx.types)
+            exp_t = _go_v3_type(_go_v3_infer_type(arm.get("body"), ctx), ctx.types)
             if exp_t:
                 break
     exp_t = exp_t or "any"
@@ -8830,6 +9069,7 @@ def _go_v3_match(node: dict, ctx: _V3GoCtx, expected) -> str:
         adt = st if isinstance(st, str) else ctx.case_adt.get(pattern)
         if adt is None:
             raise EmitError(f"cannot resolve match case {pattern!r}")
+        case_type = f"{_v3_ident(adt, 'type name')}{pattern}"
         payload_surface = ctx.case_payload.get(pattern)
         generic = _v3_generic_variant(adt, ctx.types)
         if generic is not None:
@@ -9242,6 +9482,7 @@ def _go_v3_self_rebind(node: dict, ctx: _V3GoCtx, name: str):
     arg_expected = _v3_push_elem(
         value, lambda n: _go_v3_infer_type(n, ctx), ctx.types)
     args = [_go_v3_expr(a, ctx, arg_expected) for a in value.get("args") or []]
+    args = [_go_v3_expr(a, ctx) for a in value.get("args") or []]
     if method == "push":
         return f"{name} = append({name}, {args[0]})"
     if method == "set":
@@ -9377,6 +9618,7 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
                 and (value_node.get("name") or value_node.get("id")) == "None":
             # a bare `None` infers nothing; it is an `Opt` of what it flows into
             filled = _v3_fill_erased("Opt[any]", ctx.flow_hints.get(key))
+            filled = _v3_fill_erased("Opt[any]", ctx.flow_hints.get(node.get("name")))
             inferred = filled if filled != "Opt[any]" else None
         if _v3_has_any(inferred):
             inferred = _v3_fill_erased(
@@ -9393,6 +9635,7 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             offered = ctx.flow_hints.targets.get(key, [])
             if len(offered) == 1 and isinstance(offered[0], str):
                 inferred = offered[0]
+                inferred, ctx.flow_hints.get(node.get("name")))
         if inferred is not None:
             ctx.var_types[node.get("name")] = inferred
         value = _go_v3_expr(node.get("value"), ctx, inferred)
@@ -9421,6 +9664,7 @@ def _go_v3_stmt(node: dict, ctx: _V3GoCtx, out: list, indent: int, *, t_name=Non
             out.append(f"{pad}{name} := {value}")
         if name != "_":
             out.append(f"{pad}_ = {name}")
+        out.append(f"{pad}_ = {name}")
     elif step == "assign":
         raw = node.get("name")
         name = _v3_ident(raw, "binding")
@@ -9769,6 +10013,7 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
     """`journal` (record mode on the component tier, issue #2345) wraps each
     `extern emission fn` so its durable start record is written first."""
     global _COMP_NEEDS_TEARDOWN
+def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx) -> list[str]:
     out: list[str] = []
     # item 378 Stage 5: emit the config seam once, before the externs, when any
     # extern carries a config schema (byte-identical when none do).
@@ -9830,6 +10075,7 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
         if config_bind:
             out.append("\t" + config_bind)
         body_lines = _hoist_go_imports(body, ctx, ext.get("name")) if body else []
+        body_lines = _hoist_go_imports(body, ctx) if body else []
         if body_lines:
             for line in body_lines:
                 out.append("\t" + line.rstrip())
@@ -9844,6 +10090,8 @@ def _emit_v3_go_externs(externs: list, ctx: _V3GoCtx,
 # at file scope, and the emitter hoists the module's imports into one block).
 # The seam is a directive line, `//revl:import [alias] <path>`, that a @go
 # body places among its statements: the emitter records the import spec on the
+# The seam is a directive line — `//revl:import encoding/json` — that a @go
+# body places among its statements: the emitter records the package on the
 # module's import set and drops the directive from the emitted function body.
 # It is a comment to Go's own lexer, so a body that skipped emit (e.g. copied
 # by hand) still compiles; here it is structured data the emitter acts on.
@@ -9864,12 +10112,15 @@ _GO_LANGUAGE_KEYWORDS = frozenset({
     "map", "package", "range", "return", "select", "struct", "switch", "type",
     "var",
 })
+_GO_IMPORT_DIRECTIVE = re.compile(r'^\s*//revl:import\s+(.+?)\s*$')
 
 
 def _hoist_go_imports(body: str, ctx: "_V3GoCtx", extern: str) -> list[str]:
+def _hoist_go_imports(body: str, ctx: "_V3GoCtx") -> list[str]:
     """Split a @go extern body into emittable lines, pulling any
     `//revl:import [alias] <path>` directive out to the module import set (ctx)."""
     body_lines, _check_host_body = _host_body_scanner()
+    `//revl:import <path>` directive out to the module import set (ctx)."""
     kept: list[str] = []
     for line in body_lines(body):
         if _GO_IMPORT_DIRECTIVE_WORD.match(line.strip()):
@@ -9877,6 +10128,12 @@ def _hoist_go_imports(body: str, ctx: "_V3GoCtx", extern: str) -> list[str]:
             ctx.extern_imports.add(spec)
             ctx.extern_import_sources.setdefault(
                 spec, f"extern `{extern}`: {line.strip()!r}")
+    for line in body.splitlines():
+        m = _GO_IMPORT_DIRECTIVE.match(line)
+        if m:
+            path = m.group(1).strip().strip('"')
+            if path:
+                ctx.extern_imports.add(path)
             continue
         kept.append(line)
     return kept
@@ -9959,6 +10216,7 @@ def _emit_v3_go_functions(functions: list, ctx: _V3GoCtx) -> list[str]:
         type_params = (
             "[" + ", ".join(f"{t} any" for t in tparams) + "]" if tparams else "")
         out.append(f"func {name}{type_params}({params}){sig_ret} {{")
+        out.append(f"func {name}({params}){sig_ret} {{")
         for stmt in fn.get("body") or []:
             _go_v3_stmt(stmt, ctx, out, 1)
         out.append("}")
@@ -10412,12 +10670,17 @@ const revlWALGuarantee = "the WAL records each committed effect's step identity,
 // is fatal (issue #2345): the process stops instead of running on with a record
 // that never became durable. REVL_WAL_ALLOW_UNSYNCED=1 is the explicit opt-out
 // for a target that cannot fsync; it is stamped into the log itself.
+// before the effect it describes is allowed to matter.
 type revlWAL struct {
 	mu       sync.Mutex
 	f        *os.File
 	seq      int
 	seqs     []int
 	unsynced bool
+	mu   sync.Mutex
+	f    *os.File
+	seq  int
+	seqs []int
 }
 
 var revlWALSink *revlWAL
@@ -10432,10 +10695,13 @@ func revlWALOpen() {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
 		panic("revl: cannot open the write-ahead log REVL_WAL: " + err.Error())
+		return
 	}
 	unsynced := os.Getenv("REVL_WAL_ALLOW_UNSYNCED") == "1"
 	revlWALSink = &revlWAL{f: f, unsynced: unsynced}
 	header := map[string]any{
+	revlWALSink = &revlWAL{f: f}
+	revlWALSink.write(map[string]any{
 		"record": "header", "walVersion": 1, "generation": 1,
 		"guarantee": revlWALGuarantee,
 	}
@@ -10447,6 +10713,7 @@ func revlWALOpen() {
 	if unsynced {
 		revlWALSink.write(map[string]any{"record": "durability-opt-out", "fromSeq": 0})
 	}
+	})
 }
 
 func init() { revlWALOpen() }
@@ -10486,6 +10753,7 @@ func (w *revlWAL) cut(start int64) {
 	if err := w.f.Truncate(start); err != nil {
 		return
 	}
+	_, _ = w.f.Write(append(line, '\\n'))
 	_ = w.f.Sync()
 }
 
@@ -10899,6 +11167,7 @@ type Stream struct {
 // provider's §4.5 `replay(<n>)` declaration: how many items it holds for a
 // consumer that subscribes later.
 func StreamSource(replay ...int) *Stream {
+func StreamSource() *Stream {
 	s := &Stream{kind: "source", state: "open"}
 	if len(replay) > 0 {
 		s.replayCap = replay[0]
@@ -12547,9 +12816,11 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     if used_map:
         used_opt = True
     # The total forms produce a Result value without the source ever
+    # The total division forms produce a Result value without the source ever
     # spelling `Result[` — their method names put Result in the module too.
     used_result = ("Result[" in blob) or any(
         f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
+    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
     # A `Some(literal)` / `None` / `Ok`/`Err` with no `Opt[`/`Result[` spelled
     # in the IR (element type recovered from the argument, item 280) still
     # emits the sealed types — scan the rendered body so the matching preamble
@@ -12595,6 +12866,8 @@ def _emit_v3_go(ir: dict, package: str) -> str:
     _go_refuse_extern_alias_clash(imports, ctx)
     for import_spec in sorted(ctx.extern_imports):
         imports.append(f"\t{import_spec}")
+    for path in sorted(ctx.extern_imports):
+        imports.append(f'\t"{path}"')
 
     out: list[str] = []
     out.append("// Code generated by backends/go/emit.py — DO NOT EDIT.")
@@ -12635,6 +12908,41 @@ def _emit_v3_go(ir: dict, package: str) -> str:
         out.append("")
     if ctx.needs_overflow:
         out.append(_V3_OVERFLOW_HELPER)
+        out.append("func revlAdd(a, b int64) int64 {")
+        out.append("\ts := a + b")
+        out.append("\tif (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn s")
+        out.append("}")
+        out.append("")
+        out.append("func revlSub(a, b int64) int64 {")
+        out.append("\td := a - b")
+        out.append("\tif (b < 0 && d < a) || (b > 0 && d > a) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn d")
+        out.append("}")
+        out.append("")
+        out.append("func revlMul(a, b int64) int64 {")
+        out.append("\tif a == 0 || b == 0 {")
+        out.append("\t\treturn 0")
+        out.append("\t}")
+        # `p/b != a` cannot see Int.MIN * -1: the product wraps back to
+        # Int.MIN, and Go DEFINES `Int.MIN / -1` as Int.MIN (spec, "Integer
+        # operators") rather than trapping — so the readback equals `a` and
+        # the check passes. Every other tier traps on this product; go
+        # returned Int.MIN silently. Name the one case the readback is blind
+        # to, the way revlDivTrunc/revlDivFloor already do.
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\tp := a * b")
+        out.append("\tif p/b != a {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn p")
+        out.append("}")
         out.append("")
     if ctx.needs_overflow32:
         # Int32 traps at the i32 edge (docs/arithmetic.md). Go's int32 wraps,
@@ -13060,6 +13368,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32, _COMP_NEEDS_OVERFLOW
     global _COMP_NEEDS_ARITH32
     global _COMP_NEEDS_FLOAT_DIV, _COMP_NEEDS_FLOAT_REM
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
     global _COMPENSATED_EXTERNS
@@ -13157,6 +13466,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     extern_ctx = _V3GoCtx(_V3_TYPES, ir.get("functions") or [], externs)
     if externs:
         body.extend(_emit_v3_go_externs(externs, extern_ctx, journal=_RECORD_MODE))
+        body.extend(_emit_v3_go_externs(externs, extern_ctx))
     body.extend(_emit_services(ir.get("services", {})))
     _emit_keys(ir, body)
     _emit_realm_helper(ir, body)
@@ -13837,6 +14147,9 @@ def _drop_unused_time_import(module: str) -> str:
     test now waits in its leftover dispose, so it always uses `time`, but other
     writers still may not, and go refuses to build a package with an unused
     import. Deciding on the finished text
+    #1559). A `lifecycle test` imports `time` for the unload waits
+    (`time.Sleep`), but one with no `unload` step emits none, and go refuses
+    to build a package with an unused import. Deciding on the finished text
     covers every writer of `time.` at once (a lifecycle wait, the teardown
     preamble's budgets, the timer preamble). The match is conservative: any
     `time.` token keeps the import, so the worst case is the old behavior."""
@@ -13885,6 +14198,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32, _COMP_NEEDS_OVERFLOW
     global _COMP_NEEDS_ARITH32
     global _COMP_NEEDS_FLOAT_DIV, _COMP_NEEDS_FLOAT_REM
+    global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _COMP_NEEDS_STREAM
     global _COMP_NEEDS_STREAM_DRAIN, _COMP_NEEDS_STREAM_EVENT
     global _STREAM_ITER_COUNTER
@@ -13962,6 +14276,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         body.extend(_emit_v3_go_types(types))
     if externs:
         body.extend(_emit_v3_go_externs(externs, ctx, journal=_RECORD_MODE))
+        body.extend(_emit_v3_go_externs(externs, ctx))
     if functions:
         body.extend(_emit_v3_go_functions(functions, ctx))
     pure_tests = [t for t in tests if not t.get("lifecycle")]
@@ -14000,6 +14315,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         used_opt = True
     used_result = ("Result[" in blob) or any(
         f'"method": "{m}"' in blob for m in _GO_CHECKED_FORMS)
+    used_result = ("Result[" in blob) or ("checked_div_" in blob) or ("checked_mod" in blob)
     # the Map SUBSCRIPT helper (issue #957), gated on its own like above
     body_blob = "\n".join(body)
     used_map_index = "revlMapIndex(" in body_blob
@@ -14062,6 +14378,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         imports.append('\t"strconv"')
         imports.append('\t"strings"')
     if ctx.needs_float_rem or _COMP_NEEDS_FLOAT_REM:
+    if ctx.needs_float_rem:
         imports.append('\t"math"')
     if "revldebug." in body_blob:
         # issue #2481: a recovered panic carries the go stack
@@ -14131,6 +14448,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         out.append(_V3_ANY_INDEX_HELPER)
     if ctx.needs_float_div or _COMP_NEEDS_FLOAT_DIV:
         out.append(_REVL_DIV_HELPER)
+    if ctx.needs_float_div:
+        out.append("func revlDiv(a, b float64) float64 { return a / b }")
         out.append("")
     if ctx.needs_float_lit:
         out.append("func revlF(v float64) float64 { return v }")
@@ -14143,6 +14462,42 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     # the method renderer does not write into `ctx`.
     if ctx.needs_overflow or _COMP_NEEDS_OVERFLOW:
         out.append(_V3_OVERFLOW_HELPER)
+    if ctx.needs_overflow:
+        out.append("func revlAdd(a, b int64) int64 {")
+        out.append("\ts := a + b")
+        out.append("\tif (a > 0 && b > 0 && s < 0) || (a < 0 && b < 0 && s >= 0) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn s")
+        out.append("}")
+        out.append("")
+        out.append("func revlSub(a, b int64) int64 {")
+        out.append("\td := a - b")
+        out.append("\tif (b < 0 && d < a) || (b > 0 && d > a) {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn d")
+        out.append("}")
+        out.append("")
+        out.append("func revlMul(a, b int64) int64 {")
+        out.append("\tif a == 0 || b == 0 {")
+        out.append("\t\treturn 0")
+        out.append("\t}")
+        # `p/b != a` cannot see Int.MIN * -1: the product wraps back to
+        # Int.MIN, and Go DEFINES `Int.MIN / -1` as Int.MIN (spec, "Integer
+        # operators") rather than trapping — so the readback equals `a` and
+        # the check passes. Every other tier traps on this product; go
+        # returned Int.MIN silently. Name the one case the readback is blind
+        # to, the way revlDivTrunc/revlDivFloor already do.
+        out.append("\tif a == (-9223372036854775807 - 1) && b == -1 {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\tp := a * b")
+        out.append("\tif p/b != a {")
+        out.append('\t\tpanic("revl: Int overflow")')
+        out.append("\t}")
+        out.append("\treturn p")
+        out.append("}")
         out.append("")
     # `or _COMP_NEEDS_OVERFLOW32`: the narrow can come from a component
     # METHOD body as well as from a top-level fn (issue #1347), and the
@@ -14228,6 +14583,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         # so the rendered body decides here too. Nothing in that body
         # constructs a sealed `RevlOk`/`RevlErr`, so the struct form is the
         # one that agrees with the pure tier beside it.
+    elif used_result:
         out.append(_V3_RESULT_PREAMBLE)
     if used_map or _COMP_NEEDS_MAP:
         out.append(_V3_MAP_PREAMBLE)

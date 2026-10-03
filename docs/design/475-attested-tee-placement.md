@@ -73,6 +73,7 @@ change.
      quadruples, the TCB floors and the quoting-enclave identities a TDX quote
      must meet, and `sev_min_tcb` / `sev_turin_min_tcb` for the SEV-SNP TCB floor of
      each layout AMD uses.
+     confinement the requirement exists to narrow.
    * `EnclaveEvidence` (`tee_attestation.py:316`) is the proof: `peer_id` (the
      peer it is about), `bundle` (the approved bundle's content hash),
      `measurement` (what is running inside the enclave), `region`,
@@ -98,6 +99,7 @@ change.
      are compared, as is a SEV-SNP report's TCB floor, and a SEV-SNP report is
      refused when the requirement states no floor for its layout. A `HardwareRoot`
      can also revoke a platform key by fingerprint (`revoked_platform_keys`).
+     challenge has already been consumed.
    * **The load-bearing refusal.** `tee_admits` refuses when
      `attester_key == peer_key`: a peer that signs its own attestation has
      proven nothing an `attestation` facet did not already prove, and admitting

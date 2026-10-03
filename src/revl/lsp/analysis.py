@@ -409,6 +409,7 @@ def _guarantee_hover(text: str, line0: int, start: int, end: int,
         # that need not be there.
         headline = payload.get("guarantee") or payload.get("meaning") or payload.get("category")
         lines = [f"**{payload['code']} — {headline}**"] if headline else [f"**{payload['code']}**"]
+        lines = [f"**{payload['code']} — {payload['guarantee']}**"]
         if payload.get("fix"):
             lines.append("")
             lines.append(f"Fix: {payload['fix']}")

@@ -181,6 +181,8 @@ reuses `placement.swap_admission`:
 | --- | --- |
 | `capability` | a new `host:` crossing, a new `secret:` binding, a new `env:` contract field or one whose bound is not provably narrower, a widened per-emission capability scope, or a host body appearing on a backend it was not on |
 | `taint` | a new `emit:` crossing (a new boundary edge out), a new `taint:` crossing (an untrusted origin newly reaching an emission), or a new `declassify:` (an added `endorse`) |
+| `capability` | a new `host:` crossing, a widened per-emission capability scope, or a host body appearing on a backend it was not on |
+| `taint` | a new `emit:` crossing, a new boundary edge out |
 | `realm` | a reach bound that loosened or moved |
 | `budget` | a per-capability emission ceiling that widened, including a bounded count becoming `unbounded` |
 | `retention` | a new declared position where a resource handle leaves revl's sight |

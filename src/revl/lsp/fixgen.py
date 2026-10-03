@@ -27,8 +27,10 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, fields, is_dataclass
+from dataclasses import dataclass
 
 from ..parser import ExprCall, ExprField, ExprVar, LetEffect, Parser, Program
+from ..parser import Parser, Program
 from ..errors import RevlError
 from .analysis import compute_diagnostics
 from .document import find_symbol_column, line_text, lines_of
@@ -51,6 +53,7 @@ class Fix:
 
 def generate_fix(text: str, diagnostic: dict, filename: str = "<lsp>.rvl",
                  *, verify=None) -> Fix | None:
+def generate_fix(text: str, diagnostic: dict, filename: str = "<lsp>.rvl") -> Fix | None:
     """The shared engine: one diagnostic (an LSP ``Diagnostic``) + its source
     to a verified ``Fix``, or None when no safe mechanical rewrite applies.
 
@@ -65,6 +68,8 @@ def generate_fix(text: str, diagnostic: dict, filename: str = "<lsp>.rvl",
     in-memory modules the check compiled with. It returns the patched
     program's diagnostics, or None when the patch could not be checked (the
     compile stopped before the refusal's line), which drops the candidate."""
+    away (``_resolves``). That check is the honesty gate — a candidate that does
+    not actually resolve the rejection is dropped, not returned."""
     generator = _GENERATORS.get(diagnostic.get("code"))
     if generator is None:
         return None
@@ -98,9 +103,11 @@ def _resolves(original: dict, patched: str, filename: str) -> bool:
 
 def _resolves_against(original: dict, diagnostics: list[dict]) -> bool:
     """``_resolves`` over diagnostics a caller already computed (see `verify`)."""
+    to remain — this fix resolved *its* diagnostic, which is all it claims."""
     original_code = original.get("code")
     original_line = original["range"]["start"]["line"]
     for diag in diagnostics:
+    for diag in compute_diagnostics(patched, filename):
         code = diag.get("code")
         line = diag["range"]["start"]["line"]
         if code == original_code and line == original_line:
@@ -945,10 +952,12 @@ _REPAIR_GENERATORS = {
 
 def fix_code(rejection: dict, source: str, filename: str = "<lsp>.rvl",
              *, diagnostic: dict | None = None, verify=None) -> dict:
+def fix_code(rejection: dict, source: str, filename: str = "<lsp>.rvl") -> dict:
     """The agent-facing front door: a structured rejection (``diagnostics.classify``)
     plus its source to an applyable ``fix_code`` payload.
 
     On success: ``{ok, code, title, edits}``, the same verified edits the LSP
+    On success: ``{ok, code, title, edits}`` — the same verified edits the LSP
     code-action carries. When no safe mechanical fix exists: ``{ok: False,
     code, reason}``; the prose ``fix`` from item 286 remains the guidance. The
     rejection carries a code and a line but no span, so the ranged diagnostic is
@@ -959,13 +968,16 @@ def fix_code(rejection: dict, source: str, filename: str = "<lsp>.rvl",
     must not recompile the text on its own (the MCP repair path, issue #2684
     review); ``verify`` is passed through to `generate_fix`, so the patched
     candidate is checked by the caller's profile-aware compiler."""
+    the one shared engine."""
     code = rejection.get("code")
     if diagnostic is None:
         diagnostic = _match_diagnostic(source, rejection, filename)
+    diagnostic = _match_diagnostic(source, rejection, filename)
     if diagnostic is None:
         return {"ok": False, "code": code,
                 "reason": "the rejection was not reproduced from this source"}
     fix = generate_fix(source, diagnostic, filename, verify=verify)
+    fix = generate_fix(source, diagnostic, filename)
     if fix is None:
         return {"ok": False, "code": code, "reason": "no mechanical fix for this diagnostic"}
     return {"ok": True, "code": fix.code, "title": fix.title, "edits": fix.edits}

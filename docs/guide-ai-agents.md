@@ -23,6 +23,7 @@ If you are changing RevL itself, follow [CONTRIBUTING.md](../CONTRIBUTING.md)
 and [the agent workflow](process.md). Run `./tools/pre_pr.sh --merge-ref`
 before the first push and again before merge so checks cover the current
 `origin/main` merge tree as well as your branch.
+> for the fast frontend loop; the full suite (~60s) before committing.
 
 ## The one rule
 
@@ -85,6 +86,9 @@ These are **excluded and named in diagnostics** ([syntax-2.0.md](syntax-2.0.md)
   and `n` included. Build multi-line output by concatenation, `` `${…}` ``
   templates, or a `"""..."""` verbatim block (no escapes at all). See
   [strings.md](strings.md).
+- **Strings have no escape sequences.** `"a\nb"` is four characters,
+  backslash, `n` and all. Build multi-line output by concatenation and
+  `` `${…}` `` templates.
 - **A component activation body records effects only** (`let x = effect …
   undo …`, `emit`, `fail`, `if`, `return`), plain computation does not belong
   there. Put helper functions at top level and delegate from `provide { }`.
@@ -185,6 +189,7 @@ Rules that will reject you if you forget them:
   `error: {type, message}`, what its activation raised, and a call on a key it
   provides names that provider and that error (issue #1895), so a raising
   host body is never mistaken for an unmet `requires`.
+  the component FAILED.
 
 ## The guarantees are your safety net
 
@@ -310,6 +315,8 @@ returns nothing).
 `revl mcp serve` exposes the compiler over MCP (the documented happy path;
 issues #317 and #336 note that a script entry point is window-free by design).
 The absolute-interpreter fallback is `python -P -m revl mcp serve` (the `-P`
+issue #317 / #336 — a script entry point is window-free by design). The
+absolute-interpreter fallback is `python -P -m revl mcp serve` (the `-P`
 is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 `sys.path[0]`), and the loop it enables is the point: a draft component
 never has to touch the filesystem. This is your primary interface.
@@ -322,6 +329,10 @@ schema; pass it `name` and `args` to call a verb. This makes every
 verb reachable from the list you were given. The verbs are
 grouped below by what you reach for; each verb's exact inputs and
 outputs are in [mcp-reference.md](mcp-reference.md).
+The complete advertised verb set is 56 verbs, from
+`src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what
+you reach for; each verb's exact inputs and outputs are in
+[mcp-reference.md](mcp-reference.md).
 <!-- docgen:agents-mcp-count end -->
 
 | verb(s) | use | detail |
@@ -331,6 +342,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_scaffold` | start from a typed, holed skeleton instead of a whole invented component; every hole comes back with its `fillSpec` | [scaffold.md](scaffold.md) |
 | `revl_check` | does this compile? structured diagnostics (code, guarantee, and the `fix` rewrite) **and open holes' `fillSpec`** if not; with no candidate it checks the composition the session holds | [mcp-reference.md](mcp-reference.md#revl_check) |
 | `revl_apply_repair` | take the `repairId` a refusal returned and get the repaired candidate plus its re-check in one call, instead of reconstructing the edit by hand | [fix-code.md](fix-code.md) |
+| `revl_check` | does this compile? structured diagnostics — code, guarantee, and the `fix` rewrite — **and open holes' `fillSpec`** if not | [mcp-reference.md](mcp-reference.md#revl_check) |
 | `revl_admit` | may it enter **this running composition**? | [mcp-reference.md](mcp-reference.md#revl_admit) |
 | `revl_plan` | and then what? the delta a swap would produce, without applying it | [plan.md](plan.md) |
 | `revl_ship` | check → admit → plan in one early-exit call; `apply:true` also swaps | [token-economy.md](token-economy.md) |
@@ -351,6 +363,7 @@ outputs are in [mcp-reference.md](mcp-reference.md).
 | `revl_source` | read **one declaration** by symbol (`NotesHttp`, `<file>:Name`, `<file>:<line>`), optionally with the declarations it names and without comments, instead of the whole file | [mcp-reference.md](mcp-reference.md#revl_source) |
 | `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor / symbol), you send the change, not the file | [mcp-reference.md](mcp-reference.md#revl_edit) |
 | `revl_affected_tests` | map changed repository paths to the shared pre-merge test selection; unavailable worktree/base returns `FULL` with a reason | [mcp-reference.md](mcp-reference.md#revl_affected_tests) |
+| `revl_edit` | patch the **server-side** source with a delta (hole-fill / range / anchor), you send the change, not the file | [mcp-reference.md](mcp-reference.md#revl_edit) |
 | `revl_swap` · `revl_rollback` · `revl_undo` · `revl_unload` | replace a generation, undo the last swap, return to an earlier generation through the gate, tear down + prove no residue (R4) | [mcp-reference.md](mcp-reference.md#revl_swap) · [generation-history.md](generation-history.md) |
 | `revl_gauntlet` · `revl_quarantine` | grade a candidate (proved / tested / claimed), or prove an untrusted one in the wasm sandbox | [gauntlet.md](gauntlet.md) · [quarantine-tier.md](quarantine-tier.md) |
 | `revl_test_run` | run a selected test suite under the server's interpreter and read per-test outcomes, counts and verdict instead of scraping runner text | [mcp-reference.md](mcp-reference.md#revl_test_run) |
@@ -499,6 +512,7 @@ last step:
    `source`/`files` still check a candidate you have not loaded, but not while
    a draft is held: that combination is refused, because the load it would run
    is what replaces the draft (issue #2111).
+   `line` and expected type. That is your worklist.
 3. **Fill via `revl_edit` deltas.** Send a `{hole: <line>, expr: "<fill>"}` edit
    per hole, the server holds the source, so you transmit only the change, not
    the file. Deltas accumulate across calls; a refused patch advances nothing,

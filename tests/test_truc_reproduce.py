@@ -106,6 +106,7 @@ def test_tampered_source_hash_is_an_exact_source_mismatch(registry):
     MISMATCH, with the recorded and rebuilt hashes both surfaced."""
     index_path = registry / "index.json"
     idx = json.loads(index_path.read_text(encoding="utf-8"))
+    idx = json.loads(index_path.read_text())
     idx["components"][COMPONENT]["sourceHash"] = "dead" * 16
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 
@@ -126,6 +127,7 @@ def test_tampered_manifest_hash_is_an_exact_ir_mismatch(registry):
     the gap reproduce closes."""
     index_path = registry / "index.json"
     idx = json.loads(index_path.read_text(encoding="utf-8"))
+    idx = json.loads(index_path.read_text())
     idx["components"][COMPONENT]["manifestHash"] = "beef" * 16
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 
@@ -143,6 +145,7 @@ def test_tampered_policy_surface_is_a_policy_mismatch(registry):
     MISMATCH (the G4 surface a consumer trusts a ship to have frozen)."""
     index_path = registry / "index.json"
     idx = json.loads(index_path.read_text(encoding="utf-8"))
+    idx = json.loads(index_path.read_text())
     idx["components"][COMPONENT]["emissions"] = 999
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 
@@ -285,6 +288,7 @@ def test_a_relabelled_release_is_caught_by_the_independent_pin(tmp_path, registr
     from revl.registry import _sha256
 
     source = (_entry(registry) / "component.rvl").read_text(encoding="utf-8")
+    source = (_entry(registry) / "component.rvl").read_text()
     project = tmp_path / "proj"
     (project / "trucs" / COMPONENT).mkdir(parents=True)
     (project / "trucs" / COMPONENT / "component.rvl").write_text(source)
@@ -310,6 +314,7 @@ def _attest_the_entry(registry: Path, key: bytes, *, legacy: bool = False) -> Pa
 
     That is `<entry>/evidence/attestation.json`, the path
     `registry_evidence.build_evidence` writes. This helper used to write
+    `registry.build_evidence` writes. This helper used to write
     `<entry>/attestation.json` — the same path the tier used to read — so the
     attestation tier tested green against a location nothing publishes to,
     while being structurally dead for every real entry. `legacy=True` writes the
@@ -347,6 +352,7 @@ def test_tampered_attestation_is_a_mismatch(registry, monkeypatch):
     monkeypatch.setenv(attest.KEY_ENV, "a-shared-secret")
     att_path = _attest_the_entry(registry, b"a-shared-secret")
     doc = json.loads(att_path.read_text(encoding="utf-8"))
+    doc = json.loads(att_path.read_text())
     doc["verdict"] = "tampered"
     att_path.write_text(json.dumps(doc, indent=2))
 
@@ -373,6 +379,7 @@ def test_attestation_present_but_no_key_is_cannot_verify(registry, monkeypatch):
 def test_the_attestation_tier_finds_what_build_evidence_publishes(registry,
                                                                   monkeypatch):
     """The F6 regression. `registry_evidence.build_evidence` writes the attestation to
+    """The F6 regression. `registry.build_evidence` writes the attestation to
     `<entry>/evidence/attestation.json`; the tier read `<entry>/attestation.json`,
     a path nothing writes. So for every entry the real publish path produces the
     tier was structurally DEAD — it could only ever say "no recorded
@@ -385,6 +392,7 @@ def test_the_attestation_tier_finds_what_build_evidence_publishes(registry,
     from revl import registry_evidence
 
     registry_evidence.build_evidence(str(registry), key=key, signer="revl-ci")
+    R_registry.build_evidence(str(registry), key=key, signer="revl-ci")
     published = (_entry(registry) / R_registry.EVIDENCE_DIRNAME
                  / R_registry.EVIDENCE_ATTESTATION)
     assert published.exists(), "build_evidence must publish here"
@@ -407,6 +415,7 @@ def test_a_forged_bound_dossier_is_an_attestation_mismatch(registry, monkeypatch
     from revl import registry_evidence
 
     registry_evidence.build_evidence(str(registry), key=key, signer="revl-ci")
+    R_registry.build_evidence(str(registry), key=key, signer="revl-ci")
     capabilities = (_entry(registry) / R_registry.EVIDENCE_DIRNAME
                     / R_registry.EVIDENCE_CAPABILITIES)
     capabilities.write_text(json.dumps(
@@ -441,6 +450,7 @@ def _project_with(tmp_path: Path, registry: Path, name: str,
     project = tmp_path / "app"
     (project / "trucs" / name).mkdir(parents=True)
     source = (registry / "components" / name / "component.rvl").read_text(encoding="utf-8")
+    source = (registry / "components" / name / "component.rvl").read_text()
     (project / "trucs" / name / "component.rvl").write_text(source)
     pin = (hashlib.sha256(source.encode()).hexdigest()
            if source_hash is None else source_hash)
@@ -470,6 +480,7 @@ def test_a_substituted_dependency_is_caught_by_the_independent_pin(registry,
     # registry is perfectly self-consistent again.
     entry_source = _entry(registry) / "component.rvl"
     entry_source.write_text(entry_source.read_text(encoding="utf-8") + "\n// substituted\n")
+    entry_source.write_text(entry_source.read_text() + "\n// substituted\n")
     R_registry.build_index(str(registry))
     assert R_registry.verify(str(registry)) == []   # the registry looks pristine
 
@@ -499,6 +510,7 @@ def test_a_substituted_dependency_with_no_pin_was_invisible(registry, tmp_path):
 
     entry_source = _entry(registry) / "component.rvl"
     entry_source.write_text(entry_source.read_text(encoding="utf-8") + "\n// substituted\n")
+    entry_source.write_text(entry_source.read_text() + "\n// substituted\n")
     R_registry.build_index(str(registry))
 
     report = R.reproduce(COMPONENT, project_dir=str(project),
@@ -620,6 +632,7 @@ def test_cli_json_reports_what_was_not_verified(registry, capsys):
 def test_cli_run_returns_one_on_mismatch(registry, capsys):
     index_path = registry / "index.json"
     idx = json.loads(index_path.read_text(encoding="utf-8"))
+    idx = json.loads(index_path.read_text())
     idx["components"][COMPONENT]["sourceHash"] = "dead" * 16
     index_path.write_text(json.dumps(idx, indent=2, sort_keys=True) + "\n")
 
@@ -842,10 +855,16 @@ def test_an_absent_emitter_is_still_cannot_verify(registry, monkeypatch):
         return real(name, *args, **kwargs)
 
     monkeypatch.setattr(R.importlib, "import_module", absent)
+def test_an_absent_emitter_is_still_cannot_verify(registry):
+    """The `ImportError` leg, unchanged: a backend that is not installed here
+    decided nothing about this IR, so the tier degrades honestly instead of
+    becoming a MISMATCH."""
     _entry(registry).joinpath("artifacts.json").write_text(json.dumps(
         {"backends": {"wasm": {"sourceSha256": "00" * 32}}}))
+        {"backends": {"no_such_backend": {"sourceSha256": "00" * 32}}}))
     report = R.reproduce(COMPONENT, registry=str(registry))
     art = _tier(report, f"{R.TIER_ARTIFACT} [wasm]")
+    art = _tier(report, f"{R.TIER_ARTIFACT} [no_such_backend]")
     assert art is not None and art.status == R.UNVERIFIED
     assert "not available here" in art.detail
     assert report.ok, "an absent toolchain is not a divergence"

@@ -137,6 +137,8 @@ def build_artifact(plan_result: dict, running_ir: dict | None) -> dict:
     payload = {k: v for k, v in plan_result.items()
                if k not in {"resultingIR", "candidateHostBodies"}}
     artifact = {
+    payload = {k: v for k, v in plan_result.items() if k != "resultingIR"}
+    return {
         PLAN_KEY: PLAN_FORMAT,
         "basis": fingerprint(running_ir),
         "resulting": fingerprint(resulting_ir),

@@ -23,6 +23,9 @@ both halves carry and no `CORPUS` document can reach, because a corpus document
 is one the reference emits. Every tier has one: `emit_py_refusals/`,
 `emit_ts_refusals/`, `emit_go_refusals/`, `emit_java_refusals/`,
 `emit_rust_refusals/` and `emit_wasm_refusals/`.
+is one the reference emits. Five tiers have one: `emit_ts_refusals/`,
+`emit_go_refusals/`, `emit_java_refusals/`, `emit_rust_refusals/` and
+`emit_wasm_refusals/`.
 """
 
 import importlib.util
@@ -138,9 +141,14 @@ def _ledger(lines, monkeypatch, tmp_path, ledger: dict, raw: dict | None = None)
 def test_generic_baseline_cannot_masquerade_as_closure(lines, monkeypatch, tmp_path):
     ledger = {half: {tier: _entry({"f": ("never-entered", 1)},
                                   {"never-entered": "NEVER ENTERED"})
+    ledger = {half: {tier: {"statements": 1,
+                            "uncovered": {"NEVER ENTERED": {"f": 1}}}
                      for tier in TIERS}
               for half in ("reference", "selfhost")}
     _ledger(lines, monkeypatch, tmp_path, ledger)
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
     data = {half: {tier: {"functions": {}, "sizes": {}}
                    for tier in TIERS}
             for half in ("reference", "selfhost")}
@@ -155,6 +163,11 @@ def test_line_closure_rejects_duplicates_and_missing_sides(lines, monkeypatch, t
         '["function", "a", "f", 1, 1]\n\n'
         '["function", "b", "f", 1, 1]\n')}
     _ledger(lines, monkeypatch, tmp_path, {}, raw)
+    ledger = {"reference": {"py": {"uncovered": {
+        "specific decision": {"f": 1}, "another decision": {"f": 1}}}}}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
     problems = lines.check({"reference": {}, "selfhost": {}})
     assert any("appears in multiple reasons" in problem for problem in problems)
     assert any("missing line-coverage side" in problem for problem in problems)
@@ -162,12 +175,17 @@ def test_line_closure_rejects_duplicates_and_missing_sides(lines, monkeypatch, t
 
 def test_line_check_fails_closed_on_malformed_maps_and_counts(lines, monkeypatch, tmp_path):
     ledger = {half: {tier: _entry({}) for tier in TIERS}
+    ledger = {half: {tier: {"uncovered": None} for tier in TIERS}
               for half in ("reference", "selfhost")}
     raw = {"reference/py": ('["reason", "a", "specific decision"]\n\n'
                             '["function", "a", "f", "bad", 1]\n\n'
                             '{"not": "a record"}\n\n'
                             '<<<<<<< HEAD\n')}
     _ledger(lines, monkeypatch, tmp_path, ledger, raw)
+    ledger["reference"]["py"]["uncovered"] = {"specific decision": {"f": "bad"}}
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
     data = {half: {tier: {"functions": {"f": "bad"}, "sizes": {}}
                    for tier in TIERS}
             for half in ("reference", "selfhost")}
@@ -181,8 +199,12 @@ def test_line_check_fails_closed_on_malformed_maps_and_counts(lines, monkeypatch
 @pytest.mark.parametrize("functions", [None, [], {"f": True}])
 def test_line_check_rejects_malformed_function_population(lines, monkeypatch, tmp_path, functions):
     ledger = {half: {tier: _entry({}, {"a": "specific decision"})
+    ledger = {half: {tier: {"uncovered": {"specific decision": {}}}
                      for tier in TIERS} for half in ("reference", "selfhost")}
     _ledger(lines, monkeypatch, tmp_path, ledger)
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(ledger))
+    monkeypatch.setattr(lines, "LEDGER", path)
     data = {half: {tier: {"functions": functions, "sizes": {}}
                    for tier in TIERS} for half in ("reference", "selfhost")}
     problems = lines.check(data)
@@ -243,10 +265,13 @@ def test_the_rust_required_stream_refusal_is_reached_rather_than_recorded(lines)
     document because it cannot be one.
     """
     recorded = lines._load_ledger()
+    recorded = json.loads(lines.LEDGER.read_text())
     for half, tier, name in (("reference", "rust", "_refuse_required_stream"),
                              ("selfhost", "rust", "require_ty")):
         entry = recorded[half][tier]["functions"]
         assert name not in entry, (
+        entry = recorded[half][tier]["uncovered"]
+        assert not any(name in functions for functions in entry.values()), (
             f"{half}/{tier} records `{name}` again. It is reached by "
             f"tests/fixtures/emit_rust_refusals/, so recording it is recording "
             f"something that is not true (issue #1419)")
@@ -269,13 +294,30 @@ def test_the_budget_fires_in_both_directions(lines, monkeypatch, tmp_path):
     survey = {half: {tier: {"functions": {"f": 10}, "sizes": {"f": 10}}
                      for tier in TIERS}
               for half in ("reference", "selfhost")}
+        path = tmp_path / f"ledger-{budget}.json"
+        path.write_text(json.dumps({
+            "_budget": {half: {tier: budget for tier in TIERS}
+                        for half in ("reference", "selfhost")},
+            **{half: {tier: {"uncovered": {"a specific decision": {"f": 10}}}
+                      for tier in TIERS}
+               for half in ("reference", "selfhost")}}))
+        return path
 
     _ledger(lines, monkeypatch, tmp_path / "over", ledger_with(4))
     over = lines.check(survey)
     assert any("its budget allows 4" in problem for problem in over)
+    monkeypatch.setattr(lines, "LEDGER", ledger_with(4))
+    over = lines.check({half: {tier: {"functions": {"f": 10}, "sizes": {"f": 10}}
+                               for tier in TIERS}
+                        for half in ("reference", "selfhost")})
+    assert any("`_budget` allows 4" in problem for problem in over)
 
     _ledger(lines, monkeypatch, tmp_path / "under", ledger_with(40))
     under = lines.check(survey)
+    monkeypatch.setattr(lines, "LEDGER", ledger_with(40))
+    under = lines.check({half: {tier: {"functions": {"f": 10}, "sizes": {"f": 10}}
+                                for tier in TIERS}
+                         for half in ("reference", "selfhost")})
     assert any("still allows 40" in problem for problem in under)
 
     _ledger(lines, monkeypatch, tmp_path / "exact", ledger_with(10))
@@ -299,6 +341,11 @@ def test_the_budget_is_per_function_so_a_rise_cannot_hide_behind_a_fall(
                             for half in ("reference", "selfhost")})
     assert any("`f` records 12" in p and "allows 10" in p for p in problems)
     assert any("`g` records 8" in p and "still allows 10" in p for p in problems)
+    monkeypatch.setattr(lines, "LEDGER", ledger_with(10))
+    exact = lines.check({half: {tier: {"functions": {"f": 10}, "sizes": {"f": 10}}
+                                for tier in TIERS}
+                         for half in ("reference", "selfhost")})
+    assert not any("_budget" in problem for problem in exact)
 
 
 def test_a_missing_budget_is_itself_a_failure(lines, monkeypatch, tmp_path):
@@ -309,10 +356,19 @@ def test_a_missing_budget_is_itself_a_failure(lines, monkeypatch, tmp_path):
                               '["function", "a", "f", 1, null]\n')
            for tier in TIERS for half in ("reference", "selfhost")}
     _ledger(lines, monkeypatch, tmp_path, {}, raw)
+    """Fail closed. A ledger with no budget is the state this gate was in
+    before #1419, and it has to be a failure rather than a default, or deleting
+    four lines is a way to make recording free again."""
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps(
+        {half: {tier: {"uncovered": {"a specific decision": {"f": 1}}}
+                for tier in TIERS} for half in ("reference", "selfhost")}))
+    monkeypatch.setattr(lines, "LEDGER", path)
     problems = lines.check({half: {tier: {"functions": {"f": 1}, "sizes": {"f": 1}}
                                    for tier in TIERS}
                             for half in ("reference", "selfhost")})
     assert sum("has no budget" in problem for problem in problems) == 2 * len(TIERS)
+    assert sum("no `_budget` declared" in problem for problem in problems) == 2
 
 
 def test_write_does_not_touch_the_budget(lines, monkeypatch, tmp_path):
@@ -328,18 +384,32 @@ def test_write_does_not_touch_the_budget(lines, monkeypatch, tmp_path):
                    {half: {tier: _entry({"stdlib_f": ("a", 1)})
                            for tier in TIERS}
                     for half in ("reference", "selfhost")})
+    path = tmp_path / "ledger.json"
+    path.write_text(json.dumps({
+        "_budget": {half: {tier: 1 for tier in TIERS}
+                    for half in ("reference", "selfhost")},
+        **{half: {tier: {"uncovered": {"a specific decision": {"stdlib_f": 1}}}
+                  for tier in TIERS}
+           for half in ("reference", "selfhost")}}))
+    monkeypatch.setattr(lines, "LEDGER", path)
     lines.write_ledger({half: {tier: {"statements": 99,
                                       "functions": {"stdlib_f": 40, "new_g": 3},
                                       "sizes": {"stdlib_f": 40, "new_g": 3}}
+                                      "functions": {"stdlib_f": 40},
+                                      "sizes": {"stdlib_f": 40}}
                                for tier in TIERS}
                         for half in ("reference", "selfhost")})
     rewritten = lines._load_ledger(base)
     assert rewritten["reference"]["py"]["functions"]["stdlib_f"] == {
         "uncovered": 40, "budget": 1, "reason": "a"}, (
+    rewritten = json.loads(path.read_text())
+    assert rewritten["_budget"]["reference"]["py"] == 1, (
         "`--write` moved the budget, so `--write` is a complete answer again")
     assert rewritten["reference"]["py"]["functions"]["new_g"]["budget"] is None
     problems = lines.check({half: {tier: {"functions": {"stdlib_f": 40, "new_g": 3},
                                           "sizes": {"stdlib_f": 40, "new_g": 3}}
+    problems = lines.check({half: {tier: {"functions": {"stdlib_f": 40},
+                                          "sizes": {"stdlib_f": 40}}
                                    for tier in TIERS}
                             for half in ("reference", "selfhost")})
     assert any("its budget allows 1" in problem for problem in problems)
@@ -999,3 +1069,4 @@ def test_a_missing_baseline_ledger_file_fails_closed(
     assert _run_check(lines, monkeypatch, survey) == 1
     out = capsys.readouterr().out
     assert "BASELINE line-coverage ledger: UNRESOLVED" in out
+    assert any("`_budget` allows 1" in problem for problem in problems)

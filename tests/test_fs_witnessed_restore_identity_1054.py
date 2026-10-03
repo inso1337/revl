@@ -39,6 +39,7 @@ The failure direction is the point, and both halves are pinned:
 * a preimage that cannot be shown to be the captured one RAISES, which the
   teardown loop records as `restore-residue` through the existing merged-residue
   Record schema, and it is never installed over the target;
+  Record schema — it is never installed over the target;
 * an untampered guarded restore stays exactly as quiet as it was, and a witness
   that carries no capture, or a capture recorded before the digest existed,
   still restores rather than stranding a recoverable WAL (the non-vacuity
@@ -48,6 +49,8 @@ The same-tick test at the head of the substitution section forces the capture's
 stat fields to the post-tamper tuple before the inverse runs, so it does not
 depend on the filesystem's tick at all: on a clock that did tick, the stat
 comparison would refuse anyway; with the tuple pinned, only the digest can.
+  that carries no capture still restores rather than stranding a recoverable
+  WAL (the non-vacuity controls, which pass before this change as well as after).
 """
 
 from __future__ import annotations
@@ -120,8 +123,10 @@ def _written(root, frame, name="artifact.txt", before="v1", after="v2"):
     witness = frame._transactional[-1].witness
     sidecar = witness["preimage"]
     assert target.read_text(encoding="utf-8") == after
+    assert target.read_text() == after
     assert os.path.dirname(sidecar) == str(root / ws.PREIMAGE_DIRNAME)
     assert open(sidecar, encoding="utf-8").read() == before
+    assert open(sidecar).read() == before
     return witness, str(target), sidecar
 
 
@@ -199,8 +204,13 @@ def test_the_guarded_surface_refuses_a_target_the_confinement_check_cannot_open(
         assert ei.value.code == "EOUTSIDE"
     finally:
         os.chmod(str(unreadable), 0o600)
+    with pytest.raises(fs.FsOpError) as ei:
+        fs.write_witnessed("unreadable.txt", "x")
+    assert ei.value.code == "EOUTSIDE"
+    os.chmod(str(unreadable), 0o600)
 
     # nothing was bound by the refusal
+    # nothing was bound by any of the three refusals
     assert frame._transactional == []
 
 
@@ -244,12 +254,14 @@ def test_an_untampered_guarded_restore_still_succeeds_silently(root, frame):
     fs._witnessed_restore(witness)             # no raise, no diagnostics
 
     assert open(target, encoding="utf-8").read() == "v1", "the honest preimage was not restored"
+    assert open(target).read() == "v1", "the honest preimage was not restored"
     assert not os.path.exists(sidecar), "the restore left its snapshot behind"
     assert not any((root / ws.PREIMAGE_DIRNAME).iterdir()), \
         "reversal is residue-free: the preimage directory is empty again"
 
     fs._witnessed_restore(witness)             # still idempotent on replay
     assert open(target, encoding="utf-8").read() == "v1"
+    assert open(target).read() == "v1"
 
 
 def test_a_created_target_is_still_deleted_by_its_inverse(root, frame):
@@ -277,6 +289,7 @@ def test_a_witness_that_carries_no_capture_still_restores(root, frame):
     fs._witnessed_restore(legacy)
 
     assert open(target, encoding="utf-8").read() == "v1"
+    assert open(target).read() == "v1"
     assert not os.path.exists(sidecar)
 
 
@@ -415,6 +428,8 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(root, frame):
     is out of the test and the only comparison left that can refuse is the
     recorded sha256. With the digest check removed the test fails to raise at
     all, because the pinned stat tuple no longer differs."""
+    the length is unchanged. `(dev, ino)` alone cannot see this, which is why
+    the capture records the stamps too."""
     witness, target, sidecar = _written(root, frame)
     before = os.stat(sidecar)
     with open(sidecar, "r+b") as fh:
@@ -434,6 +449,7 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(root, frame):
         "can have refused"
 
     assert open(target, encoding="utf-8").read() == "v2", \
+    assert open(target).read() == "v2", \
         "the tampered snapshot was installed over the target anyway"
     assert open(sidecar, encoding="utf-8").read() == "zz", "the refused sidecar was consumed"
 
@@ -496,6 +512,7 @@ def test_a_repermission_between_the_digest_check_and_the_rename_is_refused(
         "the digest cannot see a re-permission, so the refusal must name mode"
     assert ws.SIDECAR_DIGEST_FIELD not in ei.value.message, \
         "the bytes were honest; only the mode differed"
+    assert open(sidecar).read() == "zz", "the refused sidecar was consumed"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(root, frame):
@@ -506,12 +523,14 @@ def test_a_swapped_sidecar_is_refused_rather_than_installed(root, frame):
     decoy.write_text("v1", encoding="utf-8")   # the same BYTES as the snapshot
     os.replace(str(decoy), sidecar)
     assert open(sidecar, encoding="utf-8").read() == "v1"
+    assert open(sidecar).read() == "v1"
 
     with pytest.raises(fs.FsOpError) as ei:
         fs._witnessed_restore(witness)
     assert ei.value.code == "EIDENTITY", \
         "a same-bytes inode swap is exactly what an identity check is for"
     assert open(target, encoding="utf-8").read() == "v2"
+    assert open(target).read() == "v2"
     assert os.path.exists(sidecar)
 
 
@@ -529,6 +548,7 @@ def test_a_relinked_sidecar_is_refused_rather_than_installed(root, frame):
         fs._witnessed_restore(witness)
     assert ei.value.code == "EMULTILINK"
     assert open(target, encoding="utf-8").read() == "v2"
+    assert open(target).read() == "v2"
     assert alias.exists(), "the aliased snapshot was renamed away"
 
 
@@ -544,6 +564,7 @@ def test_a_sidecar_replaced_by_a_directory_is_refused(root, frame):
         fs._witnessed_restore(witness)
     assert ei.value.code == "EOUTSIDE"
     assert open(target, encoding="utf-8").read() == "v2"
+    assert open(target).read() == "v2"
     assert stat.S_ISDIR(os.stat(sidecar).st_mode)
 
 
@@ -629,6 +650,7 @@ def test_a_drifted_sidecar_aborts_as_restore_residue(root, frame):
     # and the drifted snapshot was NOT installed: the abort left the forward
     # mutation in place and named it, which is what residue means.
     assert open(target, encoding="utf-8").read() == "v2"
+    assert open(target).read() == "v2"
 
 
 def test_an_untampered_abort_reports_no_residue_at_all(root, frame):
@@ -643,4 +665,5 @@ def test_an_untampered_abort_reports_no_residue_at_all(root, frame):
 
     assert frame.compensation_residue == []
     assert open(target, encoding="utf-8").read() == "v1"
+    assert open(target).read() == "v1"
     assert not any((root / ws.PREIMAGE_DIRNAME).iterdir())

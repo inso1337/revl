@@ -50,6 +50,8 @@ FRONTEND_KEYWORDS = [
     "break", "continue", "else", "false", "for", "if", "in", "null", "return",
     "true", "try", "var", "while", "with", "let", "as", "assert", "async",
     "await", "type", "of",
+    "true", "var", "while", "with", "let", "as", "assert", "async", "await",
+    "type", "of",
 ]
 
 #: Names on the append-`_` ladder: `_mangle` shifted these too (`delete_` ->

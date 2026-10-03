@@ -50,6 +50,11 @@ judge and a proposal that does not declare one of the three modes are all
 failures, never passes. The mode is a required field, and it is control flow
 rather than prose: an `evolution` proposal ends at `proposal-recorded` and the
 stages past it are never reached. The tool is `tools/evolution_controller.py`.
+decision drawn from three names (`PROMOTE`, `ROLL_BACK`, `REFUSE`) rather than
+from a number. Every failure is named, and the failure direction is closed in
+every direction: a missing record, an empty evidence list, an absent authority
+axis, an unmeasurable diff and a raising judge are all failures, never passes.
+The tool is `tools/evolution_controller.py`.
 
 ## 1. The gap, measured
 
@@ -94,6 +99,7 @@ boundary.
 | `propose` | precondition | the candidate record and its retry budget (item 536's `Candidate{tree, base, scope}`) | is it scoped, and can it terminate |
 | `admit` | precondition | the standalone self-extension compile and the forbidden-grant rule (item 334, `Gate.propose`) | may this code exist at all |
 | `authority` | precondition | the attenuation product, the operator allow set (`--allow` / `REVL_EDIT_ALLOW`), and this module's fence and kernel enumeration (items 543, 544; issue #2803) | did any authority move, and is the diff inside the operator's grant |
+| `authority` | precondition | the attenuation product, plus this module's fence and kernel enumeration (items 543, 544) | did any authority move |
 | `shadow` | measured | a draw the candidate could not read (item 537) | does it behave on inputs it never saw |
 | `canary` | measured | the SLO contracts (`docs/design/473-slo-contracts.md`) | does it behave on real traffic |
 | `observe` | measured | the reward conjunction (item 536) | is the trajectory worth keeping |
@@ -132,6 +138,7 @@ trusts. This field is what turns "evolution proposes only" from a convention in
 this document into a property of the controller's control flow.
 
 ### 2.2 Where this maps onto the two shorter spellings
+### 2.1 Where this maps onto the two shorter spellings
 
 Issue #1194 names five stages (propose, admit, activate, observe, decide) and
 item 543 names nine (observe, diagnose, propose, compile, admission-check,
@@ -207,16 +214,20 @@ reading a green as permission to run code the gate never admitted".
 
 * the proposal (tree, base, scope, mode, and the citation the mode requires,
   attempt, budget, and the keys that were dropped by name);
+* the proposal (tree, base, scope, attempt, budget, and the keys that were
+  dropped by name);
 * one `Verdict` per stage in lifecycle order, each with its own `reason`,
   `evidence` and refusal `code`, including the stages that were not reached;
 * `measurements_read`, the barrier's own receipt;
 * `findings`, the out-of-order report;
 * the terminal `decision`, the `mode` and the `code` that produced it.
+* the terminal `decision` and the `code` that produced it.
 
 There is exactly one place in the module that constructs a decision, so there is
 exactly one place a reader has to look and one place a future stage is added.
 
 **Four decisions, no number.**
+**Three decisions, no number.**
 
 | decision | when | exit |
 |---|---|---|
@@ -231,10 +242,12 @@ canary record is the evidence that there is something to undo. Reporting a
 rollback with no canary would claim an undo that never ran, which is the same
 mislabel `Gate.propose` avoids when it refuses to report an E-Stop as
 `SWAP_REVERTED`. The four exit statuses keep the distinctions at the process
+`SWAP_REVERTED`. The three exit statuses keep the distinction at the process
 boundary, the way `tools/heldout_scoring.py` separates `REFUSED` from
 `DIVERGENT`: a recorded proposal is neither a promotion nor a refusal, and an
 exit status that collapsed it into either would let a caller treat a proposal
 as an activation.
+`DIVERGENT`.
 
 ## 5. The authority invariant, enforced rather than asserted
 
@@ -302,6 +315,9 @@ accept the candidate's account of it. It does not:
   kernel would hide the removed path and read as an allowed addition.
   `--no-renames` reports the removal as a deletion and the arrival as an
   addition, so both are measured;
+* when the tree is a git tree, the set comes from `git diff --name-only <base>`
+  plus untracked files, exactly the read `tools/evolution_reward.py` performs
+  for its `scope` component, and that set wins;
 * a declared set that **understates** the measured one is `DIFF_DISAGREES`;
 * a tree whose diff cannot be measured is `DIFF_UNVERIFIED` and has no
   satisfiable path, so a proposal on an unreadable tree cannot promote.
@@ -374,7 +390,12 @@ lands; section 9 lists it.
 ## 7. The failure direction, and the named refusals
 
 Fail-closed everywhere, with no third value, because a third value is where a
+<<<<<<< HEAD
 fail-open default hides. Twenty-seven named codes:
+=======
+fail-open default hides. Twenty-six named codes:
+fail-open default hides. Fifteen named codes:
+>>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 
 | code | fires when |
 |---|---|
@@ -441,7 +462,12 @@ it meant, which is a fail-open default by another route.
 
 ## 8. Non-vacuity
 
+<<<<<<< HEAD
 Four demonstrations, all in `tests/test_evolution_controller.py`: 165 tests,
+=======
+Four demonstrations, all in `tests/test_evolution_controller.py`: 138 tests,
+Three demonstrations, all in `tests/test_evolution_controller.py`: 77 tests,
+>>>>>>> 1dcf48e27 (go: refuse a consumer's Opt outside a return by name, not through go build (#1627) (#1637))
 all passing.
 
 1. **It refuses on missing evidence.** Parametrized over all four
@@ -487,6 +513,7 @@ diff would be exercising the path that cannot promote.
 **Slice 1 (this change).** The reduction, the stage table, the barrier, the
 fence, the kernel enumeration, the named refusals, the single verdict, the CLI
 and its four exit statuses, and the reward-scorecard adapter for `observe`.
+and its three exit statuses, and the reward-scorecard adapter for `observe`.
 Oracle: `tests/test_evolution_controller.py`. Fixture: a git tree per case,
 built in `tmp_path`, one edited path per case so the difference between a
 promotion and a refusal is always a single edit.

@@ -46,6 +46,7 @@ from pathlib import Path
 # written by teardown). Additive: a v1 or v2 event still parses and
 # every reader treats the new keys as optional.
 SCHEMA_VERSION = 3
+SCHEMA_VERSION = 2
 
 # event kinds (the `event` field)
 LOAD = "load"          # a component came up (… -> ACTIVE)

@@ -40,6 +40,10 @@ def read_credential(env_var: str, environ=None, *, role: str | None = None
 
     With `role`, the error names the role and not the variable: a variable
     that is not set may be a pasted key, and the name would print it."""
+def read_credential(env_var: str, environ=None) -> str:
+    """The credential in `env_var`, read now. The error names the variable and
+    never a value. `environ` is a mapping, a lookup function, or None for
+    `os.environ`."""
     if callable(environ):
         value = environ(env_var)
     else:
@@ -94,6 +98,7 @@ class Adapter:
                 f"model={b.model!r}, endpoint={b.base_url!r}, "
                 f"residence={b.residence!r}, "
                 f"has_credential={bool(b.api_key_env)})")
+                f"residence={b.residence!r}, credential_env={b.api_key_env!r})")
 
     @property
     def managed(self) -> bool:
@@ -107,6 +112,7 @@ class Adapter:
     def _credential(self):
         b = self.binding
         credential = (read_credential(b.api_key_env, self._lookup, role=b.role)
+        credential = (read_credential(b.api_key_env, self._lookup)
                       if b.api_key_env else None)
         return credential, ((credential,) if credential else ())
 
@@ -129,6 +135,7 @@ class Adapter:
                            timeout=self.binding.timeout, secrets=secrets,
                            label=self.label,
                            max_bytes=self.binding.max_reply_bytes)
+                           label=self.label)
         self._device, self._device_options = device, options
         return {**raw, "revl_load_seconds": time.monotonic() - started}
 
@@ -142,6 +149,7 @@ class Adapter:
                             timeout=self.binding.timeout, secrets=secrets,
                             label=self.label,
                             max_bytes=self.binding.max_reply_bytes)
+                            label=self.label)
 
     def residency(self) -> dict | None:
         """What the server reports holding for this model, or None when it
@@ -162,6 +170,8 @@ class Adapter:
 
     def resident_in(self, raw: dict) -> dict | None:
         """This binding's model's entry in a `residency_report()`, or None."""
+        raw = request_json(url, headers=headers, timeout=self.binding.timeout,
+                           secrets=secrets, label=self.label)
         return self._wire.resident_entry(raw, self.binding.model)
 
     def complete(self, request: CompletionRequest) -> Completion:
@@ -182,6 +192,7 @@ class Adapter:
         raw = request_json(url, body=body, headers=headers, timeout=b.timeout,
                            secrets=secrets, label=self.label,
                            max_bytes=b.max_reply_bytes)
+                           secrets=secrets, label=self.label)
         try:
             completion = self._wire.parse(raw, request)
         except ProviderError:
@@ -191,6 +202,8 @@ class Adapter:
             # makes `.get` an AttributeError, and none of it may escape as
             # anything but a ProviderError naming the role (issue #3111)
             snippet = redact(_snippet(raw), secrets)
+        except (KeyError, IndexError, TypeError, ValueError) as exc:
+            snippet = redact(str(raw)[:400], secrets)
             raise ProviderError(
                 redact(f"{self.label}: unexpected response shape from {url} "
                        f"({type(exc).__name__}: {exc}); body={snippet}",

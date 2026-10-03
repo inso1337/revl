@@ -39,6 +39,7 @@ exits 0 — reporting a run's shape is never a gate.
 from __future__ import annotations
 
 from .why_runtime import EMIT, read_trace  # noqa: F401  (re-exported: cli/observe.py)
+from .why_runtime import EMIT, read_trace
 
 # the capability a model completion emission is scoped to. A crossing is a model
 # hop when it carries an `llm` payload (written only for a model completion at
@@ -139,6 +140,11 @@ def compute_trace(events: list[dict]) -> dict:
     hops = [_hop_document(e) for e in events if _is_model_hop(e)]
     hops.sort(key=lambda h: (h.get("seq") if h.get("seq") is not None else -1))
     return {"events": len(events), "modelHops": hops}
+
+
+def trace_from_file(path: str) -> dict:
+    """Read a JSONL trace from `path` and project its model hops."""
+    return compute_trace(read_trace(path))
 
 
 def filter_document(doc: dict, *, component: str | None = None,

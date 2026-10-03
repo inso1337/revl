@@ -95,6 +95,11 @@ def rust_runtime_reason() -> str | None:
     # copies that lock into every staged crate (issue #2199)
     manifest = _placement.rust_runner_lock_manifest()
     offline = _placement.rust_generate_lockfile(manifest, offline=True)
+    manifest = str(_RUNNER / "Cargo.toml")
+    offline = subprocess.run(
+        ["cargo", "generate-lockfile", "--offline", "--manifest-path", manifest],
+        capture_output=True, text=True,
+    )
     if offline.returncode == 0:
         return None
     blob = ((offline.stderr or "") + (offline.stdout or "")).lower()
@@ -107,6 +112,10 @@ def rust_runtime_reason() -> str | None:
                 "index.crates.io is unreachable — run cargo once with network "
                 "to populate ~/.cargo, then re-run")
     networked = _placement.rust_generate_lockfile(manifest, offline=False)
+    networked = subprocess.run(
+        ["cargo", "generate-lockfile", "--manifest-path", manifest],
+        capture_output=True, text=True,
+    )
     if networked.returncode == 0:
         return None
     detail = (networked.stderr or "").strip().splitlines()
@@ -164,6 +173,11 @@ def run_rust(ir: dict, config: dict, files, once: bool = False,
     tmp = Path(tempfile.mkdtemp(prefix="revl_run_rust_"))
     # _build_rust builds from a staged copy of the runner crate, so the
     # checkout's committed src/components.rs is never written (issue #2199).
+    # _build_rust regenerates the runner's committed src/components.rs in place
+    # (it is per-composition codegen). Snapshot it so a run leaves the checkout
+    # exactly as it found it — the committed module is a golden, not scratch.
+    components_rs = _RUNNER / "src" / "components.rs"
+    saved = components_rs.read_bytes() if components_rs.exists() else None
     try:
         try:
             binary = _placement._build_rust(ir, tmp)
@@ -180,9 +194,11 @@ def run_rust(ir: dict, config: dict, files, once: bool = False,
 
         print("== load composition (rust tier) ==", flush=True)
         proc = _childproc.popen(
+        proc = subprocess.Popen(
             [binary, str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stderr=subprocess.STDOUT, text=True,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)
@@ -196,6 +212,8 @@ def run_rust(ir: dict, config: dict, files, once: bool = False,
             sys.stdout.flush()
         rc = proc.wait()
     finally:
+        if saved is not None:
+            components_rs.write_bytes(saved)
         shutil.rmtree(tmp, ignore_errors=True)
 
     proof.record(proof_out)

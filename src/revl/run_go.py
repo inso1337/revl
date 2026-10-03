@@ -135,6 +135,8 @@ def _resolve_probe(tmp: Path) -> tuple[bool, str | None]:
     env = dict(os.environ)
     offline = _childproc.run(
         ["go", "build", "./..."], cwd=str(tmp), capture_output=True,
+    offline = subprocess.run(
+        ["go", "build", "./..."], cwd=str(tmp), text=True, capture_output=True,
         env={**env, "GOFLAGS": "-mod=mod", "GOPROXY": "off"},
     )
     if offline.returncode == 0:
@@ -154,6 +156,8 @@ def _resolve_probe(tmp: Path) -> tuple[bool, str | None]:
                        "with network to populate the module cache")
     networked = _childproc.run(
         ["go", "build", "./..."], cwd=str(tmp), capture_output=True,
+    networked = subprocess.run(
+        ["go", "build", "./..."], cwd=str(tmp), text=True, capture_output=True,
         env=env,
     )
     if networked.returncode == 0:
@@ -253,9 +257,11 @@ def run_go(ir: dict, config: dict, files, once: bool = False,
 
         print("== load composition (go tier) ==", flush=True)
         proc = _childproc.popen(
+        proc = subprocess.Popen(
             [binary, str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
+            stderr=subprocess.STDOUT, text=True,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)

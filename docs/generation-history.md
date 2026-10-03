@@ -50,6 +50,7 @@ runtime; it **re-admits the target generation's sources through the same
 compile + admission gate a live `revl_swap` runs**, and then threads a
 provider's live state back across a `handoff` both generations declare when
 the restore direction admits it (issue #3293). Concretely, `undo`:
+compile + admission gate a live `revl_swap` runs**. Concretely, `undo`:
 
 1. recompiles the target snapshot's sources (`persist._recompile`) — this *is*
    the gate: parse, check, lower, then the holes gate and the runtime boot
@@ -129,6 +130,8 @@ Because an undo is a change, its plan is computed like any change:
   earlier source keeps the state of a component that declares a `handoff` on
   both sides, and of a template's live instances; any other component starts
   cold either way;
+* **what state drops** — item 53's "state: dropped" honesty, in reverse: the
+  provisions the older shape no longer serves are named, not silently lost;
 * **the interim boundary crossings that no undo can un-emit** — §6.1.
 
 ## What no undo can un-emit (compensation is not inversion)

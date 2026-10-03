@@ -69,6 +69,9 @@ def test_compile_reachable_nonleaf_is_full():
     assert "attest" in at.compile_reachable(ROOT)
     r = sel("src/revl/attest.py")
     assert r["full"] is True and "compile-reachable" in r["reason"]
+    # run_go is on the lazy compile-reachable graph -> full even though it looks
+    # tier-specific. Fail-safe over-selection is intended.
+    assert sel("src/revl/run_go.py")["full"] is True
 
 
 # --- stdlib module -> only tests touching its public API ------------------- #
@@ -164,6 +167,7 @@ def test_deleted_test_file_is_still_full():
 def test_added_test_file_alone_is_not_full():
     # Nothing else changed, so nothing but the new test (and the two
     # whole-tree guards, since an added test is a new `.py`) can newly fail.
+    # Nothing else changed, so nothing but the new test can newly fail.
     r = _override(["tests/test_newthing.py"], added={"tests/test_newthing.py"})
     assert r is not None and r["full"] is False
     # An added test is a .py change, so the read_text guard (issue #2639) and
@@ -172,6 +176,7 @@ def test_added_test_file_alone_is_not_full():
     assert set(r["pytest"]) == {
         "tests/test_newthing.py", at.READ_TEXT_GUARD_TEST,
         at.OPEN_ENCODING_GUARD}
+    assert r["pytest"] == ["tests/test_newthing.py"]
     assert r["backends"] == []
 
 
@@ -467,12 +472,16 @@ def test_modified_test_file_without_importers_selects_only_itself_and_the_guards
     whole-tree guards (a modified `.py` can add a bare read_text site or an
     unpinned open); no other test is dragged in. A synthetic name is used so
     the assertion does not rot when tests are added."""
+def test_modified_test_file_without_importers_is_only_itself():
+    """A leaf test nothing imports still selects just itself (no over-selection).
+    A synthetic name is used so the assertion does not rot when tests are added."""
     r = sel("tests/test__no_importer_sentinel__.py")
     assert set(r["pytest"]) == {
         "tests/test__no_importer_sentinel__.py",
         at.READ_TEXT_GUARD_TEST,
         at.OPEN_ENCODING_GUARD,
     }
+    assert r["pytest"] == ["tests/test__no_importer_sentinel__.py"]
 
 
 def test_test_importers_ignores_prefix_siblings():
@@ -1008,6 +1017,8 @@ def test_the_derived_rule_does_not_replace_the_hand_written_tables():
     computes, walks to from a root it holds in a variable, or declares only in
     prose. Only some of the modules in BENCH_DEPENDENT_TESTS spell a `bench/`
     path, so the derived rule finds fewer than the table declares. It is a
+    prose. Of the 18 modules in BENCH_DEPENDENT_TESTS, exactly three spell a
+    `bench/` path, so the derived rule finds three of eighteen. It is a
     complement to those tables, not their replacement."""
     cp = at.companion_paths(ROOT)
     spelled = {t for t, paths in cp.items()

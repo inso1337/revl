@@ -52,6 +52,7 @@ class RevlError(Exception):
         acquire = _source_spelling_deep(acquire)
         declared_class = _source_spelling_deep(declared_class)
         repairs = _source_spelling_deep(repairs)
+                 fix: str | None = None):
         self.filename = filename
         self.line = line
         self.message = message
@@ -96,6 +97,7 @@ class RevlError(Exception):
         if trace:
             rendered += "\n" + trace
         super().__init__(source_spelling(rendered))
+        super().__init__(rendered)
 
 
 class RevlErrors(RevlError):
@@ -129,6 +131,7 @@ class RevlErrors(RevlError):
                          navigate=first.navigate, repair=repair,
                          acquire=first.acquire, declared_class=first.declared_class,
                          repairs=first.repairs)
+                         navigate=first.navigate)
 
     def __str__(self) -> str:
         # A single refusal renders exactly as a plain `RevlError` would: no

@@ -121,6 +121,14 @@ describe('checked-in generated modules are current', () => {
       // its interpreter selection; a missing interpreter throws here instead
       // of skipping the assertion.
       const fresh = emitFixtureOutput(fixture)
+      // Same recipe scripts/emit-fixtures.ts uses at setup time.
+      const fresh = spawnSync(
+        'python3',
+        ['emit.py', '--runtime', '../../runtime.ts', join('tests', 'fixtures', fixture)],
+        { cwd: backend, encoding: 'utf-8', maxBuffer: 16 * 1024 * 1024 },
+      )
+      if (fresh.error) return // no python3 available (source tarball) — nothing to assert
+      expect(fresh.status, `emit.py failed for ${fixture}:\n${fresh.stderr}`).toBe(0)
       const committed = gitShow(`backends/typescript/tests/generated/${output}`)
       if (committed === null) {
         throw new Error(
@@ -129,6 +137,7 @@ describe('checked-in generated modules are current', () => {
       }
       expect(
         fresh,
+        fresh.stdout,
         `tests/generated/${output} does not match a fresh emit of ` +
           `tests/fixtures/${fixture} + emit.py — regenerate ` +
           `(backends/typescript/scripts/emit-fixtures.ts) and commit`,

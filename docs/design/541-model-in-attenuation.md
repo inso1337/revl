@@ -5,6 +5,8 @@ and 2 are LANDED with this note and since, slice 3 is now landed in BOTH
 engines, slice 4 landed upstream ahead of this note, slice 5 is partial, and
 slice 6 (the consult predicate, which corrects slice 1's) is LANDED (section
 8).
+Roadmap: item 519 (issue #1193), from the 2026-09-19 external review. Slice 1
+is LANDED with this note; slices 2 to 4 are designed here and not written.
 
 Design-doc number: 541. Numbers 531 to 538 were already taken on 2026-09-20,
 531 on main and the rest in open pull requests (532 in #1228 and #1242, 533 in
@@ -179,6 +181,7 @@ refused, because a dropped parameter widens.
 The admitted case is where the roadmap's "attenuates to the intersection"
 clause lives. An admitted pair's record carries `holds`, `reaches` and
 `attenuated` (what the component holds that the role does NOT reach), which is
+`attenuated` — what the component holds that the role does NOT reach — which is
 the model-role sibling of the `dropped` column in the item-66 audit chain.
 
 ### 3.1 When the product is asked
@@ -192,12 +195,24 @@ It is `bool(held)`, nothing more. `model.*`, the unnameable `*` and a `svc:`
 element (a boundary whose declaration names no token at all) are SUFFICIENT
 shapes for a held boundary to matter, and none of them is NECESSARY; reading
 the tokens instead of the emptiness was the gap issue #1193 slice 6 closed.
+The product is computed for a component that both declares a `route model`
+block AND holds a boundary that could be a model call. `_consults_a_model`
+decides the second, and it is an over-approximation in the refusing direction:
+a held boundary counts unless its declared token PROVES it is some other
+boundary. Three shapes count — a token whose head is `model`, the unnameable
+`*`, and a `key:` wiring element, which is a boundary whose declaration names
+no token at all and so rules nothing out.
 
 A component that reaches none is not exempt by policy: a role steers a
+A component whose held boundaries are all declared non-model tokens consults no
+model. That is not an exemption and not a policy escape: a role steers a
 component by choosing among the boundaries the component can reach, so a
 component that reaches none has no ceiling for a role to widen. That is also
 what keeps the slice free of a migration: item 512's own fixtures declare a
 route over an action that crosses nothing.
+component that reaches none has no ceiling for a role to widen. It is also what
+keeps the slice free of a migration: item 512's own fixtures declare a route
+over an action that crosses nothing.
 
 The gate reads the HELD set and not the component's own `emit` steps, because a
 provider body crosses through a `requires` key and it is the key's SERVICE that
@@ -288,6 +303,7 @@ The section is additive and role-only: a composition that declares no
 | 3 | a role's reach is compared with its valuation, not as a bare token | closed: a dropped parameter widens |
 | 4 | every role the block NAMES is folded in, not the one a crossing reaches | closed: naming all of them over-approximates toward refusing |
 | 7 | a role a crossing is PLACED on is folded in whether or not a block names it (slice 2) | closed: before it, deleting the block took the role out of the product |
+| 4 | every role the block NAMES is folded in, not the one a crossing reaches | closed: the crossing side is slice 2; naming all of them over-approximates toward refusing |
 | 5 | a malformed stored token degrades to `*` | closed: `*` as a reach element is covered by nothing |
 | 6 | ceilings are stripped before the coverage fold | neither: budget attenuation is item 260's separate check, and folding a ceiling here would make one crossing spuriously "cover" another |
 
@@ -357,6 +373,13 @@ refusal is spelled byte for byte. The oracle's classifier in
 `tests/test_selfhost_lower.py` carries a MODEL marker for the reach sentence,
 and `tests/fixtures/model_reach_crossing/` holds both engines to one verdict
 per document.
+**The answer for the reach fold is NO, and it is a narrower no than the one
+this section first carried.** When this note was written the gate did not parse
+`model role` at all and answered `BAD|unexpected token at top level` to every
+program that declared one. Item 512's slice 3 landed since, so the gate now
+reads a `model role` and decides the declaration half by name. The question is
+therefore live rather than moot, and the answer has to be argued rather than
+inherited.
 
 Two things the port had to spell the reference's way and not the spawn fold's.
 The held element of a bare `emission` is keyed by its SERVICE (`svc:<S>`, item
@@ -365,6 +388,26 @@ either way, but the reach fold prints the element. And the `reaches [...]`
 clause is read (`model_reach_at`) where it was stepped over; a clause the
 gate's capability reader cannot canonicalize leaves the fold without a verdict
 rather than guessed.
+The reach fold is not a declaration rule. It is a capability product over a
+component's HELD set: `_held_capabilities_pairs`, the spawn-reached surface,
+and `cap_order.covers` over the pair. That is the shape item 514's VALUE half
+has, and `selfhost/lower.rvl` states its own answer for it in the
+model-placement section header: the gate has no flow walk, so a program the
+value side refuses is one the gate raises no objection to, which is a
+no-objection and not an admission. The reach fold gets the same answer for the
+same reason, and the oracle's classifier in `tests/test_selfhost_lower.py`
+deliberately carries NO marker for the reach sentence, so the gate can never
+claim an agreement it does not have.
+
+What DID need a port is item 515's declaration half, which shares this slot:
+the `device` clause and the ordered candidate set are read and refused by the
+gate byte for byte in this change. `docs/design/539-model-portfolio.md` section
+7 is that measurement.
+
+No `.rvl` in any corpus directory uses `reaches [...]`, so the census is
+unmoved, which is measured in section 8 and not inferred.
+
+---
 
 ## 8. Slice plan and evidence
 
@@ -385,6 +428,10 @@ row is unchanged. What S2 does NOT do is drop a role the block names that no
 crossing reaches: decision 4's over-approximation stays, in the refusing
 direction. Oracle: `tests/test_model_reach_crossing.py`, ported to the gate
 (section 7).
+**S2. The crossing side.** Fold the role a CROSSING actually reaches rather
+than every role the block names, which is item 512's slice 4 (a crossing
+carries its `model.<role>` token) applied here. This removes decision 4's
+over-approximation and is what makes a three-role block precise.
 
 **S3. The role in the spawn product. LANDED IN BOTH ENGINES (issue #1193).**
 A spawner whose CHILD routes through a role reaching past the spawner is the
@@ -417,6 +464,10 @@ the corpus is the regression the census exists to catch.
 S3's own predicate half was still wrong when it landed; S6 is the
 correction. `model_consults` skipped a child holding no `model.`-spelled token
 in BOTH engines, so the fold S3 added was never asked about that child.
+**S3. The role in the spawn product.** A spawner whose CHILD routes through a
+role reaching past the spawner is the lineage form of the same question. It
+needs the model reach folded into `_spawn_surface_closure`, and it is separate
+because the closure is the one place a mistake amplifies across a whole graph.
 
 **S4. The kernel boundary. LANDED UPSTREAM, ahead of this note.** Issue
 #1223's rule, expressed as this fold with a kernel-owned held set, is item 544
@@ -488,6 +539,10 @@ whether the set is COMPLETE is section 9's second bullet and is unchanged.
   The predicate reads the same lowered held set the attenuation fold compares,
   so the two cannot disagree, but that is an argument about one reader and not
   a measurement of the grammar.
+* That `_consults_a_model` is complete. It is a deliberate
+  over-approximation, and a component that reaches a model through a boundary
+  whose declared token is neither `model.*`, `*`, nor untokened would not be
+  gated in. No such shape is known; it was not exhaustively searched for.
 * Any claim about the six emitter tiers. Nothing in this slice reaches an
   emitter, so there is nothing tier-specific to be right or wrong about, but
   that is an argument and not a measurement.

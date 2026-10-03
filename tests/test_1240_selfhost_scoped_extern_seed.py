@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 from _compiled_ir import compiled_ir  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 from revl.errors import RevlError  # noqa: E402
 
 
@@ -40,6 +41,7 @@ def _emitted() -> dict:
     """`selfhost/lower.rvl` compiled and run under the python backend - the
     same harness `tests/test_selfhost_lower.py` uses."""
     ir = compiled_ir(ROOT / "selfhost" / "lower.rvl")
+    ir = compile_files([str(ROOT / "selfhost" / "lower.rvl")])
     spec = importlib.util.spec_from_file_location(
         "pyemit_selfhost_lower_1240", ROOT / "backends" / "python" / "emit.py")
     module = importlib.util.module_from_spec(spec)

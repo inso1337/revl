@@ -23,6 +23,8 @@ is external — the agent/LLM in the automorph harness (built separately). This
 module owns the *orchestration and the agent-readable rejection payload*: the
 loop, the `propose(packet) -> candidate` seam, the budget, the accumulated
 attempt trace, and the clean structured payload a generator acts on
+loop, the `propose(candidate, why_trace) -> candidate` seam, the budget, the
+accumulated attempt trace, and the clean structured payload a generator acts on
 (the violated G-rule as a machine key, the offending subject/call-path, the
 suggested fix). The harness fills the real generator via `register_proposer`;
 `scripted_proposer` is the trivial deterministic in-repo impl that proves the
@@ -232,16 +234,24 @@ def refusal_note(n: int, payload: dict) -> str:
 # A proposer takes ONE `ProposerPacket` and returns a revised candidate. This
 # is the seam the harness fills with the real generator (an agent/LLM); it is
 # deliberately a plain callable so the loop has no LLM dependency of its own:
+# A proposer takes the current candidate and the rejection payload and returns
+# a revised candidate. This is the seam the harness fills with the real
+# generator (an agent/LLM); it is deliberately a plain callable so the loop has
+# no LLM dependency of its own. Signature:
 #
 #     propose(packet: ProposerPacket) -> Candidate
+#     propose(candidate: Candidate, why_trace: dict) -> Candidate
 #
 # The packet is bounded (see above). A proposer that cannot improve the
 # candidate returns `packet.candidate` unchanged — the loop still bounds
+# `why_trace` is the `rejection_payload` view. A proposer that cannot improve
+# the candidate returns it unchanged (or any candidate) — the loop still bounds
 # retries by the budget, so a stuck proposer terminates in budget exhaustion
 # rather than looping forever.
 # --------------------------------------------------------------------------
 
 Proposer = Callable[["ProposerPacket"], "Candidate"]
+Proposer = Callable[["Candidate", dict], "Candidate"]
 
 # The harness registers its real generator here; `evolve` uses it when no
 # proposer is passed explicitly. Left None so a missing seam is a clear error
@@ -268,6 +278,7 @@ class Attempt:
     """One turn of the loop: the candidate offered, the Gate verdict, and — on
     a refusal that still had an attempt left, the digest of the
     `ProposerPacket` that was handed to `propose`."""
+    a refusal — the structured payload that was handed to `propose`."""
 
     n: int
     candidate: Candidate
@@ -313,6 +324,7 @@ class EvolveResult:
     shared budget ran out before). `all_deferred` is true when the probe
     deferred every candidate, so no attempt was made: a caller can tell that
     apart from an empty candidate list, which has no attempts and no deferral."""
+    rejection payload."""
 
     admitted: bool
     attempts: list[Attempt] = field(default_factory=list)
@@ -406,6 +418,8 @@ def evolve(
 ) -> EvolveResult:
     """Admit `candidate` through the Gate; on refusal hand `proposer` a
     `ProposerPacket` and retry, up to `budget` admit attempts.
+    """Admit `candidate` through the Gate; on refusal feed the why-trace to
+    `proposer` and retry, up to `budget` admit attempts.
 
     Control flow:
       * up to `budget` iterations; each iteration admits the current candidate;
@@ -413,6 +427,8 @@ def evolve(
       * a refusal with attempts still left → a packet (the brief, the current
         candidate, this refusal, and capped notes on earlier refusals) goes to
         `proposer`, whose revised candidate the loop retries;
+      * a refusal with attempts still left → `proposer(candidate, why_trace)`
+        produces the next candidate and the loop retries;
       * a refusal on the final attempt → `EvolveResult(admitted=False, ...)`
         carrying the whole history and the final rejection payload.
 
@@ -424,9 +440,15 @@ def evolve(
     refused attempt that hands a packet to `propose` records that packet's
     digest as `Attempt.packet_digest`; an admitted attempt and the final
     refusal record `None` because nothing was handed over."""
+    the loop — only the candidate's sources evolve."""
     if budget < 1:
         raise ValueError(f"evolve budget must be >= 1, got {budget}")
     propose = _resolve_proposer(proposer)
+    propose = proposer if proposer is not None else _HARNESS_PROPOSER
+    if propose is None:
+        raise ValueError(
+            "no propose seam: pass `proposer=` or install one with "
+            "register_proposer() (the harness fills this)")
 
     result = EvolveResult(admitted=False)
     current = candidate
@@ -443,9 +465,11 @@ def evolve(
 
         payload = rejection_payload(verdict.get("rejection") or {})
         attempt = Attempt(
+        result.attempts.append(Attempt(
             n=n, candidate=current, admitted=False,
             diagnostic=verdict.get("diagnostic", ""),
             verdict=verdict, rejection=payload)
+            verdict=verdict, rejection=payload))
         result.final_rejection = payload
 
         # regenerate only when there is a further attempt to spend it on
@@ -459,6 +483,7 @@ def evolve(
             notes = (notes + [refusal_note(n, payload)])[-MAX_PACKET_NOTES:]
         else:
             result.attempts.append(attempt)
+            current = propose(current, payload)
 
     return result
 
@@ -712,13 +737,22 @@ def scripted_proposer(fixups: dict[str, Proposer]) -> Proposer:
     unmatched g_rule returns the parent candidate unchanged, so the loop runs
     out its budget and gives up with the full history — the budget-exhaustion
     path."""
+    """Build a deterministic proposer from a `{g_rule: fixup}` table. On a
+    refusal it dispatches on the payload's `g_rule` to the matching fixup
+    (itself a `(candidate, why_trace) -> candidate` callable); an unmatched
+    g_rule returns the candidate unchanged, so the loop runs out its budget and
+    gives up with the full history — the budget-exhaustion path."""
 
     def propose(packet: ProposerPacket) -> Candidate:
         refusal = packet.last_refusal or {}
         fixup = fixups.get(refusal.get("g_rule"))
+    def propose(candidate: Candidate, why_trace: dict) -> Candidate:
+        fixup = fixups.get(why_trace.get("g_rule"))
         if fixup is None:
             return packet.candidate
         return fixup(packet)
+            return candidate
+        return fixup(candidate, why_trace)
 
     return propose
 
@@ -737,6 +771,8 @@ def propose_bridge(candidate_json: str, why_trace_json: str) -> str:
     harness-registered proposer, return the revised candidate JSON. The
     transport seam carries no brief or notes, so the reconstructed packet has
     an empty brief and no notes. The harness installs the real generator with
+    and why-trace, dispatch to the harness-registered proposer, return the
+    revised candidate JSON. The harness installs the real generator with
     `register_proposer`; without one this raises (the seam is unfilled)."""
     if _HARNESS_PROPOSER is None:
         raise ValueError(
@@ -746,6 +782,8 @@ def propose_bridge(candidate_json: str, why_trace_json: str) -> str:
     packet = ProposerPacket(brief="", candidate=candidate,
                             last_refusal=why_trace or None)
     return _HARNESS_PROPOSER(packet).to_json()
+    why_trace = json.loads(why_trace_json) if why_trace_json else {}
+    return _HARNESS_PROPOSER(candidate, why_trace).to_json()
 
 
 def evolve_bridge(candidate_json: str, budget: int) -> str:
@@ -765,14 +803,22 @@ def g2_key_bump_proposer(new_suffix: str = "_v2") -> Proposer:
     provider of `thing`), it yields a candidate providing a fresh key —
     admitted on the next attempt. A seed packet (no refusal) leaves the
     candidate unchanged."""
+    bumping the colliding key (the payload's `subject`) to `subject + suffix`.
+    Given the item-144 `collide` candidate (a second provider of `thing`), it
+    yields a candidate providing a fresh key — admitted on the next attempt."""
 
     def fix_g2(packet: ProposerPacket) -> Candidate:
         refusal = packet.last_refusal or {}
         subject = refusal.get("subject")
+    def fix_g2(candidate: Candidate, why_trace: dict) -> Candidate:
+        subject = why_trace.get("subject")
         if not subject:
             return packet.candidate
+            return candidate
         renamed = rename_provision_key(
             packet.candidate.sources, subject, f"{subject}{new_suffix}")
         return Candidate(sources=renamed, manifest=packet.candidate.manifest)
+            candidate.sources, subject, f"{subject}{new_suffix}")
+        return Candidate(sources=renamed, manifest=candidate.manifest)
 
     return scripted_proposer({"G2": fix_g2})

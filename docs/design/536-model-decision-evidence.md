@@ -86,9 +86,11 @@ in the issue.
 ## 2. What the object binds
 
 One record, `kind: "revl.model-decision"`, version `3.0`, in
+One record, `kind: "revl.model-decision"`, version `1.0`, in
 `src/revl/model_evidence.py`. `BODY_MEMBERS` is the closed body; every member
 is required and every member is inside the MAC. Versions `1.0` and `2.0` are
 still accepted, under their own bodies and their own MAC domains (§2.1, §2.2).
+is required and every member is inside the MAC.
 
 | member | what it binds | why it is here |
 | ------ | ------------- | -------------- |
@@ -112,6 +114,7 @@ still accepted, under their own bodies and their own MAC domains (§2.1, §2.2).
 | `retained` | the explicit retention decision, or nothing | the item's content rule (§4.3) |
 
 Four members are worth their own sentence.
+Three members are worth their own sentence.
 
 **`candidates` is a list of digests in the order offered, with `chosen` an
 index into it.** Not a count and not the chosen digest alone. A count cannot be
@@ -126,6 +129,7 @@ A record without the depth cannot tell the two apart, and "the ladder ran" is
 exactly the fact an audit of a bad answer starts from. `fallback_reason` is the
 other half of that fact: the depth says the ladder moved and the reason says
 whether the rung was unavailable, declined or refused (§2.1).
+exactly the fact an audit of a bad answer starts from.
 
 **`origins` is sorted and duplicate-free, and that is checked.** Two records
 over the same input must compare equal byte for byte, or the object cannot be
@@ -486,6 +490,11 @@ Two further readings are borrowed rather than re-derived:
   verifier to refuse it. The key fingerprints are domain-separated too, so one
   secret fingerprints differently for the two protocols and a fingerprint
   cannot be lifted from one record type onto the other.
+  and back. `SIGN_DOMAIN` is `b"revl.model-decision/v1\x00"`, and the tests
+  seal a body with `attest._sign` and require this verifier to refuse it. The
+  key fingerprints are domain-separated too, so one secret fingerprints
+  differently for the two protocols and a fingerprint cannot be lifted from one
+  record type onto the other.
 * **The algorithm is validated, not recorded.** `sign_alg` is checked against
   this build's constant rather than read off the record. That is item 428 F1's
   finding on `revl attest`: a record claiming `ed25519` that verified as HMAC
@@ -523,6 +532,10 @@ is not evidence until it has been seen to fail, so three defects were injected
 into a clean tree and the suite re-run. The numbers below were measured when
 this note landed; the generated per-member sets have grown with the body since,
 and the `1.0` tamper set is generated over `BODY_MEMBERS_V1` separately.
+197 tests pass in `tests/test_model_evidence_517.py`, 1 skips with a reason
+(the item-512 cross-module agreement, which has nothing to compare against
+until that PR lands). A passing test is not evidence until it has been seen to
+fail, so three defects were injected into a clean tree and the suite re-run:
 
 | injected defect | tests red |
 | --------------- | --------- |

@@ -79,6 +79,12 @@ def load_compiler(root: Path):
         sys.path.insert(0, src)
         for mod in [m for m in list(sys.modules) if m == "revl" or m.startswith("revl.")]:
             del sys.modules[mod]
+    src = str(root / "src")
+    if src in sys.path:
+        sys.path.remove(src)
+    sys.path.insert(0, src)
+    for mod in [m for m in list(sys.modules) if m == "revl" or m.startswith("revl.")]:
+        del sys.modules[mod]
     from revl import RevlError, compile_source  # noqa: PLC0415
     from revl.diagnostics import classify  # noqa: PLC0415
     return compile_source, RevlError, classify
@@ -86,6 +92,7 @@ def load_compiler(root: Path):
 
 def score_one(path: Path, compile_source, RevlError, classify) -> dict:
     code = path.read_text(encoding="utf-8")
+    code = path.read_text()
     try:
         compile_source(code, path.parent.parent.name + ".rvl")
         return {"ok": True}

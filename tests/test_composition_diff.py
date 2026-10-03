@@ -51,6 +51,7 @@ def test_identical_compositions_diff_to_empty():
                                   "reach_weakened": [],
                                   "scope_widened": [], "scope_tightened": [],
                                   "backends_added": [], "backends_removed": []}
+    assert delta["crossings"] == {"added": [], "removed": []}
     assert delta["guarantees"] == []
 
 

@@ -201,6 +201,7 @@ public final class RunOnce {
                 log("swap", order.get(idx), "dispose NOT confirmed: "
                         + failure.getClass().getSimpleName());
                 continue;
+            } catch (Throwable ignored) {
             }
             log("swap", order.get(idx), "dispose -> inverses replay (LIFO)");
         }

@@ -53,6 +53,7 @@ exits nonzero, exactly as the py tier does for a missing cordis-py.
 from __future__ import annotations
 
 import base64
+import importlib.util
 import json
 import os
 import shutil
@@ -67,10 +68,12 @@ from pathlib import Path
 from . import _childproc
 from ._once_proof import SPEC_FLAG, OnceProof
 from ._paths import backends_root, venv_python
+from ._paths import backends_root
 from .errors import RevlError
 from .refusal import refusals
 from .wal import header_record
 from .wasm_confinement import ConfinementError, check_component_imports
+from .wal import WAL_GUARANTEE
 
 _BACKENDS_DIR = backends_root()
 _WASM_DIR = _BACKENDS_DIR / "wasm"
@@ -107,8 +110,12 @@ _WAL_FRAME_PREFIX = "[wal] "
 def wal_header() -> dict:
     """The WAL's first line: the schema the go/py tiers write, from the one
     shared builder (:func:`revl.wal.header_record`), so recover reads a wasm WAL
+    """The WAL's first line — byte-for-byte the schema the go/py tiers write
+    (``walVersion``/``generation``/``guarantee``), so recover reads a wasm WAL
     through the tier-agnostic core with no wasm-specific casing."""
     return header_record(1)
+    return {"record": "header", "walVersion": 1, "generation": 1,
+            "guarantee": WAL_GUARANTEE}
 
 
 def wal_descriptor(seq: int, receiver: str, method: str, witness) -> dict:
@@ -153,6 +160,8 @@ def wal_allows_unsynced() -> bool:
 def write_wal_record(handle, record: dict, *,
                      allow_unsynced: bool | None = None) -> None:
     """Append one JSONL record and fsync it: the write-ahead discipline the go
+def write_wal_record(handle, record: dict) -> None:
+    """Append one JSONL record and fsync it — the write-ahead discipline the go
     tier uses, so a descriptor a run saw drained is on disk before the effect it
     describes is allowed to matter. A failed write or flush always raises
     :class:`WALDurabilityError`; a failed fsync raises it unless the run opted
@@ -166,6 +175,9 @@ def write_wal_record(handle, record: dict, *,
     except OSError as error:
         raise WALDurabilityError(
             f"write-ahead log write failed: {error}") from error
+    describes is allowed to matter."""
+    handle.write(json.dumps(record) + "\n")
+    handle.flush()
     try:
         os.fsync(handle.fileno())
     except (OSError, ValueError) as error:
@@ -204,6 +216,7 @@ def _drop_unsynced_tail(handle, start: int | None) -> None:
         # and the run is stopping anyway
         os.fsync(handle.fileno())
     except (OSError, ValueError):
+    except (OSError, ValueError):  # pragma: no cover — e.g. a pipe target
         pass
 
 
@@ -239,6 +252,7 @@ def _cordis_wasm_python() -> str | None:
     if override and Path(override).exists():
         return override
     venv = venv_python(_cordis_wasm_dir() / ".venv")
+    venv = _cordis_wasm_dir() / ".venv" / "bin" / "python"
     return str(venv) if venv.exists() else None
 
 
@@ -262,10 +276,12 @@ def wasm_runtime_reason() -> str | None:
                 "or set REVL_CORDIS_WASM_PYTHON) — a wasmtime-bearing venv is "
                 "needed to boot the WAT modules")
     probe = _childproc.run(
+    probe = subprocess.run(
         [python, "-c",
          "import sys; sys.path.insert(0, sys.argv[1]); import wasmtime; "
          "from runtime import Runtime", str(cordis_wasm)],
         capture_output=True,
+        capture_output=True, text=True,
     )
     if probe.returncode == 0:
         return None
@@ -282,6 +298,7 @@ def _load_order(ir: dict) -> list[str]:
 def _wasm_emitter():
     """The wasm emitter module, from the one cached loader
     (`placement.backend_emit_module`, issue #2204).
+    """Load backends/wasm/emit.py and hand the CALLER the module object.
 
     The caller keeps the module it is handed because `EmitError` is a class on
     the module OBJECT: a second `exec_module` produces a different class, and
@@ -292,6 +309,13 @@ def _wasm_emitter():
     from .placement import backend_emit_module  # noqa: PLC0415 - off the compile graph
 
     return backend_emit_module("wasm", root=_BACKENDS_DIR)
+    The caller keeps it because `EmitError` is a class on the module OBJECT: a
+    second `exec_module` produces a different class, and an `except` against it
+    would not catch the instance the first module raised (issue #1406)."""
+    spec = importlib.util.spec_from_file_location("revl_wasm_emit", _WASM_DIR / "emit.py")
+    emit_module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(emit_module)
+    return emit_module
 
 
 def _emit_modules(ir: dict, record: bool = False, emit_module=None) -> dict[str, str]:
@@ -522,6 +546,7 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             # so a descriptor the drain sees is appended to a well-formed log. A
             # header that cannot be made durable stops the run here, before the
             # harness (and so any host body) starts (issue #2345).
+            # so a descriptor the drain sees is appended to a well-formed log.
             wal_handle = open(wal_path, "w", encoding="utf-8")
             header = wal_header()
             unsynced = wal_allows_unsynced()
@@ -539,11 +564,13 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
                       f"(set {ALLOW_UNSYNCED_ENV}=1 to opt out for a target "
                       f"that cannot fsync)", file=sys.stderr)
                 return 1
+            write_wal_record(wal_handle, wal_header())
 
         env = dict(os.environ)
         env["CORDIS_WASM"] = str(_cordis_wasm_dir())
         print("== load composition (wasm tier) ==", flush=True)
         proc = _childproc.popen(
+        proc = subprocess.Popen(
             [_cordis_wasm_python(), str(_HARNESS), str(spec_file)],
             stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT, env=env,
@@ -552,6 +579,7 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
             # killed only this child and a spinning harness was reparented to
             # pid 1, still burning CPU.
             start_new_session=True,
+            stderr=subprocess.STDOUT, text=True, env=env,
         )
         # the proof token is stdin's only line; then stdin closes, as before,
         # so the runner never blocks on it (issue #1621)
@@ -618,6 +646,19 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
                   f"{_HARNESS_STARTUP_GRACE_SECONDS:g}s startup) and was "
                   f"killed", file=sys.stderr)
             return 1
+        for line in proc.stdout:
+            # drain a `[wal] {…}` frame into the durable WAL (item 322 Slice 2);
+            # every other line is the harness's own `[run] …`/`_log` output.
+            if wal_handle is not None:
+                seq = drain_wal_frame(wal_handle, line, proof.tag("wal"))
+                if seq is not None:
+                    drained_seqs.append(seq)
+                    continue
+            # only a token-tagged line is the runtime's proof; anything else,
+            # a program's own `[run] NO-RESIDUE` included, is output (#1621)
+            sys.stdout.write(proof.line(line))
+            sys.stdout.flush()
+        rc = proc.wait()
 
         # a clean unload commits: stamp the discharge (recover then SKIPS those
         # seqs — a committed transaction is never rolled back) and the terminal
@@ -631,6 +672,8 @@ def run_wasm(ir: dict, config: dict, files, once: bool = False,
                 print(f"error: {error}; the commit markers are not durable, so "
                       f"recover treats this run as not complete", file=sys.stderr)
                 return 1
+            write_wal_record(wal_handle, wal_discharge(drained_seqs))
+            write_wal_record(wal_handle, wal_activation_complete())
     finally:
         # issue #3189: the harness is its own session leader, so it no longer
         # shares the terminal's group and a Ctrl-C (or any exception between

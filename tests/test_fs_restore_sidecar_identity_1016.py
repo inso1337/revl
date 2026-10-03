@@ -109,6 +109,7 @@ def _written(mod, workspace):
     sidecar = witness["preimage"]
     assert os.path.dirname(sidecar) == str(workspace / ws.PREIMAGE_DIRNAME)
     assert open(sidecar, encoding="utf-8").read() == "v1"
+    assert open(sidecar).read() == "v1"
     return witness, str(workspace / "artifact.txt"), sidecar
 
 
@@ -122,16 +123,19 @@ def test_an_untampered_restore_still_succeeds_silently(workspace):
     mod = _fs_module()
     witness, target, sidecar = _written(mod, workspace)
     assert open(target, encoding="utf-8").read() == "v2"
+    assert open(target).read() == "v2"
 
     mod.restore(witness)                       # no raise, no diagnostics
 
     assert open(target, encoding="utf-8").read() == "v1", "the honest preimage was not restored"
+    assert open(target).read() == "v1", "the honest preimage was not restored"
     assert not os.path.exists(sidecar), "the restore left its snapshot behind"
     assert not any((workspace / ws.PREIMAGE_DIRNAME).iterdir()), \
         "reversal is residue-free: the preimage directory is empty again"
 
     mod.restore(witness)                       # still idempotent on replay
     assert open(target, encoding="utf-8").read() == "v1"
+    assert open(target).read() == "v1"
 
 
 def test_a_created_file_is_still_deleted_by_its_inverse(workspace):
@@ -159,6 +163,7 @@ def test_a_witness_that_carries_no_capture_still_restores(workspace):
     mod.restore(legacy)
 
     assert open(target, encoding="utf-8").read() == "v1"
+    assert open(target).read() == "v1"
     assert not os.path.exists(sidecar)
 
 
@@ -173,6 +178,8 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
     records `ctime_ns` too, which catches the rewrite once the inode timestamp
     clock has ticked, and the sidecar's content digest, which catches it inside
     a single tick where every stat field stays equal (issue #2647)."""
+    the length is unchanged. `(dev, ino)` alone cannot see this, which is why
+    the capture records the stamps as well."""
     mod = _fs_module()
     witness, target, sidecar = _written(mod, workspace)
     before = os.stat(sidecar)
@@ -186,8 +193,10 @@ def test_a_tampered_sidecar_is_refused_rather_than_installed(workspace):
     assert ei.value.code == "EIDENTITY"
 
     assert open(target, encoding="utf-8").read() == "v2", \
+    assert open(target).read() == "v2", \
         "the tampered snapshot was installed over the target anyway"
     assert open(sidecar, encoding="utf-8").read() == "zz", "the refused sidecar was consumed"
+    assert open(sidecar).read() == "zz", "the refused sidecar was consumed"
 
 
 def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
@@ -199,12 +208,14 @@ def test_a_swapped_sidecar_is_refused_rather_than_installed(workspace):
     decoy.write_text("v1", encoding="utf-8")   # same BYTES as the snapshot
     os.replace(str(decoy), sidecar)
     assert open(sidecar, encoding="utf-8").read() == "v1"
+    assert open(sidecar).read() == "v1"
 
     with pytest.raises(ws.FsOpError) as ei:
         mod.restore(witness)
     assert ei.value.code == "EIDENTITY", \
         "a same-bytes inode swap is exactly what an identity check is for"
     assert open(target, encoding="utf-8").read() == "v2"
+    assert open(target).read() == "v2"
     assert os.path.exists(sidecar)
 
 
@@ -223,6 +234,7 @@ def test_a_relinked_sidecar_is_refused_rather_than_installed(workspace):
         mod.restore(witness)
     assert ei.value.code == "EMULTILINK"
     assert open(target, encoding="utf-8").read() == "v2"
+    assert open(target).read() == "v2"
     assert alias.exists(), "the aliased snapshot was renamed away"
 
 
@@ -278,6 +290,7 @@ def test_a_repermissioned_sidecar_is_refused_on_the_mode_field(workspace):
 
     assert open(target, encoding="utf-8").read() == "v2"
     assert os.path.exists(sidecar), "the refused sidecar was consumed"
+    assert open(target).read() == "v2"
 
 
 def test_the_installed_result_is_rechecked_after_the_rename(workspace, monkeypatch):
@@ -345,6 +358,7 @@ def test_a_drifted_sidecar_aborts_as_restore_residue(workspace, monkeypatch):
         "Agent", [_effect("write", "artifact.txt", "v2")], abort=True)))
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
     frame = _sole_frame(session)
     [residue] = [r for r in frame.compensation_residue
@@ -356,6 +370,7 @@ def test_a_drifted_sidecar_aborts_as_restore_residue(workspace, monkeypatch):
     # and the drifted snapshot was NOT installed: the abort left the forward
     # mutation in place and named it, which is what residue means.
     assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v2"
+    assert (workspace / "artifact.txt").read_text() == "v2"
 
 
 @needs_cordis
@@ -368,8 +383,10 @@ def test_an_untampered_abort_reports_no_residue_at_all(workspace):
         "Agent", [_effect("write", "artifact.txt", "v2")], abort=True)))
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
     frame = _sole_frame(session)
     assert frame.compensation_residue == []
     assert (workspace / "artifact.txt").read_text(encoding="utf-8") == "v1"
+    assert (workspace / "artifact.txt").read_text() == "v1"
     assert not any((workspace / ws.PREIMAGE_DIRNAME).iterdir())

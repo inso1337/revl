@@ -8,6 +8,7 @@ integration code.
 Three dependency forms exist, and they do not give the same guarantee.
 Sections one to five below are the py wheel (installed from source, for example
 `pip install "git+https://github.com/inso1337/revl@<tag>"`, then
+Sections one to five below are the py wheel (`pip install revl`, then
 `from revl.gate import admit, gate_version, ...`), which is the full
 reference compiler and can both refuse and admit.
 ["The rust tier"](#the-rust-tier-the-revl-gate-crate) is the native
@@ -98,6 +99,7 @@ the approver seam, WAL recovery, the self-extension `propose` verb) live in
 Calling `admit`/`admit_into` gets you none of this. If you want "admitted AND
 run revertibly," you adopt `Gate` explicitly and take on its walls (one live
 gate per process, no async). If you only install revl and call `admit`,
+gate per process, no async). If you only `pip install revl` and call `admit`,
 you are on layer 1 alone, and you own whatever runtime discipline your
 admitted code runs under.
 
@@ -278,6 +280,13 @@ equality over the scalar set. No literal, no operator, no `let`, no `effect`, no
 block body, no service operation carrying a marking. Anything else is
 `Admission::Withheld`, carrying the verdict verbatim, so switching from `admit`
 to `issue_admission` can only ADD the admitted wire.
+That surface is deliberately tiny: interface declarations only, meaning
+`service` method signatures and scalar `type` aliases over a closed scalar
+vocabulary derived from the reference's own table. It holds no function body,
+no expression, no literal and no generic head, which is exactly why a
+no-objection over it is the whole answer rather than a partial one. Anything
+else is `Admission::Withheld`, carrying the verdict verbatim, so switching from
+`admit` to `issue_admission` can only ADD the admitted wire.
 
 `issue_admission_into(source, manifest)` asks the same question against a
 running composition. The empty manifest is the empty composition and reduces to
@@ -290,6 +299,12 @@ one the wire NAMES: a same-name component is a replacement, whose handoff and
 unmet-consumer reasoning belongs to the fold. A running component the wire names
 nowhere carries no provision and no requirement row, so replacing it hands off
 no state and strands no consumer.
+the standalone question. Against a non-empty one the candidate carries one
+obligation more: nothing it declares may REDECLARE a service the running
+composition already declares. That is the only interaction the reference has
+between an interface-only candidate and a running manifest, and it gates a
+redeclaration on the compatibility relation the type layer decides, so a
+redeclaration is withheld here while a fresh interface is admitted.
 
 The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
 header followed by one `:S,op,op` row per declared service, carrying its name
@@ -316,6 +331,7 @@ return withheld, so silence there is silence about the result and no certified
 body can call it. The fold READS that return and does not use it - its readers
 on that side are the refusal rules, which is a separate slice with its own
 census rows. And a wire carrying a WITHDRAWAL row (`-C`, the replacement wave) is
+cannot carry, and they carry no return type, emission or async marking. And a wire carrying a WITHDRAWAL row (`-C`, the replacement wave) is
 declined outright: the fold decides a withdrawal in full, and re-deriving which
 provisions survive it on this side would be a second implementation of that
 reasoning.
@@ -470,6 +486,9 @@ from a git tag (`pip install "git+https://github.com/inso1337/revl@<tag>"`) and
 `from revl.gate import ...` works in-process, with no subprocess and no wire.
 The name `revl` on PyPI ([pypi.org/project/revl](https://pypi.org/project/revl/)) belongs to an unrelated project, so installing it by
 that name does not give you this package. The rust crate ships as committed source in this repo and builds
+The py surface above ships now: `pip install revl` and
+`from revl.gate import ...` works today, in-process, with no subprocess and
+no wire. The rust crate ships as committed source in this repo and builds
 with no Python on the machine, so a rust consumer can depend on it via a path
 dependency today (see the example's `README.md`); what is NOT done is the
 PUBLISH step. `revl-gate` is not on crates.io, so `cargo add revl-gate` is
@@ -480,12 +499,16 @@ the tarball it produces, and stops there (see the publish status below). The
 wasm tier is in the same position one step further back: the component builds
 from committed crate source and transpiles to a JS module that runs in a
 browser, a worker or `wasmtime` today
+that works right now. The wasm tier is in the same position one step further
+along: the component builds from committed crate source and transpiles to a
+JS module that runs in a browser, a worker or `wasmtime` today
 (`python3 tools/build_gate_js.py --out DIR`, or `npm run build` inside
 `examples/ecosystem-consumer-js/`), and what is NOT done is again the PUBLISH
 step, one step further back, because no npm package of the gate exists
 to publish: the example transpiles the component into its own `dist/` and is
 `private`, and nothing in this repository ships a `package.json` for the gate
 itself. Nothing is on npm, so `npm i` the gate is the shape a consumer gets
+step. Nothing is on npm, so `npm i` the gate is the shape a consumer gets
 once revl's release path cuts it, not a command that works right now. Neither
 publish changes a line of the contract above; both are packaging.
 
@@ -501,6 +524,7 @@ verdict surface: `no-objection` is the non-refusing arm, not an admission, and
 the crate's separate admission surface is not on this world.
 
 ## Publish status: built and rehearsed; the upload is the owner's step
+## Publish status: the only remaining step
 
 All three dependency forms are built and verified from the committed source in
 CI today; what none of them has yet is a copy on a public registry. That last
@@ -510,12 +534,17 @@ owner's decision, not a merge's. So the honest state of "revl as a dependency"
 is: code-complete on every tier, the py and rust release paths rehearsed
 without an upload, and one owner-run publish per registry still to come, plus
 the packaging itself on the wasm/js tier, which does not exist yet.
+is: code-complete on every tier, awaiting one owner-run publish per registry.
 
 | tier | dependency form | built, checked and rehearsed from source in CI | the step that remains |
+| tier | dependency form | built + checked from source in CI | the only step that remains |
 |---|---|---|---|
 | py | install from source or a git tag, then `from revl.gate import ...` | wheel built and installed into a fresh venv by `release dry run`, manifest-gated by `tools/check_wheel_manifest.py`, surface-gated by `tests/test_gate_compat.py` | choose a distribution name that is free on the index (the [`revl` name on PyPI](https://pypi.org/project/revl/) is taken by an unrelated project), then push a `v*` tag: `publish.yml` runs the full matrix on the tag and uploads by Trusted Publishing (the one-time publisher config is noted inline in `publish.yml`) |
 | rust | `cargo add revl-gate` | `crates/revl-gate` regenerated and drift-gated by `tests/test_gate_crate_drift.py`; the example depends on it by path and its verdicts are gated by `tests/test_gate_consumer_example_rs.py`; `release dry run (crate)` runs the real `cargo package` and `tools/check_crate_package.py` compares the tarball's members against `git ls-files crates/revl-gate` | `cargo publish` the crate to **crates.io** with an owner token |
 | wasm / js | `npm i` the jco-transpiled gate | `crates/revl-gate-wasm` built by `tools/build_gate_wasm.py`, transpiled by `tools/build_gate_js.py`, drift/import/vector-gated by the three `test_gate_wasm_*` suites and exercised by `tests/test_gate_consumer_example_js.py`. **No rehearsal: there is no package to rehearse.** | write the npm package for the transpiled gate (nothing in this repository ships a `package.json` for it today, and `docs/design/335-wasm-edge-gate.md` defers that packaging here), then `npm publish` it to **npm** with an owner token |
+| py | `pip install revl`, then `from revl.gate import ...` | wheel built and installed into a fresh venv by `release dry run`, manifest-gated by `tools/check_wheel_manifest.py`, surface-gated by `tests/test_gate_compat.py` | push a `v*` tag: `publish.yml` runs the full matrix on the tag and uploads to **PyPI** by Trusted Publishing (the one-time PyPI publisher config is noted inline in `publish.yml`) |
+| rust | `cargo add revl-gate` | `crates/revl-gate` regenerated and drift-gated by `tests/test_gate_crate_drift.py`; the example depends on it by path and its verdicts are gated by `tests/test_gate_consumer_example_rs.py` | `cargo publish` the crate to **crates.io** with an owner token |
+| wasm / js | `npm i` the jco-transpiled gate | `crates/revl-gate-wasm` built by `tools/build_gate_wasm.py`, transpiled by `tools/build_gate_js.py`, drift/import/vector-gated by the three `test_gate_wasm_*` suites and exercised by `tests/test_gate_consumer_example_js.py` | `npm publish` the transpiled package to **npm** with an owner token |
 
 Nothing above is a code change. Each remaining step is an owner running a
 publish against a registry with a credential this repository does not hold, and
@@ -527,6 +556,8 @@ changes only where the bytes came from, never what a verdict means.
 `tests/test_gate_crate_release_path.py` pins the rust rehearsal, so neither the
 "only a publish remains" claim nor the rehearsal itself can quietly rot back
 into a code gap.
+`tests/test_gate_dependency_publish_ready.py` pins this readiness so the "only a
+publish remains" claim cannot quietly rot back into a code gap.
 
 See also: [`docs/design/338-revl-as-dependency.md`](design/338-revl-as-dependency.md)
 for the full design and its adversarial review;

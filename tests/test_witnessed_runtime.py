@@ -202,9 +202,11 @@ def test_witnessed_reverts_on_abort(target):
     report = session.load(_ir(_witnessed_component("StashAbort", abort=True)))
     assert report["components"] == [{"name": "StashAbort", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "StashAbort", "state": "FAILED"}]
 
     assert os.path.exists(target), "abort did not replay the inverse — mutation stuck"
     assert open(target, encoding="utf-8").read() == "the deliverable"
+    assert open(target).read() == "the deliverable"
     # residue-free: the backup the mutation created was cleaned up by the revert
     assert not os.path.exists(bak), "abort left rollback residue (A8 violation)"
 
@@ -230,6 +232,7 @@ def test_acquire_bracket_reverts_on_clean_unload(target):
     assert os.path.exists(target), "acquire bracket failed to revert on clean unload"
     assert not os.path.exists(bak)
     assert open(target, encoding="utf-8").read() == "the deliverable"
+    assert open(target).read() == "the deliverable"
 
 
 # ---------------------------------------------------------------------------
@@ -258,6 +261,7 @@ def test_witnessed_call_site_emits_ok_conditional_transactional():
             "_revl_wit1.value, scope={'caps': ['fs']}, "
             "call={'receiver': None, 'method': 'unstash', "
             "'args': (lambda result: [result])(_revl_wit1.value)})") in body
+            "_revl_wit1.value, scope={'caps': ['fs']})") in body
     # it is NOT a bracket: no `yield lambda:` disposer for the witnessed step
     # (the only yields are the transactional one and the frame drain).
     assert "yield lambda:" not in body
@@ -269,6 +273,8 @@ def test_witnessed_call_site_emits_ok_conditional_transactional():
                       if ln.startswith("from runtime import ")][0]
     assert {"Ok", "Err"} <= {
         n.strip() for n in runtime_import[len("from runtime import "):].split(",")}
+    # Ok/Err are present because the witnessed extern returns Result
+    assert "class Ok:" in body
 
 
 def test_bracket_still_emits_a_plain_disposer():
@@ -391,6 +397,7 @@ def test_an_aborted_transactional_wal_descriptor_replays_on_recover(
         _ir(_witnessed_component("StashAbort", abort=True)), record=True)
     assert loaded_report["components"] == [{"name": "StashAbort", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert loaded_report["components"] == [{"name": "StashAbort", "state": "FAILED"}]
 
     session.recorder.wal.close()  # <-- simulate the crash: no activation-complete
 
@@ -575,6 +582,7 @@ def test_compensation_runs_in_phase2_after_transactional_on_abort(target, order_
     report = session.load(_comp_ir(_compensated_component("CompAbort", abort=True)))
     assert report["components"] == [{"name": "CompAbort", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "CompAbort", "state": "FAILED"}]
 
     # Phase 1 fully reverted the transactional witnessed effect: the file is
     # back and residue-free, exactly like test_witnessed_reverts_on_abort.
@@ -610,6 +618,7 @@ def test_a_failed_compensation_lands_as_residue_and_abort_still_succeeds(target,
         _compensated_component("CompFails", abort=True, offset_fails=True)))
     assert report["components"] == [{"name": "CompFails", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "CompFails", "state": "FAILED"}]
 
     # Phase 1 still ran to completion, unaffected by the Phase-2 failure that
     # comes after it.
@@ -653,6 +662,8 @@ def test_compensate_call_site_emits_through_frame_compensation():
             "call={'receiver': None, 'method': 'offset', 'args': ['go']}, "
             "crossing='note')") in body
     assert re.search(r"^ +yield _revl_emit\d+\.compensation$", body, re.M)
+    assert ("yield _revl_frame.compensation(lambda: offset('go'))" in body
+            or "yield _revl_frame.compensation(lambda: offset(\"go\"))" in body)
     # not a bare disposer: no plain `yield lambda:` for the compensate step
     # (the witnessed step's own transactional yield is also absent here,
     # since `stash`'s registration itself is `_revl_frame.transactional`,
@@ -712,6 +723,7 @@ def test_an_aborted_compensation_wal_descriptor_carries_no_discharge_record(
         _comp_ir(_compensated_component("CompWalAbort", abort=True)), record=True)
     assert report["components"] == [{"name": "CompWalAbort", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "CompWalAbort", "state": "FAILED"}]
 
     session.recorder.wal.close()
 
@@ -761,6 +773,7 @@ def test_a_tiny_budget_skips_and_records_a_later_compensation(order_log, monkeyp
     report = session.load(_comp_ir(_two_compensations_component("TinyBudget")))
     assert report["components"] == [{"name": "TinyBudget", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "TinyBudget", "state": "FAILED"}]
 
     # the newer (offset_slow) compensation ran; the older (offset) one was
     # skipped once its budget check found the deadline already past.
@@ -786,6 +799,7 @@ def test_a_zero_budget_means_unbounded(order_log, monkeypatch):
     report = session.load(_comp_ir(_two_compensations_component("ZeroBudget")))
     assert report["components"] == [{"name": "ZeroBudget", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "ZeroBudget", "state": "FAILED"}]
 
     # `0` means no bound: both compensations ran despite the 50ms sleep.
     assert _order_lines(order_log) == ["compensate:second", "compensate:first"]

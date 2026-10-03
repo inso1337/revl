@@ -366,6 +366,7 @@ These are named limits, not oversights. None of them is half-implemented.
   checked against its parameter in check position there. An unknown type
   name in an annotation is refused there, as it is in a `fn` body, at the first
   use that gives it a value of another type.
+  types are checked.
 - **Calling a function through a field directly.** `h.run(1)` is a builtin
   method call to the lowerer, and there is no builtin `run`; bind it first
   (`let r: (Int) -> Str = h.run  return r(1)`). The existing diagnostic

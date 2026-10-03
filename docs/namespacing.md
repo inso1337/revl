@@ -184,6 +184,9 @@ first-party code of exactly the kind `tools/gate_reference_census.py` refuses to
 tolerate — and it hid the collision rule above behind a parse stage that never
 reached it, since a backend's `_check_host_keys` arm is reachable only once the
 key parses.
+  unqualified path; emitting a *qualified* key to a target runtime is future
+  work and is out of scope here (the deliverable is the compile-time key
+  identity: parsing, linking/G2, injection, and admission).
 
 ## What this unblocks (item 49)
 

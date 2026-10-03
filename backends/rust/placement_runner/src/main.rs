@@ -481,6 +481,7 @@ fn main() {
                 Some(handle) => {
                     let fiber = root.plugin(handle, ());
                     activated(&fiber, format!("proxy for key {key}"), &fibers);
+                    fiber.try_wait().unwrap();
                     fibers.push((format!("{key}-proxy"), fiber));
                     log("proxy", key, &format!("-> {socket} [{service}]"));
                     if !once {
@@ -497,6 +498,7 @@ fn main() {
                         "FATAL unsupported proxy service {service} for key {key}: \
                          this build has no proxy component for it"), &fibers);
                 }
+                None => log("proxy", key, &format!("UNSUPPORTED service {service}")),
             }
         }
     }
@@ -530,6 +532,13 @@ fn main() {
                         }
                         Err(error) => {
                             fatal_boot(format!("FATAL boot failed loading {cname}: {error}"), &fibers);
+                            eprintln!("{}", confidential::revl_redact_text(format!(
+                                "[{name}] boot failed loading {cname}: {error}")));
+                            for (label, fiber) in fibers.iter().rev() {
+                                let _ = fiber.dispose();
+                                log("swap", label, "dispose");
+                            }
+                            std::process::exit(1);
                         }
                     }
                 }
@@ -551,6 +560,7 @@ fn main() {
                          this build does not have (name spelling must match the \
                          emitter's)"), &fibers);
                 }
+                None => log("load", cname, "UNKNOWN component"),
             }
         }
     }
@@ -569,6 +579,7 @@ fn main() {
                 Resolved::In(ctx) => {
                     let fiber = ctx.plugin(serve_plugin(key.clone(), served.clone()), ());
                     activated(&fiber, format!("served key {key}"), &fibers);
+                    fiber.try_wait().unwrap();
                     fibers.push(("serve".to_string(), fiber));
                 }
                 Resolved::Refused(why) => {
@@ -600,6 +611,7 @@ fn main() {
                 (),
             );
             activated(&fiber, what, &fibers);
+            fiber.try_wait().unwrap();
             fibers.push(("probe".to_string(), fiber));
         }
     }
@@ -651,6 +663,7 @@ fn main() {
                         log("swap", &format!("{key}-proxy"),
                             &format!("dispose NOT confirmed: {error}"));
                     }
+                    let _ = pf.dispose();
                 }
                 for (label, fiber) in fibers.iter() {
                     if !label.ends_with("-proxy") {
@@ -675,6 +688,7 @@ fn main() {
     };
     let watch = TeardownWatch::start(name.clone());
     let mut unconfirmed: Vec<String> = Vec::new();
+    // 6. teardown, consumers first (reverse load order)
     for (label, fiber) in fibers.iter().rev() {
         watch.disposing(label);
         match fiber.dispose() {
@@ -688,6 +702,8 @@ fn main() {
     watch.finish();
     if !unconfirmed.is_empty() {
         incomplete(&format!("dispose not confirmed for {}", unconfirmed.join(", ")));
+        let _ = fiber.dispose();
+        log("swap", label, "dispose");
     }
 
     // 7. no-residue proof (once mode only, so placement's stream is unchanged):

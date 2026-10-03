@@ -38,6 +38,7 @@ def test_beacon_emits_goldens():
     modules = _emitter().emit(ir)
     for name in ("Beacon", "Auditor"):
         golden = (ROOT / "backends" / "wasm" / "golden" / f"{name}.wat").read_text(encoding="utf-8")
+        golden = (ROOT / "backends" / "wasm" / "golden" / f"{name}.wat").read_text()
         assert modules[name] == golden, (
             f"backends/wasm/golden/{name}.wat drifted from the emitter. "
             + _TAIL.format(t="wasm"))
@@ -49,6 +50,7 @@ def test_pulse_await_lowering():
     ir = compile_files([str(ROOT / "examples" / "pulse.rvl")])
     pulse = _emitter().emit(ir)["Pulse"]
     golden = (ROOT / "backends" / "wasm" / "golden" / "Pulse.wat").read_text(encoding="utf-8")
+    golden = (ROOT / "backends" / "wasm" / "golden" / "Pulse.wat").read_text()
     assert pulse == golden, (
         "backends/wasm/golden/Pulse.wat drifted from the emitter. "
         + _TAIL.format(t="wasm"))
@@ -248,6 +250,8 @@ def test_called_fn_is_emitted_into_the_component_module(tmp_path):
     ))["C"]
     assert "(func $fn.outer" in wat and "(func $fn.inner" in wat
     assert "(func $fn.unused" not in wat        # only the closure, not the corpus
+    assert "(func $outer" in wat and "(func $inner" in wat
+    assert "(func $unused" not in wat        # only the closure, not the corpus
     assert int(_invoke(tmp_path, "closure", wat, "provide:s.f", 20)[-1]) == 42
 
 
@@ -330,6 +334,13 @@ def test_boundary_refusals_say_why_not_unknown_kind():
 # the service boundary. These are the positions that used to be refused by
 # name; they are EXECUTED on wasmtime here, not merely emitted, because the
 # original bug was a module that failed validation at load.
+# item 301: the emit-refusal has to recurse into ADT variant PAYLOADS, list
+# elements, record fields and match-arm/result widths — not just declared
+# boundary types. A `Float` in any of those value positions has no wasm value
+# representation on this tier (`_wasm_ty` would call it i32 while the value is
+# an `f64.const`), so it must be REFUSED at emit, never lowered to a module
+# that then fails wasm validation ("a wasm target never silently degrades",
+# docs/wasm-capabilities.md). Found by the item-292 fuzzer.
 # ---------------------------------------------------------------------------
 
 def _invoke_wat(wat_path: Path, fn: str, *args):
@@ -339,6 +350,30 @@ def _invoke_wat(wat_path: Path, fn: str, *args):
     )
     assert result.returncode == 0, result.stderr
     return result.stdout.strip().splitlines()[-1]
+def test_float_in_value_positions_is_refused_not_mis_emitted():
+    emitter = _emitter()
+    # fuzz_wasm_ad4e66e8: a `List[Float]` literal (`[0.0, 0.0, 0.0].length()`).
+    # The element has no slot representation, so refuse at the list element.
+    ir = compile_files([str(ROOT / "examples" / "regressions" / "fuzz_wasm_ad4e66e8.rvl")])
+    with pytest.raises(emitter.EmitError, match="list element: type 'Float' is not lowerable"):
+        emitter.emit(ir)
+    # fuzz_wasm_af371f9d: a match over `Err(-3.4)` — a `Float` variant payload.
+    # Refuse rather than emit an f64 into the cell. The SITE moved earlier than
+    # it used to be: the arm's payload BINDING is a Float local, and a Float
+    # local is refused by `_declare_local` (an f64 into an i32 local is a module
+    # that does not validate), which runs before the constructed payload is
+    # checked. Same refusal, same wording, one step sooner — so this asserts the
+    # wording both sites share rather than pinning whichever fires first.
+    ir = compile_files([str(ROOT / "examples" / "regressions" / "fuzz_wasm_af371f9d.rvl")])
+    with pytest.raises(emitter.EmitError, match="type 'Float' is not lowerable"):
+        emitter.emit(ir)
+    # and the payload site itself is still there, reached where no binding
+    # precedes it (a wildcard arm binds nothing).
+    with pytest.raises(emitter.EmitError,
+                       match="payload of .*: type 'Float' is not lowerable"):
+        emitter.emit(compile_source(
+            "pub fn probe() -> Int { return match Err(1.5) { Ok(_) => 0, Err(_) => 1 } }\n"
+            'test "t" { assert probe() == 1 }\n'))
 
 
 @needs_wasmtime
@@ -411,14 +446,19 @@ def test_float_fuzz_regressions_lower_and_run(tmp_path):
 
 @needs_wasmtime
 def test_float_adt_variant_payload_with_match_runs(tmp_path):
+def test_float_adt_variant_payload_with_match_is_refused():
     # The roadmap-301 shape verbatim: `type Adt0 = C0_0(Float)` matched over.
     # The payload is a Float slot; the result is f64, so the module validates
     # and runs instead of being refused.
+    # The variant carries a Float payload with no representation here — the
+    # emitter must refuse at construction, not emit invalid wasm.
     emitter = _emitter()
     source = (
         "type Adt0 = C0_0(Float)\n"
         "pub fn probe() -> Float { return match C0_0(1.0) { C0_0(v) => v + 0.5 } }\n"
         'test "t" { assert probe() == 1.5 }\n'
+        "pub fn probe() -> Int { return match C0_0(1.0) { C0_0(v) => 0 } }\n"
+        'test "t" { assert probe() == 0 }\n'
     )
     wat_path = tmp_path / "adt.wat"
     wat_path.write_text(emitter.emit(compile_source(source))["functions"], encoding="utf-8")
@@ -458,6 +498,8 @@ def test_float_crosses_the_service_boundary_on_the_real_substrate(tmp_path):
                             capture_output=True, text=True, timeout=180)
     assert result.returncode == 0, result.stdout + result.stderr
     assert "float boundary ok" in result.stdout
+    with pytest.raises(emitter.EmitError, match="payload of 'Adt0' case 'C0_0': type 'Float' is not lowerable"):
+        emitter.emit(compile_source(source))
 
 
 def test_supported_value_shapes_still_emit_no_over_refusal():

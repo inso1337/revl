@@ -1,6 +1,7 @@
 {
   "lockVersion": 1,
   "note": "truc's stage-0 composition: the file list the launcher compiles, and the sha256 of each file's bytes. That compile IS truc passing its own gate on every boot (docs/design/truc-architecture.md section 7). externs.rvl is pulled in as an import, so it is not listed as a root: it is pinned under `imports`, checked the same way at boot and never compiled as a root. The pins are mandatory and so is this file: a missing, unparseable or unpinned lock refuses to boot rather than falling back to compiling whatever sits in components/. Regenerate with `python -P -m revl.truc._relock` and commit; tests/test_truc_bootstrap.py is the regenerate-or-red gate. (The `-P` is the PYTHONSAFEPATH safety bit; without it, `-m` puts the CWD at sys.path[0] and a sibling `truc.py` in a component's directory would shadow truc's own launcher; issue #317.)",
+  "note": "truc's stage-0 composition: the file list the launcher compiles, and the sha256 of each file's bytes. That compile IS truc passing its own gate on every boot (docs/design/truc-architecture.md section 7). externs.rvl is pulled in as an import, so it is not listed as a root. The pins are mandatory and so is this file: a missing, unparseable or unpinned lock refuses to boot rather than falling back to compiling whatever sits in components/. Regenerate with `python -P -m revl.truc._relock` and commit; tests/test_truc_bootstrap.py is the regenerate-or-red gate. (The `-P` is the PYTHONSAFEPATH safety bit; without it, `-m` puts the CWD at sys.path[0] and a sibling `truc.py` in a component's directory would shadow truc's own launcher; issue #317.)",
   "files": [
     {
       "path": "components/registry_client.rvl",
@@ -9,26 +10,32 @@
     {
       "path": "components/fetcher.rvl",
       "sha256": "7e284ae55cfba003575674f94d7c17f876f06b9c80072f11ef03f08741462547"
+      "sha256": "cf4a939231e628bafae13b9bfd5ab711fba563625f991e89daea63aee537f3f2"
     },
     {
       "path": "components/gatekeeper.rvl",
       "sha256": "9f59e503f8c84531127889b3970ebfbcaf455c9b3c5c29b4024128d3da602ecf"
+      "sha256": "37eae3f69c2597d14925cd9b70b869e67f7475be32d524d00c1dda475fbd1e51"
     },
     {
       "path": "components/workspace.rvl",
       "sha256": "2dd94714af86e86f9fc056c27113ac99caf4e8599625d14f2f434dfdfae5411d"
+      "sha256": "40d4b26c69a7a1f69080a18b5c861be4dfe5ed68c0457bcc45f4b6697dd6656b"
     },
     {
       "path": "components/planner.rvl",
       "sha256": "a2622aeff53db637c4f84b60cce4816a377734498894b5155d716c69cc54df9c"
+      "sha256": "8f250896c1405389ec464840609224cfa529a42a68be15b902cd0775ceebba1d"
     },
     {
       "path": "components/assembler.rvl",
       "sha256": "523e33f37851c35343edc4cdd11adc0d3cf84ebef460415331bb3a18b56aaba3"
+      "sha256": "ac8a288f62b6ea6458cc7f159dc36926bbd0cd7c252657675b3728935dbdaa59"
     },
     {
       "path": "components/shipper.rvl",
       "sha256": "e3f2e5b958e00e15117c14e9c0537dcb957d81805e25510ddfff552cfb0c314b"
+      "sha256": "d8fb550e81f059152c2f488dd97ec57d304f7135efd216bb1373ff4d3d69ac9d"
     },
     {
       "path": "components/cli.rvl",
@@ -39,6 +46,7 @@
     {
       "path": "externs.rvl",
       "sha256": "d47c1ce1d779b21788d8de5214337675049c27c00913e4513e0fd20e21fef5fc"
+      "sha256": "9a6d212439d2a519da1628a49be6aae0448347c2a54b0f7231a81917b58327f2"
     }
   ]
 }

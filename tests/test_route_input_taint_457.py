@@ -74,15 +74,18 @@ def _refusal(src: str) -> str:
 # reachable from a cross-site page.
 _BIND_KINDS = [
     ("path", '  route delete "/notes/{id}"\n'
+    ("path", '  route get "/notes/{id}"\n'
              "  emission fn get_note(id: Str) -> Str\n",
      "get_note(id)", "id"),
     ("query", '  route delete "/notes"\n'
+    ("query", '  route get "/notes"\n'
               "  emission fn get_note(limit: Str) -> Str\n",
      "get_note(limit)", "limit"),
     ("body", '  route post "/notes"\n'
              "  emission fn get_note(note: NewNote) -> Str\n",
      "get_note(note)", "note.title"),
     ("request", '  route delete "/notes/{id}"\n'
+    ("request", '  route get "/notes/{id}"\n'
                 "  emission fn get_note(req: Request) -> Str\n",
      "get_note(req)", "req.path"),
 ]
@@ -122,6 +125,7 @@ def test_the_route_clause_alone_is_what_flips_the_verdict():
         "    }\n"
     )
     routed = _app('  route delete "/notes/{id}"\n'
+    routed = _app('  route get "/notes/{id}"\n'
                   "  emission fn get_note(id: Str) -> Str\n", handler)
     unrouted = _app("  emission fn get_note(id: Str) -> Str\n", handler)
 
@@ -135,6 +139,7 @@ def test_the_pre_existing_web_rule_still_refuses():
     still refuses, and names its own origin."""
     src = _app(
         '  route delete "/notes"\n'
+        '  route get "/notes"\n'
         "  emission fn get_note(url: Str) -> Str\n",
         "    fn get_note(url) {\n"
         "      let page = emit fetch(url)\n"
@@ -156,6 +161,7 @@ def test_a_routed_input_reaching_an_ordinary_emission_is_admitted():
     admitted — the stamp does not make every routed handler refuse."""
     src = _app(
         '  route delete "/notes"\n'
+        '  route get "/notes"\n'
         "  emission fn list_notes(q: Str) -> Str\n",
         "    fn list_notes(q) {\n"
         "      emit save(q)\n"
@@ -172,6 +178,7 @@ def test_endorse_input_declassifies_a_routed_input():
     the operation and applied to the value."""
     src = _app(
         '  route delete "/notes/{id}"\n'
+        '  route get "/notes/{id}"\n'
         "  endorse[input] emission fn get_note(id: Str) -> Str\n",
         "    fn get_note(id) {\n"
         '      let safe = endorse[input](id, reason = "operator-reviewed")\n'
@@ -191,6 +198,7 @@ def test_a_declared_qualifier_on_a_routed_parameter_survives_the_stamp():
     fire."""
     src = _app(
         '  route delete "/notes/{id}"\n'
+        '  route get "/notes/{id}"\n'
         "  emission fn get_note(key: Secret[Str]) -> Str\n",
         "    fn get_note(key) {\n"
         "      emit save(key)\n"

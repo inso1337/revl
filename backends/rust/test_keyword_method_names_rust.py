@@ -4,6 +4,9 @@ Part of issue #1512 (the rust tier; the ts tier is PR #1552). Of Rust's strict,
 reserved and weak keywords, the revl frontend accepts 35 as a method name (the
 other 21 are revl keywords too; `try` joined that set in #1900). On main the
 rust emitter spelled such a method three ways:
+reserved and weak keywords, the revl frontend accepts 36 as a method name (the
+other 20 are revl keywords too). On main the rust emitter spelled such a method
+three ways:
 
 * the trait declaration and a call through a required service moved it onto
   the append-`_` ladder (`box` -> `box_`);
@@ -13,6 +16,7 @@ rust emitter spelled such a method three ways:
   (`svc.box(..)`) kept the raw keyword, which rustc refuses.
 
 So every one of the 31 strict/reserved keywords the frontend accepts broke
+So every one of the 32 strict/reserved keywords the frontend accepts broke
 `cargo build` of any crate that declared it. `_method_ident` is now the one
 spelling, used at the trait, every impl, the proxy, the dispatch, a call
 through a required service and a lifecycle `call`. The wire keeps the contract
@@ -85,6 +89,7 @@ def test_the_frontend_hands_the_emitter_these_names():
     """Pinned so a frontend change that admits or refuses another keyword is
     seen here: the emitter must spell every name it is handed."""
     assert len(KEYWORDS) == 31 and len(ACCEPTED) == 38
+    assert len(KEYWORDS) == 32 and len(ACCEPTED) == 39
     assert {"box", "impl", "Self", "crate", "self", "super", "gen"} <= set(KEYWORDS)
 
 

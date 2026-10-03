@@ -120,11 +120,13 @@ def test_committed_grammars_equal_a_fresh_derivation():
 
 def test_a_parser_change_changes_the_derivation():
     source = (ROOT / "src" / "revl" / "parser.py").read_text(encoding="utf-8")
+    source = (ROOT / "src" / "revl" / "parser.py").read_text()
     edited = source.replace('self.expect("kw", "every")', 'self.expect("kw", "everyday")', 1)
     assert edited != source
     rendered = sg.render("lark", derived=sg.derive(edited))
     assert '"everyday"' in rendered
     assert '"everyday"' not in (ROOT / "grammar" / "revl.lark").read_text(encoding="utf-8")
+    assert '"everyday"' not in (ROOT / "grammar" / "revl.lark").read_text()
 
 
 def test_cli_check_reports_no_drift(capsys):
@@ -229,6 +231,7 @@ def test_small_corpus_documents_are_accepted_by_the_gbnf_grammar(gbnf):
     small = [(n, t) for n, t in parseable
              if 200 <= len(t) <= 700
              and not n.startswith("examples/rejections/")]
+    small = [(n, t) for n, t in parseable if 200 <= len(t) <= 700]
     sample = small[::max(1, len(small) // 12)][:12]
     assert len(sample) >= 10, len(sample)
     refused = [name for name, text in sample if not gbnf.accepts(text)]

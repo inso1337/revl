@@ -215,6 +215,7 @@ func App() stc.Component {
 					_revlApplyInv, _revlApplyErr = nil, fmt.Errorf("panic: %v", r)
 				}
 			}()
+		Apply: func(ctx *stc.Context) (stc.Inverse, error) {
 			var a *RevlSpawnHandle
 			if err := ctx.Effect(func() stc.Inverse {
 				a = revlSpawnCell(ctx, CellConfig{Id: 1})

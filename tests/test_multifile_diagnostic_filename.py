@@ -201,3 +201,4 @@ def test_default_param_purity_names_the_declaring_file(tmp_path, monkeypatch):
         diag = report(error)["diagnostics"][0]
         assert diag["file"].endswith("second.rvl")
         assert diag["line"] == 3
+    assert len(first.read_text().splitlines()) < error.line

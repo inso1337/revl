@@ -341,6 +341,7 @@ fn is_py_space(c: Str, cc: Int) -> Bool {
   if (c.is_space()) { return true }
   if ((cc < 32) || (cc >= 133)) { return is_py_space_extra(cc) }
   return false
+  return c.is_space()
 }
 
 fn trim(s: Str) -> Str {
@@ -552,6 +553,9 @@ fn step(source: Str, i: Int, line: Int) -> Step {
   // c is not newline here (the cc == 10 case returned). Every `str.isspace`
   // character is skipped, as the reference lexer skips it (issue #2343).
   if (is_py_space(c, cc)) { return { i: i + 1, line: line, tok: none } }
+  // c is not newline here (the cc == 10 case returned), so the classifier
+  // builtin is exactly is_space(c) — call it directly, skipping the fn call.
+  if (c.is_space()) { return { i: i + 1, line: line, tok: none } }
   if (source.slice(i, i + 2) == "//") {
     let sc = scan_comment(source, i)
     return { i: sc.j, line: line, tok: none }
@@ -730,6 +734,9 @@ fn step(source: Str, i: Int, line: Int) -> Step {
       // as the reference's `while source[k].isspace()` reads it (issue #2343)
       var kb = jb
       while (kb < n1 && is_py_space(source.charAt(kb), source.codepoint_at(kb))) { kb += 1 }
+      while (kb < n1 && source.codepoint_at(kb) != 10 && source.charAt(kb).is_space()) { kb += 1 }
+      // whitespace before `{` may include a newline
+      while (kb < n1 && source.codepoint_at(kb) == 10) { kb += 1 }
       if (kb < n1 && source.charAt(kb) == "{") {
         let hb = scan_host_body(source, kb)
         if (hb.j == 0 - 1) {

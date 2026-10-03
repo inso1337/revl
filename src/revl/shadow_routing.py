@@ -334,6 +334,7 @@ class Answered:
     incumbent's validated answer and hands this object the raw host return
     instead; a candidate's is the answer its own completion produced, which is
     what a live route serves."""
+    of each it holds so a reader is never guessing which comparison ran."""
 
     record: Mapping[str, Any]
     world: Any = None
@@ -349,6 +350,11 @@ class Served:
     live route the share did not select. ``shadowed`` says whether the
     candidate was consulted at all: on a crossing the share did not select, it
     was not called, and the ledger counts that rather than asserting it."""
+    ``side`` is which answer was handed back to the caller, and it is
+    :data:`INCUMBENT` on every crossing of a route that is not live.
+    ``shadowed`` says whether the candidate was consulted at all: on a
+    crossing the share did not select, it was not called, and the ledger
+    counts that rather than asserting it."""
 
     crossing: tuple
     shadowed: bool
@@ -848,11 +854,16 @@ class Scheduler:
               answered: Optional[Answered] = None,
               served: Optional[str] = None) -> Optional[Answered]:
         """Offer one crossing to the schedule. Returns the answer SERVED.
+        """Offer one crossing to the schedule. Returns the INCUMBENT's answer.
 
         ``answered`` is the incumbent's answer when the caller already holds
         it, which is what a running seam holds: the incumbent has answered and
         asking it again would issue and pay for a second completion. Absent,
         the ``incumbent`` producer is called for it.
+        ``answered`` is that answer when the caller already holds it, which is
+        what a running seam holds: the incumbent has answered and asking it
+        again would issue and pay for a second completion. Absent, the
+        ``incumbent`` producer is called for it.
 
         ``served`` is which side's answer actually reached the caller, for a
         caller that KNOWS rather than infers. Absent, it is derived from the
@@ -866,6 +877,10 @@ class Scheduler:
         served. On a route that is not live that is the incumbent's, which is
         what every offline caller already got; :func:`serve` ignores the
         return and keeps its batch shape."""
+        about who is answering. `revl.shadow_runtime` passes it explicitly and
+        always passes `INCUMBENT`, because its seam discards the observer's
+        return and therefore cannot serve a candidate's answer whatever the
+        route says."""
         if self._refusal is not None:
             return answered
         if not isinstance(crossing, tuple) or len(crossing) != 2:
@@ -876,6 +891,8 @@ class Scheduler:
                 f"no second correlation")
             return answered
         shadowed = selects(self.route, crossing)
+        side = served if served is not None else (
+            CANDIDATE if self.route.live else INCUMBENT)
         left = answered
         if left is None:
             if self._incumbent is None:
@@ -895,6 +912,7 @@ class Scheduler:
             # not select is a crossing the candidate did not answer, and a
             # ledger that said otherwise would name an answer nobody made.
             self._served.append(Served(crossing, False, INCUMBENT))
+            self._served.append(Served(crossing, False, side))
             return left
         self._calls += 1
         side = served if served is not None else (
@@ -913,6 +931,7 @@ class Scheduler:
             side=side, observation=observation))
         self._served.append(Served(crossing, True, side))
         return right if side == CANDIDATE else left
+        return left
 
     def ledger(self) -> ShadowLedger:
         """The accumulated window. A refused schedule yields an EMPTY ledger
@@ -949,6 +968,7 @@ def serve(route: ShadowRoute, crossings: Sequence[tuple], *,
        crossings the share selected, and the incumbent's on the rest: a live
        route is the cutover, and it is what makes a landed promotion change
        which model answers.
+       shadow.
     3. Every entry carries this route's action and realm, so the window is
        this action class's evidence and `decide` can refuse one that is not.
 
@@ -1129,10 +1149,14 @@ __all__ = [
     "ROUTING_KIND", "ROUTING_VERSION", "WINDOW_KIND", "WINDOW_VERSION",
     "INCUMBENT", "CANDIDATE", "SIDES",
     "LINKS", "WINDOW_LINKS", "SCHEDULE_STAGE", "DECISIONS",
+    "ROUTING_KIND", "ROUTING_VERSION", "INCUMBENT", "CANDIDATE", "SIDES",
+    "LINKS", "SCHEDULE_STAGE", "DECISIONS",
     "ROUTE_MALFORMED", "SHARE_MALFORMED", "ROUTE_MISMATCHED",
     "ACTION_UNSCHEDULED", "ACTION_MISMATCHED", "REALM_MISMATCHED",
     "SERVED_CANDIDATE", "WINDOW_MALFORMED", "WINDOW_TRUNCATED",
+    "SERVED_CANDIDATE",
     "Share", "NOTHING", "EVERYTHING", "ShadowRoute", "Answered", "Served",
     "Entry", "ShadowLedger", "Scheduler", "selects", "serve", "decide",
     "render", "window_from_dict",
+    "render",
 ]

@@ -292,6 +292,8 @@ multi-component sessions that need it. The branch resolves the presented
 hash against the outstanding-ticket table to the ticket's component and
 its realm labels, the same resolve-before-running pattern the `restore`
 branch uses (`_restore_targets`), and refuses
+its realm labels, the same resolve-without-running pattern the `restore`
+branch uses on the snapshot manifest (`_snapshot_targets`), and refuses
 an unknown hash before the authority check runs.
 
 **Back-compatibility, the item-55 clause.** With no approval policy
@@ -379,6 +381,8 @@ sensitive, as a clause in the extern/method modifier position:
 > roadmap item 343. In the shipped compiler an `emission` extern takes no
 > `[caps]` scope: the parser refuses one (only `witnessed[caps]` is
 > capability-scoped) and an emission's capability token IS its extern name:
+> `[caps]` scope — the parser refuses one (only `witnessed[caps]` is
+> capability-scoped) — and an emission's capability token IS its extern name:
 > the class map does `caps.add(name)`
 > (`revl.mcp.approval.ClassMap._classify_direct`). So today a policy rule
 > targets an emission by name and the declaration-side clause carries no

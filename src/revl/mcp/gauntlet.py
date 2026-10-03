@@ -194,6 +194,8 @@ def _lifecycle_section(boot_ir: dict | None, config: dict | None,
         # A host config the load refuses (a wrongly typed, undeclared or
         # missing required field, issues #3535 and #3596) is a `RevlError`
         # from `configure_rows_from_host`, graded the same way.
+    except SessionError as error:
+        # no runtime, an open hole, a boot that refuses — all graded, not raised
         return {"kind": "tested", "status": "unavailable", "ran": False,
                 "reason": str(error),
                 "counts": {"checks": 0, "passed": 0, "failed": 0}}

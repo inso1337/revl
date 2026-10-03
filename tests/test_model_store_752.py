@@ -9,6 +9,8 @@ examples/user_cache.rvl `query(sql: Str)` sketch that predates Minato), and
 every mutation lowered as a revertible `effect` whose inverse is the natural
 CRUD counterpart (`create` undoes to `remove`, `update` restores the value the
 row held before the overwrite, `delete` re-inserts the row it removed).
+every mutation lowered as a revertible `effect` whose derived inverse is the
+natural CRUD counterpart (`create` carries `undo remove`).
 
 Beyond the first slice (#767) it closes the two persistence-ergonomics gaps the
 exemplary app's boring half (#777) filed against the pattern:
@@ -35,10 +37,14 @@ Two check layers, mirroring the split used elsewhere in the suite:
   `update` lowers to an overwrite effect whose undo branches on the value read
   before the write (issue #1980), `delete` lowers to a remove effect whose undo
   re-inserts the removed row, and `list` returns the typed `List[Note]`; and
+  and `list` returns the typed `List[Note]`; and
 * the lifecycle assertion runs on the real cordis-py runtime when it is
   installed (`sh backends/python/setup.sh`), proving the rows are created,
   read, overwritten, deleted and listable under their store-assigned keys and
   that teardown reverts them residue-free, with the same driver harness as
+  installed (`sh backends/python/setup.sh`), proving the created rows are
+  readable and listable under their store-assigned keys and that teardown
+  reverts them residue-free — the same driver harness as
   tests/test_lifecycle_exec.py.
 """
 
@@ -76,6 +82,8 @@ def test_model_store_compiles_with_typed_crud():
     assert ir["types"]["Draft"]["fields"] == {"body": "Str"}
     # The store service exposes typed CRUD verbs, and `create`/`update`/`delete`
     # are emissions (witnessed mutations), while `get`/`list` are pure reads.
+    # The store service exposes typed CRUD verbs, and `create` is an emission
+    # (a witnessed mutation), while `get`/`list` are pure reads.
     store = ir["services"]["Store"]["methods"]
     assert store["create"]["emission"] is True
     assert store["update"]["emission"] is True
@@ -99,6 +107,7 @@ def test_no_raw_sql_anywhere():
     lowered = code.lower()
     for sql_tok in ("query(sql", "insert into", "delete from", "select * from",
                     "update notes", " where ", "drop table", " sql:"):
+    for sql_tok in ("query(sql", "insert into", "delete from", "select * from", " sql:"):
         assert sql_tok not in lowered, f"raw SQL leaked into the store: {sql_tok!r}"
     ir = compile_files([str(EXAMPLE)])
     assert "sql" not in json.dumps(ir).lower()
@@ -209,3 +218,4 @@ def test_store_reverts_residue_free_on_the_runtime():
             "revert residue-free") in result.stdout
     assert "PASS update and delete of an absent key are typed no-ops" in result.stdout
     assert "[py] pass: 5 test(s) passed" in result.stdout
+    assert "[py] pass: 3 test(s) passed" in result.stdout

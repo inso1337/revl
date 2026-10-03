@@ -102,6 +102,8 @@ def test_a_name_inside_a_computed_callee_reaches_the_value_channel():
     """Before: `called = set()`, `values = {'x'}` — `send` in NEITHER."""
     ir = _legacy_ir(_SEND + "fn dispatch(x: Str) -> Str "
                             "{ return [send][0](x) }\n")
+    ir = compile_source(_SEND + "fn dispatch(x: Str) -> Str "
+                                "{ return [send][0](x) }\n")
     body = next(f for f in ir["functions"] if f["name"] == "dispatch")["body"]
     called, values = set(), set()
     _calls_in(body, called, values=values)
@@ -126,6 +128,7 @@ def test_a_computed_callee_that_wraps_a_named_call_still_records_the_call():
     """`pick()(x)`: the inner call is a real call (`pick` in `found`), and the
     subtree walk is what reaches it at all."""
     ir = _legacy_ir(
+    ir = compile_source(
         _SEND
         + "fn pick() -> (Str) -> Str { return send }\n"
         + "fn dispatch(x: Str) -> Str { return pick()(x) }\n")
@@ -144,6 +147,8 @@ def test_g4_refuses_an_index_computed_callee_reaching_an_emission():
     # refused where `send` is taken as a value (issue #2842), before the
     # declaration check could see `dispatch()`
     assert _VALUE_REFUSAL in err.message
+    assert "declared plain" in err.message
+    assert "dispatch()" in err.message
 
 
 def test_the_direct_form_is_refused_identically_the_asymmetry_is_gone():
@@ -161,6 +166,8 @@ def test_the_emitting_fixed_point_reaches_the_dispatching_fn():
     boundary behind it), exactly as the `indirect(ship, x)` shape does."""
     ir = _legacy_ir(_SEND + "fn dispatch(x: Str) -> Str "
                             "{ return [send][0](x) }\n")
+    ir = compile_source(_SEND + "fn dispatch(x: Str) -> Str "
+                                "{ return [send][0](x) }\n")
     caps = _emitting_capabilities(ir["functions"], ir["externs"])
     assert caps["dispatch"] == {"*", "send"}
 
@@ -174,6 +181,7 @@ def test_g4_refuses_a_factory_returned_handler():
         _plain_service("return pick()(x)",
                        extra="fn pick() -> (Str) -> Str { return send }\n"), "G4")
     assert _VALUE_REFUSAL in err.message
+    assert "dispatch()" in err.message
 
 
 def test_g4_refuses_a_ternary_selected_handler():
@@ -206,6 +214,8 @@ def test_the_capability_bound_is_not_evaded_by_a_computed_callee():
                    "G4")
     # refused at the value reference (issue #2842), which names `send`
     assert _VALUE_REFUSAL in err.message
+    assert "emission[db]" in err.message
+    assert "send" in err.message
 
 
 # ------------------------------------------------------- F1d: A1 coloring
@@ -256,11 +266,13 @@ _G8_ADMITTED = (_SEND
 def test_the_g8_audit_reports_the_boundary_behind_a_computed_callee():
     """Declared `emission`, so the program was admitted (it is refused since
     issue #2842; the audit is measured on the older IR), and the audit surface
+    """Declared `emission`, so the program is admitted — and the audit surface
     must then say WHICH boundary it reaches. Before, `_boundary` returned no
     externs at all and `revl audit` printed
     `boundary: none — fully revertible (G8)` for a component reaching an
     `extern emission fn`."""
     externs = _boundary(_legacy_ir(_G8_ADMITTED))["C"]["externs"]
+    externs = _boundary(compile_source(_G8_ADMITTED))["C"]["externs"]
     by_name = {e["name"]: e["class"] for e in externs}
     assert by_name == {"*": "first-class dispatch", "send": "emission"}
 
@@ -297,6 +309,7 @@ def test_a_dispatcher_over_its_own_parameter_stays_clean():
     parameter, so nothing concrete flows there. Only `wrap`, which hands it an
     emitting value, is flagged."""
     ir = _legacy_ir(
+    ir = compile_source(
         _SEND
         + "fn indirect(f: (Str) -> Str, x: Str) -> Str { return f(x) }\n"
         + "fn wrap(x: Str) -> Str { return indirect(send, x) }\n")

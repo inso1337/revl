@@ -398,6 +398,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
             forward_admissions: bool = False,
             callers: Optional[dict] = None,
             committed: Optional[bool] = None) -> dict:
+            forward_admissions: bool = False) -> dict:
     """Read the WAL at ``wal_path`` and prove a way back.
 
     Returns a stated verdict (``rolled-forward`` or ``rolled-back``) with a
@@ -440,6 +441,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     """
     from .wal import (  # noqa: PLC0415 - tier-agnostic core, lazy
         expired_tickets, opening_intervals, read_wal, revoked_tickets)
+    from .wal import read_wal  # noqa: PLC0415 — tier-agnostic core, lazy
 
     try:
         wal = read_wal(wal_path)
@@ -497,6 +499,11 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     elif any(r.get("record") == "activation-complete" for r in latest):
         report = _roll_forward(_scoped_wal(wal, latest),
                                session=session, snapshot=snapshot)
+        return _with_world(_fork_retired(wal, frozen), world, tally)
+    approved = next((r for r in records
+                     if r.get("record") == "commit-approved"), None)
+    if wal["complete"]:
+        report = _roll_forward(wal, session=session, snapshot=snapshot)
     elif approved is not None:
         # item 245, Decision 3, the approved-to-discharged window: a crash after
         # `commit-approved` and before `activation-complete` is a COMMITTED
@@ -505,6 +512,8 @@ def recover(wal_path: str, *, world: Optional[World] = None,
         # forward. This dominates the discharge-set skip for a session-owned WAL.
         report = _roll_forward_window(wal_path, _scoped_wal(wal, latest),
                                       approved, world=bound(), reissue=reissue)
+        report = _roll_forward_window(wal_path, wal, approved,
+                                      world=bound(), reissue=reissue)
     else:
         report = _roll_back(_scoped_wal(wal, _trailing_open(intervals)),
                             world=bound(), wal_path=wal_path)
@@ -524,6 +533,7 @@ def recover(wal_path: str, *, world: Optional[World] = None,
     expired = expired_tickets(records)
     if expired:
         report["expiredTickets"] = expired
+        report = _roll_back(wal, world=bound(), wal_path=wal_path)
 
     # design 460 §5: the forward-recovery scan runs in BOTH branches — an
     # admission can be owed under either verdict, because the session's activation
@@ -884,6 +894,7 @@ def _deferral_crosscheck(records: list) -> dict:
                           if records[i].get("record") == "commit-approved"), -1)
     from .wal import seqs_of  # noqa: PLC0415
     flushed = seqs_of(records, ("flushed",))
+    flushed = {r.get("seq") for r in records if r.get("record") == "flushed"}
     flush_failed = {r.get("seq"): r for r in records
                     if r.get("record") == "flush-residue"}
     fired, owed, dropped, outstanding = [], [], [], []
@@ -997,6 +1008,7 @@ def _roll_forward(wal: dict, *, session=None, snapshot: Optional[dict] = None) -
               if r.get("record") == "effect"
               and not (r.get("kind") == "emission" and r.get("seq") in settled)]
     steady, steady_nested = _split_nested(steady, records, wal.get("callers"))
+              if r.get("record") == "effect"]
     steady_residue = _steady_state_residue(steady)
     steady_residue["nested"] = _nested_entries(steady_nested)
     # issue #1017: the activation marker is not a flush receipt. Cross-check the
@@ -1720,6 +1732,7 @@ def _roll_forward_window(wal_path: str, wal: dict, approved: dict, *,
     deferred = [r for r in records if r.get("record") == "deferred-emission"]
     from .wal import seqs_of  # noqa: PLC0415
     flushed = seqs_of(records, ("flushed",))
+    flushed = {r.get("seq") for r in records if r.get("record") == "flushed"}
     flush_failed = {r.get("seq"): r for r in records
                     if r.get("record") == "flush-residue"}
     discharged: set = set()
@@ -2316,6 +2329,7 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
     (which records, never clears)."""
     committed = [r for r in wal["records"] if r.get("record") == "effect"]
     effects, nested = _split_nested(committed, wal["records"], wal.get("callers"))
+    effects = [r for r in wal["records"] if r.get("record") == "effect"]
     descriptors = [r for r in wal["records"]
                    if r.get("record") == "discharge-descriptor"]
     discharged: set = set()
@@ -2737,6 +2751,9 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                         "were re-attempted best-effort; ")
                      + "deferred emissions were dropped, never fired."),
         "committedEffects": len(committed),
+                     "were re-attempted best-effort; deferred emissions were "
+                     "dropped, never fired."),
+        "committedEffects": len(effects),
         "torn": wal.get("torn", False),
         "ran": ran,
         "moot": moot,
@@ -2770,6 +2787,7 @@ def _roll_back(wal: dict, *, world: World, wal_path: Optional[str] = None) -> di
                                     discharged_skipped, transactional_rolled_back,
                                     compensations_reissued, dropped_deferred,
                                     compensations_ran, settled_by_replay),
+                                    compensations_reissued, dropped_deferred),
         },
         "guarantee": _guarantee(),
     }
@@ -2781,6 +2799,7 @@ def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
                    dropped_deferred: Optional[list] = None,
                    compensations_ran: Optional[list] = None,
                    settled_by_replay: Optional[list] = None) -> str:
+                   dropped_deferred: Optional[list] = None) -> str:
     committed = [d for d in discharged_skipped if d.get("retained")]
     # issue #1477: what a real composition binding did, stated first. Empty
     # (and so absent from the proof) against the model.
@@ -2809,11 +2828,14 @@ def _residue_proof(ran: list, moot: list, outstanding: list, remaining: list,
                 f"record never landed (a crash between the effect and its "
                 f"record) is not covered and must be reconciled by hand (see "
                 f"docs/crash-recovery.md section 4c).")
+                f"inverse(s) were moot (memory gone).{note}{dropped_note} The "
+                f"world holds only what was deliberately committed.")
     kinds: dict = {}
     for rec in outstanding:
         kinds[rec["kind"]] = kinds.get(rec["kind"], 0) + 1
     breakdown = ", ".join(f"{n} {k}" for k, n in sorted(kinds.items()))
     return (f"RESIDUE: {len(outstanding)} outstanding record(s) ({breakdown});{bound} "
+    return (f"RESIDUE: {len(outstanding)} outstanding record(s) ({breakdown}); "
             f"{len(remaining)} referent(s) still out in the world "
             f"({', '.join(remaining) or 'none named'}). "
             f"{len(compensations_reissued)} compensation(s) were re-attempted "

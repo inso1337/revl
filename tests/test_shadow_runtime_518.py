@@ -197,6 +197,7 @@ def seal(*, step_index, role, placement, answer, prompt, recorded_at=None):
         template_digest=me.digest("agent prompt {input}"),
         origins=["input"], reasoning=me.reasoning_span(),
         candidates=[answer], chosen=0,
+        origins=["input"], candidates=[answer], chosen=0,
         outcome="validated", sampling=dict(SAMPLING), policy_digest=POLICY,
         fallback_depth=0, recorded_at=recorded_at)
 
@@ -342,12 +343,15 @@ def sides(incumbent_ir, candidate_ir, *, disagree_at=None, slo=None):
         # producer returns instead of the response it validated.
         served_value = runtime.validate_retry(
             make_call, budget=0, schema={"type": "object"}, where=COMPONENT)
+        runtime.validate_retry(make_call, budget=0,
+                               schema={"type": "object"}, where=COMPONENT)
         said = f"said-{step}" if step != disagree_at else f"other-{step}"
         return srt.answered(candidate_ir, COMPONENT, seal(
             step_index=step, role="successor",
             placement=PLACEMENT_SUCCESSOR,
             answer=answer_digest(said), prompt=f"asked-{step}"),
             value=served_value)
+            answer=answer_digest(said), prompt=f"asked-{step}"))
 
     metrics = (lambda _crossing: dict(slo)) if slo is not None else None
     return incumbent, candidate, metrics, calls
@@ -522,6 +526,11 @@ def test_the_answer_the_body_receives_is_the_incumbents(incumbent_ir,
     promotion that lands, and the successor's model reaching the body — is
     `tests/test_shadow_cutover_1192.py`."""
     the_route = route(live=False)
+    """The seam's structural property. The observer runs on every crossing
+    and the successor answers with a different model name on every one; the
+    value `validate_retry` hands back is still the incumbent's host return,
+    because the hook's result is discarded."""
+    the_route = route(live=True)
     resolution = srt.resolve(incumbent_ir, the_route)
     incumbent, candidate, _m, _calls = sides(incumbent_ir, same_ir)
     shadow = srt.TierShadow(resolution, incumbent=incumbent,
@@ -537,6 +546,7 @@ def test_the_answer_the_body_receives_is_the_incumbents(incumbent_ir,
 def test_the_ledger_records_the_side_the_seam_actually_served(incumbent_ir,
                                                               same_ir):
     """On a LIVE route, and the answer the body got says the same thing.
+    """Even on a LIVE route.
 
     `live` says which rule the gate applies, which is that the first
     attributed divergence reverts. Slice 2 derived the served side from that
@@ -544,6 +554,12 @@ def test_the_ledger_records_the_side_the_seam_actually_served(incumbent_ir,
     the hook returns the candidate's answer on a live route, so the candidate
     answered and the ledger says the candidate answered. The side recorded and
     the value served are one statement, and this test reads both."""
+    attributed divergence reverts, and slice 2 derives the served side from
+    it because an offline caller has nothing better to go on. A seam does: this hook's return is
+    discarded, so the incumbent answered, and the ledger says the incumbent
+    answered. A route this seam serves is a shadow whatever its `live` flag
+    says, and a route whose successor really answers is a cutover this seam
+    does not perform."""
     _s, ledger, verdict, _t, _c = run(
         incumbent_ir, same_ir, route_overrides={"live": True},
         plan_overrides={"live": True}, disagree_at=5)
@@ -553,6 +569,9 @@ def test_the_ledger_records_the_side_the_seam_actually_served(incumbent_ir,
     assert all(entry.side == sr.CANDIDATE for entry in ledger.entries)
     # ... and nothing the incumbent answered, on a route the successor owns
     assert f"answers served by the incumbent: 0 of {WIDTH}" \
+    assert {served.side for served in ledger.served} == {sr.INCUMBENT}
+    assert all(entry.side == sr.INCUMBENT for entry in ledger.entries)
+    assert f"answers served by the incumbent: {WIDTH} of {WIDTH}" \
         in sr.render(verdict, ledger)
     # and the live RULE still applied
     assert verdict.decision == sp.REVERT
@@ -867,6 +886,7 @@ def test_the_world_builder_is_canarys_own():
     assert srt.world_for.__wrapped__ is not None \
         if hasattr(srt.world_for, "__wrapped__") else True
     tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    tree = ast.parse(MODULE_PATH.read_text())
     calls = {node.func.attr for node in ast.walk(tree)
              if isinstance(node, ast.Call)
              and isinstance(node.func, ast.Attribute)}
@@ -879,6 +899,7 @@ def test_the_module_reads_no_metric():
     goes straight into the `Observation`, which is where a metric is allowed
     to be."""
     tree = ast.parse(MODULE_PATH.read_text(encoding="utf-8"))
+    tree = ast.parse(MODULE_PATH.read_text())
     for node in ast.walk(tree):
         if isinstance(node, ast.Attribute):
             assert node.attr not in sp.SLO_MEMBERS + ("_slo",), node.attr

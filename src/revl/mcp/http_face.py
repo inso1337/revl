@@ -569,6 +569,7 @@ class HttpComposedServer:
                 # guarantee, carried onto HTTP): read-only iff the checker
                 # proved the body mutates nothing — a `witnessed[C]` write is
                 # a mutation with an inverse, so it is false there too.
+                # refused unreverted mutation.
                 "readOnly": annotations.get("readOnlyHint") is True,
                 "emission": provenance.get("classification") == "emission",
             })
@@ -857,6 +858,7 @@ class HttpComposedServer:
         could not be encoded used to close the connection with no status line.
         A body that does encode is still written byte for byte as the handler
         produced it."""
+        headers and body, sent as-is."""
         enc = _encode_value(value)
         if not isinstance(enc, dict):
             return HttpReply.json(_SERVER_ERROR, {
@@ -893,6 +895,10 @@ class HttpComposedServer:
         return HttpReply(status, _text_body_bytes(text),
                          "text/plain; charset=utf-8", extra_headers,
                          status_text)
+        content_type = "application/json" if kind == "Json" else \
+            "text/plain; charset=utf-8"
+        return HttpReply(status, str(payload).encode("utf-8"),
+                         content_type, extra_headers, status_text)
 
 
 def _opt_inner(type_name: str | None) -> str | None:
@@ -1501,6 +1507,28 @@ def serve_http(ir: dict, config: dict | None = None, *,
             raise
     bound_host, bound_port = httpd.server_address[:2]
     scheme = "https" if httpd.tls_context is not None else "http"
+    print(f"revl serve --http: {composition} on {scheme}://{bound_host}:{bound_port}",
+          file=sys.stderr)
+    print(f"  gate frontier: {face.frontier}", file=sys.stderr)
+    served = len(face._by_path) + sum(
+        (r.key, r.op) not in face._withheld_ops for r in face._routes_457)
+    print(f"  {served} public operation(s); GET / for the manifest. LOCAL "
+          "contract only — no safety claim about any callee.", file=sys.stderr)
+    for withheld in face._withheld_ops.values():
+        print(f"  withheld: {withheld.message()}", file=sys.stderr)
+    if listener is not None:
+        for line in listener.describe():
+            print(f"  {line}", file=sys.stderr)
+    if refuse_ungated_emissions and approval_policy is None:
+        refused = sorted(f"{key}.{op}" for key, op in _served_ops(face)
+                         if face.ungated_class(key, op) != "none")
+        print(f"  --refuse-ungated-emissions: {len(refused)} public operation(s) "
+              f"reach a class-(c) crossing and are refused"
+              + (f": {', '.join(refused)}" if refused else ""), file=sys.stderr)
+    if approval_policy is not None and listener is None:
+        print("  warning: the approval policy holds every class-(c) crossing an "
+              "app request reaches, and without --operator-listen nothing can "
+              "answer its ticket, so those requests stay pending", file=sys.stderr)
     try:
         # inside the try: a SIGTERM (turned into KeyboardInterrupt) that lands
         # while these lines print must still reach the `finally` that stops

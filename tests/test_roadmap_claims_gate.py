@@ -440,6 +440,7 @@ def real():
     tree = gate.Tree.from_git(ROOT)
     # The main file plus docs/roadmap-archive/, as the gate itself reads it.
     source = gate.read_roadmap(gate.DEFAULT_ROADMAP).text
+    source = gate.DEFAULT_ROADMAP.read_text()
     return source, tree
 
 

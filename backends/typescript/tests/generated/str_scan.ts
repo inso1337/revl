@@ -33,6 +33,7 @@ const REVL_I64_MIN = -(2n ** 63n)
 const REVL_I64_MAX = 2n ** 63n - 1n
 function revlI64(v: bigint): bigint {
   if (BigInt.asIntN(64, v) !== v) throw new RangeError('revl: Int overflow')
+  if (v < REVL_I64_MIN || v > REVL_I64_MAX) throw new RangeError('revl: Int overflow')
   return v
 }
 
@@ -96,6 +97,17 @@ function revlCpsDecode(s: string): string | string[] {
   for (let i = 0; i < s.length; i++) {
     const u = s.charCodeAt(i)
     if (u >= 0xD800 && u <= 0xDFFF) return Array.from(s)
+let revlCpsK0: string | undefined
+let revlCpsV0: string[] = []
+let revlCpsK1: string | undefined
+let revlCpsV1: string[] = []
+function revlCps(s: string): string[] {
+  if (s === revlCpsK0) return revlCpsV0
+  if (s === revlCpsK1) {
+    const k = revlCpsK1, v = revlCpsV1
+    revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+    revlCpsK0 = k; revlCpsV0 = v
+    return v
   }
   return s
 }
@@ -112,6 +124,9 @@ function revlCps(s: string): string | string[] {
   if (k === revlCpsN) k--
   for (; k > 0; k--) { revlCpsK[k] = revlCpsK[k - 1]; revlCpsV[k] = revlCpsV[k - 1]; revlCpsF[k] = revlCpsF[k - 1] }
   revlCpsK[0] = s; revlCpsV[0] = v; revlCpsF[0] = f
+  const v = Array.from(s)
+  revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+  revlCpsK0 = s; revlCpsV0 = v
   return v
 }
 function revlLen(x: string | ArrayLike<unknown>): bigint {
@@ -126,6 +141,9 @@ function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unkn
   if (typeof x !== "string") return (x as Uint8Array | unknown[]).slice(i, j)
   const v = revlCps(x)
   return typeof v === "string" ? v.slice(i, j) : v.slice(i, j).join("")
+  return typeof x === "string"
+    ? revlCps(x).slice(i, j).join("")
+    : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = revlCps(s)[Number(i)]
@@ -153,8 +171,10 @@ export function count_digits(s: string): bigint {
     while ((i < revlLen(s))) {
       if (((_rc: string) => "0" <= _rc && _rc <= "9")((revlCharAt(s, i)))) {
         n = (BigInt.asIntN(64, $revl_i64 = n + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+        n = revlI64(n + 1n)
       }
       i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+      i = revlI64(i + 1n)
     }
     return n
 }
@@ -166,6 +186,8 @@ export function checksum(s: string): bigint {
     while ((i < revlLen(s))) {
       acc = revlMod(((BigInt.asIntN(64, $revl_i64 = acc + revlCharCodeAt(s, i)) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))), 65536n)
       i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+      acc = revlMod((revlI64(acc + revlCharCodeAt(s, i))), 65536n)
+      i = revlI64(i + 1n)
     }
     return acc
 }
@@ -181,6 +203,7 @@ export function common_prefix(a: string, b: string): bigint {
         return i
       }
       i = (BigInt.asIntN(64, $revl_i64 = i + 1n) === $revl_i64 ? $revl_i64 : revlI64($revl_i64))
+      i = revlI64(i + 1n)
     }
     return i
 }

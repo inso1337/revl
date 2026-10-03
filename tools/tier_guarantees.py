@@ -1,6 +1,7 @@
 """The guarantee x tier support matrix, derived rather than authored.
 
     python3 tools/tier_guarantees.py [--json] [--show] [--check]
+    python3 tools/tier_guarantees.py [--json] [--check]
 
 `tools/conformance.py` answers "does every CONSTRUCT survive every tier?".
 This answers the question an adopter actually asks before shipping: **what is
@@ -166,6 +167,14 @@ ACKNOWLEDGED: dict[str, str] = {
           "computer-use reversibility registry's (`src/revl/ui_family.py`); "
           "it is stated and witnessed in `formal/STATUS.md`'s A5 row "
           "(issue #2114).",
+    "A5": "compensation accompanies an emission by construction: the grammar "
+          "attaches `compensate` to the `emit` that carries it, so a violating "
+          "program is not expressible and cannot be written as a fixture.",
+    "G-SECRET": "the confidentiality fixtures in `examples/rejections/` are "
+                "refused under `G-SECRET-FLOW` (the disclosure-sink half). "
+                "`G-SECRET` (the capability-reach half) is enforced in "
+                "`src/revl/taint.py` and exercised by the per-tier secret "
+                "registry suites, not by a fixture this corpus compiles.",
     "T3": "an open hole is refused at the ADMISSION gate rather than by "
           "`compile_files`, so a hole fixture compiles here and is refused one "
           "stage later; the reproducers live with the gate "
@@ -238,6 +247,7 @@ def guarantee_codes() -> list[str]:
     each, so the table reads the way `docs/guarantees.md` does.
     """
     from revl.diagnostics import GUARANTEES  # noqa: PLC0415: needs sys.path
+    from revl.diagnostics import GUARANTEES  # noqa: PLC0415 — needs sys.path
 
     def key(code: str) -> tuple:
         m = re.fullmatch(r"([GAT])(\d+)", code)
@@ -380,6 +390,7 @@ def _selfhost_admit():
 
 
 def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple]:
+def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple[str, str]]:
     """code -> (verdict, reason) for the `revl` column.
 
     `admit_src` answers `"<TAG>|<message>"` or `""` for no objection. Three
@@ -413,6 +424,7 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple]:
             "matrix with an unmeasured column rather than render it blank.")
 
     out: dict[str, tuple[str, str] | tuple[str, str, list[str]]] = {}
+    out: dict[str, tuple[str, str]] = {}
     for code, paths in index.items():
         agreed = 0
         # each reproducer the gate does NOT refuse under this code, with what
@@ -448,10 +460,15 @@ def selfhost_verdicts(index: dict[str, list[str]]) -> dict[str, tuple]:
             out[code] = (PROVED, "the self-host gate refuses every reproducer "
                                  f"for {code} under {spelling}")
         elif agreed:
+            rest = ("answers under " + ", ".join(sorted(other_tags))
+                    if other_tags else "admits")
             out[code] = (DIVERGENCE,
                          f"the self-host gate refuses every other {code} "
                          f"reproducer, and not these",
                          sorted(missed))
+                         f"the self-host gate agrees on {agreed} of "
+                         f"{len(paths)} {code} reproducers; the rest it "
+                         f"{rest}")
         else:
             answered = ("answers every " + code + " reproducer under "
                         + ", ".join(sorted(other_tags)) if other_tags
@@ -490,6 +507,7 @@ def parity_divergences(host_tiers: tuple[str, ...]) -> dict[tuple[str, str], str
     out: dict[tuple[str, str], str] = {}
     # The main file plus docs/roadmap-archive/ (tools/roadmap_source.py).
     for record in markers.tier_parity_records(markers.read_roadmap(ROADMAP).text,
+    for record in markers.tier_parity_records(ROADMAP.read_text(encoding="utf-8"),
                                               backends):
         codes: set[str] = set()
         for subject in record["subjects"]:
@@ -578,6 +596,7 @@ def _short(tier: str) -> str:
     from revl.tiers import short_tier  # noqa: PLC0415: needs sys.path
 
     return short_tier(tier)
+    return {"python": "py", "typescript": "ts"}.get(tier, tier)
 
 
 def matrix() -> dict:
@@ -588,6 +607,7 @@ def matrix() -> dict:
         {"tiers": [...], "rows": [{"code", "text", "evidence", "sites",
                                    "cells": {tier: {"verdict", "why",
                                                     "names"?}}}, ...],
+                                   "cells": {tier: {"verdict", "why"}}}, ...],
          "acknowledged": {...}}
     """
     tiers = host_tiers()
@@ -652,10 +672,12 @@ def matrix() -> dict:
             row["cells"][short] = {"verdict": DIVERGENCE, "why": why}
 
         verdict, why, *names = selfhost.get(
+        verdict, why = selfhost.get(
             code, (UNIMPLEMENTED, "no reproducer reaches the self-host gate, "
                                   "so its verdict on this code is unmeasured"))
         if not paths:
             verdict, why, names = base[0], base[1], []
+            verdict, why = base[0], base[1]
         row["cells"][SELFHOST_TIER] = {"verdict": verdict, "why": why}
         if names:
             row["cells"][SELFHOST_TIER]["names"] = names[0]
@@ -764,9 +786,24 @@ def markdown(data: dict | None = None) -> str:
         link = f"[`{evidence}`](../{evidence})" if evidence else "–"
         out.append(f"| `{row['code']}` | " + " | ".join(cells) + f" | {link} |")
 
+    out.append("")
+    out.append("| tier | " + " | ".join(_CELL[v].replace("**", "")
+                                        for v in (PROVED, DIVERGENCE,
+                                                  NO_REPRODUCER, UNIMPLEMENTED))
+               + " |")
+    out.append("|---|---|---|---|---|")
+    for tier in tiers:
+        counts = {v: 0 for v in _CELL}
+        for row in data["rows"]:
+            counts[row["cells"][tier]["verdict"]] += 1
+        out.append(f"| {tier} | " + " | ".join(
+            str(counts[v]) for v in (PROVED, DIVERGENCE, NO_REPRODUCER,
+                                     UNIMPLEMENTED)) + " |")
+
     explained: list[str] = []
     for row in data["rows"]:
         seen: dict[tuple[str, str, tuple[str, ...]], list[str]] = {}
+        seen: dict[str, list[str]] = {}
         for tier in tiers:
             cell = row["cells"][tier]
             if cell["verdict"] == PROVED:
@@ -775,6 +812,10 @@ def markdown(data: dict | None = None) -> str:
                    tuple(cell.get("names", ())))
             seen.setdefault(key, []).append(tier)
         for (verdict, detail, names), where in seen.items():
+            why = cell["why"].rstrip(".")
+            seen.setdefault(f"{cell['verdict']}: {why}", []).append(tier)
+        for why, where in seen.items():
+            verdict, _, detail = why.partition(": ")
             explained.append(f"- `{row['code']}` on {', '.join(where)} "
                              f"{_PHRASE[verdict]} "
                              f"{detail[:1].upper()}{detail[1:]}"
@@ -782,6 +823,7 @@ def markdown(data: dict | None = None) -> str:
             # one reproducer per line, sorted, so a branch that moves one
             # program's verdict touches that program's line only
             explained.extend(f"  - {name}" for name in names)
+                             f"{detail[:1].upper()}{detail[1:]}.")
     if explained:
         out.append("")
         out.append("**Why a cell is not `proved`.** Every non-`proved` cell "

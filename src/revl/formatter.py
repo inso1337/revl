@@ -41,6 +41,8 @@ line, except that every member of a `provide` block gets a line of its own
 (issue #1700, `_one_member_per_line`), so each method is addressable by symbol.
 A few IR fields carry a source line, so on some programs that split changes
 the IR; `format_admitted` then falls back to the line-preserving layout.  It cannot
+The formatter is *line-preserving*: it re-indents and normalises horizontal
+spacing but never moves a token onto a different logical line.  It cannot
 re-flow statements, and it does not reformat the interior of backtick
 templates or `@host` blocks (those are opaque verbatim spans).  Faithful
 re-flowing would require statement-boundary information that only the parser
@@ -128,6 +130,7 @@ def _scan_one(source: str, filename: str, i: int, n: int, pieces: list) -> int:
     start, count = i, len(pieces)
     c = source[i]
     if True:  # one branch per piece kind, in lexer.lex's order
+        c = source[i]
         if c == "\n":
             pieces.append(_Piece(_NEWLINE, "\n"))
             i += 1
@@ -184,6 +187,7 @@ def _scan_one(source: str, filename: str, i: int, n: int, pieces: list) -> int:
     if len(pieces) > count:
         pieces[-1].start, pieces[-1].end = start, i
     return i
+    return pieces
 
 
 def _as_format_error(filename: str, line: int, error: RevlError) -> FormatError:
@@ -401,6 +405,9 @@ def _space_between(prev: _Piece, cur: _Piece,
     # `emission[db]` and the typed hole `hole[Str]` (issue #1822). A keyword
     # that is followed by a list keeps its space: `return [1, 2]`
     if c == "[" and p in _TIGHT_BRACKET_KEYWORDS:
+    # capability annotation `emission[db]` binds its bracket tight, unlike the
+    # `return [1, 2]` list form where the keyword keeps its space
+    if c == "[" and p == "emission":
         return False
     # call / index: `f(...)`, `xs[...]`, `Opt[Str]`, `)(...)` -- but a keyword
     # keeps its space (`return (x)`, `if (c)`)
@@ -461,6 +468,7 @@ def _depth_delta(pieces: list[_Piece]) -> int:
 
 def format_source(source: str, filename: str = "<source>", *,
                   comments: bool = True, split_members: bool = True) -> str:
+def format_source(source: str, filename: str = "<source>") -> str:
     """Return the canonical formatting of *source*.
 
     The formatting is a pure, deterministic function of the token stream, so
@@ -496,8 +504,10 @@ def format_source(source: str, filename: str = "<source>", *,
         notes = [p for p in line if p.kind == _COMMENT] if comments else []
         if not code and not notes and len(code) != len(line):
             continue  # a comment-only line, dropped with its comment
+        comments = [p for p in line if p.kind == _COMMENT]
 
         if not code and not notes:
+        if not code and not comments:
             rendered.append("")  # blank line (collapsed below)
             continue
 
@@ -506,9 +516,12 @@ def format_source(source: str, filename: str = "<source>", *,
             text = _render_line(code, indent_level)
             if notes:  # trailing comment on a code line
                 text = text + "  " + notes[0].text
+            if comments:  # trailing comment on a code line
+                text = text + "  " + comments[0].text
             rendered.append(text)
         else:  # comment-only line, indented at the current depth
             rendered.append(_INDENT * max(depth, 0) + notes[0].text)
+            rendered.append(_INDENT * max(depth, 0) + comments[0].text)
 
         depth += _depth_delta(code)
         if depth < 0:
@@ -654,12 +667,14 @@ def _token_signature(source: str, filename: str):
     refusal rather than as an excuse to skip the check.
     """
     from . import shared_parse
+    from .lexer import lex
 
     try:
         # issue #2194: inside one MCP tool call, the tokens a read-only reader
         # of the same text already has; otherwise `lex(source, filename)`
         return [(token.kind, token.value)
                 for token in shared_parse.tokens(source, filename)]
+        return [(token.kind, token.value) for token in lex(source, filename)]
     except RevlError:
         return None
     except Exception:  # pragma: no cover - defensive
@@ -749,6 +764,7 @@ class GateResult:
 def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
                   token_preserving: bool = True, *,
                   original_ir: dict | None = None) -> GateResult:
+                  token_preserving: bool = True) -> GateResult:
     """The admissibility gate shared by `fmt` and `--migrate`.
 
     Compile both texts and require their IR to be byte-identical.  The result
@@ -837,6 +853,7 @@ def ir_equivalent(original: str, candidate: str, filename: str = "<source>",
         ir_orig, err_orig = original_ir, None
     else:
         ir_orig, err_orig = _compile_ir(original, filename)
+    ir_orig, err_orig = _compile_ir(original, filename)
     ir_cand, err_cand = _compile_ir(candidate, filename)
 
     if ir_orig is not None:

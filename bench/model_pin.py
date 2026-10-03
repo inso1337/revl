@@ -449,6 +449,7 @@ def main(argv: list[str] | None = None) -> int:
     model = args.model
     if model is None:
         hosts = json.loads((BENCH / "hosts.json").read_text(encoding="utf-8"))
+        hosts = json.loads((BENCH / "hosts.json").read_text())
         model = hosts["pinned_model"]["id"]
 
     pin = build_pin(args.endpoint, model, args.kind, args.samples,

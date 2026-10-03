@@ -1,6 +1,7 @@
 """Tests for `tools/evolution_controller.py` (roadmap item 520, issue #1194).
 
 The four things these tests have to establish, in the repository's own terms:
+The three things these tests have to establish, in the repository's own terms:
 
   1. THE CONTROLLER REFUSES when a stage's evidence is missing. A controller
      that promotes on missing evidence is the fail-open shape, and this
@@ -112,6 +113,7 @@ def proposal_record(tree: Path, **over) -> dict:
     difference between a promotion and a refusal is always a single edit. The
     default mode is `repair` with the localized fault it cites; a test that
     changes the mode removes the citation the other mode does not need.
+    difference between a promotion and a refusal is always a single edit.
     """
     record = {
         "tree": str(tree),
@@ -175,6 +177,8 @@ def resolve_commit(tree: Path, ref: str) -> str:
                     ref + "^{commit}").strip()
     except AssertionError:
         return ""
+def run(record: dict) -> ec.LifecycleVerdict:
+    return ec.decide(ec.load_proposal(record))
 
 
 @pytest.fixture
@@ -1251,6 +1255,7 @@ def test_the_control_also_passes_a_kernel_edit(tmp_path):
 # ------------------------------------------------------------------- the CLI
 
 def test_the_cli_exit_status_distinguishes_the_four_decisions(
+def test_the_cli_exit_status_distinguishes_the_three_decisions(
         clean_tree, tmp_path):
     cases = [
         (proposal_record(clean_tree), ec.PROMOTE, "PROMOTE"),
@@ -1310,6 +1315,8 @@ def test_the_cli_reads_the_operator_base(clean_tree, tmp_path, monkeypatch):
     assert ec.main(["--proposal", str(src), "--allow", "**",
                     "--base", base, "--json", str(out)]) == ec.PROMOTE
     assert json.loads(out.read_text(encoding="utf-8"))["base_source"] == "--base"
+        assert ec.main(["--proposal", str(src), "--json", str(out)]) == status
+        assert json.loads(out.read_text())["decision"] == decision
 
 
 def test_an_unreadable_proposal_refuses(tmp_path):
@@ -1329,6 +1336,8 @@ def test_the_verdict_json_shows_that_measurements_were_not_read(
                     "--allow", "src/**,tests/**",
                     "--base", _head(clean_tree, "HEAD~1")]) == ec.REFUSE
     verdict = json.loads(out.read_text(encoding="utf-8"))
+    assert ec.main(["--proposal", str(src), "--json", str(out)]) == ec.REFUSE
+    verdict = json.loads(out.read_text())
     assert verdict["measurements_read"] is False
     assert verdict["code"] == "AUTHORITY_WIDENED"
     assert verdict["refusing_stage"] == "authority"

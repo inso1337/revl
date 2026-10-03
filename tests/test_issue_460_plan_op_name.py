@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -39,8 +40,10 @@ if str(_BACKEND_PY) not in sys.path:
 
 _NODE_TS_REASON = node_ts_skip_reason(
     "node is required to run the emitted ts consumer")
+_HAS_NODE = shutil.which("node") is not None
 _needs_node = pytest.mark.skipif(
     _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
+    not _HAS_NODE, reason="node is required to run the emitted ts consumer")
 
 # A user-origin consumer that reads the op name at an index off a classify plan,
 # exactly as the harness's terminal toolbox does to render `witnessed[<op>]`.

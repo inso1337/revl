@@ -206,6 +206,7 @@ def test_must2_covers_the_inverse_source_endpoint_not_only_the_target(
 
     assert donor.exists(), "the inverse's SOURCE endpoint was renamed away"
     assert donor.read_text(encoding="utf-8") == "outside the root"
+    assert donor.read_text() == "outside the root"
     assert not os.path.exists(inside_target)
 
 
@@ -251,11 +252,14 @@ def test_write_restore_roundtrip_and_idempotent(workspace):
     w = mod.write("artifact.txt", "v2")
     assert isinstance(w, mod.Ok)
     assert open(art, encoding="utf-8").read() == "v2"          # mutated
+    assert open(art).read() == "v2"          # mutated
     assert w.value["created"] is False
     mod.restore(w.value)
     assert open(art, encoding="utf-8").read() == "v1"          # preimage back
+    assert open(art).read() == "v1"          # preimage back
     mod.restore(w.value)                      # idempotent: second replay no-ops
     assert open(art, encoding="utf-8").read() == "v1"
+    assert open(art).read() == "v1"
 
 
 def test_write_of_new_file_undo_deletes_it(workspace):
@@ -276,6 +280,7 @@ def test_rm_unrm_roundtrip(workspace):
     assert isinstance(r, mod.Ok) and not os.path.exists(stale)
     mod.unrm(r.value)
     assert os.path.exists(stale) and open(stale, encoding="utf-8").read() == "junk"
+    assert os.path.exists(stale) and open(stale).read() == "junk"
     mod.unrm(r.value)                          # idempotent
 
 
@@ -317,6 +322,7 @@ def test_h1_persists_on_clean_commit(workspace):
 
     # the activation applied both mutations
     assert art.read_text(encoding="utf-8") == "v2"
+    assert art.read_text() == "v2"
     assert not stale.exists()
     frame = _sole_frame(session)
     assert len(frame._transactional) == 2      # write + rm registered
@@ -325,6 +331,7 @@ def test_h1_persists_on_clean_commit(workspace):
 
     # the mutations ARE the deliverable: they persist, inverses discharged
     assert art.read_text(encoding="utf-8") == "v2", "commit wrongly reverted the write"
+    assert art.read_text() == "v2", "commit wrongly reverted the write"
     assert not stale.exists(), "commit wrongly restored the removed file"
     for entry in frame._transactional:
         assert entry.discharged is True and entry.replayed is False
@@ -342,10 +349,13 @@ def test_h1_reverts_residue_free_on_abort(workspace):
                   _effect("rm", "stale.txt")], abort=True)))
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
     # abort replayed both inverses: files back to their preimage
     assert art.read_text(encoding="utf-8") == "v1", "abort did not restore the write preimage"
     assert stale.read_text(encoding="utf-8") == "junk", "abort did not un-remove the file"
+    assert art.read_text() == "v1", "abort did not restore the write preimage"
+    assert stale.read_text() == "junk", "abort did not un-remove the file"
     # residue-free: the snapshot + parked file the mutations created are gone
     garbage = workspace / ws.GARBAGE_DIRNAME
     preimage = workspace / ws.PREIMAGE_DIRNAME
@@ -428,6 +438,7 @@ def test_residue_surface_enumerates_aborted_crossings(workspace, tmp_path, monke
                   _effect("rm", "stale.txt")], abort=True)), record=True)
     assert report["components"] == [{"name": "Agent", "state": "FAILED",
         "error": {"type": "RuntimeError", "message": "boom"}}]
+    assert report["components"] == [{"name": "Agent", "state": "FAILED"}]
 
     # Finalize the in-process abort the way the session lifecycle does: the
     # activation failed and reverted its witnessed inverses in-process, and the

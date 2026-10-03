@@ -67,6 +67,9 @@ pub fn latch_path(latch: Option<&str>, wal: Option<&str>, env: bool) -> Option<S
 /// (`ErrorKind::NotFound`) reads as not-halted, matching
 /// `estop.py::read_latch` (FileNotFoundError -> None, every other OSError ->
 /// unreadable).
+/// ts tier and now this — applies the same rule. A latch the OS refuses to open
+/// at all (missing file, permission error) reads as absent, matching
+/// `estop.py::read_latch` (FileNotFoundError/OSError -> None).
 pub fn read_latch(path: Option<&str>) -> Option<Value> {
     let path = path?;
     if path.is_empty() {
@@ -78,6 +81,9 @@ pub fn read_latch(path: Option<&str>) -> Option<Value> {
         // Any other read failure: a halt no reader can inspect must never be
         // mistaken for the absence of a halt.
         Err(_) => return Some(unreadable()),
+        // ENOENT or any other OS-level read failure: the latch is not readable,
+        // so it is not a halt. (A malformed BUT readable latch is handled below.)
+        Err(_) => return None,
     };
     match serde_json::from_str::<Value>(&text) {
         Ok(v) if v.is_object() => Some(v),

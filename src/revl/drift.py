@@ -268,6 +268,7 @@ def _changed_reading(changed) -> dict:
 
 
 def detect(admitted, live=None, changed=None) -> dict:
+def detect(admitted, live=None) -> dict:
     """The drift verdict over a re-measurement of an admitted identity.
 
     `admitted` is the manifest of digests admission bound, as
@@ -301,6 +302,7 @@ def detect(admitted, live=None, changed=None) -> dict:
             status = STATUS_DRIFTED
             reason = shape_changes[key]
         elif key in reasons:
+        if key in reasons:
             status = STATUS_UNVERIFIED
             reason = reasons[key]
         elif key not in values:

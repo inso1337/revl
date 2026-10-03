@@ -112,6 +112,12 @@ for by a key the peer does not hold. An offer's asserted `trust = "attested"`
 facet is decoration: the signature proves the peer wrote the word, not that it is
 so. The permitted region is checked against the **attestation**, never copied
 into the slot's asserted `regions`.
+bundle, inside a permitted measurement and region, confined to a forbidden
+outbound network, fresh, unanswered before, and vouched for by a key the peer
+does not hold. An offer's asserted `trust = "attested"` facet is decoration: the
+signature proves the peer wrote the word, not that it is so. The permitted
+region is checked against the **attestation**, never copied into the slot's
+asserted `regions`.
 
 `admit_peer_for_process` never raises; it returns `(False, reason)` and the
 reason is the verifier's own, so the placement spelling cannot refuse an offer
@@ -166,6 +172,7 @@ parses to nothing, not to an empty demand, and it is checked against the empty
 `PlacementSlot`, which demands nothing, consumes no challenge and pays one
 `is None`. "Declares no requirement" therefore cannot be confused with "declares
 a requirement that admits everything": the second is refused at parse time.
+a requirement that admits everything" — the second is refused at parse time.
 Every existing placement file is unchanged.
 
 ## Tests

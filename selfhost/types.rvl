@@ -378,6 +378,7 @@ fn is_scalar_head(h: Str) -> Bool {
 }
 
 // typecheck._GENERIC_ARITY, plus the scalars' zero arity above.
+// typecheck._GENERIC_ARITY.
 fn generic_arity(h: Str) -> Int {
   if (h == "Opt" || h == "List") { return 1 }
   if (h == "Map" || h == "Result") { return 2 }
@@ -450,6 +451,7 @@ fn wf_walk(name: Str, root: Str, allow_async: Bool, in_fn_return: Bool) -> WfR {
 }
 
 pub fn int_str(n: Int) -> Str {
+fn int_str(n: Int) -> Str {
   if (n == 0) { return "0" }
   var v = n
   var neg = false
@@ -531,6 +533,8 @@ pub fn compatible(expected: Str, actual: Str) -> Bool {
   // agree on `Fn[Int, Str]` against `(Int) -> Str` in either direction.
   if (is_fn_head(ehead) && is_fn_head(ahead)) {
     if (eargs.length() != aargs.length()) { return false }
+  if (ehead == fn_head()) {
+    if (ehead != ahead || eargs.length() != aargs.length()) { return false }
     var i = 0
     var ok = true
     // parameters contravariant, result covariant
@@ -638,10 +642,13 @@ fn fill_unknown_args(keep: Str, other: Str) -> Str {
 // Port of typecheck.join: the common type of two branches, "" (None) when
 // there is none. The wholesale return of a compatible side fills that side's
 // unresolved `Any` slots from the other (see fill_unknown_args).
+// there is none.
 pub fn join(a: Str, b: Str) -> Str {
   if (a == "" || b == "") { return "" }
   if (compatible(a, b)) { return fill_unknown_args(a, b) }
   if (compatible(b, a)) { return fill_unknown_args(b, a) }
+  if (compatible(a, b)) { return a }
+  if (compatible(b, a)) { return b }
   return ""
 }
 

@@ -369,6 +369,7 @@ def test_a_load_time_ticket_still_names_the_candidates_host_code(tmp_path):
     assert ticket["unreviewedHostCode"] == [host_body_entry(announce)]
     assert [{key: value for key, value in entry.items() if key != "digests"}
             for entry in ticket["unreviewedHostCode"]] == [
+    assert ticket["unreviewedHostCode"] == [
         {"extern": "announce", "classification": "emission", "backends": ["py"]}]
     assert server.SESSION.ir is None
     assert server._AUTHORED_HOST_BODIES == before["_AUTHORED_HOST_BODIES"]

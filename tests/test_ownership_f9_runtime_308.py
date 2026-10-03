@@ -115,9 +115,11 @@ def _run(tmp_path, monkeypatch, *, release: bool, fault: bool) -> _Run:
     ((_name, fiber),) = driver.fibers.items()
     frame = driver.runtime._frame_for_ctx(fiber.ctx)
     mid = path.read_text(encoding="utf-8").split()
+    mid = path.read_text().split()
     adopted = len(frame._adopted)
     session.unload()
     return _Run(mid, adopted, path.read_text(encoding="utf-8").split(), faulted, call_trace)
+    return _Run(mid, adopted, path.read_text().split(), faulted, call_trace)
 
 
 # ---------------------------------------------------------------------------

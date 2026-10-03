@@ -2,6 +2,9 @@
 // `Int` `+` goes through `_revl_i64` exactly as it does in a `fn`, issue
 // #2198), a builtin, a ternary, and a negation: `Int` is checked like any
 // `Int` `-`, `Float` stays the host's.
+// Provide-method bodies: multiple methods, params, a plain-`bin` return (no
+// `_revl_i64` in a component body — the i64 helper is still emitted, unused,
+// exactly as the reference gates it), a builtin, and a ternary.
 service Calc {
   fn add(a: Int, b: Int) -> Int
   fn name(n: Int) -> Str

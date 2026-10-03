@@ -96,6 +96,7 @@ const CORPUS: &[Doc] = &[
         // decided natively since issue #3107; the reference row must still be
         // the one the binary publishes, and the native row is deduped by code
         outside_frontier: "totality of a `verified fn` (decided natively)",
+        outside_frontier: "totality of a `verified fn`",
     },
     Doc {
         name: "g8_extern_unclassified",

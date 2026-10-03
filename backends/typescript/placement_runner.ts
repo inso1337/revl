@@ -463,6 +463,9 @@ async function teardown(): Promise<void> {
       if (outcome !== 'done') reason = 'timed out'
     } catch (error) {
       reason = error instanceof Error ? error.message : String(error)
+      await fiber.dispose()
+    } catch {
+      /* best-effort */
     }
     if (reason === undefined) {
       logNow('swap', label, 'dispose')
@@ -470,6 +473,7 @@ async function teardown(): Promise<void> {
       logNow('swap', label, `dispose NOT confirmed: ${reason}`)
       unconfirmed.push(label)
     }
+    log('swap', label, 'dispose')
   }
   clearTimeout(timer)
   if (server) server.close()

@@ -22,6 +22,7 @@ published by the Free Software Foundation. The full text is in [LICENSE](LICENSE
   `dogfood/`, `ci/`, `site/`, `playground/`, `docs/`, and every other path not
   named in the MIT list below, except the research text named in the CC BY 4.0
   section below
+  named in the MIT list below
 
 The AGPL's network clause (section 13) applies. If you run a modified revl,
 including a modified admission gate, as a service that others interact with over

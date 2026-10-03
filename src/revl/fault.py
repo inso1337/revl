@@ -219,9 +219,22 @@ def _unreleased_host_resources(events: list) -> list:
     this, a fault test passes a component the lifecycle test condemns.
     """
     resources = _HostResources()
+    live: dict = {}
     for event in events:
         resources.record(event)
     return resources.unreleased()
+        head = event.split(" ", 1)[0]
+        tag, _, verb = head.rpartition(".")
+        if not tag:
+            continue
+        if verb in _ACQUIRE_VERBS:
+            live[tag] = verb
+        elif verb in _ACQUIRE_VERBS.values():
+            live.pop(tag, None)
+    return sorted(
+        "{} ({}() with no {}())".format(tag, verb, _ACQUIRE_VERBS[verb])
+        for tag, verb in live.items()
+    )
 
 
 async def _flush() -> None:
@@ -1262,13 +1275,17 @@ def subset_composition(ir: dict, keep) -> dict:
     pruned = copy.deepcopy(ir)
     pruned["components"] = [c for c in pruned.get("components") or []
                             if keep(c.get("name"))]
+                            if c.get("name") not in dependents]
     manifest = pruned.get("manifest")
     if isinstance(manifest, dict):
         if isinstance(manifest.get("components"), list):
             manifest["components"] = [c for c in manifest["components"]
                                       if keep(c.get("name"))]
+                                      if c.get("name") not in dependents]
         if isinstance(manifest.get("loadOrder"), list):
             manifest["loadOrder"] = [n for n in manifest["loadOrder"] if keep(n)]
+            manifest["loadOrder"] = [n for n in manifest["loadOrder"]
+                                     if n not in dependents]
     return pruned
 
 
@@ -1803,6 +1820,7 @@ _ROUNDTRIP_HEADER = (
     "  in the method's own window instead: call the method, abort, and assert the "
     "fingerprint\n"
     "  returned and the declared inverse ran without restore-residue (issue #1897).\n"
+    "  to baseline — {n} randomized rounds.\n"
     "  IN SCOPE: in-process observable state only — the runtime's mutation ledger "
     "(host\n"
     "  acquire/release, map keys, pool connections). OUT OF REACH (replay.md §4.1), "
@@ -2102,16 +2120,19 @@ def _verified_effect_labels(body: list) -> list:
 def roundtrip_units(ir: dict) -> list:
     """One unit per component that has a `verified` activation-body effect, and
     one per provide method that has a `verified` witnessed effect (issue #1897).
+    """One unit per component that has a `verified` activation-body effect.
 
     The marker is threaded by the frontend (`step["verified"]`), so a hand- or
     import-produced IR gets round-trip tested too.  Shape mirrors a fault unit;
     a method unit adds `key` and `method`, and its round trip is the method's
     own window, call-then-abort (`_drive_method_roundtrip`).
+    import-produced IR gets round-trip tested too.  Shape mirrors a fault unit.
     """
     units: list = []
     for component in ir.get("components") or []:
         body = component.get("body") or []
         labels = _verified_effect_labels(body)
+        labels = _verified_effect_labels(component.get("body") or [])
         if labels:
             units.append({"component": component.get("name"), "verified": labels})
         for step in body:
@@ -2345,9 +2366,12 @@ def _roundtrip_dossier(results: list, rounds: int) -> dict:
     """Aggregate ``(component, labels, round_results[, method])`` into a
     gauntlet-shaped dossier.  ``round_results`` is ``[(ok, detail, config)]``;
     ``method`` (`key.method`) names a method unit (issue #1897).  Pure."""
+    """Aggregate ``(component, labels, round_results)`` into a gauntlet-shaped
+    dossier.  ``round_results`` is ``[(ok, detail, config)]``.  Pure."""
     components = []
     total = passed = failed = 0
     for component, labels, round_results, *method in results:
+    for component, labels, round_results in results:
         first_fail = next(((detail, cfg) for ok, detail, cfg in round_results if not ok),
                           None)
         ok = first_fail is None
@@ -2373,6 +2397,7 @@ def _roundtrip_dossier(results: list, rounds: int) -> dict:
         "note": "each `verified effect` was round-tripped (activate, tear down, "
                 "compare the observable-state fingerprint; a witnessed method "
                 "effect: call the method, abort, compare) over "
+                "compare the observable-state fingerprint) over "
                 f"{rounds} randomized rounds; a test the author did not write, not a "
                 "proof — in-process state only, aliases/emissions/clock out of reach "
                 "(docs/verified-effect.md).",
@@ -2431,6 +2456,7 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
         method = (f"{unit['key']}.{unit['method']}" if unit.get("method") else None)
         rng = random.Random(f"revl-roundtrip:{component}"
                             + (f":{method}" if method else ""))
+        rng = random.Random(f"revl-roundtrip:{component}")
         round_results: list = []
         for round_index in range(rounds):
             # a fresh, valid, randomized config for every component (the
@@ -2449,6 +2475,8 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
                     ok, detail = asyncio.run(_drive_roundtrip(
                         ir, component, configs, emit, runtime_mod, Context,
                         FiberState))
+                ok, detail = asyncio.run(_drive_roundtrip(
+                    ir, component, configs, emit, runtime_mod, Context, FiberState))
             except Exception as error:  # noqa: BLE001 — a driver crash is a failure
                 ok, detail = False, _driver_failure(emit, error, "round-trip")
             round_results.append((ok, detail, config))
@@ -2456,6 +2484,7 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
                 break  # a shrinking-free counterexample: report the first failing config
         results.append((component, labels, round_results)
                        + ((method,) if method else ()))
+        results.append((component, labels, round_results))
 
     dossier = _roundtrip_dossier(results, rounds)
     for entry in dossier["components"]:
@@ -2463,10 +2492,12 @@ def run_roundtrip_units(ir: dict, units: list, out=None,
         name = entry["component"] + (f" {entry['method']}" if entry.get("method") else "")
         if entry["status"] == "pass":
             printer(f"PASS {name}: {entry['rounds']} round(s), "
+            printer(f"PASS {entry['component']}: {entry['rounds']} round(s), "
                     f"inverse held for [{effects}]")
         else:
             ce = entry.get("counterexample") or {}
             printer(f"FAIL {name}: inverse round-trip broke for [{effects}]")
+            printer(f"FAIL {entry['component']}: inverse round-trip broke for [{effects}]")
             printer(f"    - config {ce.get('config')!r}: {ce.get('reason')}")
     counts = dossier["counts"]
     printer(f"round-tripped {counts['effects']} verified effect(s): "
@@ -2568,6 +2599,7 @@ def prop_units(ir: dict) -> list:
     units: list = []
     for unit in ir.get("prop_tests") or []:
         entry = {
+        units.append({
             "name": unit.get("name"),
             "params": [dict(p) for p in unit.get("params") or []],
             "body": unit.get("body") or [],
@@ -2580,6 +2612,7 @@ def prop_units(ir: dict) -> list:
             entry["spec_of"] = unit["spec_of"]
             entry["spec"] = unit.get("spec")
         units.append(entry)
+        })
     return units
 
 

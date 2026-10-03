@@ -56,6 +56,9 @@ CLI verbs: `truc stack check` (header-only resolution, a collision reported at
 edit time) and `truc apply` (resolve + admit, all-or-nothing write),
 as thin front doors onto the composition engine (decision 7). The verbs live
 in truc's
+CLI verbs — `truc stack check` (header-only resolution, a collision reported at
+edit time) and `truc apply` (resolve + admit, all-or-nothing write) — as thin
+front doors onto the composition engine (decision 7). The verbs live in truc's
 bootstrapped `.rvl` toolchain (`src/revl/truc/components/`, host bodies in
 `src/revl/truc/_host.py`); `tests/test_truc_apply_stack_check.py` covers the
 host behaviour directly and the real CLI end to end under the cordis-py runtime.
@@ -745,6 +748,7 @@ layer pg for Harness {
 As built (S2): the head is `layer pg for Harness`, not `layer acme::pg for
 Harness`. `acme` is the layer's ORIGIN, and §1.2 decides an origin is read off
 where the document lives rather than written by it, a document naming its own
+where the document lives rather than written by it — a document naming its own
 origin is the one thing the scoping rule forbids. `provides` is likewise
 required on the replacement row, because §1.3's assertion is what makes the
 document unable to lie about the wiring, and a replacement is a row.

@@ -74,6 +74,11 @@ the same command as the regeneration: `python3 tools/census_artifact.py
 --write`. `--verify --strict` also compares each record file and each case
 file byte for byte against the run, and reports a missing or left-over case
 file, so a reordered, hand-merged or forgotten file fails it.
+So `docs/census-artifact.md` and `docs/census-artifact.json` are OUTPUT.
+`tools/census_artifact.py` is the only thing that writes them, every count and
+every named residual comes from a run, and `--check` reports a hand edit as
+drift. The file says so in its first paragraph, where a person about to edit it
+will see it.
 
 ## The mechanism is driven, not asserted
 
@@ -157,6 +162,9 @@ program the reproduction did not run is counted in the report. After two
 re-recording pull requests land, no record is at main's checker version until
 one re-record there (`python3 tools/regen_generated.py --only census`), and
 `--verify --strict` names it until then. A recorded result rots, so it is not trusted blind: every run
+cannot run it. It is recorded in
+`tests/fixtures/census_crate_reproduction.json` beside the checker version it was
+taken at, and a recorded result rots, so it is not trusted blind: every run
 compares the recorded version against the current one, and a reproduction taken
 at a different version is published as stale and **lifts no claim**. The ladder
 rung in the report is computed from evidence that is current, never declared.
@@ -174,6 +182,7 @@ that sentence would over-claim, and
 ## The honesty protocol
 
 The report (`python3 tools/census_artifact.py --json`) is an `EVAL-REPORT-1` document under the frozen
+`docs/census-artifact.json` is an `EVAL-REPORT-1` document under the frozen
 protocol in `docs/design/478-eval-honesty-protocol.md`, and
 `tools/check_eval_report.py` passes on it. That checker decides three things:
 `noSelfScore`, that every brief names a gate from the frozen set, and that no

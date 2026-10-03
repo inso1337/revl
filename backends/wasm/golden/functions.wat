@@ -69,29 +69,35 @@
   ;;   case Invalid: Str
 
   (func $fn.add (export "add") (param $p_a i64) (param $p_b i64) (result i64) (local $__revl_tmp i32)
+  (func $add (export "add") (param $p_a i64) (param $p_b i64) (result i64) (local $__revl_tmp i32)
     (local.get $p_a)
       (local.get $p_b)
       (call $int_add)
     return)
 
   (func $fn.negate (export "negate") (param $p_b i32) (result i32) (local $__revl_tmp i32)
+  (func $negate (export "negate") (param $p_b i32) (result i32) (local $__revl_tmp i32)
     (local.get $p_b)
       (i32.eqz)
     return)
 
   (func $fn.name (export "name") (param $p_row i32) (result i32) (local $__revl_tmp i32)
+  (func $name (export "name") (param $p_row i32) (result i32) (local $__revl_tmp i32)
     (i32.wrap_i64 (i64.load (i32.add (local.get $p_row) (i32.const 8))))
     return)
 
   (func $fn.first (export "first") (param $p_xs i32) (result i64) (local $__revl_tmp i32)
+  (func $first (export "first") (param $p_xs i32) (result i64) (local $__revl_tmp i32)
     (i64.load (call $list_slot (local.get $p_xs) (i64.const 0)))
     return)
 
   (func $fn.greet (export "greet") (result i32) (local $__revl_tmp i32)
+  (func $greet (export "greet") (result i32) (local $__revl_tmp i32)
     (i32.const 0)
     return)
 
   (func $fn.make_row (export "make_row") (param $p_id i64) (param $p_name i32) (result i32) (local $__revl_tmp i32)
+  (func $make_row (export "make_row") (param $p_id i64) (param $p_name i32) (result i32) (local $__revl_tmp i32)
     (call $alloc (i32.const 16))
       (local.set $__revl_tmp)
       (i64.store (local.get $__revl_tmp) (local.get $p_id))
@@ -100,6 +106,7 @@
     return)
 
   (func $fn.classify (export "classify") (param $p_n i64) (result i32) (local $__revl_tmp i32)
+  (func $classify (export "classify") (param $p_n i64) (result i32) (local $__revl_tmp i32)
     (local.get $p_n)
       (i64.const 0)
       (i64.lt_s)

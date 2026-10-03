@@ -76,6 +76,7 @@
         "message",
         "ok",
         "repairs"
+        "ok"
       ],
       "note": "The `explain` result envelope, produced by `diagnostics.explain` and re-spelled field by field by the CLI renderer. A field added to the producer and not read by the renderer is invisible."
     },
@@ -117,6 +118,9 @@
         "src/revl/resources.py::resource_taint",
         "src/revl/type_schema.py::expressibility_reason",
         "src/revl/type_schema.py::fully_expressible"
+        "src/revl/mcp/schema.py::expressibility_reason",
+        "src/revl/mcp/schema.py::fully_expressible",
+        "src/revl/resources.py::resource_taint"
       ],
       "tokens": [
         "cases",
@@ -203,6 +207,7 @@
       "sites": [
         "src/revl/export_client.py::_SCALARS",
         "src/revl/type_schema.py::_JSON_TYPES"
+        "src/revl/mcp/schema.py::_JSON_TYPES"
       ],
       "tokens": [
         "Bool",
@@ -213,6 +218,7 @@
         "Unit"
       ],
       "note": "Issue #1272, instance 1 of issue #1285, the six-scalar half. `type_schema._JSON_TYPES` is the type schema's scalar table (the MCP projection reads it) and `export_client._SCALARS` the client exporter's; both are kept, for the reasons PR #1283 records, and PR #1283's differential walks the pair driven by the surface type. See also the four-scalar class carrying `export_openapi._SCALARS`, which is the SAME vocabulary two scalars short."
+      "note": "Issue #1272, instance 1 of issue #1285, the six-scalar half. `mcp/schema._JSON_TYPES` is the MCP projection's scalar table and `export_client._SCALARS` the client exporter's; both are kept, for the reasons PR #1283 records, and PR #1283's differential walks the pair driven by the surface type. See also the four-scalar class carrying `export_openapi._SCALARS`, which is the SAME vocabulary two scalars short."
     },
     {
       "sites": [
@@ -241,6 +247,7 @@
         "Str"
       ],
       "note": "Issue #1272, instance 1 of issue #1285, the four-scalar half. `export_openapi._SCALARS` is `type_schema._JSON_TYPES` two scalars short (`Bytes`, `Unit`), which is exactly the drift the issue describes and is why exact-vocabulary matching puts the two halves in different classes. `run._ENV_TYPE_CHECKS` and `fuzz_cross_tier.BASE` are third and fourth declarations of the same four scalars."
+      "note": "Issue #1272, instance 1 of issue #1285, the four-scalar half. `export_openapi._SCALARS` is `mcp/schema._JSON_TYPES` two scalars short (`Bytes`, `Unit`), which is exactly the drift the issue describes and is why exact-vocabulary matching puts the two halves in different classes. `run._ENV_TYPE_CHECKS` and `fuzz_cross_tier.BASE` are third and fourth declarations of the same four scalars."
     },
     {
       "sites": [
@@ -260,8 +267,32 @@
     },
     {
       "sites": [
+        "src/revl/fault.py::_SWEEP_ALL_TIERS",
+        "src/revl/gate.py::_KNOWN_TIERS",
+        "src/revl/run.py::KNOWN_BACKENDS",
+        "src/revl/run.py::RUNNABLE_BACKENDS",
+        "src/revl/test.py::_RAW_RUNNERS",
+        "tools/conformance_cert.py::ALL_TIERS",
+        "tools/docgen.py::VISION_TIER_RUNTIME",
+        "tools/fuzz_cross_tier.py::detect_tiers",
+        "tools/selfhost_coverage.py::TIERS",
+        "tools/selfhost_line_coverage.py::TIERS"
+      ],
+      "tokens": [
+        "go",
+        "java",
+        "py",
+        "rust",
+        "ts",
+        "wasm"
+      ],
+      "note": "The six tier names in their short spelling, re-declared in ten places, the largest mirror class in the tree. Real mirror, not yet resolved."
+    },
+    {
+      "sites": [
         "src/revl/fault.py::_drive_roundtrip",
         "src/revl/fault.py::subset_composition",
+        "src/revl/fault.py::_prune_dependents",
         "src/revl/run_go.py::_load_order",
         "src/revl/run_java.py::_load_order",
         "src/revl/run_rust.py::_load_order",
@@ -275,6 +306,7 @@
         "name"
       ],
       "note": "The manifest load-order fields. The five `_load_order` bodies are per-backend copies of one another, which is the copy-paste form of this defect: a manifest field added for one runtime and not the others changes load order on five tiers unevenly. `fault.subset_composition` is the one place a composition is cut down to some of its components: `fault._prune_dependents` and `recover_binding._sub_composition` (a placement process's share, issue #1477) both call it rather than re-spelling the fields."
+      "note": "The manifest load-order fields. The five `_load_order` bodies are per-backend copies of one another, which is the copy-paste form of this defect: a manifest field added for one runtime and not the others changes load order on five tiers unevenly."
     },
     {
       "sites": [
@@ -431,6 +463,7 @@
         "with"
       ],
       "note": "DELIBERATE COPY, with the reason written at the declaration and a test holding it. `tools/heldout_scoring.py` generates the held-out programs, and `draw()` is required to be a pure function of `(seed, count)` that reads no file: `src/revl/lexer.py` is SUBJECT under item 537, so a candidate that could make the draw depend on it could narrow the draw by editing it. `from revl.lexer import KEYWORDS` is therefore the thing this copy exists to avoid, not an oversight. What holds the two sides together is `tests/test_heldout_scoring.py::test_the_reserved_set_covers_every_lexer_keyword`, which issue #1332 made two-directional: it was `KEYWORDS - _RESERVED` only, so a keyword the lexer DROPPED could sit in the frozen copy and narrow the draw silently. It now asserts set equality, so a one-sided edit on either side reds that test before it reaches this entry. Re-recorded for `try` (#1900): BOTH copies gained it in one commit, which is the vocabulary moving and not a drift. `try` is a prefix unary the frontend refuses as an identifier (parser.py, the generic reserved-keyword refusal), so it also leaves every backend's admitted method-name list -- see `tests/test_keyword_method_names_1474.py` and the three backend mirrors beside it."
+      "note": "DELIBERATE COPY, with the reason written at the declaration and a test holding it. `tools/heldout_scoring.py` generates the held-out programs, and `draw()` is required to be a pure function of `(seed, count)` that reads no file: `src/revl/lexer.py` is SUBJECT under item 537, so a candidate that could make the draw depend on it could narrow the draw by editing it. `from revl.lexer import KEYWORDS` is therefore the thing this copy exists to avoid, not an oversight. What holds the two sides together is `tests/test_heldout_scoring.py::test_the_reserved_set_covers_every_lexer_keyword`, which issue #1332 made two-directional: it was `KEYWORDS - _RESERVED` only, so a keyword the lexer DROPPED could sit in the frozen copy and narrow the draw silently. It now asserts set equality, so a one-sided edit on either side reds that test before it reaches this entry."
     },
     {
       "sites": [
@@ -481,6 +514,7 @@
         "to_str"
       ],
       "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked. Re-recorded for `checked_add`, `checked_sub` and `checked_mul` (#3259): BOTH copies gained them in one commit, which is the vocabulary moving and not a drift."
+      "note": "The thirty-seven builtin method names, declared once in lowering and once in the type checker. The largest vocabulary in the tree by token count: a method in one and not the other either type-checks and fails to lower or lowers and is never checked."
     },
     {
       "sites": [
@@ -769,6 +803,20 @@
         "ls-files"
       ],
       "note": "Two copies of the tracked-files listing, one per wheel checker. Near-clones down to the git argument vector."
+    },
+    {
+      "sites": [
+        "tools/evolution_controller.py::measured_diff",
+        "tools/evolution_reward.py::changed_files"
+      ],
+      "tokens": [
+        "--exclude-standard",
+        "--name-only",
+        "--others",
+        "diff",
+        "ls-files"
+      ],
+      "note": "Two copies of the changed-files listing, one in the controller and one in the reward. Near-clones down to the git argument vector; a flag added to one changes what one half of the loop measures."
     },
     {
       "sites": [
