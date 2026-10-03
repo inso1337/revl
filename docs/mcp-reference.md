@@ -305,6 +305,14 @@ component you just loaded. Returns the result and the trace it produced.
 What is loaded right now: fiber states, provided keys, whether a rollback is
 available, and the trace since the last call. No inputs.
 
+It always carries `loopAxes`, loaded or not and with or without an approval
+policy: six measures of how the session used the loop, each
+`{numerator, denominator, value}` with `value` null while the denominator is 0,
+plus `boundaryCalls` (executed `revl_call`s by class). The counts are
+cumulative for the MCP session; an unload, commit or abort does not reset
+them. The definitions are in
+[harness-gate-guide.md](harness-gate-guide.md#the-agent-loop-axes-revl_state-loopaxes).
+
 ### `revl_swap`
 
 Admit a candidate against the RUNNING composition and hot-swap it in. A rejected

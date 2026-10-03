@@ -243,3 +243,54 @@ Two derived numbers ride on those:
 These are the numbers a harness dogfood measures before and after wiring the
 gate. `tests/test_approval_policy.py` asserts both on a live cordis-py
 composition end to end.
+
+## The agent-loop axes (`revl_state` `loopAxes`)
+
+`revl_state` also reports six axes in `loopAxes` (issue #1738). Unlike the
+`approval` block they are always present, with or without a policy, and they
+are cumulative for the whole MCP session: an unload, a commit or an abort does
+not reset them. Each is `{numerator, denominator, value}`, where `value` is the
+ratio rounded to four places, or null while the denominator is 0.
+
+| axis | numerator | denominator |
+|---|---|---|
+| `reversibilityRate` | executed boundary calls witnessed with a registered inverse, class (a) | executed boundary calls, classes (a), (b) and (c) |
+| `autoApprovedWithProof` | executed boundary calls the checker proved revertible or deferred, classes (a) and (b) | the same |
+| `promptsPerSession` | prompts raised: per-call tickets, commit prompts and residue prompts (the `prompts` tally above) | commit sessions, from a `load` to the unload, commit or abort that ends it, the open one included |
+| `preflightCoverage` | composition edits whose touched components were all named by an earlier blast-radius query | composition edits |
+| `violationsCaughtBeforeExecution` | refusals at check, admit, plan, load, swap or edit time whose diagnostics name a guarantee | those, plus `revl_call`s that failed at run time |
+| `residueAfterAbort` | unresolved compensation records `revl_abort` left | aborts |
+
+Details that decide the counts:
+
+- A boundary call is a `revl_call` whose reach crosses a boundary. It is
+  counted once, when it is decided and about to run. A ticketed call counts
+  when it runs after its approval; the refused first attempt crossed nothing.
+  A call the seam cache answered crossed nothing either. With no policy the
+  class comes from a policy-independent class map of the live generation; a
+  call that cannot be classified is counted under `boundaryCalls.unclassified`
+  and in no axis.
+- A class (c) call covered by a standing approval, a grant or a distilled rule
+  is in the `autoApprovedWithProof` denominator but not its numerator: consent
+  is not proof. This is why it can differ from `approval.percentAutoApproved`,
+  which leaves such calls out of both.
+- A blast-radius query is `revl_query_withdraw`, `revl_query_drift`,
+  `revl_query_dependents`, `revl_query_reach`, `revl_query_emitters`,
+  `revl_live_query` or `revl_plan`. The components it covers are the one it
+  asked about and every component its result names (cascade, providers, call
+  sites, `components`, `impacted`).
+- A composition edit is a `revl_swap`, `revl_edit`, `revl_rollback`,
+  `revl_undo`, `revl_restore`, `revl_ship` or `revl_repair` that changed at
+  least one component of the running composition. A refused or no-op one is
+  not an edit. `revl_load`, `revl_unload`, commit and abort are not edits.
+- A refusal that names no guarantee (a session precondition, a usage error)
+  is in neither count of `violationsCaughtBeforeExecution`. An approval ticket
+  is a question, not a run-time refusal.
+- A failed swap that reboots its predecessor is not an abort for
+  `residueAfterAbort`.
+
+The preflight and refusal axes are measured where MCP tool calls are
+dispatched (`revl.mcp.server.handle`), so a program driving `Session` directly
+moves only the call, prompt and abort axes. `tests/test_loop_axes_1738.py`
+runs a scripted session with a known mix and asserts all six values, with and
+without a policy.
