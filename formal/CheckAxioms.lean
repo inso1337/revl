@@ -380,3 +380,18 @@ import RevL
 #print axioms RevL.G1Access.declaring_admits
 #print axioms RevL.G1Access.fixtures_decided
 #print axioms RevL.G1Access.g1_access_not_vacuous
+-- Issue #1808: A1 async colour. Reach of an async name through the `fn`
+-- graph within a fuel bound, the per-site rule (a sync method, an unawaited
+-- step and a teardown slot reach nothing async; an awaited step must), the
+-- signature rule, and the corpus shapes; decided by the oracle's `A1`/`A1S`
+-- rows.
+#print axioms RevL.A1Async.reachB_iff
+#print axioms RevL.A1Async.reach_mono
+#print axioms RevL.A1Async.reaches_iff
+#print axioms RevL.A1Async.siteB_iff
+#print axioms RevL.A1Async.teardown_suspension_refused
+#print axioms RevL.A1Async.await_without_async_refused
+#print axioms RevL.A1Async.await_pairing_exact
+#print axioms RevL.A1Async.sigB_iff
+#print axioms RevL.A1Async.fixtures_decided
+#print axioms RevL.A1Async.a1_not_vacuous

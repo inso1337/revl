@@ -257,3 +257,13 @@ RevL.G1Access.access_mono	instance	RevL.G1Access.g1_access_not_vacuous	AccessOK 
 RevL.G1Access.declaring_admits	instance	RevL.G1Access.g1_access_not_vacuous	Logger is refused with no requirements and admitted once db is declared
 RevL.G1Access.fixtures_decided	concrete	-	g1_undeclared_access's Logger refused, admitted with db declared; a declared store admitted, refused against a db-only declaration
 RevL.G1Access.g1_access_not_vacuous	concrete	-	the undeclared access refused and the declared one admitted by the rule
+RevL.A1Async.reachB_iff	instance	RevL.A1Async.a1_not_vacuous,RevL.A1Async.fixtures_decided	reachB is true on open_conn (through the fn graph to ho) and false on W.cool, so the reach decider is mutation-sensitive
+RevL.A1Async.reach_mono	instance	RevL.A1Async.a1_not_vacuous	open_conn reaches async within 2 steps, and so within 3
+RevL.A1Async.reaches_iff	instance	RevL.A1Async.a1_not_vacuous	a site's heads reach async exactly when one head does: open_conn does, W.cool does not
+RevL.A1Async.siteB_iff	instance	RevL.A1Async.a1_not_vacuous,RevL.A1Async.fixtures_decided	siteB is true on the awaited acquisition and the synchronous undo, false on the unawaited acquisition and the suspending undo, so the printed A1 verdict is mutation-sensitive
+RevL.A1Async.teardown_suspension_refused	necessity	RevL.A1Async.a1_not_vacuous	an undo reaching W.heat is refused; an undo reaching W.cool is admitted, so the refusal is not universal
+RevL.A1Async.await_without_async_refused	necessity	RevL.A1Async.fixtures_decided	an await emit of the sync Log.note is refused; the awaited open_conn acquisition is admitted
+RevL.A1Async.await_pairing_exact	instance	RevL.A1Async.a1_not_vacuous	open_conn is admitted awaited and refused unawaited, the pairing the theorem states
+RevL.A1Async.sigB_iff	instance	RevL.A1Async.fixtures_decided	sigB is false on a sync implementation of an async declaration and true when the colours agree
+RevL.A1Async.fixtures_decided	concrete	-	the undo, effect, sync-method, emit and signature shapes of the A1 fixtures decided both ways
+RevL.A1Async.a1_not_vacuous	concrete	-	the reach through a fn, the awaited acquisition admitted, its unawaited twin and the suspending undo refused, the synchronous undo admitted
