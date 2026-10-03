@@ -81,10 +81,19 @@ def _reshaped(payload: dict, attempt: int, state: dict) -> dict:
 
 
 def _stop_message(attempt: int, payload: dict) -> str:
-    remedy = ("send `next` instead" if payload.get("next") is not None
-              else "change the arguments, or the session state the refusal names")
+    remedy = _what_instead(payload.get("next"))
     return (f"this exact call has now been refused {attempt} times in a row, "
             f"and sending it unchanged will be refused again: {remedy}")
+
+
+def _what_instead(nxt) -> str:
+    """What to do instead of resending, read off the refusal's `next`."""
+    if nxt is None:
+        return "change the arguments, or the session state the refusal names"
+    first = nxt[0] if isinstance(nxt, list) else nxt
+    if "operator" in first:
+        return f"an operator has to act first ({first['operator']})"
+    return "send `next` instead"
 
 
 def _diagnostic(code: str, message: str) -> dict:

@@ -131,3 +131,17 @@ def test_the_state_is_rendered_from_the_footer():
         "from what is running")
     assert repeat.render({**loaded, "draft": True}).endswith(
         "with a draft edit that has open holes pending")
+
+
+def test_past_the_bound_an_operator_step_is_not_offered_as_a_call():
+    """A runtime-gate refusal (#1692) has an operator step for `next`, which
+    the caller cannot send; the bound's message says an operator must act."""
+    server_mod.set_runtime_available(False)
+    try:
+        bodies = [_call("revl_load", {"source": GOOD}) for _ in range(repeat.BOUND)]
+    finally:
+        server_mod.set_runtime_available(None)
+    stop = bodies[-1]["diagnostics"][0]
+    assert stop["code"] == repeat.CODE
+    assert "an operator has to act first" in stop["message"]
+    assert "send `next`" not in stop["message"]

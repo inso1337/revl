@@ -3,7 +3,8 @@
 A refusal with a known remedy returns `next: {tool, arguments, ready,
 needs?}` beside its prose, and its message names that remedy. Pinned here:
 
-* the shape of `next` (one schema check every case below runs);
+* the shape of `next` (one schema check every case below runs), including
+  the operator step the runtime gate (#1692) answers with;
 * every "call revl_load first" site answers with `revl_load`, pre-filled with
   the composition this session last ran when there is one, and that `next`
   sent as-is reloads it;
@@ -72,6 +73,10 @@ def _assert_next_shape(nxt) -> None:
     calls = nxt if isinstance(nxt, list) else [nxt]
     assert calls, "an empty `next` list is not a remedy"
     for entry in calls:
+        if "operator" in entry:   # a remedy no MCP call can perform
+            assert entry == {"operator": entry["operator"], "ready": False}
+            assert isinstance(entry["operator"], str) and entry["operator"]
+            continue
         assert set(entry) <= {"tool", "arguments", "ready", "needs"}, entry
         assert entry["tool"] in _ADVERTISED, entry["tool"]
         assert isinstance(entry["arguments"], dict)
@@ -101,6 +106,7 @@ def test_the_schema_accepts_a_call_and_a_preference_list():
     later = remedy.call("revl_load", {}, ready=False, needs="`source` or `files`")
     _assert_next_shape(one)
     _assert_next_shape([one, later])
+    _assert_next_shape(remedy.operator_step("run setup, then restart"))
     assert one == {"tool": "revl_load", "arguments": {"files": ["a.rvl"]},
                    "ready": True}
 
@@ -204,3 +210,12 @@ def test_a_files_loaded_name_only_swap_offers_the_files(tmp_path):
     assert nxt == {"tool": "revl_swap", "arguments": {"files": [str(path)]},
                    "ready": True}
     assert _send(nxt)["swapped"] is True
+
+
+def test_the_runtime_gate_refusal_uses_the_same_schema():
+    """#1692's refusal on a server that cannot import cordis is an operator
+    step: no MCP call installs a runtime."""
+    from revl.mcp import runtime_gate
+    nxt = runtime_gate.refusal("revl_load")["next"]
+    _assert_next_shape(nxt)
+    assert "setup.sh" in nxt["operator"]
