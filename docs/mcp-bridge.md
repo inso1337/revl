@@ -209,6 +209,35 @@ an imported module, no self-minted declassifier, and **no self-chosen realm**.
 writes to disk — so they compile unprofiled, the way an embedder's own sources
 do.
 
+**Edited files: trust follows the text (issue #1715).** When transport-carried
+text stands in for one of those files (`revl_edit` on a files-loaded
+composition, or `revl_swap {files, modules}` with a module keyed by a file's
+path), the boundary is drawn declaration by declaration against the operator's
+own text of that file, which is the file on disk inside the sanctioned roots:
+
+- a declaration that parses identically to one in the operator's text of the
+  same file (source positions ignored, so moving it is not changing it) is the
+  operator's and is not checked by the profile, exactly as at load. That covers
+  an unchanged host extern, the unchanged functions and components that call
+  it, and an unchanged `use` (including one that leaves the admitting
+  directory: same path, same file, the operator's layout);
+- every other declaration in that text is the agent's and gets the whole
+  untrusted-author profile: an added or changed `extern` is refused (`G8`,
+  naming it), as is any reach into host code from an agent declaration,
+  directly or through any function, the operator's included; a self-minted
+  declassifier, a realm, an `asset`, the granted allowlist, and `use`
+  confinement all apply to it;
+- a file the call did not overlay is the operator's, as at load. An imported
+  file the call did overlay is checked the same way as a root, so rewriting an
+  operator library under an untouched operator component is still swept;
+- text for a path outside the sanctioned roots is never compared with that
+  path: all of it is the agent's, so the trust decision cannot become an oracle
+  on a file the jail keeps closed. An operator-sanctioned `--provider` module is
+  the operator's text by configuration.
+
+Inline `source` and `modules` that stand in for no file are unchanged: all of
+it is the agent's.
+
 The realm half is the one that reads as decoration and is not. A realm is an
 authority ADDRESS: the item-246/251 approval policy scopes standing approvals
 and auto-approve rules by `(component glob, realm)` and matches the realm half
@@ -398,6 +427,50 @@ fills that hole by the very line the fillSpec reported, and then it admits and
 swaps. Deltas accumulate across the calls; nothing is resent. An edit that fails
 to compile or admit advances nothing — the working buffer stays at its last good
 state, so a refused patch never leaves a broken draft behind.
+
+**Files-loaded compositions.** A composition loaded with `revl_load {files}`
+is just as editable (issue #1690). Each loaded file is a buffer named by the
+path it was loaded under, and `target` picks one; with a single file it can be
+omitted. An edit may carry its own `target`, so one call can change several
+files at once, which is what a change across a `use` needs: the new function in
+the library and the import that names it land together or not at all. The
+compile reads every edited file from the session before the disk, so that
+import resolves to the edited text. Nothing is written to disk. What swapped in
+is what the session holds: the next edit starts from it, `revl_snapshot`
+returns it, and `revl_swap` with no source re-admits it.
+
+```
+revl_load  {files: ["svc.rvl", "lib.rvl", "main.rvl"]}
+revl_edit  {edits: [{target: "lib.rvl", anchor: "}\n",
+                     replacement: "}\npub fn label2() -> Str { return \"v2\" }\n"},
+                    {target: "main.rvl", anchor: "{ label }",
+                     replacement: "{ label, label2 }"},
+                    {target: "main.rvl", anchor: "= label()",
+                     replacement: "= label2()"}]}        -> admitted, swapped
+```
+
+Edited file text arrived over the transport, so what an edit changes is the
+agent's while what it leaves alone stays the operator's
+([Authoring trust](#authoring-trust--the-agent-is-not-a-host-code-author), "Edited files"). An edit may not add
+or change a host extern; it may change the rest of a file that declares one, and
+the operator's components keep calling it.
+
+The path jail reads the patched text, not the edits (issue #1709). Before
+anything compiles, every buffer an edit touched is scanned, as it reads after
+all the edits, for `use` paths. One that leaves the operator-sanctioned roots
+(resolved against the file's own directory for a loaded file) is refused with
+nothing compiled, however the edits assembled it; a buffer that no longer lexes
+is refused too, since its imports cannot be read. An import the operator's file
+already names on disk is not newly refused. This holds whatever the authoring
+trust: under `--author-trust trusted` the compile has no confinement of its
+own, and the jail is the only check.
+
+With nothing loaded, `revl_edit` also takes `files` (or `source`, `modules`,
+`config`) and loads them through `revl_load` itself before it edits, so an agent
+never has to learn that the edit needs a load first. The load answers to the
+load gates (the operator's `load` grant, a lease on a cold load). With a
+composition already loaded, `files`/`source` are refused rather than silently
+reloading over it.
 
 **Swap by name.** The same server-side source backs an additive extension to
 `revl_swap`: called with *no* inline `source`/`files`/`modules`, it re-admits

@@ -322,6 +322,27 @@ def _collect_module_keys(node, out: set) -> None:
             _collect_module_keys(item, out)
 
 
+def _operator_text_of(in_memory: dict, providers: dict) -> dict:
+    """The operator's own text of each file an in-memory source stands in for
+    (issue #1715): the file on disk, read only inside the sanctioned roots. A
+    path outside them has no operator text, so everything sent for it stays the
+    author's; reading it would make the trust decision an oracle on a file the
+    jail exists to keep closed. An operator-sanctioned provider is the
+    operator's text by configuration."""
+    roots = _file_roots()
+    operator: dict = {os.path.abspath(p): text for p, text in providers.items()}
+    for path in in_memory:
+        if path in operator or not _within_roots(path, roots) \
+                or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                operator[path] = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return operator
+
+
 def _jail_refusal(arguments: dict) -> dict | None:
     """The refusal payload when a tool call names a path outside the sanctioned
     roots, or `None` when every path is inside. Fails CLOSED: refused before the
@@ -570,7 +591,10 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
         if files:
             return compile_files(list(files), manifest=manifest,
                                  replacing=replacing, profile=prof,
-                                 sources=in_memory or None)
+                                 sources=in_memory or None,
+                                 operator_sources=(
+                                     _operator_text_of(in_memory, providers)
+                                     if prof is not None else None))
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:
@@ -894,8 +918,9 @@ def _tool_swap(arguments: dict) -> dict:
         return quarantined
 
     inline = any(arguments.get(k) is not None for k in ("source", "files", "modules"))
+    before = _edit.running_source(SESSION)
     if not inline:
-        return _swap_server_side(replacing)
+        return _with_touched(_swap_server_side(replacing), before)
 
     # issue #1446: like `revl_load` (#1444), a swap that does not succeed
     # changes nothing, so the candidate's host bodies are recorded only once it
@@ -934,17 +959,59 @@ def _tool_swap(arguments: dict) -> dict:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+    return _with_touched({"ok": True, "admitted": True, "swapped": True,
+                          **_summary(full), **state}, before)
+
+
+def _with_touched(result: dict, before: dict) -> dict:
+    """A swap that landed reports the top-level symbols it added, changed or
+    removed against what was running (issue #1714)."""
+    if result.get("swapped"):
+        result["touched"] = _edit._touched(before, _edit.running_source(SESSION))
+    return result
+
+
+def _tool_source(arguments: dict) -> dict:
+    """One declaration of the server-side source, by symbol (issue #1714).
+
+    Reads what the session holds (inline source, modules, or the loaded files
+    as last swapped in), or, with nothing loaded, the `files`/`source` given."""
+    from . import symbols as _symbols  # noqa: PLC0415
+
+    symbol = arguments.get("symbol")
+    if not symbol:
+        return _session_error("`symbol` is required: a declaration name, "
+                              "`<buffer>:Name`, or `<buffer>:<line>`")
+    try:
+        vs = _source_set(arguments)
+        result = _symbols.read(vs, symbol,
+                               deps="deps" in (arguments.get("with") or []),
+                               comments=arguments.get("comments", True) is not False)
+    except (_symbols.SymbolError, _edit.EditError) as error:
+        return _session_error(str(error))
+    return {"ok": True, **result}
+
+
+def _source_set(arguments: dict) -> dict:
+    if SESSION.loaded:
+        return _edit.running_source(SESSION)
+    if arguments.get("source") is not None:
+        return {"source": arguments["source"],
+                "modules": dict(arguments.get("modules") or {})}
+    if arguments.get("files"):
+        return _edit._files_source({"files": list(arguments["files"]),
+                                    "modules": arguments.get("modules")})
+    raise _edit.EditError("nothing is loaded: load a composition, or pass "
+                          "`files` or `source` to read from")
 
 
 def _swap_server_side(replacing: tuple) -> dict:
     """Swap the source the session already holds — no inline source resent."""
     vs = _edit.virtual_source(SESSION)
-    if vs.get("source") is None:
+    if vs.get("source") is None and not vs.get("files"):
         return _session_error(
-            "no server-side source to swap by name — this composition was not "
-            "loaded from inline source, so there is nothing the session can "
-            "re-admit without you passing `source`/`files`")
+            "no server-side source to swap by name — there is nothing the "
+            "session can re-admit without you passing `source`/`files`")
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -972,7 +1039,35 @@ def _swap_server_side(replacing: tuple) -> dict:
 
 def _tool_edit(arguments: dict) -> dict:
     """Patch the server-side source of the running composition and re-admit —
-    deltas, not documents (roadmap item 50, docs/mcp-bridge.md)."""
+    deltas, not documents (roadmap item 50, docs/mcp-bridge.md).
+
+    With nothing loaded, a call that carries `files` or `source` loads it first,
+    through `revl_load` itself, then edits it (issue #1690): an agent never has
+    to learn that the edit verb needs a load verb before it."""
+    carried = any(arguments.get(k) is not None for k in ("source", "files"))
+    if carried and SESSION.loaded:
+        return _session_error(
+            "a composition is already loaded: revl_edit patches it, so omit "
+            "`files`/`source` (or revl_unload first to load another)",
+            edited=False, swapped=False)
+    loaded = None
+    if carried:
+        load_arguments = {k: arguments[k] for k in
+                          ("source", "files", "modules", "config", "record")
+                          if k in arguments}
+        # the load half answers to the load gate: the call was gated as an edit
+        decision = _operator.decide(SESSION, "revl_load", load_arguments)
+        if decision.gated and not decision.allowed:
+            return {**_refused_by_operator(decision), "loaded": False,
+                    "edited": False, "swapped": False}
+        loaded = _tool_load(load_arguments)
+        if not loaded.get("ok"):
+            return {**loaded, "loaded": False, "edited": False, "swapped": False}
+    result = _edit_loaded(arguments)
+    return {**result, "loaded": True} if loaded is not None else result
+
+
+def _edit_loaded(arguments: dict) -> dict:
     try:
         return _edit.apply_edit(SESSION, arguments)
     except _edit.EditError as error:
@@ -2485,7 +2580,15 @@ TOOLS = [
                        "hot-swapped in; one that still has open holes advances the "
                        "server-side source (so the next edit builds on it) but swaps "
                        "nothing. Returns the admission verdict / holes / diagnostic — "
-                       "never the whole source.",
+                       "never the whole source. A composition loaded from `files` is "
+                       "edited too: each loaded file is a buffer named by its path, an "
+                       "edit's own `target` lets one call change several files (a `use` "
+                       "between edited files resolves to the edited text), and the disk "
+                       "is never written. With nothing loaded, pass `files` or `source` "
+                       "and this loads it first, then edits it. {symbol, replacement} "
+                       "replaces one top-level declaration by name (read it first with "
+                       "revl_source). A response that edited lists the `touched` "
+                       "symbols.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2512,19 +2615,75 @@ TOOLS = [
                             "count": {"type": "integer",
                                       "description": "max anchor sites to replace "
                                                      "(omit for all)"},
+                            "target": {"type": "string",
+                                       "description": "this edit's buffer, when it is "
+                                                      "not the call's `target`"},
+                            "symbol": {"type": "string",
+                                       "description": "with `replacement`: replace the "
+                                                      "whole top-level declaration "
+                                                      "this names (as revl_source "
+                                                      "addresses it)"},
                         },
                     },
                 },
                 "target": {"type": "string",
                            "description": "which server-side buffer to edit: omit for the "
-                                          "main inline source, or name an in-memory module"},
+                                          "main inline source (or the one loaded file), "
+                                          "name a loaded file by its path, or name an "
+                                          "in-memory module"},
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: load these files first, "
+                                         "then edit them"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: load this source first, "
+                                          "then edit it"},
+                "modules": {"type": "object",
+                            "description": "in-memory `use` modules for that load"},
+                "config": {"type": "object",
+                           "description": "config for that load, as revl_load takes it"},
             },
             "required": ["edits"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_edit,
+    },
+    {
+        "name": "revl_source",
+        "description": "Read ONE declaration of the server-side source by symbol, "
+                       "instead of the whole file. `symbol` is a top-level "
+                       "declaration's name (a component, service, type, fn, "
+                       "extern...), `<buffer>:Name` when the name is not unique, or "
+                       "`<buffer>:<line>` for the declaration containing that line; a "
+                       "buffer is a loaded file's path, an in-memory module's key, or "
+                       "`source`. `with: [\"deps\"]` adds the declarations it names "
+                       "(its services, the functions and types it uses), and "
+                       "`comments: false` returns the code alone in canonical form. "
+                       "Reads the running composition, or, with nothing loaded, "
+                       "`files`/`source`. Pairs with revl_edit's {symbol, "
+                       "replacement} edit.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "symbol": {"type": "string",
+                           "description": "`Name`, `<buffer>:Name` or "
+                                          "`<buffer>:<line>`"},
+                "with": {"type": "array", "items": {"type": "string",
+                                                    "enum": ["deps"]},
+                         "description": "`deps`: also the declarations it names"},
+                "comments": {"type": "boolean",
+                             "description": "false: code only, canonical "
+                                            "(default true: verbatim)"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: files to read from"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: source to read from"},
+            },
+            "required": ["symbol"],
+        },
+        "annotations": {"readOnlyHint": True},
+        "handler": _tool_source,
     },
     {
         "name": "revl_gauntlet",

@@ -71,7 +71,9 @@ def _materialize(origin: dict) -> dict:
 
     `files` are read into text at snapshot time so the snapshot is portable
     JSON that reproduces the *snapshotted* sources — not whatever the paths
-    happen to hold at restore time.
+    happen to hold at restore time. A file `revl_edit` has patched is not read:
+    its edited text is what is running, and it is on the session, not on disk
+    (issue #1690).
     """
     sources: dict = {}
     if origin.get("source") is not None:
@@ -81,7 +83,10 @@ def _materialize(origin: dict) -> dict:
     files = origin.get("files")
     if files:
         sources["files"] = list(files)
-        sources["files_content"] = {path: _read_text(path) for path in files}
+        held = origin.get("files_content") or {}
+        sources["files_content"] = {
+            path: held[path] if path in held else _read_text(path)
+            for path in files}
     return sources
 
 
@@ -261,6 +266,10 @@ def _origin_from(sources: dict) -> dict:
         origin["modules"] = dict(sources["modules"])
     if sources.get("files"):
         origin["files"] = list(sources["files"])
+        # the restored text, not the disk: what was restored is what runs, so a
+        # later snapshot or revl_edit starts from it (issue #1690)
+        if sources.get("files_content"):
+            origin["files_content"] = dict(sources["files_content"])
     return origin
 
 
