@@ -86,7 +86,7 @@ def test_every_verb_initialize_names_is_in_the_core_tier():
 
 
 def test_the_core_tier_stays_small():
-    assert len(disclosure.CORE) <= 13
+    assert len(disclosure.CORE) <= 14
     assert disclosure.CORE[-1] == disclosure.DISCOVERY
 
 
@@ -143,9 +143,9 @@ def test_an_unknown_topic_or_verb_refuses_with_the_index_as_next(arguments):
 # ------------------------------------------------- unlisted still callable
 
 def test_an_unlisted_verb_is_still_callable_by_name():
-    assert "revl_explain" not in [t["name"] for t in _list()]
-    payload = _call("revl_explain", {"code": "G4"})
-    assert payload["ok"] is True and payload["code"] == "G4"
+    assert "revl_fmt" not in [t["name"] for t in _list()]
+    payload = _call("revl_fmt", {"source": "service S { fn f() -> Int }\n"})
+    assert payload["ok"] is True, payload
 
 
 # ------------------------------------------------------- the opt-out

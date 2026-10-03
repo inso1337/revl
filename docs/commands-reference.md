@@ -149,16 +149,21 @@ of revl source for a grammar-constrained decoder. No sources.
   reading the parser's code (`src/revl/source_grammar.py`), not copied by hand.
   `lark` is llguidance's Lark dialect, `gbnf` the character-level GBNF the
   llama.cpp server and XGrammar read, `ebnf` a plain form for reading. The
-  grammar is an over-approximation of the parser: every document the parser
-  accepts is in its language, and semantic checks stay with the checker. It
-  still refuses shapes the parser refuses, such as a requirement written in a
-  component body (`component C { requires k: S }`) instead of on the header.
+  grammar is an over-approximation of the parser, and semantic checks stay
+  with the checker. It still refuses shapes the parser refuses, such as a
+  requirement written in a component body (`component C { requires k: S }`)
+  instead of on the header. One rule is narrower than the parser, so that a
+  constrained decoder cannot write prose: an expression statement that
+  follows another statement starts a new line (or follows a `;`). The parser
+  would read `the quick brown fox` in a function body as four statements;
+  every corpus document the rule refuses is one the compiler refuses too.
 - `--category program|component-body|statements|expression|type` - scope the
   grammar to one syntactic slot, so a generator filling a hole is held to that
   slot. Defaults to `program`. The MCP `revl_grammar` tool takes the same
   `format` and `category` ([mcp-reference.md](mcp-reference.md#revl_grammar)).
 - `--notes` - where the derivation is looser than the parser: each read it
-  models as any token, and each backtracking construct.
+  models as any token (none today, issue #1698), and each backtracking
+  construct.
 - `--write` / `--check` - regenerate, or check, the committed `grammar/revl.lark`,
   `grammar/revl.gbnf` and `grammar/revl.ebnf` (run from a checkout). A parser
   change that alters the grammar fails `tests/test_source_grammar_1661.py` until

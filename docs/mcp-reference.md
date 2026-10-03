@@ -6,12 +6,33 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The server has exactly the 56 verbs below, one section each. By default `tools/list` advertises the 11 core verbs and `revl_verbs` returns the rest; see "Find a verb".
+The server has exactly the 56 verbs below, one section each. By default `tools/list` advertises the 12 core verbs and `revl_verbs` returns the rest; see "Find a verb".
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
 for its flags). The protocol is JSON over stdio; `tools/list` returns these
 verbs and `tools/call` invokes one.
+
+## The authoring loop
+
+The server's `initialize` instructions name the loop an agent should take, in
+order, and each verb on it opens its description with "Authoring loop step N of
+6" (issue #1704; the text lives in `src/revl/mcp/authoring_loop.py`):
+
+1. **reuse:** `revl_resolve` returns an existing component with its source and
+   manifest, so nothing is generated.
+2. **scaffold:** `revl_scaffold` returns a typed skeleton whose unknowns are
+   `hole[T]`, each with a fillSpec.
+3. **fill:** one hole at a time from its fillSpec. Write the expression into the
+   draft and re-run `revl_check`, or send `revl_edit {hole, expr}` once the
+   composition is running.
+4. **preflight:** `revl_query_withdraw` gives the exact blast radius of replacing
+   or removing a component. `revl_edit` returns it in `blastRadius` for the
+   components it touches, and `revl_plan` shows what a swap would do.
+5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
+   fail with the code and the fix.
+6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
+   `revl_edit` re-admits and swaps on its own. On a cold start, use `revl_load`.
 
 ## How to read this
 
@@ -187,8 +208,8 @@ A successful response is never rewritten.
 
 `tools/list` advertises the core tier by default (issue #1697): the authoring
 loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
-`revl_query_withdraw`, `revl_check`, `revl_admit`, and `revl_plan` before a
-swap), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
+`revl_query_withdraw`, `revl_check`, `revl_admit`, `revl_plan` before a swap,
+and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
 `revl_verbs`. That is about a quarter of the full list's schema size, which
 matters on every cold start. Every verb `initialize` names is in the core tier,
 and a test holds the two together. Every other verb is still served and callable by
@@ -217,6 +238,25 @@ Compile a component. Returns the composition summary, the G8 boundary, and
 message) on success, or structured diagnostics (code, guarantee,
 expected/actual, `fix` hint) on rejection. A draft with holes compiles; it is
 refused at admission until every hole is filled.
+
+Both answers carry `selfCheck`, the one-call self-check against every
+guarantee:
+
+- `guarantees`: one row per guarantee, G1 to G9, each with `code`, `guarantee`
+  (what it means) and `status`:
+  - `pass` when the compile succeeded, since the checker enforces every
+    guarantee before it returns an IR.
+  - `fail` when a diagnostic names it. The row carries the `fix` and the
+    `failures` (code, message, file, line, fix).
+  - `unchecked` when the compile refused before it could prove that guarantee.
+    That is not a pass. Fix the failures and check again.
+- `summary`: the `pass` / `fail` / `unchecked` counts.
+- `admissible`: true only when the compile succeeded with no open holes.
+- `otherFailures`: refusals under any other code (a type error, an amendment,
+  an extended guarantee such as `G-SECRET`), so a green row is never read past
+  a red one elsewhere.
+- `note`: why a draft with holes is not admissible, or why rows are
+  `unchecked`.
 
 - Inputs: `source` / `files` / `modules`.
 
@@ -391,6 +431,14 @@ component you just loaded. Returns the result and the trace it produced.
 What is loaded right now: fiber states, provided keys, whether a rollback is
 available, and the trace since the last call. No inputs.
 
+It always carries `loopAxes`, loaded or not and with or without an approval
+policy: six measures of how the session used the loop, each
+`{numerator, denominator, value}` with `value` null while the denominator is 0,
+plus `boundaryCalls` (executed `revl_call`s by class). The counts are
+cumulative for the MCP session; an unload, commit or abort does not reset
+them. The definitions are in
+[harness-gate-guide.md](harness-gate-guide.md#the-agent-loop-axes-revl_state-loopaxes).
+
 ### `revl_swap`
 
 Admit a candidate against the RUNNING composition and hot-swap it in. A rejected
@@ -412,6 +460,17 @@ patch that breaks a guarantee is refused with its diagnostic and the running
 system is untouched. A clean patch is hot-swapped in; one that still has open
 holes advances the server-side source but swaps nothing. Returns the admission
 verdict / holes / diagnostic, never the whole source.
+
+A swapped edit and a draft edit with open holes both carry `blastRadius`, which
+makes preflight automatic. It is read off the composition that is running when
+the edit arrives:
+- `touched`: the components whose definition changed, plus added and removed
+  ones. Shifted source lines alone do not count. A component also counts when a
+  service it provides or requires changed its declaration.
+- `components`: for each touched component, the `revl_query_withdraw` answer:
+  `cascade`, `withdrawalOrder`, `orphanedKeys`, `breaks`, `precision`. An added
+  component carries `added: true` and an empty cascade.
+- `breaks`: the total across the touched components.
 
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
   replacement}` / `{anchor, replacement, count?}`); `target` (which server-side

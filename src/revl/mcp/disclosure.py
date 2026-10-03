@@ -24,14 +24,15 @@ DISCOVERY = "revl_verbs"
 #: Listed by default. Every verb `initialize` tells an agent to use must be
 #: here (tests/test_mcp_tiered_tools_1697.py holds the two together):
 #:
-#: * the authoring loop, in its order: reuse (resolve), scaffold, fill (edit),
-#:   withdraw-safety (query_withdraw), check, admit, and plan before a swap;
+#: * the authoring loop `initialize` names (#1704), in its order: reuse
+#:   (resolve), scaffold, fill (edit), withdraw-safety (query_withdraw), check,
+#:   admit, plan before a swap, and explain a diagnostic code;
 #: * running it: load, call, swap;
 #: * `revl_source` and `revl_change`, listed once they exist (#1741's stack);
 #:   a name with no verb behind it is skipped, not listed;
 #: * the way to everything else, `revl_verbs`.
 CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
-        "revl_check", "revl_admit", "revl_plan",
+        "revl_check", "revl_admit", "revl_plan", "revl_explain",
         "revl_load", "revl_call", "revl_swap",
         "revl_source", "revl_change",
         DISCOVERY)

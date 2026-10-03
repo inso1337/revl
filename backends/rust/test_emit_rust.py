@@ -3012,6 +3012,313 @@ def test_witnessed_teardown_loop_runs_on_real_cordis_rs(tmp_path):
     assert result.returncode == 0, result.stdout + result.stderr
 
 
+# ---------------------------------------------------------------------------
+# issue #1592: an emission extern that DECLARES its own `compensate` (item 254)
+# registers it at every site it is emitted from, with the py reference's
+# semantics: registered after the fire, discharged on a clean unload, run in
+# Phase 2 on an abort. Before the fix the rust emitter rendered only the
+# forward call, so an abort left "put(..)" with no "restore". `SiteAbort` and
+# `Agent.site` are the controls: a site-spelled `compensate`, which rust
+# registered before the fix. Driven against the real cordis-rs crate.
+# ---------------------------------------------------------------------------
+
+_EXTERN_COMPENSATE_RVL = """
+extern emission fn put_row(body: Str) -> Int compensate restore_row() = @rs {
+    revl_log(format!("put({})", body));
+    1
+}
+extern emission fn restore_row() -> Int = @rs { revl_log(String::from("restore")); 0 }
+extern emission fn note(body: Str) -> Int = @rs { revl_log(format!("note({})", body)); 1 }
+
+service Ops {
+  emission fn run(x: Str) -> Int
+  emission fn site(x: Str) -> Int
+}
+
+component SiteAbort {
+  emit note("s") compensate restore_row()
+  fail "boom"
+}
+component ExternOk {
+  emit put_row("y")
+}
+component ExternAbort {
+  emit put_row("y")
+  fail "boom"
+}
+component Agent provides ops: Ops {
+  provide ops {
+    fn run(x) { emit put_row(x) return 0 }
+    fn site(x) { emit note(x) compensate restore_row() return 0 }
+  }
+}
+component Beat {
+  every 10s { emit put_row("x") }
+}
+"""
+
+_EXTERN_COMPENSATE_HARNESS = """
+static REVL_TEST_LOG: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+fn revl_log(s: String) {
+    REVL_TEST_LOG.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().push(s);
+}
+fn revl_log_clear() {
+    REVL_TEST_LOG.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().clear();
+}
+fn log() -> Vec<String> {
+    REVL_TEST_LOG.get().map(|m| m.lock().unwrap().clone()).unwrap_or_default()
+}
+fn want(expected: &[&str]) {
+    let expected: Vec<String> = expected.iter().map(|s| s.to_string()).collect();
+    assert_eq!(log(), expected);
+}
+
+#[test]
+fn site_spelled_control_runs_on_abort() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    assert!(root.plugin(site_abort(), ()).try_wait().is_err());
+    want(&["note(s)", "restore"]);
+}
+
+#[test]
+fn site_spelled_method_control_runs_on_abort() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(agent(), ());
+    fiber.try_wait().unwrap();
+    let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
+    ops.site("m".to_string());
+    revl_abort("Agent.teardown.phase2");
+    fiber.dispose().unwrap();
+    want(&["note(m)", "restore"]);
+}
+
+#[test]
+fn activation_extern_compensation_discharges_on_clean_unload() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(extern_ok(), ());
+    fiber.try_wait().unwrap();
+    fiber.dispose().unwrap();
+    want(&["put(y)"]);
+}
+
+#[test]
+fn activation_extern_compensation_runs_on_abort() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    assert!(root.plugin(extern_abort(), ()).try_wait().is_err());
+    want(&["put(y)", "restore"]);
+}
+
+#[test]
+fn method_extern_compensation_discharges_on_clean_unload() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(agent(), ());
+    fiber.try_wait().unwrap();
+    let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
+    ops.run("m".to_string());
+    fiber.dispose().unwrap();
+    want(&["put(m)"]);
+}
+
+#[test]
+fn method_extern_compensation_runs_on_abort() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(agent(), ());
+    fiber.try_wait().unwrap();
+    let ops = root.require::<Box<dyn Ops>>("ops").unwrap();
+    ops.run("m".to_string());
+    revl_abort("Agent.teardown.phase2");
+    fiber.dispose().unwrap();
+    want(&["put(m)", "restore"]);
+}
+
+#[test]
+fn timer_extern_compensation_discharges_on_clean_unload() {
+    revl_log_clear();
+    revl_clock_reset();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(beat(), ());
+    fiber.try_wait().unwrap();
+    revl_clock_advance(25000); // fires at 10s and 20s
+    want(&["put(x)", "put(x)"]);
+    fiber.dispose().unwrap();
+    want(&["put(x)", "put(x)"]);
+}
+
+#[test]
+fn timer_extern_compensation_runs_once_per_firing_on_abort() {
+    revl_log_clear();
+    revl_clock_reset();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(beat(), ());
+    fiber.try_wait().unwrap();
+    revl_clock_advance(25000);
+    revl_abort("Beat.teardown.phase2");
+    fiber.dispose().unwrap();
+    want(&["put(x)", "put(x)", "restore", "restore"]);
+}
+"""
+
+
+@needs_cargo
+def test_extern_declared_compensation_registers_at_every_site(tmp_path):
+    """issue #1592, runtime proof against the real cordis-rs crate: an
+    extern-declared `compensate` is registered from an activation body, a
+    provide-method body and a timer firing, discharged on a clean unload and
+    run in Phase 2 on an abort. See `_EXTERN_COMPENSATE_HARNESS`."""
+    ir = compile_source(_EXTERN_COMPENSATE_RVL, "extern_compensate.rvl")
+    src = emit.emit(ir)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(
+        src + "\n" + _EXTERN_COMPENSATE_HARNESS, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    # one static log and one clock shared by every #[test] fn: single-threaded
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_extern_declared_compensation_is_rendered_at_every_site():
+    """Emit-only companion (no cargo needed): each site registers the extern's
+    declared `restore_row()` after the forward call."""
+    src = emit.emit(compile_source(_EXTERN_COMPENSATE_RVL, "extern_compensate.rvl"))
+    # ExternOk, ExternAbort, Agent.run and Beat, plus the two site-spelled
+    # controls (SiteAbort, Agent.site)
+    assert src.count("Box::new(move || { let _ = restore_row(); })") == 6
+    assert '"Beat.timer.compensate"' in src
+    assert '"ExternAbort.compensate"' in src
+    assert '"Agent.run.compensate.' in src
+
+
+# issue #1592, the #1511 positions: inside a provide method a call to an extern
+# that declares its own `compensate` registers it in EVERY position, not only
+# as an `emit` statement: a `let`, a `return`, an argument, a nested operand
+# and an `if` arm. `OnlyValue`'s provide holds no `emit` statement at all, so it
+# also pins that such a component still gets the activation accumulator.
+_DECLARED_POSITIONS_RVL = """
+extern emission fn put_row(body: Str) -> Int compensate restore_row() = @rs {
+    revl_log(format!("put({})", body));
+    1
+}
+extern emission fn restore_row() -> Int = @rs { revl_log(String::from("restore")); 0 }
+extern pure fn keep(n: Int) -> Int = @rs { n }
+
+service Vals {
+  emission fn bound(x: Str) -> Int
+  emission fn returned(x: Str) -> Int
+  emission fn argument(x: Str) -> Int
+  emission fn nested(x: Str) -> Int
+  emission fn guarded(x: Str) -> Int
+}
+service Only { emission fn returned(x: Str) -> Int }
+
+component Values provides vals: Vals {
+  provide vals {
+    fn bound(x) {
+      let a = emit put_row(x)
+      return a
+    }
+    fn returned(x) { return emit put_row(x) }
+    fn argument(x) {
+      let s = keep(emit put_row(x))
+      return s
+    }
+    fn nested(x) {
+      let b = emit put_row(x) + 1
+      return b
+    }
+    fn guarded(x) {
+      if (true) { emit put_row(x) }
+      return 0
+    }
+  }
+}
+component OnlyValue provides only: Only {
+  provide only { fn returned(x) { return emit put_row(x) } }
+}
+"""
+
+_DECLARED_POSITIONS_HARNESS = """
+static REVL_TEST_LOG: std::sync::OnceLock<std::sync::Mutex<Vec<String>>> = std::sync::OnceLock::new();
+
+fn revl_log(s: String) {
+    REVL_TEST_LOG.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().push(s);
+}
+fn revl_log_clear() {
+    REVL_TEST_LOG.get_or_init(|| std::sync::Mutex::new(Vec::new())).lock().unwrap().clear();
+}
+fn log() -> Vec<String> {
+    REVL_TEST_LOG.get().map(|m| m.lock().unwrap().clone()).unwrap_or_default()
+}
+
+fn run(tag: &str, abort: bool) -> Vec<String> {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(values(), ());
+    fiber.try_wait().unwrap();
+    let v = root.require::<Box<dyn Vals>>("vals").unwrap();
+    let arg = tag.to_string();
+    let _ = match tag {
+        "let" => v.bound(arg),
+        "return" => v.returned(arg),
+        "argument" => v.argument(arg),
+        "nested" => v.nested(arg),
+        _ => v.guarded(arg),
+    };
+    if abort {
+        revl_abort("Values.teardown.phase2");
+    }
+    fiber.dispose().unwrap();
+    log()
+}
+
+#[test]
+fn every_value_position_runs_its_compensation_on_abort() {
+    for tag in ["let", "return", "argument", "nested", "ifarm"] {
+        assert_eq!(run(tag, true), vec![format!("put({})", tag), "restore".to_string()], "{}", tag);
+    }
+}
+
+#[test]
+fn every_value_position_discharges_on_clean_unload() {
+    for tag in ["let", "return", "argument", "nested", "ifarm"] {
+        assert_eq!(run(tag, false), vec![format!("put({})", tag)], "{}", tag);
+    }
+}
+
+#[test]
+fn a_provide_with_only_value_positions_still_registers() {
+    revl_log_clear();
+    let root = cordis::Context::new();
+    let fiber = root.plugin(only_value(), ());
+    fiber.try_wait().unwrap();
+    let o = root.require::<Box<dyn Only>>("only").unwrap();
+    let _ = o.returned("o".to_string());
+    revl_abort("OnlyValue.teardown.phase2");
+    fiber.dispose().unwrap();
+    assert_eq!(log(), vec!["put(o)".to_string(), "restore".to_string()]);
+}
+"""
+
+
+@needs_cargo
+def test_declared_compensation_registers_in_every_value_position(tmp_path):
+    """issue #1592 (the positions of #1511), runtime proof against the real
+    cordis-rs crate. See `_DECLARED_POSITIONS_HARNESS`."""
+    src = emit.emit(compile_source(_DECLARED_POSITIONS_RVL, "declared_positions.rvl"))
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "lib.rs").write_text(
+        src + "\n" + _DECLARED_POSITIONS_HARNESS, encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text(emit.cargo_toml("revl_check"), encoding="utf-8")
+    result = _cargo("test", tmp_path, "--", "--test-threads=1")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_witnessed_call_site_emits_transactional_registration():
     """Emit-only companion (no cargo needed): the witnessed call site compiles
     to a transactional registration keyed off `committed`, not a plain
