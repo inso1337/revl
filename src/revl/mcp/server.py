@@ -76,6 +76,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import fillspec
 from . import draft as _draft
+from . import knowledge_index as _knowledge
 from . import proposal as _proposal
 from . import edit as _edit
 from . import leases as _leases
@@ -818,6 +819,33 @@ def _origin(arguments: dict) -> dict:
     return origin
 
 
+# the verbs whose responses carry the knowledge entries of the symbols they
+# touched (issue #1745)
+_KNOWLEDGE_RIDES = frozenset({"revl_edit", "revl_change", "revl_swap"})
+
+
+def _ride_knowledge(name: str, payload) -> None:
+    """Keep the session's knowledge index current with the running composition
+    and attach the entries a call's touched symbols concern (issue #1745)."""
+    if not isinstance(payload, dict):
+        return
+    try:
+        entries = _knowledge.refresh(SESSION)
+        if name in _KNOWLEDGE_RIDES and payload.get("touched"):
+            payload["knowledge"] = _knowledge.ride(
+                entries, _knowledge.touched_symbols(payload))
+        elif name == "revl_load" and SESSION.loaded:
+            payload["knowledge"] = _k_counts(entries)
+    except Exception:  # noqa: BLE001 — an index failure never fails the call
+        return
+
+
+def _k_counts(entries: list) -> dict:
+    from ..knowledge import counts  # noqa: PLC0415
+
+    return counts(entries)
+
+
 def _remember_live_host_bodies() -> None:
     """Re-read the host bodies the LIVE composition carries, so a later
     class-(c) ticket can name them. Called after every completed tool call, so
@@ -1032,6 +1060,11 @@ def _tool_source(arguments: dict) -> dict:
                                comments=arguments.get("comments", True) is not False)
     except (_symbols.SymbolError, _edit.EditError) as error:
         return _session_error(str(error))
+    if "knowledge" in (arguments.get("with") or []):
+        entries = (_knowledge.refresh(SESSION)
+                   if SESSION.loaded and arguments.get("proposal") is not True
+                   else _knowledge.index_of(vs, None))
+        result["knowledge"] = _knowledge.ride(entries, [result["symbol"]])
     return {"ok": True, **result}
 
 
@@ -1753,6 +1786,11 @@ def _tool_estop_report(_arguments: dict) -> dict:
 
 def _tool_state(_arguments: dict) -> dict:
     state = {"ok": True, **SESSION.state(drain=True)}
+    if SESSION.loaded:
+        try:
+            state["knowledge"] = _k_counts(_knowledge.refresh(SESSION))
+        except Exception:  # noqa: BLE001 — never fails the state read
+            pass
     held = _draft.pending(SESSION)
     if held is not None and not SESSION.loaded:
         try:
@@ -2078,11 +2116,11 @@ def _tool_check(arguments: dict) -> dict:
     try:
         ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
-        rejected = report(error)
+        refused = report(error)
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
-        rejected["selfCheck"] = _authoring_loop.self_check(rejected["diagnostics"])
-        return rejected
+        refused["selfCheck"] = _authoring_loop.self_check(refused["diagnostics"])
+        return _with_candidate_knowledge(refused, arguments, refused)
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
@@ -2094,9 +2132,28 @@ def _tool_check(arguments: dict) -> dict:
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
-    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": holes,
-            "selfCheck": _authoring_loop.self_check(None, holes)}
+    return _with_candidate_knowledge(
+        {"ok": True, **_summary(ir), "boundary": _boundary_of(ir), "holes": holes,
+         "selfCheck": _authoring_loop.self_check(None, holes)},
+        arguments, None)
+
+
+def _with_candidate_knowledge(payload: dict, arguments: dict, refused) -> dict:
+    """A checked candidate's comment index (issue #1745): its counts and any
+    comment the compiler no longer agrees with (an `expected error:` it does
+    not raise, a `REFUSED` head on a file that compiles)."""
+    try:
+        if arguments.get("source") is not None:
+            vs = {"source": arguments["source"],
+                  "modules": dict(arguments.get("modules") or {})}
+        elif arguments.get("files"):
+            vs = _edit._files_source({"files": list(arguments["files"])})
+        else:
+            return payload
+        payload["knowledge"] = _knowledge.for_candidate(vs, refused)
+    except Exception:  # noqa: BLE001 — an index failure never fails the check
+        pass
+    return payload
 
 
 def _untrusted_author() -> bool:
@@ -2983,8 +3040,10 @@ TOOLS = [
                            "description": "`Name`, `<buffer>:Name` or "
                                           "`<buffer>:<line>`"},
                 "with": {"type": "array", "items": {"type": "string",
-                                                    "enum": ["deps"]},
-                         "description": "`deps`: also the declarations it names"},
+                                                    "enum": ["deps", "knowledge"]},
+                         "description": "`deps`: also the declarations it names; "
+                                        "`knowledge`: the comment-index entries "
+                                        "about it"},
                 "comments": {"type": "boolean",
                              "description": "false: code only, canonical "
                                             "(default true: verbatim)"},
@@ -4304,6 +4363,7 @@ def handle(message: dict) -> dict | None:
             try:
                 payload = handler(arguments)
                 _remember_live_host_bodies()
+                _ride_knowledge(name, payload)
             except ApprovalRequired as exc:
                 # item 246: a class-(c) crossing the decision inside Session.call
                 # (or the activation gate in load/swap) refused. This is a result,

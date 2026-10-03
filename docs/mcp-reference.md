@@ -499,6 +499,36 @@ it first. After an export, the files on disk equal `revl_snapshot`'s
 
 - Inputs: `path` and `overwrite` (inline compositions).
 
+### The comment index (`knowledge` on responses)
+
+When a composition is loaded, and when `revl_check` reads a candidate, the
+server indexes the comments it already has (issue #1745; knowledge slice 2 of
+the design study). Each comment block is anchored to the declaration it
+describes (the symbol path `revl_source` uses), with a fingerprint of that
+declaration's canonical, comment-free code, and classified:
+
+| tier | when | what is kept |
+|---|---|---|
+| `derived` | an `expected error:` block, or a `REFUSED` / `REJECTED` / `ADMITTED` head | a reference to the diagnostic, re-checked against the compile: `live` if the compiler still says it, `refuted` if not. No body |
+| `served` | the block cites a guarantee code (`G4`, `T1`, ...) or a `docs/` path | a reference: `revl explain` the code, read the doc. No body |
+| `doc` | everything else | the body, bounded |
+
+An entry goes `stale` when its anchor's fingerprint changes. A comment-only
+edit or a `revl fmt` reformat changes no fingerprint, so it stales nothing; an
+edited comment is a new entry. The index rides on responses:
+
+- `revl_edit`, `revl_change` and `revl_swap` carry `knowledge: {touched, live,
+  stale, refuted}` for the symbols they touched (and the declarations that
+  contain them), at most 8 of each;
+- `revl_source {with: ["knowledge"]}` carries the entries about the symbol;
+- `revl_check` carries the candidate's counts and every `refuted` entry, so a
+  comment the compiler no longer agrees with is visible before anything loads;
+- `revl_load` and `revl_state` carry the counts (`entries`, `live`, `stale`,
+  `refuted`).
+
+On this tree, 158 of the 163 `expected error:` blocks are live and 5 are
+refuted: the drift the study measured.
+
 ### `revl_source`
 
 Read ONE top-level declaration of the server-side source by symbol, instead of
