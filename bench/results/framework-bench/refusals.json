@@ -44,14 +44,26 @@
           ]
         },
         "ts": {
-          "residual": 4,
-          "corpus": 61,
-          "reproduced": 57,
+          "residual": 16,
+          "corpus": 76,
+          "reproduced": 60,
           "documents": [
+            "../../../backends/go/scenarios/advance.rvl",
+            "../../../backends/go/testdata/opt_gaps_280.rvl",
+            "../../../backends/go/testdata/stream_130.rvl",
             "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+            "../../../examples/async_timer.rvl",
             "../../../examples/java_match.rvl",
+            "../../../examples/lifecycle_cache.rvl",
+            "../../../stdlib/fs.rvl",
+            "../../../stdlib/router.rvl",
+            "../emit_py_corpus/branches.rvl",
             "../emit_py_corpus/services_control_flow.rvl",
-            "component_edges.rvl"
+            "../emit_rust_corpus/comp_stream.rvl",
+            "component_edges.rvl",
+            "extern_compensate.rvl",
+            "ref_externs.rvl",
+            "routed_timers.rvl"
           ]
         },
         "wasm": {
@@ -61,8 +73,8 @@
           "documents": []
         }
       },
-      "total_residual": 15,
-      "total_corpus": 278,
+      "total_residual": 27,
+      "total_corpus": 293,
       "clean_tiers": [
         "java",
         "wasm"
@@ -74,10 +86,13 @@
       "means": "constructs the reference emitter implements and the self-host port does not",
       "tiers": {
         "go": {
-          "unported_constructs": 48,
-          "unported_reasons": 10,
+          "unported_constructs": 49,
+          "unported_reasons": 11,
           "blind_constructs": 1,
           "reasons": {
+            "Issues #1511 and #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit` (a `ctx.Effect` compensation entry), a provide-method `emit` and every value position of a provide method (`registerMethodCompensation`, through `revlDeclared` for a `let`, a `return`, an argument or a nested operand), and a timer firing. It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/extern_compensate/exec_test.go.": [
+              "class=emission"
+            ],
             "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
               "kind=bool",
               "kind=fn",
@@ -268,10 +283,13 @@
           }
         },
         "rust": {
-          "unported_constructs": 20,
-          "unported_reasons": 7,
+          "unported_constructs": 21,
+          "unported_reasons": 8,
           "blind_constructs": 14,
           "reasons": {
+            "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+              "class=emission"
+            ],
             "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
               "secret=<true>",
               "secret_return=<true>"
@@ -309,39 +327,10 @@
           }
         },
         "ts": {
-          "unported_constructs": 16,
-          "unported_reasons": 8,
+          "unported_constructs": 1,
+          "unported_reasons": 1,
           "blind_constructs": 4,
           "reasons": {
-            "component `call`, `load`, and `unload` steps require routed instance/reference lifecycle machinery rather than the mirrored provide/guard/effect subset; their source branches terminate in the reference component runtime, not v3 statement emission": [
-              "step=call",
-              "step=load",
-              "step=unload"
-            ],
-            "in-file lifecycle tests are emitted by reference-only `_emit_ts_lifecycle_tests`; corpus oracle documents compile library/application output and the port intentionally has no test-runner generation path": [
-              "lifecycle=<true>"
-            ],
-            "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81: the java tier, which still refuses the whole stream surface)": [
-              "kind=stream-merge",
-              "kind=subscribe",
-              "stage=take",
-              "step=stream-iter"
-            ],
-            "reference roots named `stdlib` enter `_emit_ts_ref_runtime`/`_emit_ts_ref_thunk`; the self-host corpus contract requires ordinary host roots and refuses missing host roots instead of synthesizing reference-runtime thunks": [
-              "root=stdlib"
-            ],
-            "temporal `every` and component timer/advance/assert-no-residue steps are handled by reference-only `_emit_temporal` and runtime scheduler hooks, outside the self-host emitter's synchronous component subset": [
-              "mode=every",
-              "step=advance",
-              "step=assert_no_residue",
-              "step=timer"
-            ],
-            "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
-              "kind=do"
-            ],
-            "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
-              "class=witnessed"
-            ],
             "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
               "kind=hole"
             ]
@@ -423,7 +412,7 @@
           }
         }
       },
-      "total_unported": 187
+      "total_unported": 174
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -431,16 +420,16 @@
       "means": "dispatch arms an oracle's reference implementation can take that no corpus document exhibits; an unexercised path, not a refusal",
       "oracles": {
         "compile": 1,
-        "emit_go": 49,
+        "emit_go": 50,
         "emit_java": 36,
         "emit_py": 28,
-        "emit_rust": 34,
-        "emit_ts": 20,
+        "emit_rust": 35,
+        "emit_ts": 5,
         "emit_wasm": 50,
         "gate_census": 5,
         "lower_ir": 5
       },
-      "total_unreached": 228
+      "total_unreached": 215
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

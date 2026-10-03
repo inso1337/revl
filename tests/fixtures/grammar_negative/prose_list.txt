@@ -1,0 +1,5 @@
+I made three changes:
+
+1. The cache now expires entries after a minute.
+2. The database call is retried once on failure.
+3. Errors are logged instead of being swallowed.

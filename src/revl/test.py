@@ -1172,7 +1172,9 @@ def cross_tier_sweep_command(ir: dict) -> int:
     if failures:
         counts = dossier["counts"]
         print(f"[sweep-all] {counts['tiersLeakingResidue']} tier(s) left "
-              f"residue, {counts['disagreements']} cross-tier disagreement(s)",
+              f"residue, {counts['tiersDiverging']} tier(s) ran compensations "
+              f"other than those declared, {counts['disagreements']} "
+              f"cross-tier disagreement(s)",
               file=sys.stderr)
         return 1
     if dossier["counts"]["executed"] == 0:

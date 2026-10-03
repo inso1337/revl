@@ -17,6 +17,12 @@ authoring agent reaches for before anything is live, each with both its CLI
 form and its MCP form. Every step of the loop is reachable either way, so an
 MCP-native agent never has to shell out.
 
+Over MCP the server states the full loop itself, in its `initialize`
+instructions: reuse (`revl_resolve`) -> scaffold (`revl_scaffold`) -> fill ->
+preflight (`revl_query_withdraw`) -> check (`revl_check`'s `selfCheck`, every
+guarantee G1-G9 as pass or fail) -> commit (`revl_admit`). See
+[mcp-reference.md](mcp-reference.md#the-authoring-loop).
+
 ## The loop
 
 ```
@@ -51,7 +57,12 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    obligation: `crossing.required` is always false, so do not spend effort
    deciding whether a hole "is an emission position". If the fill needs a
    crossing, `crossing.calls` lists the ones allowed there, already written
-   as `emit db.put(<k: Str>, <v: Str>)`. Fill one hole against its spec, re-check,
+   as `emit db.put(<k: Str>, <v: Str>)`. If it needs host code, `externs`
+   says where the declaration goes (the top level of the file, never at the
+   hole) and whether you may write one at all: an untrusted author may not.
+   `grammarCategory` names the syntactic slot the fill must be (today
+   `expression` for every hole); pass it as `category` to `revl_grammar`
+   with a `format` to hold a constrained decoder to that slot. Fill one hole against its spec, re-check,
    repeat. This is the step that turns generate-whole/refuse/regenerate into
    scaffold/fill/fill: most wrong answers become unrepresentable before they
    are written.

@@ -1,0 +1,211 @@
+// Blast-radius benchmark composition: two tenants on one platform, 22
+// components.
+//
+// Each tenant runs the same stack in its own realm (`tenant_a`, `tenant_b`):
+//
+//   <T>Store (kv)          <- <T>Cache, <T>Users
+//   <T>Cache (cache)       <- <T>Sessions
+//   <T>Users (users)       <- <T>Sessions
+//   <T>Sessions (sessions) <- <T>Api
+//   <T>Api (api)           <- <T>Worker
+//   <T>Notify (notify)     <- <T>Api
+//   <T>Audit (audit)       <- nobody in the tenant; the platform reads it
+//   <T>Worker              provides nothing
+//
+// Shared by both tenants (no realm): Journal (ledger), MailRelay (mail),
+// BillingService (billing), MetricsSink (metrics), StatusPage (status).
+//
+// Every per-tenant key is provided twice, once per realm. That is legal
+// because provision is unique per (key, realm) (G2), and it is why
+// withdrawing one tenant's store breaks that tenant and nothing of the other.
+// `send_mail` and `ledger_write` are irreversible: a sent message cannot be
+// unsent and a journal line cannot be taken back.
+
+extern emission fn ledger_write(line: Str) -> Str
+  = @py { return line }
+  = @ts { return line; }
+
+extern emission fn send_mail(to: Str, body: Str) -> Str
+  = @py { return to }
+  = @ts { return to; }
+
+service Ledger { emission[ledger_write] fn append(line: Str) -> Str }
+service Mailer { emission[send_mail] fn send(to: Str, body: Str) -> Str }
+service Billing {
+  fn balance(account: Str) -> Str
+  emission[ledger] fn charge(account: Str) -> Str
+  emission[ledger] fn refund(account: Str) -> Str
+}
+service Metrics { fn count(name: Str) -> Str }
+service Status { fn page(name: Str) -> Str }
+service Kv { fn read(k: Str) -> Str }
+service Cache { fn read(k: Str) -> Str }
+service Users { fn read(k: Str) -> Str }
+service Sessions { fn open(user: Str) -> Str }
+service Api {
+  fn handle(path: Str) -> Str
+  emission[billing] fn refund(account: Str) -> Str
+}
+service Notify { emission[mail] fn tell(user: Str, body: Str) -> Str }
+service Audit { emission[ledger] fn record(line: Str) -> Str }
+service Work { fn tick(n: Str) -> Str }
+
+component Journal provides ledger: Ledger {
+  provide ledger {
+    fn append(line) = emit ledger_write(line)
+  }
+}
+
+component MailRelay provides mail: Mailer {
+  provide mail {
+    fn send(to, body) = emit send_mail(to, body)
+  }
+}
+
+component BillingService requires ledger: Ledger provides billing: Billing {
+  provide billing {
+    fn balance(account) = account
+    fn charge(account) = emit ledger.append(account)
+    fn refund(account) = emit ledger.append(account)
+  }
+}
+
+component MetricsSink provides metrics: Metrics {
+  provide metrics {
+    fn count(name) = name
+  }
+}
+
+component StatusPage requires metrics: Metrics provides status: Status {
+  provide status {
+    fn page(name) = metrics.count(name)
+  }
+}
+
+component TenantAStore requires ledger: Ledger provides kv: Kv {
+  isolate kv in realm("tenant_a")
+  provide kv {
+    fn read(k) = k
+  }
+}
+
+component TenantACache requires kv: Kv provides cache: Cache {
+  isolate kv in realm("tenant_a")
+  isolate cache in realm("tenant_a")
+  provide cache {
+    fn read(k) = kv.read(k)
+  }
+}
+
+component TenantAUsers requires kv: Kv provides users: Users {
+  isolate kv in realm("tenant_a")
+  isolate users in realm("tenant_a")
+  provide users {
+    fn read(k) = kv.read(k)
+  }
+}
+
+component TenantASessions requires users: Users, cache: Cache provides sessions: Sessions {
+  isolate users in realm("tenant_a")
+  isolate cache in realm("tenant_a")
+  isolate sessions in realm("tenant_a")
+  provide sessions {
+    fn open(user) = cache.read(users.read(user))
+  }
+}
+
+component TenantANotify requires mail: Mailer provides notify: Notify {
+  isolate notify in realm("tenant_a")
+  provide notify {
+    fn tell(user, body) = emit mail.send(user, body)
+  }
+}
+
+component TenantAApi requires sessions: Sessions, notify: Notify, billing: Billing provides api: Api {
+  isolate sessions in realm("tenant_a")
+  isolate notify in realm("tenant_a")
+  isolate api in realm("tenant_a")
+  provide api {
+    fn handle(path) = sessions.open(path)
+    fn refund(account) = emit billing.refund(account)
+  }
+}
+
+component TenantAAudit requires ledger: Ledger provides audit: Audit {
+  isolate audit in realm("tenant_a")
+  provide audit {
+    fn record(line) = emit ledger.append(line)
+  }
+}
+
+component TenantAWorker requires api: Api provides work: Work {
+  isolate api in realm("tenant_a")
+  isolate work in realm("tenant_a")
+  provide work {
+    fn tick(n) = api.handle(n)
+  }
+}
+
+component TenantBStore requires ledger: Ledger provides kv: Kv {
+  isolate kv in realm("tenant_b")
+  provide kv {
+    fn read(k) = k
+  }
+}
+
+component TenantBCache requires kv: Kv provides cache: Cache {
+  isolate kv in realm("tenant_b")
+  isolate cache in realm("tenant_b")
+  provide cache {
+    fn read(k) = kv.read(k)
+  }
+}
+
+component TenantBUsers requires kv: Kv provides users: Users {
+  isolate kv in realm("tenant_b")
+  isolate users in realm("tenant_b")
+  provide users {
+    fn read(k) = kv.read(k)
+  }
+}
+
+component TenantBSessions requires users: Users, cache: Cache provides sessions: Sessions {
+  isolate users in realm("tenant_b")
+  isolate cache in realm("tenant_b")
+  isolate sessions in realm("tenant_b")
+  provide sessions {
+    fn open(user) = cache.read(users.read(user))
+  }
+}
+
+component TenantBNotify requires mail: Mailer provides notify: Notify {
+  isolate notify in realm("tenant_b")
+  provide notify {
+    fn tell(user, body) = emit mail.send(user, body)
+  }
+}
+
+component TenantBApi requires sessions: Sessions, notify: Notify, billing: Billing provides api: Api {
+  isolate sessions in realm("tenant_b")
+  isolate notify in realm("tenant_b")
+  isolate api in realm("tenant_b")
+  provide api {
+    fn handle(path) = sessions.open(path)
+    fn refund(account) = emit billing.refund(account)
+  }
+}
+
+component TenantBAudit requires ledger: Ledger provides audit: Audit {
+  isolate audit in realm("tenant_b")
+  provide audit {
+    fn record(line) = emit ledger.append(line)
+  }
+}
+
+component TenantBWorker requires api: Api provides work: Work {
+  isolate api in realm("tenant_b")
+  isolate work in realm("tenant_b")
+  provide work {
+    fn tick(n) = api.handle(n)
+  }
+}

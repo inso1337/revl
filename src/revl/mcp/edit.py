@@ -70,6 +70,7 @@ from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
 from . import fillspec
+from .authoring_loop import blast_radius
 
 _WORD_HOLE = re.compile(r"\bhole\b")
 
@@ -341,11 +342,14 @@ def apply_edit(session, arguments: dict) -> dict:
 
     # (2) open holes -> checked, not admissible. Advance the working buffer so
     # the next edit builds on it (fill holes one at a time), but swap nothing.
-    holes = fillspec.enrich(ir) if ir.get("holes") else []
+    from .server import _untrusted_author  # noqa: PLC0415 - no import cycle
+    holes = (fillspec.enrich(ir, untrusted=_untrusted_author())
+             if ir.get("holes") else [])
     if holes:
         session.draft = vs
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
                 "applied": applied, "holes": holes,
+                "blastRadius": blast_radius(session.ir, ir),
                 **_summary(ir),
                 "note": f"{len(holes)} open hole(s) remain — the edit was applied "
                         "to the server-side source and it compiles, but a hole may "
@@ -389,10 +393,13 @@ def apply_edit(session, arguments: dict) -> dict:
     if quarantined is not None:  # required quarantine: not proved, not swapped
         return {**quarantined, "edited": False, "applied": applied}
 
+    # issue #1704: the cascade of what this edit replaces, read off the
+    # composition that is running now, so preflight comes with the change.
+    radius = blast_radius(session.ir, ir)
     state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
-            "applied": applied, **_summary(ir), **state}
+            "applied": applied, "blastRadius": radius, **_summary(ir), **state}
 
 
 def _summary(ir: dict) -> dict:

@@ -310,6 +310,13 @@ class _Env:
         # at a `Map.new()` acquisition (`MapNew[int64]()`); set transiently by
         # the let-effect emitter, None everywhere else.
         self.map_new_value: str | None = None
+        # issue #1592: inside a provide method whose impl holds the activation
+        # frame, the frame expression a value-position call to an extern
+        # declaring a `compensate` registers on; and the one call node an `emit`
+        # statement registers itself (rendered bare, so it is not registered
+        # twice).
+        self.declared_frame: str | None = None
+        self.declared_skip = None
 
     def _prefix(self) -> str:
         return (self.receiver + ".") if self.receiver else ""
@@ -639,7 +646,7 @@ def _expr(node, env: _Env, expected=None) -> str:
         # tier limit beats a fall-through.
         name = _v3_ident(node.get("name"), "function")
         args = ", ".join(_expr(a, env) for a in node.get("args") or [])
-        return "%s(%s)" % (name, args)
+        return _declared_call(node, "%s(%s)" % (name, args), env)
     if kind == "record":
         # v3 typed-core only: a record literal needs the document's declared
         # record type for its field set (the v1/v2 tier carries none).
@@ -1214,6 +1221,11 @@ def _flag_stream_event() -> None:
 # `witnessed` extern, so their emission stays byte-identical. Rebuilt per
 # `emit()` call (mirrors `_V3_TYPES`).
 _WITNESSED_EXTERNS: dict = {}
+# item 254 (issue #1592): emission externs that DECLARE their own `compensate`,
+# by name. Every `emit` of one registers that compensation, at whatever site the
+# emit sits. Empty for a document with no such extern, so its emission stays
+# byte-identical. Rebuilt per `emit()` call, beside `_WITNESSED_EXTERNS`.
+_COMPENSATED_EXTERNS: dict = {}
 # Whether the document needs the `RevlFrame` teardown accumulator preamble
 # (any component uses a witnessed effect or an `emit ... compensate ...`).
 # Flags `_TEARDOWN_PREAMBLE` + the `time`/`os`/`strconv` imports into the
@@ -1226,6 +1238,9 @@ _COMP_NEEDS_TEARDOWN = False
 # with only activation-body witnessed effects / compensations leaves this False
 # and emits the base preamble byte-identically.
 _COMP_NEEDS_METHOD_WITNESSED = False
+# issue #1592: whether some provide method calls an extern that declares its
+# own `compensate` in a value position, so `revlDeclared` is emitted.
+_COMP_NEEDS_DECLARED = False
 # Per-emit counter for unique witnessed-step local names (`_revlWit1`, …).
 _WITNESSED_COUNTER = 0
 # item 322 Slice 1: record mode. When True, a witnessed transactional step also
@@ -1613,6 +1628,8 @@ def _emit_provide_impl(comp_name, prov_name, service_name, methods, services,
             out.append("\trevlMarkSecret(%s)" % ", ".join(secret_params))
         env = _Env(binds, reqs, _config_fields_flag(has_config),
                    params=m.get("params", []), receiver=_METHOD_RECEIVER)
+        if has_method_frame:
+            env.declared_frame = "%s.revlFrame" % _METHOD_RECEIVER
         for pn in m.get("params", []):
             env.var_types[pn] = ptypes.get(pn)
         _emit_method_body(m.get("body", []), env, out, 1,
@@ -1795,9 +1812,12 @@ def _emit_method_body(body, env: _Env, out, indent, ret_surface=None):
             # abort (fired after every proof inverse, guarded, residue-collected).
             # The frame is reached the same way as the witnessed seam
             # (`receiver.revlFrame`, wired at provide construction).
-            comp_node = step.get("compensate")
+            env.declared_skip = step.get("expr")
             out.append("%s%s" % (pad, _expr(step["expr"], env)))
-            if comp_node is not None:
+            env.declared_skip = None
+            # the site-spelled clause, then the extern's own declared one
+            # (item 254, issue #1592), each registered after the fire.
+            for comp_node in _emit_compensations(step):
                 compensate_call = _expr(comp_node, env)
                 key, method = _call_descriptor(comp_node)
                 frame = "%s.revlFrame" % env.receiver
@@ -2555,6 +2575,97 @@ def _method_body_has_witnessed(body) -> bool:
     return False
 
 
+_REVL_DECLARED = '''// revlDeclared registers the compensation an extern DECLARES (item 254) for a
+// call in a value position of a provide method (a let, a return, an argument,
+// a nested operand; issue #1592). Go evaluates the argument v, the
+// call itself, before revlDeclared runs, so the offset is parked only once the
+// call has returned, exactly as a method-body emit statement parks it.
+func revlDeclared[T any](f *RevlFrame, v T, key, method string, run func() error) T {
+	f.registerMethodCompensation(key, method, run)
+	return v
+}
+'''
+
+
+def _declared_call(node, call: str, env) -> str:
+    """A call to an extern that declares its own `compensate`, in a value
+    position of a provide method (issue #1592; the positions of #1511): it
+    renders through `revlDeclared`, which registers the offset on the
+    activation frame after the call returns. An `emit` statement's own call
+    renders bare (`env.declared_skip`), because the statement registers it."""
+    if not _COMPENSATED_EXTERNS or not env.declared_frame or node is env.declared_skip:
+        return call
+    ext = _COMPENSATED_EXTERNS.get(node.get("name"))
+    if ext is None:
+        return call
+    global _COMP_NEEDS_DECLARED, _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
+    _COMP_NEEDS_DECLARED = True
+    _COMP_NEEDS_TEARDOWN = True
+    _COMP_NEEDS_METHOD_WITNESSED = True
+    comp = _as_fn_call(ext["compensate"])
+    key, method = _call_descriptor(comp)
+    return "revlDeclared(%s, %s, %s, %s, func() error { %s; return nil })" % (
+        env.declared_frame, call, _go_string(key), _go_string(method), _expr(comp, env))
+
+
+def _reaches_declared(node) -> bool:
+    """Whether any `fn` call in *node* (an IR subtree) names an extern that
+    declares its own `compensate`."""
+    if not _COMPENSATED_EXTERNS:
+        return False
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in _COMPENSATED_EXTERNS:
+            return True
+        return any(_reaches_declared(v) for v in node.values())
+    if isinstance(node, list):
+        return any(_reaches_declared(v) for v in node)
+    return False
+
+
+def _compensated_table(externs) -> dict:
+    """Emission externs that declare a `compensate` slot, by name (item 254)."""
+    return {
+        ext["name"]: ext for ext in externs
+        if ext.get("class") == "emission" and ext.get("compensate") is not None
+    }
+
+
+def _as_fn_call(node):
+    """An extern's declared slot is lowered in the pure-expression dialect
+    (`{"kind": "call", "callee": {"kind": "var", ...}}`). Re-spell a bare named
+    call as the component-site `fn` node the component renderer and
+    `_call_descriptor` read. Anything else is returned as is."""
+    if isinstance(node, dict) and node.get("kind") == "call" and "method" not in node:
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            return {"kind": "fn", "name": callee.get("name"),
+                    "args": list(node.get("args") or [])}
+    return node
+
+
+def _emit_compensations(step) -> list:
+    """The compensations an `emit` step registers, in order: the site-spelled
+    `compensate` clause, then the emitted extern's own declared one (item 254,
+    issue #1592). The order the py reference registers them in. An extern is
+    matched as a `fn`-kind call naming it (backends/python/emit.py
+    `_compensated_extern`)."""
+    out = []
+    if step.get("compensate") is not None:
+        out.append(step["compensate"])
+    expr = step.get("expr")
+    if _COMPENSATED_EXTERNS and isinstance(expr, dict) and expr.get("kind") == "fn":
+        ext = _COMPENSATED_EXTERNS.get(expr.get("name"))
+        if ext is not None:
+            out.append(_as_fn_call(ext["compensate"]))
+    return out
+
+
+def _timer_has_compensate(step) -> bool:
+    """True iff a `timer` step's firing emits an extern that declares its own
+    `compensate`, so each firing registers onto the activation frame."""
+    return any(_emit_compensations(em) for em in step.get("body") or [])
+
+
 def _method_body_has_compensate(body) -> bool:
     """True iff a provide-METHOD body carries an `emit ... compensate ...` step
     (the item-247 method-body compensate remainder). Its compensation is parked
@@ -2565,9 +2676,11 @@ def _method_body_has_compensate(body) -> bool:
     soundness bug this closes on go); the frame seam is what makes it abort-only,
     Phase-2, and discharged on commit."""
     for step in body or []:
-        if step.get("step") == "emit" and step.get("compensate") is not None:
+        if step.get("step") == "emit" and _emit_compensations(step):
             return True
-    return False
+    # issue #1592: a call to an extern declaring a `compensate` in a value
+    # position (a `let`, a `return`, an argument, a nested operand)
+    return _reaches_declared(body)
 
 
 def _provide_has_method_frame(provide_step) -> bool:
@@ -2590,7 +2703,9 @@ def _body_needs_frame(steps) -> bool:
         kind = step.get("step")
         if kind in ("let-effect", "effect") and _witnessed_extern(step.get("acquire")) is not None:
             return True
-        if kind == "emit" and step.get("compensate") is not None:
+        if kind == "emit" and _emit_compensations(step):
+            return True
+        if kind == "timer" and _timer_has_compensate(step):
             return True
         if kind == "provide" and _provide_has_method_frame(step):
             return True
@@ -3174,12 +3289,16 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # `runCompensationPhase` drains the queue, best-effort and bounded,
         # via the goroutine-abandon pattern (go's per-tier obligation).
         emit_call = _expr(step["expr"], env)
-        comp_node = step.get("compensate")
-        if comp_node is not None:
+        # the site-spelled clause, then the emitted extern's own declared one
+        # (item 254, issue #1592): one entry each, in that order, as the py
+        # reference registers them. The emission fires inside the first.
+        compensations = _emit_compensations(step)
+        for index, comp_node in enumerate(compensations):
             compensate_call = _expr(comp_node, env)
             key, method = _call_descriptor(comp_node)
             out.append("%sif err := ctx.Effect(func() stc.Inverse {" % pad)
-            out.append("%s%s" % (inner, emit_call))
+            if index == 0:
+                out.append("%s%s" % (inner, emit_call))
             out.append("%sreturn func() error {" % inner)
             out.append("%s\tif _revlFrame.committed {" % inner)
             out.append("%s\t\treturn nil // item 247 a5a: discharge — never runs" % inner)
@@ -3193,7 +3312,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
             out.append("%s}" % pad)
             global _COMP_NEEDS_TEARDOWN
             _COMP_NEEDS_TEARDOWN = True
-        else:
+        if not compensations:
             out.append("%s%s" % (pad, emit_call))
     elif s == "timer":
         # A `timer` step (item 57): a revertible schedule. Arming the timer is
@@ -3208,6 +3327,7 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
         # component's declared capabilities (each `emit` lowers through the same
         # path a top-level emission does, so G4/G8 reach is audited).
         global _COMP_NEEDS_TIMER, _TIMER_COUNTER
+        global _COMP_NEEDS_METHOD_WITNESSED
         _COMP_NEEDS_TIMER = True
         mode = step.get("mode")
         schedule = "revlScheduleEvery" if mode == "every" else "revlScheduleAfter"
@@ -3223,6 +3343,16 @@ def _emit_component_step(comp, step, services, env: _Env, out, indent=3):
                 raise EmitError("timer body carries emissions only, found %r"
                                 % (em.get("step"),))
             out.append("%s\t%s" % (inner, _expr(em.get("expr"), env)))
+            # an emitted extern that declares its own `compensate` registers it
+            # on every firing, after the fire (item 254, issue #1592). A firing
+            # runs after activation, so it parks on the frame exactly like a
+            # provide-method call does.
+            for comp_node in _emit_compensations(em):
+                key, method = _call_descriptor(comp_node)
+                out.append("%s\t_revlFrame.registerMethodCompensation(%s, %s, func() error { %s; return nil })"
+                           % (inner, _go_string(key), _go_string(method), _expr(comp_node, env)))
+                _COMP_NEEDS_TEARDOWN = True
+                _COMP_NEEDS_METHOD_WITNESSED = True
         out.append("%s})" % inner)
         # the derived inverse: cancellation, yielded into the disposer stack.
         out.append("%sreturn func() error { %s.Cancel(); return nil }" % (inner, handle))
@@ -9895,6 +10025,8 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
     global _COMP_NEEDS_STRCONV, _COMP_NEEDS_OVERFLOW32
     global _COMP_NEEDS_TIMER, _TIMER_COUNTER, _STREAM_ITER_COUNTER
     global _WITNESSED_EXTERNS, _COMP_NEEDS_TEARDOWN, _WITNESSED_COUNTER
+    global _COMPENSATED_EXTERNS
+    global _COMP_NEEDS_DECLARED
     global _COMP_NEEDS_METHOD_WITNESSED, _FN_RET, _COMP_NEEDS_STREAM
     global _COMP_NEEDS_STREAM_EVENT, _COMP_NEEDS_STREAM_DRAIN
     global _SECRET_MODE
@@ -9912,6 +10044,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         ext["name"]: ext for ext in (ir.get("externs") or [])
         if ext.get("class") == "witnessed"
     }
+    _COMPENSATED_EXTERNS = _compensated_table(ir.get("externs") or [])
     # item 320: declared return types of every top-level fn and extern, so a
     # value-typed `let x = effect <fn call>` bracket acquisition can be
     # declared by its ACTUAL return type instead of `*T`. Empty for a document
@@ -9925,6 +10058,7 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
             _FN_RET[_ext["name"]] = _ext.get("returns")
     _COMP_NEEDS_TEARDOWN = False
     _COMP_NEEDS_METHOD_WITNESSED = False
+    _COMP_NEEDS_DECLARED = False
     _WITNESSED_COUNTER = 0
     # item 102: a lifecycle test's `advance` step drives the clock coeffect
     # (RevlClockAdvance / RevlClockReset), which lives in the timer preamble.
@@ -10078,6 +10212,8 @@ def _emit(ir: dict, package: str = "emitted", package_name: str | None = None,
         out.append(_COMP_RESULT_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _COMP_NEEDS_DECLARED:
+            out.append(_REVL_DECLARED)
         if _RECORD_MODE:
             out.append(_RECORD_PREAMBLE)
     if _COMP_NEEDS_TIMER:
@@ -10554,6 +10690,30 @@ def _emit_go_bridge(ir: dict) -> list[str]:
     out.append("}")
     out.append("")
 
+    # issue #1567: the context an ISOLATED provision is read through. A key a
+    # component isolates (`isolate kv in realm("wa")`) is published in that
+    # realm only, so `RevlInvoke(root, ..)` could neither serve nor probe it.
+    # The runner picks the realm (the py tier's `resolve_key` order, off the
+    # spec's `placements`); this hands back a child context bound to it, the
+    # way `Load<Comp>` binds an isolating component. Every document emits it,
+    # so the runner always links; one that isolates nothing answers false.
+    realm_keys = sorted({key for comp in ir.get("components", [])
+                         for key in (comp.get("isolate") or {}) if key in provided})
+    out.append("// RevlRealmContext returns a child of ctx with `key` isolated in the")
+    out.append("// named realm, so a provision placed there resolves through it.")
+    out.append("func RevlRealmContext(ctx *stc.Context, key, realm string) (*stc.Context, bool) {")
+    if realm_keys:
+        out.append("	switch key {")
+        for key in realm_keys:
+            out.append("	case %s:" % _go_string(key))
+            out.append("		child := ctx.Child()")
+            out.append("		child.Isolate(%s, %s(realm))" % (_key_var(key), _realm_helper_name()))
+            out.append("		return child, true")
+        out.append("	}")
+    out.append("	return nil, false")
+    out.append("}")
+    out.append("")
+
     # component name -> loaded Fiber, building typed config from the placement
     # spec's `config` object (keyed by PascalCase component name).
     out.append("// RevlLoad loads a component by name with config from the spec.")
@@ -10643,7 +10803,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     global _COMP_NEEDS_STREAM_DRAIN, _COMP_NEEDS_STREAM_EVENT
     global _STREAM_ITER_COUNTER
     global _COMP_NEEDS_TEARDOWN, _COMP_NEEDS_METHOD_WITNESSED
-    global _WITNESSED_EXTERNS, _WITNESSED_COUNTER
+    global _WITNESSED_EXTERNS, _WITNESSED_COUNTER, _COMPENSATED_EXTERNS
+    global _COMP_NEEDS_DECLARED
     global _FN_RET
     global _SECRET_MODE
     _SECRET_MODE = _declares_secret(ir)
@@ -10671,6 +10832,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
     _COMP_NEEDS_STREAM_EVENT = False
     _COMP_NEEDS_TEARDOWN = False
     _COMP_NEEDS_METHOD_WITNESSED = False
+    _COMP_NEEDS_DECLARED = False
     # items 243/247: the document's witnessed externs by name. `_emit` has
     # built this registry since item 243; this path never did, so
     # `_witnessed_extern` matched nothing and a witnessed effect in a carried
@@ -10681,6 +10843,7 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         ext["name"]: ext for ext in externs
         if ext.get("class") == "witnessed"
     }
+    _COMPENSATED_EXTERNS = _compensated_table(externs)
     _WITNESSED_COUNTER = 0
 
     has_lifecycle = any(t.get("lifecycle") for t in tests)
@@ -10992,6 +11155,8 @@ def _emit_v3_combined(ir: dict, package: str, placement: bool = True) -> str:
         out.append(_V3_STDLIB_PREAMBLE)
     if _COMP_NEEDS_TEARDOWN:
         out.append(_teardown_preamble(_COMP_NEEDS_METHOD_WITNESSED))
+        if _COMP_NEEDS_DECLARED:
+            out.append(_REVL_DECLARED)
         if _RECORD_MODE:
             # item 322 Slice 1: the durable WAL sink the teardown records
             # through. `_emit` appends it beside the teardown preamble; a
