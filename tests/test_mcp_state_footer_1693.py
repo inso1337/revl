@@ -101,6 +101,18 @@ def test_a_refusal_before_the_handler_carries_the_footer_too():
     assert _footer(payload) == NOTHING
 
 
+def test_the_runtime_gate_refusal_carries_the_footer():
+    """A server that cannot import cordis refuses runtime verbs before any
+    handler runs (#1692); the footer rides on that refusal too."""
+    server_mod.set_runtime_available(False)
+    try:
+        payload = _call("revl_load", {"source": CACHE})
+    finally:
+        server_mod.set_runtime_available(None)
+    assert payload["unavailable"] == "cordis-py runtime"
+    assert _footer(payload) == NOTHING
+
+
 def test_an_internal_fault_carries_the_footer(monkeypatch):
     def broken(_arguments):
         raise RuntimeError("boom")
