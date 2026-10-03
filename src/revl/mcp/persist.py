@@ -162,10 +162,10 @@ def snapshot(session) -> dict:
     Raises `SessionError` (from the session) when nothing is loaded or when
     the live composition has no recorded sources to reproduce it from.
     """
-    from .session import SessionError  # noqa: PLC0415 — avoid an import cycle
+    from .session import NothingLoaded, SessionError  # noqa: PLC0415 — avoid an import cycle
 
     if not session.loaded:
-        raise SessionError("nothing is loaded — snapshot needs a live composition")
+        raise NothingLoaded("nothing is loaded — snapshot needs a live composition")
     if not getattr(session, "origin", None):
         raise SessionError(
             "this composition has no recorded sources, so it cannot be "

@@ -42,6 +42,28 @@ that admits, so an agent gets rule + call-chain + fix in one response, never a
 second round-trip. A rejected candidate never deploys: the compile runs before
 the transition, so the running system keeps serving.
 
+**Refusals carry their next call.** A refusal with a known remedy returns it as
+data in `next`, beside the prose (issue #1691):
+
+```json
+"next": {"tool": "revl_load", "arguments": {"files": ["app.rvl"]}, "ready": true}
+```
+
+`tool` is the verb to call and `arguments` its arguments, pre-filled from what
+the session holds. `ready` is true when `arguments`, sent as-is, are expected to
+succeed. When it is false, `needs` says what the caller must add. Where several
+remedies exist, `next` is a list in preference order. A remedy no MCP call can
+perform (an operator has to act outside the session) is an operator step
+instead, `{"operator": "<what to do>", "ready": false}`. The refusal's message
+ends with the same remedy in words, so the two never disagree. Remedies today:
+
+| Refusal | `next` |
+| ------- | ------ |
+| nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
+| `revl_edit` on a composition loaded from one file | `revl_swap` with your patch applied to that file's text as inline `source`. `ready` only if that swap would admit. After it, `revl_edit` patches the inline source directly. The file on disk is not changed |
+| `revl_swap` with no source, on a composition loaded from files | `revl_swap` with those `files` |
+| a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
+
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
 only `revl_load` can boot one, which needs `cordis`. If the server's interpreter
@@ -51,7 +73,7 @@ import cordis, the server re-executes under it and says so on stderr. Otherwise
 it starts, names the unavailable verbs on stderr and in the `initialize`
 instructions, and each of those verbs answers with
 `{"ok": false, "refused": true, "unavailable": "cordis-py runtime", "next": ...}`,
-`next` being the fix. A few verbs keep working with less: `revl_ship` cannot
+`next` being the operator step that fixes it. A few verbs keep working with less: `revl_ship` cannot
 `apply`, `revl_gauntlet` and `revl_quarantine` skip their substrate battery,
 and the history verbs answer only from an inline `timeline`/`trace`. The lists
 live in `src/revl/mcp/runtime_gate.py`, and `revl doctor` reports which case

@@ -93,7 +93,8 @@ from .. import query as Q
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
-from .session import Session, SessionError
+from . import remedy as _remedy
+from .session import NothingLoaded, Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -651,11 +652,15 @@ def _boundary_of(ir: dict) -> dict:
 SESSION = Session()
 
 
-def _session_error(message: str, **extra) -> dict:
-    return {"ok": False, "diagnostics": [{
+def _session_error(message: str | BaseException, **extra) -> dict:
+    """A session refusal. `message` is the prose, or the exception that
+    refused. Its next call, when it has one (issue #1691), is resolved and
+    attached by `remedy`, which also names it at the end of the message."""
+    message, remedy = _remedy.resolve(message, extra)
+    return _remedy.attach({"ok": False, "diagnostics": [{
         "severity": "error", "code": "REVL", "category": "session",
         "message": message,
-    }], **extra}
+    }], **extra}, remedy)
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
@@ -764,7 +769,7 @@ def _tool_lease(arguments: dict) -> dict:
         else:
             book.claim(component, holder, arguments.get("ttl"))
     except _leases.LeaseError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     events = book.drain_events()
     _record_lease_trace(events)
     payload = {
@@ -831,7 +836,7 @@ def _tool_load(arguments: dict) -> dict:
                              record=bool(arguments.get("record")),
                              origin=_origin(arguments))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
@@ -847,7 +852,7 @@ def _tool_call(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.call(key, method, arguments.get("args") or [])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired:
         # item 246: the class-(c) ticket two-step is a RESULT, shaped by
         # `handle`. Re-raised past the catch-all below, which used to swallow it
@@ -871,7 +876,7 @@ def _tool_swap(arguments: dict) -> dict:
     source is still accepted, unchanged.
     """
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — call revl_load first")
+        return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     replacing = tuple(arguments.get("replacing") or ())
 
     # component leases (item 61): under a policy that enforces leases, refuse a
@@ -927,7 +932,7 @@ def _tool_swap(arguments: dict) -> dict:
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired as exc:
         # the candidate's own host bodies: a yes admits the candidate, so its
         # ticket names the candidate's host code, never the running one's
@@ -942,9 +947,10 @@ def _swap_server_side(replacing: tuple) -> dict:
     vs = _edit.virtual_source(SESSION)
     if vs.get("source") is None:
         return _session_error(
-            "no server-side source to swap by name — this composition was not "
-            "loaded from inline source, so there is nothing the session can "
-            "re-admit without you passing `source`/`files`")
+            "no server-side source to swap by name — this composition was "
+            "loaded from files, so the session holds no inline source to "
+            "re-admit; swap the files themselves",
+            next=_remedy.swap_files_next(SESSION.origin, replacing))
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -965,7 +971,7 @@ def _swap_server_side(replacing: tuple) -> dict:
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
             "fromServerSide": True, **_summary(full), **state}
 
@@ -976,16 +982,66 @@ def _tool_edit(arguments: dict) -> dict:
     try:
         return _edit.apply_edit(SESSION, arguments)
     except _edit.EditError as error:
-        return _session_error(str(error), edited=False, swapped=False)
+        return _edit_refusal(error, arguments)
     except SessionError as error:
-        return _session_error(str(error))
+        if not SESSION.loaded:
+            return _session_error(NothingLoaded(str(error)))
+        return _session_error(error)
+
+
+def _edit_refusal(error, arguments: dict) -> dict:
+    """A `revl_edit` refusal. When the composition was loaded from files, so
+    there is no inline buffer to patch, the refusal carries the patch applied
+    to the file as a ready `revl_swap` (issue #1691)."""
+    if not _files_loaded_without_buffer(arguments):
+        return _session_error(error, edited=False, swapped=False)
+    try:
+        nxt = _remedy.edit_as_swap(SESSION, arguments, _swap_would_refuse)
+    except _edit.EditError as patch_error:
+        return _session_error(patch_error, edited=False, swapped=False)
+    except OSError:
+        nxt = None
+    if nxt is None:
+        return _session_error(error, edited=False, swapped=False)
+    name = os.path.basename(str(SESSION.origin["files"][0]))
+    return _session_error(
+        f"this composition was loaded from files ({name}), and revl_edit "
+        f"patches only inline source, so there is no buffer to patch. `next` "
+        f"is your patch applied to {name} as a revl_swap with inline `source`; "
+        f"after it, revl_edit patches that source directly",
+        next=nxt, edited=False, swapped=False)
+
+
+def _files_loaded_without_buffer(arguments: dict) -> bool:
+    if arguments.get("target") not in (None, "source"):
+        return False
+    vs = _edit.virtual_source(SESSION)
+    return vs.get("source") is None and bool((SESSION.origin or {}).get("files"))
+
+
+def _swap_would_refuse(arguments: dict) -> str | None:
+    """Whether `revl_swap(arguments)` would refuse before swapping: the
+    authoring gate, admission against the running composition, then the whole
+    composition on its own. None when it would not; else the first reason."""
+    gate = _authoring_refusal(arguments)
+    if gate is not None:
+        return gate["diagnostics"][0]["message"]
+    source, files, modules = _candidate_of(arguments)
+    replacing = tuple(arguments.get("replacing") or ())
+    try:
+        compile_under_authoring(source, files, modules=modules,
+                                manifest=SESSION.ir, replacing=replacing)
+        compile_under_authoring(source, files, modules=modules)
+    except RevlError as error:
+        return report(error)["diagnostics"][0]["message"]
+    return None
 
 
 def _tool_rollback(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.rollback()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_undo(arguments: dict) -> dict:
@@ -1002,11 +1058,11 @@ def _tool_undo(arguments: dict) -> dict:
     boundary crossings no undo can un-emit — rides along either way
     (docs/generation-history.md)."""
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — call revl_load first")
+        return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
         result = SESSION.undo(arguments.get("to"))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
     # diagnostic, matching how revl_restore reports a rejected re-admission.
     if result.get("refused"):
@@ -1026,7 +1082,7 @@ def _tool_unload(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.unload()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_commit(_arguments: dict) -> dict:
@@ -1036,7 +1092,7 @@ def _tool_commit(_arguments: dict) -> dict:
     try:
         return {"ok": True, "manifest": SESSION.commit()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_commit_confirm(arguments: dict) -> dict:
@@ -1056,7 +1112,7 @@ def _tool_commit_confirm(arguments: dict) -> dict:
     try:
         result = SESSION.commit_confirm(manifest_hash)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     if result.get("refused"):
         return {"ok": False, **result}
     return {"ok": True, **result}
@@ -1077,7 +1133,7 @@ def _tool_fork(arguments: dict) -> dict:
     except SessionError as error:
         # a refused fork (a KIND_OPAQUE tail, a non-idempotent span, a committed
         # boundary below k) is a RESULT the caller reads, not a crash
-        return _session_error(str(error), refused=True)
+        return _session_error(error, refused=True)
 
 
 def _tool_fork_confirm(arguments: dict) -> dict:
@@ -1093,7 +1149,7 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     try:
         result = SESSION.fork_confirm(fork_hash)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     if result.get("refused"):
         return {"ok": False, **{k: v for k, v in result.items()
                                 if k != "branchSession"}}
@@ -1255,7 +1311,7 @@ def _tool_approve(arguments: dict) -> dict:
                 ticket_hash=ticket_hash, capability=capability,
                 uses=uses, ttl_ms=ttl_ms)}
         except SessionError as error:
-            return _session_error(str(error))
+            return _session_error(error)
     if not ticket_hash:
         return _session_error("provide `hash` — the ticket hash from the "
                               "approvalRequired response — or a `capability` "
@@ -1265,7 +1321,7 @@ def _tool_approve(arguments: dict) -> dict:
             ticket_hash, vote=vote or "approve", as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_revoke(arguments: dict) -> dict:
@@ -1297,9 +1353,9 @@ def _tool_revoke(arguments: dict) -> dict:
         return {"ok": True, **SESSION.revoke_standing_grant(
             capability=capability, request_id=request_id)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_escalate(arguments: dict) -> dict:
@@ -1320,9 +1376,9 @@ def _tool_escalate(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.escalate(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_override(arguments: dict) -> dict:
@@ -1345,9 +1401,9 @@ def _tool_override(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.override(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_quorum(arguments: dict) -> dict:
@@ -1363,9 +1419,9 @@ def _tool_quorum(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.decision_report(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_distillation_offers(_arguments: dict) -> dict:
@@ -1375,7 +1431,7 @@ def _tool_distillation_offers(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.distillation_offers()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_apply_distillation(arguments: dict) -> dict:
@@ -1390,7 +1446,7 @@ def _tool_apply_distillation(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.apply_distillation(offer_id)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_revoke_distillation(arguments: dict) -> dict:
@@ -1404,7 +1460,7 @@ def _tool_revoke_distillation(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.revoke_distillation(rule)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_abort(arguments: dict) -> dict:
@@ -1419,7 +1475,7 @@ def _tool_abort(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.abort()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_estop(arguments: dict) -> dict:
@@ -1435,7 +1491,7 @@ def _tool_estop(arguments: dict) -> dict:
             arguments.get("operator") or getattr(
                 getattr(SESSION, "operator", None), "token", None))}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_estop_report(_arguments: dict) -> dict:
@@ -1443,7 +1499,7 @@ def _tool_estop_report(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.estop_report()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_state(_arguments: dict) -> dict:
@@ -1523,7 +1579,7 @@ def _tool_snapshot(_arguments: dict) -> dict:
     try:
         return {"ok": True, "snapshot": SESSION.snapshot()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _restore_authoring_refusal(snap) -> dict | None:
@@ -1602,7 +1658,7 @@ def _tool_restore(arguments: dict) -> dict:
                 "message": str(error)}]
         return payload
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
@@ -1611,7 +1667,7 @@ def _tool_timeline(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.timeline(arguments.get("component"))}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_inspect_step(arguments: dict) -> dict:
@@ -1621,7 +1677,7 @@ def _tool_inspect_step(arguments: dict) -> dict:
         return {"ok": True, **SESSION.inspect_step(arguments.get("component"),
                                                    arguments["at"])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_step_back(arguments: dict) -> dict:
@@ -1634,7 +1690,7 @@ def _tool_step_back(arguments: dict) -> dict:
     except SessionError as error:
         # a refused unwind is a *result*, not a crash: it means the range
         # contains an emission that cannot be undone
-        return _session_error(str(error), refused=True)
+        return _session_error(error, refused=True)
 
 
 def _tool_replay_bisect(arguments: dict) -> dict:
@@ -1647,7 +1703,7 @@ def _tool_replay_bisect(arguments: dict) -> dict:
         return {"ok": True, **SESSION.bisect(arguments.get("component"),
                                              predicate)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_replay_forward(arguments: dict) -> dict:
@@ -1657,7 +1713,7 @@ def _tool_replay_forward(arguments: dict) -> dict:
         return {"ok": True, **SESSION.replay_forward(arguments.get("component"),
                                                      arguments["from"])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 # -- verified canary (docs/verified-canary.md, roadmap item 59) ------------
@@ -1695,8 +1751,9 @@ def _tool_live_query(arguments: dict) -> dict:
     """The five query verbs, answered against the LIVE session's post-swap
     state instead of a compiled-from-source IR (query.live_query)."""
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — a live query answers against "
-                              "the running composition; call revl_load first")
+        return _session_error(NothingLoaded(
+            "nothing is loaded — a live query answers against the running "
+            "composition; call revl_load first"))
     verb = arguments.get("verb")
     if verb not in Q._VERB_FN:
         return _session_error(f"unknown verb {verb!r}; one of "
@@ -1731,7 +1788,7 @@ def _tool_history_emitted_between(arguments: dict) -> dict:
         try:
             timeline = SESSION.timeline(None)
         except SessionError as error:
-            return _session_error(str(error))
+            return _session_error(error)
     return Q.emitted_between(timeline, frm, to, arguments.get("component"))
 
 
@@ -2155,7 +2212,7 @@ def _tool_scaffold(arguments: dict) -> dict:
             resource_type=arguments.get("resource"),
         )
     except ScaffoldError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     filename = arguments.get("filename") or f"{spec.component}.rvl"
     return scaffold_document(spec, filename, untrusted=_untrusted_author())
 
@@ -3822,6 +3879,7 @@ def handle(message: dict) -> dict | None:
             try:
                 payload = handler(arguments)
                 _remember_live_host_bodies()
+                _remedy.remember(SESSION)
             except ApprovalRequired as exc:
                 # item 246: a class-(c) crossing the decision inside Session.call
                 # (or the activation gate in load/swap) refused. This is a result,
