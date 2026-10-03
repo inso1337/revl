@@ -13004,12 +13004,34 @@ fn realm_placeholder_msg(name: &str, key: &str) -> String {
     return ((((String::from("realm placeholder `?").revl_concat(&name)).revl_concat("` (on `isolate ")).revl_concat(&key)).revl_concat("`) is not bound: the operator binds it to a realm at admission, ")).revl_concat("and until then the provision has no realm to check G2 against");
 }
 
+fn realm_route_placeholder_msg(name: &str, key: &str) -> String {
+    return (((((((String::from("realm placeholder `?").revl_concat(&name)).revl_concat("` (on `isolate ")).revl_concat(&key)).revl_concat(" in realms(...)`) is not bound: the operator binds it to a realm at ")).revl_concat("admission, and until then that leg of the route has no realm to ")).revl_concat("resolve `")).revl_concat(&key)).revl_concat("` in");
+}
+
+fn route_placeholder_at(ts: &[Token], j: i64) -> String {
+    let mut k = j;
+    while ((k < ts.revl_length()) && (!atk(ts, k, ")"))) {
+        if (atk(ts, k, "?") && atk(ts, (k).checked_add(1i64).expect("revl: Int overflow"), "ident")) {
+            return tkc(ts, (k).checked_add(1i64).expect("revl: Int overflow")).text;
+        }
+        k = (k).checked_add(1i64).expect("revl: Int overflow");
+    }
+    return String::from("");
+}
+
 fn realm_placeholder_scan(ts: &[Token]) -> Verd {
     let mut i = 0i64;
     while (i < ts.revl_length()) {
         if ((((((atw(ts, i, "isolate") && atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in")) && atw(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realm")) && atk(ts, (i).checked_add(4i64).expect("revl: Int overflow"), "(")) && atk(ts, (i).checked_add(5i64).expect("revl: Int overflow"), "?")) && atk(ts, (i).checked_add(6i64).expect("revl: Int overflow"), "ident")) && atk(ts, (i).checked_add(7i64).expect("revl: Int overflow"), ")")) {
             let msg = realm_placeholder_msg(&tkc(ts, (i).checked_add(6i64).expect("revl: Int overflow")).text, &tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
             return mk_verd(tagged("G2", &msg), tkc(ts, i).line);
+        }
+        if (((atw(ts, i, "isolate") && atw(ts, (i).checked_add(2i64).expect("revl: Int overflow"), "in")) && ati(ts, (i).checked_add(3i64).expect("revl: Int overflow"), "realms")) && atk(ts, (i).checked_add(4i64).expect("revl: Int overflow"), "(")) {
+            let name = route_placeholder_at(ts, (i).checked_add(5i64).expect("revl: Int overflow"));
+            if (name != "") {
+                let msg = realm_route_placeholder_msg(&name, &tkc(ts, (i).checked_add(1i64).expect("revl: Int overflow")).text);
+                return mk_verd(tagged("G2", &msg), tkc(ts, i).line);
+            }
         }
         i = (i).checked_add(1i64).expect("revl: Int overflow");
     }

@@ -1790,6 +1790,22 @@ component Store provides kv: KV {
 }
 component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
 """, "G2"),
+    # The `realms(...)` route takes placeholders too (#1728, routes): the first
+    # unbound leg is refused in list order, after any literal before it.
+    ("an unbound realm placeholder in a route", """service KV { fn get(k: Str) -> Str }
+service Api { fn read(k: Str) -> Str }
+component Front requires kv: KV provides api: Api {
+  isolate kv in realms("w1", ?b) strategy(round_robin)
+  provide api { fn read(k) = kv.get(k) }
+}
+""", "G2"),
+    ("an unbound route placeholder ahead of a route refusal", """service KV { fn get(k: Str) -> Str }
+service Api { fn read(k: Str) -> Str }
+component Front requires kv: KV provides api: Api {
+  isolate kv in realms(?a, ?b) strategy(no_such_strategy)
+  provide api { fn read(k) = kv.get(k) }
+}
+""", "G2"),
     # ---- the qualified test heads, negative controls (item 391) ------------
     # Stepping over a test block must land on the NEXT declaration, not past
     # it: each of these puts a real refusal in the tail, so a step that

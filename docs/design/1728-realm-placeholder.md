@@ -41,9 +41,9 @@ component TenantAStore provides kv: Kv {
 ```
 
 - **Syntax.** `isolate <key> in realm(?<name>)`. `?` followed by an
-  identifier, in the singular form only. The plural routing form
-  `realms(...)` still takes literals; a placeholder there stays a parse
-  refusal.
+  identifier. The plural routing form takes placeholders too, one per leg:
+  `isolate <key> in realms(?<a>, ?<b>) [strategy(...)]` (see "Routes"
+  below).
 - **Binding.** The operator binds `<name>` to a realm. The binding comes from
   the operator's side only:
   - `revl compile --bind-realm NAME=REALM` (repeatable);
@@ -92,6 +92,34 @@ provisions share a placeholder. That is the code's structure, not an
 authority: the operator decides what each placeholder means, and can bind two
 of them apart or together.
 
+## Routes
+
+A route, `isolate <key> in realms(...)`, spreads a required key across
+several realms, so each leg is an authority address just as a singular
+`realm(...)` is. Each entry of the list may be a placeholder `?<name>`, and the
+same rules apply leg by leg:
+
+- **Binding** is the same operator-only binding: one `--bind-realm` map binds
+  singular placeholders and route legs alike, and a name used in both means
+  the same realm in both. `realm_placeholders.bind` replaces each `?<name>`
+  entry with its bound realm, in list order, before lowering, so the route's
+  checks and the manifest's `routes` map read ordinary realms.
+- **G9** skips a route only when every entry is a placeholder. A route with
+  any literal among its realms names that realm, and the untrusted-author
+  profile refuses it exactly as it refuses an all-literal route.
+- **An unbound leg is refused by name**, code G2, with its own sentence: that
+  leg of the route has no realm to resolve the key in.
+- **Two legs bound to one realm are refused**, code G2. A route names each
+  realm once; the parser refuses a repeated literal, and since what two
+  placeholders mean is the binding's, the repeat is checked after binding.
+  `realms(?a, ?a)` is the same case.
+- **Every routed realm needs a provider** (item 162). That check runs in
+  lowering over the bound realms, so a leg the operator binds to a realm with
+  no provider of the key is refused as a literal one would be.
+
+The gate scans the route form too and refuses its first placeholder, after
+any literal before it, with the reference's route sentence.
+
 ## Self-host and gate parity
 
 The gate (`selfhost/lower.rvl`'s `admit_src`, `admit_all` and
@@ -115,9 +143,6 @@ placeholder would need one.
 
 ## Not in this change
 
-- **Placeholders in `realms(...)`.** The multi-realm route names the realms a
-  router spreads across. A placeholder list is a straightforward extension of
-  the same binding, and was left out to keep the surface this issue asked for.
 - **Placeholders outside `isolate`.** A composition's `remote` and `host`
   rows also take `in realm("...")`. Those are written by the operator in a
   composition document, not by an agent, so the case does not arise.
