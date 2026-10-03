@@ -93,7 +93,7 @@ from .. import query as Q
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
-from .session import Session, SessionError
+from .session import ApprovalRefused, Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -856,6 +856,34 @@ def _tool_call(arguments: dict) -> dict:
         raise
     except Exception as exc:  # the callee raised — that is a result, not a crash
         return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
+                              trace=SESSION.state().get("trace", []))
+
+
+def _tool_act(arguments: dict) -> dict:
+    """One call per agent action (issue #1708): classify the proposed action,
+    then execute it (class (a), or (c) already approved), defer it to commit
+    (class (b)), or ticket it (class (c), nothing fired), and record a receipt
+    the commit manifest lists. Returns `{class, outcome, receipt, residue}`; a
+    ticket comes back in the same two-step shape `revl_call` uses, with those
+    fields beside it."""
+    key, method = arguments.get("key"), arguments.get("method")
+    if not key or not method:
+        return _session_error("`key` and `method` are required")
+    try:
+        return {"ok": True, **SESSION.act(key, method, arguments.get("args") or [])}
+    except ApprovalRefused as error:
+        return _session_error(str(error), outcome="refused",
+                              ticket=error.ticket.get("hash"))
+    except SessionError as error:
+        return _session_error(str(error))
+    except ApprovalRequired as exc:
+        payload = _approval_required(exc)
+        receipt = getattr(exc, "receipt", None) or {}
+        return {**payload, "class": receipt.get("class", "c"),
+                "outcome": "ticket", "receipt": receipt, "residue": []}
+    except Exception as exc:  # the callee raised: a result, not a crash
+        return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
+                              outcome="raised",
                               trace=SESSION.state().get("trace", []))
 
 
@@ -2448,6 +2476,31 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_call,
+    },
+    {
+        "name": "revl_act",
+        "description": "One call per agent action through the approval gate "
+                       "(issue #1708). Classifies the proposed action by its "
+                       "checked effect class, then: class (a) (witnessed, with an "
+                       "inverse) executes; class (b) (deferred) is queued for "
+                       "revl_commit; class (c) (any other emission) returns a "
+                       "ticket and fires nothing until an operator approves it, "
+                       "after which the identical re-issue executes. Returns "
+                       "`class`, `outcome` (executed, deferred or ticket), the "
+                       "`receipt` recorded for the commit manifest and the "
+                       "`residue` (crossings fired that no inverse can take "
+                       "back). Needs the approval gate on.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "provided key, e.g. `ops`"},
+                "method": {"type": "string", "description": "operation name"},
+                "args": {"type": "array", "description": "positional arguments"},
+            },
+            "required": ["key", "method"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_act,
     },
     {
         "name": "revl_swap",

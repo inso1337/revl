@@ -201,6 +201,43 @@ and replays the witnessed inverses, proving a clean world. An all-(a)/(b)
 session commits with `prompts == {"commit": 1, "perCall": 0, "residue": 0}`
 (`test_all_ab_session_is_fully_auto_approved`).
 
+## One call per action: `revl_act`
+
+The verbs above leave the per-call branching to the harness: call, read the
+class off the result, relay a ticket, re-issue. `revl_act` (issue #1708) is the
+same gate in one call per agent action. Pass the proposed action as
+`{key, method, args}`; it returns
+
+    {class, outcome, ticket?, receipt, residue}
+
+| class | outcome | what fired | what the receipt holds |
+|---|---|---|---|
+| (a) | `executed` | the witnessed crossing | `witnessed`: each entry's `inverse` and the `walSeq` it is durable in |
+| (b) | `deferred` | nothing yet; it fires at commit | `deferred`: the commit-manifest `group` |
+| (c), unapproved | `ticket` | nothing | `ticket`: the hash to approve |
+| (c), approved | `executed` | the emission, once | `residue`: the crossing, which no inverse takes back |
+
+`residue` is what an abort or a rewind would leave behind: the class-(c)
+crossings this action fired. A class-(a) or (b) action has none.
+
+The harness loop around it:
+
+1. For each tool call the agent proposes, call `revl_act`.
+2. On `executed` or `deferred`, hand the result back to the agent and go on.
+3. On `ticket`, relay the ticket to a human. The human's operator calls
+   `revl_approve(ticket.hash)`; then call `revl_act` again with the identical
+   action, and it executes once.
+4. At the end of the session, `revl_commit` returns the commit manifest. Its
+   `actions` lists every receipt in order, ticketed ones included, beside the
+   `deferred` queue and the `witnessed` count. `revl_commit_confirm(hash)`
+   flushes the deferred actions and keeps the witnessed ones; `revl_abort`
+   undoes the witnessed ones and fires nothing deferred.
+
+`tests/test_tool_loop_act_1708.py` runs this loop over the fixture above. The
+CLI form, `revl act FILES`, reads the actions as JSON lines on stdin
+([commands-reference.md](commands-reference.md#revl-act)); it has no operator,
+so a class-(c) action there stays a ticket.
+
 ## The `session.state()` metrics
 
 `revl_state` surfaces the session's approval metrics (None off-policy, so

@@ -42,7 +42,7 @@ from .._paths import backends_root
 
 #: Verbs that need a live composition, which only the runtime can boot.
 RUNTIME_VERBS = frozenset({
-    "revl_load", "revl_call", "revl_swap", "revl_unload", "revl_snapshot",
+    "revl_load", "revl_call", "revl_act", "revl_swap", "revl_unload", "revl_snapshot",
     "revl_restore", "revl_rollback", "revl_undo", "revl_commit",
     "revl_commit_confirm", "revl_abort", "revl_estop", "revl_estop_report",
     "revl_edit", "revl_live_query", "revl_timeline", "revl_inspect_step",

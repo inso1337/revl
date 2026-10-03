@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 55 verbs below, one section each.
+The advertised list is exactly the 56 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -72,6 +72,7 @@ the current interpreter (issue #1692).
 | `revl_tools` | yes | no | - (source) |
 | `revl_load` | no | no | - (source) |
 | `revl_call` | no | no | `key`, `method` |
+| `revl_act` | no | no | `key`, `method` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` |
 | `revl_gauntlet` | yes | no | - (source) |
@@ -299,6 +300,32 @@ component you just loaded. Returns the result and the trace it produced.
   realm. A key isolated into two or more realms has no single provider, and the
   call is refused with every provider and its realm named. The approval ticket
   for the call carries the realm of the provider it reached.
+
+### `revl_act`
+
+One call per agent action through the approval gate (issue #1708). Takes the
+proposed action, classifies it by its checked effect class, and does what the
+class allows:
+
+- class (a), a `witnessed` crossing with a registered inverse: executes. The
+  receipt's `witnessed` entries name the inverse and the WAL record (`walSeq`)
+  the crossing is durable in;
+- class (b), a `deferred` emission: queued for the commit, nothing fired yet.
+  The receipt's `deferred` entries name the commit-manifest group;
+- class (c), any other emission: returns the `revl_call` ticket two-step
+  (`approvalRequired`, `ticket`) and fires nothing. Once an operator approves
+  the ticket, the identical re-issue executes.
+
+Returns `class`, `outcome` (`executed`, `deferred` or `ticket`; `refused` after
+an operator's no, `raised` when the operation itself raised), `receipt`, and
+`residue`: the crossings this action fired that no inverse can take back. Every
+receipt is kept, and `revl_commit`'s manifest lists them under `actions`.
+
+- Inputs: `key` (provided key, required), `method` (operation name, required),
+  `args` (positional arguments).
+- Needs the approval gate on (`revl mcp serve --approval-policy auto`); without
+  it the call is refused, because there is no class to report.
+- The CLI form is `revl act FILES` ([commands-reference.md](commands-reference.md#revl-act)).
 
 ### `revl_state`
 

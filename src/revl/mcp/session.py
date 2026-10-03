@@ -663,6 +663,9 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #1708: the receipts `act` records, one per proposed action, in
+        # order. The commit manifest lists them; teardown drops them
+        self._actions: list = []
         # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
         # may be written into the durable, cross-session approval WAL when a
         # crossing is approved. "withheld" (the DEFAULT) records it as UNRECORDED
@@ -3513,7 +3516,12 @@ class Session:
         self._require()
         if self._owner is None:
             raise SessionError("no session owner is registered — nothing to commit")
-        return self._owner.manifest()
+        manifest = self._owner.manifest()
+        if self._actions:
+            # issue #1708: every action `act` took this session, by outcome. The
+            # hash binds the gate target, not this list, so it is unchanged
+            manifest["actions"] = [dict(a) for a in self._actions]
+        return manifest
 
     def commit_confirm(self, manifest_hash: str) -> dict:
         """Execute the approved commit — step 2 (Decision 3/4). The durable
@@ -4280,6 +4288,7 @@ class Session:
         # a single-use approval re-arms across the unload.
         self._settle_approval_spend(self._owner)
         self._owner = None
+        self._actions = []
         self.ir = None
         self.previous = None
         self.origin = None
@@ -4948,6 +4957,120 @@ class Session:
         if self._cache_inval_tokens:
             self._fire_cache_invalidations(key, method)
         return {"result": render(result), "trace": driver.drain_events()}
+
+    # -- issue #1708: the one-call tool-loop entry point ---------------------
+
+    def act(self, key: str, method: str, args: list | None = None) -> dict:
+        """Run one proposed agent action through the gate in one call (issue
+        #1708): classify it, then execute it (class none/(a), or (c) under a
+        standing approval), defer it (class (b)), or ticket it (an unapproved
+        class (c), nothing fired). Every outcome is recorded as a receipt in
+        `self._actions`, which the commit manifest lists.
+
+        Returns `{class, outcome, receipt, residue}`. An unapproved class (c)
+        raises `ApprovalRequired` with `receipt` set on it, so every surface
+        shapes the ticket two-step as it does for `call`. `residue` names the
+        crossings this action fired that no inverse can take back: an abort or a
+        rewind leaves them behind."""
+        self._require()
+        if self.approval_policy is None or self._class_map is None:
+            raise SessionError(
+                "acting needs the approval gate, which classifies the action: "
+                "serve with `--approval-policy auto` (issue #1708). Use "
+                "revl_call to invoke an operation with no gate")
+        reach = self._class_map.classify_call(key, method)
+        receipt = {"seq": len(self._actions), "key": key, "method": method,
+                   "argsDigest": _cache_args_digest(args),
+                   "class": reach["class"] if reach is not None else None}
+        before = self._act_marks()
+        try:
+            out = self.call(key, method, args)
+        except (ApprovalRequired, ApprovalRefused) as exc:
+            self._act_held(receipt, exc)
+            raise
+        except SessionError:
+            raise                      # refused before anything ran
+        except Exception as exc:       # the operation raised after the gate
+            self._act_raised(receipt, exc, before, reach)
+            raise
+        return self._act_done(receipt, before, reach, out)
+
+    def _act_held(self, receipt: dict, exc) -> None:
+        """Record a class-(c) action the gate held: a ticket, or an operator's
+        no. Nothing fired. The receipt rides on a ticket's exception, so the
+        surface that shapes the two-step can return it."""
+        refused = isinstance(exc, ApprovalRefused)
+        receipt.update(outcome="refused" if refused else "ticket",
+                       ticket=exc.ticket.get("hash"))
+        self._actions.append(receipt)
+        exc.receipt = dict(receipt)
+
+    def _act_raised(self, receipt: dict, exc: Exception, before: dict,
+                    reach: dict | None) -> None:
+        receipt.update(outcome="raised", error=f"{type(exc).__name__}: {exc}",
+                       **self._act_evidence(before))
+        receipt["residue"] = self._act_residue(
+            reach, "irreversible: may have fired before the call raised")
+        self._actions.append(receipt)
+
+    def _act_done(self, receipt: dict, before: dict, reach: dict | None,
+                  out: dict) -> dict:
+        outcome = "deferred" if receipt["class"] == "b" else "executed"
+        residue = self._act_residue(reach) if outcome == "executed" else []
+        receipt.update(outcome=outcome, **self._act_evidence(before),
+                       residue=residue)
+        self._actions.append(receipt)
+        return {"class": receipt["class"], "outcome": outcome,
+                "receipt": dict(receipt), "residue": residue,
+                "result": out["result"], "trace": out["trace"]}
+
+    def _act_marks(self) -> dict:
+        """What the gate holds before an action: the witnessed entries' ids and
+        the length of the deferral queue."""
+        owner = self._owner
+        if owner is None:
+            return {"witnessed": set(), "deferred": 0}
+        effects = owner.witness_snapshot(self._generation).effects
+        return {"witnessed": {e.id for e in effects},
+                "deferred": len(owner.manifest()["deferred"])}
+
+    def _act_evidence(self, before: dict) -> dict:
+        """The receipt's evidence: each witnessed entry the action registered,
+        named with its inverse and the WAL record it is durable in, and each
+        crossing it queued for commit."""
+        owner = self._owner
+        if owner is None:
+            return {"witnessed": [], "deferred": []}
+        witnessed = [
+            {"id": e.id, "inverse": e.method, "walSeq": e.seq,
+             "revision": e.revision, "status": e.status}
+            for e in owner.witness_snapshot(self._generation).effects
+            if e.id not in before["witnessed"]]
+        deferred = [{"group": d["group"], "receiver": d.get("receiver"),
+                     "method": d.get("method")}
+                    for d in owner.manifest()["deferred"][before["deferred"]:]]
+        return {"witnessed": witnessed, "deferred": deferred}
+
+    @staticmethod
+    def _act_residue(reach: dict | None,
+                     reason: str = "irreversible: fired with no checked "
+                                   "inverse") -> list:
+        """The class-(c) crossings an executed action fired: the ones no inverse
+        takes back."""
+        if reach is None:
+            return []
+        residue = []
+        for crossing in reach.get("crossings") or ():
+            if crossing.get("actionClass") != "c":
+                continue
+            name = crossing.get("name") or (
+                f"{crossing.get('key')}.{crossing.get('method')}"
+                if crossing.get("kind") == "emission"
+                else crossing.get("capability"))
+            residue.append({"crossing": name, "kind": crossing.get("kind"),
+                            "component": crossing.get("component"),
+                            "reason": reason})
+        return residue
 
     # -- item 310: the seam-method cache entry store ------------------------
 

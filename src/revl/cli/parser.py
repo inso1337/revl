@@ -1617,6 +1617,23 @@ def build_parser() -> argparse.ArgumentParser:
                               "residue instead (0 clean, 1 residue)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
 
+    act = sub.add_parser(
+        "act",
+        help="the agent tool loop in one call per action (issue #1708): boot the "
+             "composition under the approval gate, read proposed actions from "
+             "stdin (one JSON object per line: key, method, args), and print "
+             "each one's class, outcome (executed, deferred or ticket), receipt "
+             "and residue, then the commit manifest")
+    act.add_argument("files", nargs="+")
+    act.add_argument("--wal", default=None, metavar="FILE",
+                     help="the session's write-ahead log (default: a file in the "
+                          "per-user approval WAL directory)")
+    act.add_argument("--commit", action="store_true",
+                     help="at end of input, confirm the commit manifest: flush "
+                          "the deferred actions and keep the witnessed ones. "
+                          "Without it the session is aborted: nothing deferred "
+                          "fires and the witnessed actions are undone")
+
     estop = sub.add_parser(
         "estop",
         help="E-STOP (item 443): the operator's emergency halt. Arm the latch a "
