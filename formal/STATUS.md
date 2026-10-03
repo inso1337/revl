@@ -1035,15 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**684 .rvl files -> 617 components -> 1527 statements = 433 modeled +
-222 componentless + 29 refused at parse**, and **7880 verdicts compared
-(433 files + 617 components + 215 provide methods + 38 spawn edges + 29
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1527
-confinements + 1527 surfaces + 419 teardowns + 488 provide-clause
-components + 83 config fields + 617 A2 bodies), 7880 agree, 0
+**693 .rvl files -> 626 components -> 1537 statements = 442 modeled +
+222 componentless + 29 refused at parse**, and **7943 verdicts compared
+(442 files + 626 components + 222 provide methods + 38 spawn edges + 29
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1537
+confinements + 1537 surfaces + 419 teardowns + 497 provide-clause
+components + 83 config fields + 626 A2 bodies), 7943 agree, 0
 mismatches**.
 
-Checker alignment over the 433 modeled files. Every bucket recording a
+Checker alignment over the 442 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1052,15 +1052,15 @@ not that it disagrees.
 
 An absence cannot disagree, so the two buckets aimed at a row the model
 does carry are `ratcheted` instead: `out-of-fragment-G5` and
-`out-of-fragment-G6` and `out-of-fragment-approval` are held to the
-names in `formal/out_of_fragment_ledger.json`, which shrinks only. A
-file that JOINS one fails the gate, and a line no longer in its bucket
-fails it until it is deleted. So a new `undo` shape the `Prog` cannot
-resolve, or a new G6 fixture, cannot arrive while the model stays silent
-about it. `agree-*` and the generic `out-of-fragment` stay
-informational; that one collects every code the model states no row
-about at all, so it grows with corpus work that never touched this
-layer.
+`out-of-fragment-G6` and `out-of-fragment-approval` and
+`out-of-fragment-deferred` are held to the names in
+`formal/out_of_fragment_ledger.json`, which shrinks only. A file that
+JOINS one fails the gate, and a line no longer in its bucket fails it
+until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
+a new G6 fixture, cannot arrive while the model stays silent about it.
+`agree-*` and the generic `out-of-fragment` stay informational; that one
+collects every code the model states no row about at all, so it grows
+with corpus work that never touched this layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1070,7 +1070,7 @@ layer.
 | `agree-G3` | 1 | informational |
 | `agree-G4` | 91 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 219 | informational |
+| `agree-accept` | 222 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1082,6 +1082,7 @@ layer.
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 | `out-of-fragment-approval` | 34 | ratcheted |
+| `out-of-fragment-deferred` | 6 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1131,6 +1132,12 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_match_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_record_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl`
+- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_call_in_arrow_in_fn_body.rvl`
+- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_call_in_fn_body.rvl`
+- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_call_in_test_body.rvl`
+- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_value_in_component.rvl`
+- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_value_in_fn_body.rvl`
+- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_value_in_test_body.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.
