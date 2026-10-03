@@ -8,6 +8,7 @@ import RevL.Theorems.A8_WalDischarge
 import RevL.Theorems.R4_NoResidue
 import RevL.Theorems.A9_ProvideKeyDeclared
 import RevL.Theorems.A2_NoAcquisitionAfterProvision
+import RevL.Theorems.G4_DeferredPosition
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -47,7 +48,9 @@ overstated:
 
 1. `g4OK` and `hostAcquireOK` (the `G` row), and `configDataOK` (the `CD`
    row). Three rules under the G4
-   guarantee. `g4OK` is the MARKER rule; the G4 model
+   guarantee. (The fourth, the DEFERRED-POSITION rule, is not a private
+   restatement: the `DF` row decides `RevL.G4Deferred.deferredB`, issue
+   #1742.) `g4OK` is the MARKER rule; the G4 model
    (`RevL.Theorems.G4_InverseOrEmit` over `RevL.Syntax.Stmt`) is indexed
    by statement syntax, and the export carries call FACTS — receiver,
    service, method, marker context — so no model definition takes its
@@ -145,6 +148,12 @@ Fact rows in (tab-separated, one fact per line):
                                              an `effect … undo …` (legal); any
                                              other site acquires irreversibly
                                              (G4, category `acquire`)
+  DR <file> <fn|test|component> <owner> <extern> <call|arrow|value>
+                                             one reach of a `deferred` emission
+                                             extern and where it sits: a call,
+                                             a call inside an arrow, or the
+                                             extern as a function value (G4,
+                                             category `deferred`, issue #1742)
   CF <file> <component|extern> <owner> <field> <type>
                                              a declared config field
   CN <file> <component|extern> <owner> <field> <ord> <form> <type>
@@ -215,6 +224,9 @@ Verdict rows out:
   A2 <file> <comp> <a2=ok|fail>                    no acquisition after a
                                                    provision: `RevL.A2.a2B`
                                                    over the body's `AQ` steps
+  DF <file> <deferred=ok|fail>                     G4 deferred position:
+                                                   `RevL.G4Deferred.deferredB`
+                                                   over the file's `DR` reaches
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -992,6 +1004,15 @@ structure HARow where
   verb : String
   pos : String
 
+/-- One reach of a `deferred` emission extern (`DR` row), with the scope and
+position the model's `RevL.G4Deferred` rule reads. -/
+structure DRRow where
+  path : String
+  scope : String
+  owner : String
+  ext : String
+  pos : String
+
 /-- A declared config field (`CF` row). `kind` is `component` or `extern`,
 the two owners `lower._check_config` is called for; `spelling` is the type
 as the author wrote it and is carried for legibility only — the judgment
@@ -1284,6 +1305,11 @@ def parseHA (f : List String) : Option HARow :=
   | ["HA", path, comp, verb, pos] => some ⟨path, comp, verb, pos⟩
   | _ => none
 
+def parseDR (f : List String) : Option DRRow :=
+  match f with
+  | ["DR", path, scope, owner, ext, pos] => some ⟨path, scope, owner, ext, pos⟩
+  | _ => none
+
 def parseCF (f : List String) : Option CFRow :=
   match f with
   | ["CF", path, kind, owner, field, spelling] =>
@@ -1499,6 +1525,46 @@ def closeN (n : Nat) (edges : List (String × String)) (closed : CapMap) : CapMa
   | 0 => closed
   | n + 1 => closeN n edges (oneStep edges closed)
 
+/-! ## Deciding the G4 deferred-position rule (issue #1742)
+
+A `DR` row is one reach of a `deferred` emission extern. Its scope and
+position are read into the model's own `RevL.G4Deferred.Reach`, and the file
+verdict is `RevL.G4Deferred.deferredB` over the file's reaches.
+`deferredOKB_iff` is the bridge: the printed `DF` Bool is the declarative
+`RevL.G4Deferred.DeferredOK`. A scope or position the model has no
+constructor for is a HARD error in `main`, never a silently dropped reach. -/
+
+section DeferredPosition
+
+def parseScope : String → Option RevL.G4Deferred.Scope
+  | "fn" => some .fn
+  | "test" => some .test
+  | "component" => some .component
+  | _ => none
+
+def parsePos : String → Option RevL.G4Deferred.Pos
+  | "call" => some .call
+  | "arrow" => some .arrow
+  | "value" => some .value
+  | _ => none
+
+/-- The model's reach for one `DR` row, or `none` for an unknown spelling. -/
+def reachOf (r : DRRow) : Option RevL.G4Deferred.Reach :=
+  match parseScope r.scope, parsePos r.pos with
+  | some s, some p => some ⟨s, p⟩
+  | _, _ => none
+
+/-- **Deferred-position decider**: the model's rule over the file's reaches. -/
+def deferredOKB (reaches : List RevL.G4Deferred.Reach) : Bool :=
+  RevL.G4Deferred.deferredB reaches
+
+/-- **The `DF` verdict is the model's rule** (`RevL.G4Deferred.deferredB_iff`). -/
+theorem deferredOKB_iff (reaches : List RevL.G4Deferred.Reach) :
+    deferredOKB reaches = true ↔ RevL.G4Deferred.DeferredOK reaches :=
+  RevL.G4Deferred.deferredB_iff reaches
+
+end DeferredPosition
+
 /-! ## Deciding A2: no acquisition after a provision (issue 1166)
 
 The `AQ` rows are one component's activation body in order, each statement
@@ -1601,6 +1667,7 @@ def main (args : List String) : IO UInt32 := do
     let pbrows := fields.filterMap parsePB
     let prrows := fields.filterMap parsePR
     let harows := fields.filterMap parseHA
+    let drrows := fields.filterMap parseDR
     let cfrows := fields.filterMap parseCF
     let cnrows := fields.filterMap parseCN
     let irows := fields.filterMap parseI
@@ -1667,6 +1734,12 @@ def main (args : List String) : IO UInt32 := do
         if outcome log = .rolledBack then csv (reportedSeqLabels log ok) else "n/a"
       out := out ++ s!"O\t{scen}\toutcome={outcomeName (outcome log)}\t" ++
         s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\n"
+    -- A `DR` row whose scope or position the model has no constructor for
+    -- would drop a reach silently and move the verdict: refuse instead.
+    let unknownDR := drrows.filter (fun r => (reachOf r).isNone)
+    if !unknownDR.isEmpty then
+      IO.eprintln s!"oracle: DR rows of unknown scope or position: {unknownDR.map (·.path)}"
+      return 1
     for p in paths do
       let fm := mrows.filter (fun r => r.path == p)
       let ub := brows.filter (fun r => r.path == p)
@@ -1807,6 +1880,11 @@ def main (args : List String) : IO UInt32 := do
         let steps := mine.filterMap (fun r => parseStep r.kind)
         let av := if a2OKB steps then "ok" else "fail"
         out := out ++ s!"A2\t{p}\t{cn}\ta2={av}\n"
+      -- DF verdict (G4 deferred position, issue #1742), one per file: the
+      -- model's rule over every reach of a `deferred` extern the file makes.
+      let reaches := (drrows.filter (fun r => r.path == p)).filterMap reachOf
+      let dfv := if deferredOKB reaches then "ok" else "fail"
+      out := out ++ s!"DF\t{p}\tdeferred={dfv}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -1866,3 +1944,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.a9RowB_iff
 #print axioms RevLOracle.parseStep_stepName
 #print axioms RevLOracle.a2OKB_iff
+#print axioms RevLOracle.deferredOKB_iff

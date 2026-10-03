@@ -332,3 +332,16 @@ import RevL
 #print axioms RevL.A2.fixture_release_before_withdrawal
 #print axioms RevL.A2.fixture_opens_the_window
 #print axioms RevL.A2.a2_not_vacuous
+
+-- Issue #1742: the G4 deferred-position rule. A `deferred` emission extern is
+-- reached only by a call in a component; never called in a `fn` or `test`
+-- body, inside an arrow there, or as a function value. The per-reach rule and
+-- its decider, the file rule and its decider (the oracle's `DF` row), and the
+-- corpus shapes the rule both admits and refuses.
+#print axioms RevL.G4Deferred.legalB_iff
+#print axioms RevL.G4Deferred.deferredB_iff
+#print axioms RevL.G4Deferred.value_never_legal
+#print axioms RevL.G4Deferred.body_reach_refused
+#print axioms RevL.G4Deferred.refused_of_mem
+#print axioms RevL.G4Deferred.fixtures_decided
+#print axioms RevL.G4Deferred.deferred_not_vacuous
