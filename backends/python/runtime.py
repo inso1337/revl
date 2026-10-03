@@ -1485,10 +1485,52 @@ def plug(ctx, component: dict, config=None):
 #: it is attributed to the activation (hence the instance) that acquired it.
 _ACTIVATING: list["Frame"] = []
 
-#: ctx -> the Frame of the activation on that context. Weak-keyed so a torn-down
-#: instance's frame is collected with its context. A `SpawnHandle` finds its
-#: instance's frame here, via the fiber context it already holds.
+#: ctx -> the Frame of the activation on that context, for a context that
+#: cannot carry the frame itself (no instance `__dict__`). Every cordis context
+#: can, and carries it as `_REVL_FRAME` in its own `__dict__` (`_bind_frame`).
+#:
+#: Issue #1720: this map used to hold every frame. It is weak-keyed, but each
+#: value (the frame) holds its key strongly (`frame.ctx`), so no entry was ever
+#: collected, and through `frame._owner` every session that ever activated a
+#: component stayed reachable from this module for the life of the process,
+#: with its event loop and its open log. Stored on the context, a frame lives
+#: exactly as long as its context does.
 _FRAME_BY_CTX: "weakref.WeakKeyDictionary" = weakref.WeakKeyDictionary()
+
+_REVL_FRAME = "_revl_frame"
+
+
+def _frame_slot(ctx: Any) -> "Optional[dict]":
+    """The `__dict__` a context's frame lives in, or None when it has none.
+
+    A recording wrapper (`replay._RecordingContext`) keeps the raw context in
+    its own `_revl_ctx`, and both resolve to the RAW context's dict, so the
+    frame is found by either (item 334). The dicts are read with `object`'s own
+    attribute access on purpose: a cordis context's `__getattr__` walks to its
+    PARENT for an underscored name, so a plain `getattr` on a child with no
+    frame of its own would answer with the parent's frame."""
+    try:
+        own = object.__getattribute__(ctx, "__dict__")
+    except (AttributeError, TypeError):
+        return None
+    inner = own.get("_revl_ctx")
+    if inner is None:
+        return own
+    try:
+        return object.__getattribute__(inner, "__dict__")
+    except (AttributeError, TypeError):
+        return own
+
+
+def _bind_frame(ctx: Any, frame: "Frame") -> None:
+    slot = _frame_slot(ctx)
+    if slot is not None:
+        slot[_REVL_FRAME] = frame
+        return
+    try:
+        _FRAME_BY_CTX[ctx] = frame
+    except TypeError:  # pragma: no cover — non-weakrefable ctx
+        pass
 
 #: component name -> the live `SpawnHandle`s of that template, in spawn order.
 #: A list (not a set): the swap engine correlates old instances to the new ones
@@ -1507,6 +1549,9 @@ def _register_resource(resource: Any) -> None:
 
 
 def _frame_for_ctx(ctx: Any) -> "Optional[Frame]":
+    slot = _frame_slot(ctx)
+    if slot is not None:
+        return slot.get(_REVL_FRAME)
     try:
         return _FRAME_BY_CTX.get(ctx)
     except TypeError:  # pragma: no cover — non-weakrefable ctx
@@ -3247,27 +3292,14 @@ class Frame:
         # activation-body inverses that unwind after `drain` escrow themselves
         # (see `_hold_for_session`). Never set by a mid-activation failure.
         self._holding = False
-        try:
-            _FRAME_BY_CTX[ctx] = self  # so a SpawnHandle can find this frame
-        except TypeError:  # pragma: no cover — non-weakrefable ctx
-            pass
+        _bind_frame(ctx, self)  # so a SpawnHandle can find this frame
         # item 334 (instance migration under recording): the emitted body is
-        # handed a `_RecordingContext` wrapper when the WAL is on, so the frame
-        # is keyed above under the WRAPPER — but a `SpawnHandle` holds the RAW
-        # fiber context (`runtime.spawn`: `SpawnHandle(fiber, ...)`) and looks the
-        # frame up by it (`_frame`/`_frame_for_ctx`). Without also keying under
-        # the underlying raw context, `capture_state` finds no frame under a
-        # recording gate and silently reports an empty resource vector, so a
-        # generational hot-swap through `Gate.propose` (which records under a
-        # policy) drops the live instance's state instead of migrating it. Key
-        # the frame under the underlying context too; a bare (un-recorded)
-        # activation has no `_revl_ctx` and is untouched.
-        underlying = getattr(ctx, "_revl_ctx", None)
-        if underlying is not None and underlying is not ctx:
-            try:
-                _FRAME_BY_CTX[underlying] = self
-            except TypeError:  # pragma: no cover — non-weakrefable ctx
-                pass
+        # handed a `_RecordingContext` wrapper when the WAL is on, but a
+        # `SpawnHandle` holds the RAW fiber context and looks the frame up by
+        # it, so a frame bound only under the wrapper made `capture_state`
+        # report an empty resource vector and a hot-swap through
+        # `Gate.propose` drop the live instance's state. `_bind_frame` stores
+        # the frame on the RAW context, which both spellings resolve to.
         # An emitted `apply` resolves its config immediately before building
         # the Frame, so this is where the resolution finally learns which
         # component it belongs to (ConfigSchema itself is name-less in

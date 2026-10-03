@@ -1,0 +1,15 @@
+// idiom: provide-method
+// summary: the body of a provide method whose operation is not `emission`
+// rule: G4: a plain operation does not cross the boundary, so its body is a pure expression with no `emit`
+// rule: A6: the method names its parameters only; their types come from the service declaration
+// fill: db.get(key)
+// type: Str
+
+service Db { fn get(key: Str) -> Str }
+service Cache { fn read(key: Str) -> Str }
+
+component Reader requires db: Db provides cache: Cache {
+  provide cache {
+    fn read(key) = db.get(key)
+  }
+}

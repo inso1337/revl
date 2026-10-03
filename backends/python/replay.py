@@ -2539,14 +2539,38 @@ class WriteAheadLog:
         self._write(record)
         return record
 
-    def record_approval_consumed(self, request_id: str) -> dict:
-        """Append the single-use SPEND, durably, BEFORE the extern body runs
-        (item 246, Decision 3: consume-before-fire). A crash between this record
-        and the emission leaves consumed-but-unfired — an owed action that needs a
-        FRESH approval, which is fail-closed: the world saw at most one fire on
-        this yes. The later emission record names the same ``requestId``; the
-        audit joins the spend and the emission on it."""
+    def record_approval_consumed(self, request_id: str, *,
+                                 use: int | None = None) -> dict:
+        """Append one SPEND, durably, BEFORE the authorized crossing runs (item
+        246, Decision 3: consume-before-fire). A crash between this record and
+        the fire leaves consumed-but-unfired, which is fail-closed: a fresh
+        approval is needed, and the world saw at most one fire on this spend.
+
+        ``use`` (issue #1781) is the 1-based index of this spend for
+        ``requestId`` in the session. The session's per-call path (ticket
+        approvals, item-344 standing grants, item-251 distilled rules) and the
+        activation gate's two-phase spend always pass it, so one multi-use
+        grant's spends are told apart by ``(requestId, use)``. The runtime path
+        for an approval threaded into an emission spends a single-use entry and
+        writes no ``use``.
+
+        What follows on the record:
+
+        * after the session's per-call path, an ``approval-emission`` with the
+          same ``requestId`` and ``use`` once the crossing RETURNED. A spend
+          with no such emission was either never fired or raised mid-crossing,
+          and a reader must treat it as owed or ambiguous, never as fired;
+        * after the runtime path, an ``approval-emission`` with the same
+          ``requestId`` (no ``use``) once the threaded crossing fired;
+        * after an activation-gate spend, no ``approval-emission``: that
+          crossing is part of the activation body, which ``activation-complete``
+          records.
+
+        ``revl recover`` does not read these records (src/revl/wal.py); they are
+        the audit trail."""
         record = {"record": "approval-consumed", "requestId": request_id}
+        if use is not None:
+            record["use"] = use
         self._write(record)
         return record
 
@@ -2738,15 +2762,24 @@ class WriteAheadLog:
         return record
 
     def record_approval_emission(self, request_id: str, capability: str,
-                                 component: str) -> dict:
-        """Append the ``approval-emission`` record AFTER a typed-approval crossing
-        fires (item 246, Decision 3), naming the same ``requestId`` the spend
-        did. The audit joins the ``approval-consumed`` spend and this emission on
-        ``requestId``: a spend with no matching emission is a visible owed action
-        (crossing unverified), never a silent gap. Consumes no seq — it names a
-        fact about a fire that already happened."""
+                                 component: str, *,
+                                 use: int | None = None) -> dict:
+        """Append the ``approval-emission`` record AFTER an approved crossing
+        fired (item 246, Decision 3), naming the same ``requestId`` (and, from
+        the session's per-call path, the same ``use``, issue #1781) as the
+        ``approval-consumed`` spend that authorized it. Written by the runtime
+        path for an approval threaded into an emission, and by ``Session.call``
+        once a crossing a ticket approval, standing grant or distilled rule
+        covered has returned.
+
+        The join is on ``(requestId, use)``, or on ``requestId`` alone for the
+        runtime path's single-use spends. A spend with no matching emission is
+        an owed or ambiguous crossing, never a silent gap. Consumes no seq: it
+        names a fact about a fire that already happened."""
         record = {"record": "approval-emission", "requestId": request_id,
                   "capability": capability, "component": component}
+        if use is not None:
+            record["use"] = use
         self._write(record)
         return record
 

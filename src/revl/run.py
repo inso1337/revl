@@ -2726,6 +2726,17 @@ def run_command(args, hold_once: bool = False) -> int:
             f"         revl run ...                                       # the documented happy path\n"
             f"         .venv/bin/python -P -m revl run ...                # absolute-interpreter fallback (the `-P` closes the CWD-shadowing window)",
             lifecycle.BOOT, code=3)
+    except Exception as exc:  # noqa: BLE001 - an installed runtime that fails on import
+        # Present but broken is a different failure from absent: the package
+        # is found, and importing it raises. The pinned cordis-py fork does
+        # this when its optional `watchdog` extra is missing (`cordis.hmr`
+        # subclasses a name that is None). Say what raised, and point at the
+        # setup script, which installs the runtime with what it imports.
+        return _fail(
+            f"the cordis-py runtime is installed but does not import: "
+            f"{type(exc).__name__}: {exc}\n"
+            f"       reinstall it with its dependencies:  sh {backend_dir / 'setup.sh'}",
+            lifecycle.BOOT, code=3)
     # The backend directory is a trusted loader path, not an import capability
     # for generated user bodies. Keep the already-loaded runtime modules alive,
     # but remove the ambient path before any generated module is executed.
