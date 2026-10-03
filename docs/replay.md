@@ -377,7 +377,7 @@ What that layer establishes, observed rather than argued:
   disposer is still identified as a provision, by object identity;
 * step-back restores the state its inverses guard, and leaves the fiber
   `ACTIVE` and the service callable — withdrawn is not disposed;
-* **`unload` after a step-back still reports `noResidue: true`** on all four
+* **`unload` after a step-back still reports `noResidue: true`** on all five
   checks. This is the sharpest result: the once-only inverse is shared with
   the real fiber's teardown, so replaying `store.drop()` early neither
   double-frees it nor causes the runtime to skip anything else. R4 survives
