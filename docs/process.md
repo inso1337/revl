@@ -368,6 +368,75 @@ What is still not covered is the publish job's own runtime environment, its
 on a tag build and cannot be rehearsed without publishing. Run
 `gh workflow run "release dry run"` and read it green before pushing a tag.
 
+## Merging main into a PR branch
+
+Update an open PR by merging `origin/main` into it, never by rebasing and
+force-pushing. The merge usually stops on files nobody writes: the gate
+crates, the derived grammar, the census artifact and its crate reproduction,
+the generated block of `formal/STATUS.md`, the conformance matrix and the
+docgen blocks. Never hand-merge one. Resolve them all with one command
+(issue #1784):
+
+    git merge origin/main
+    python3 tools/regen_generated.py
+    git commit
+
+`tools/regen_generated.py` walks the conflicted paths and, for each file it
+knows a generator for, reruns that generator on the merged tree, in the order
+the generators read each other's output:
+1. both gate crates;
+2. the grammar;
+3. provenance;
+4. the census, with its crate reproduction (`cargo`, about fourteen minutes);
+5. `formal/STATUS.md` (a real `lake build`);
+6. the conformance matrix;
+7. the coverage ledger, once it is per half and tier (issue #1768);
+8. docgen.
+
+It then runs every generator's own check, and stages what it resolved.
+
+- **Wholly generated files** are taken from main and regenerated.
+- **Partly generated files** (a doc with a docgen block, `formal/STATUS.md`,
+  the README matrix) are regenerated in all three versions, base, yours and
+  main's, then merged with `git merge-file`. Prose from both sides survives, and
+  a real prose conflict is left marked for you, with the generated region
+  already fresh.
+- **The coverage ledger** (`tests/fixtures/selfhost_uncovered_lines/`) is
+  handed to `tools/selfhost_line_coverage.py --write` as it stands, because
+  that tool reads through conflict markers and re-measures every count. It
+  never writes a budget. When its `--check` names a function whose budget no
+  longer matches, set that budget by hand in the merge commit; the tool
+  prints this step.
+- **Hand-maintained ratchets are never resolved for you.** The tool prints the
+  conflict and the rule. This applies to `selfhost_blind_spots.json` and
+  `oracle_construct_reach_ledger.json`, and to the single-file
+  `selfhost_uncovered_lines.json` ledger while main still has it.
+- **A layout move on main** (the census records, the per-tier ledger) gives
+  every branch cut before it one modify/delete conflict on the old file. The
+  tool takes main's side, the deletion or the hand-written page that replaced
+  the file, and regenerates the new layout. It recognises the move by a path
+  only the new layout has, present on main and absent from the merge base;
+  the moves are listed in its `TRANSITIONS`.
+- **`bench/results/` is left alone** unless you pass `--bench`, which takes
+  main's side, including a file main deleted.
+- **A step whose tool is missing** (`lake`, `cargo`) is skipped with a loud
+  banner, and the files it owns are left as they were. `--fast` skips the
+  crate census on purpose.
+- **Provenance has no default generation** for your branch's new census
+  documents. Pass `--provenance-generation N` when its manifest conflicts, or
+  when its check names an UNDECLARED document this branch added:
+  `--only provenance --provenance-generation N`. The census reads the
+  manifest, so the tool reruns the census after it.
+
+The tool calls each generator by its command line and never reads a generated
+file, so a change to a generated layout needs no change to the tool. Only a
+renamed generator or a moved output does, and both live in its `REGISTRY`
+and `TRANSITIONS`,
+which `tests/test_regen_generated.py` checks against the tree. `--list`
+prints what it knows; `--all` and `--only NAME` regenerate outside a
+conflict. It exits 0 when every conflict it owns is resolved and every check
+passes, and 1 when a check fails or a conflict is left for a human.
+
 ## Merging
 
 The orchestrator merges when CI is green, and regenerates the site wheel if the
