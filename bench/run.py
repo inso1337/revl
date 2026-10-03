@@ -95,30 +95,56 @@ def extract_code(reply: str) -> str:
 COMPILER_ROOT = ROOT  # overridable via --compiler-root
 
 
+def _is_revl(name: str) -> bool:
+    return name == "revl" or name.startswith("revl.")
+
+
+# The `revl/__init__.py` the last `compile_check` graded with, for
+# `scoring_compiler`. `compile_check` puts the process's own `revl` back when
+# it returns, so `sys.modules` no longer says which one graded.
+_GRADED_BY: str | None = None
+
+
 def compile_check(code: str, name: str):
     """Returns (ok, error_message). Imports the compiler each call so a
     concurrent edit to src/revl is picked up, and an import-time breakage is
-    reported rather than crashing the run."""
+    reported rather than crashing the run.
+
+    The fresh import is scoped to this call. Every `revl` module already
+    loaded, and `sys.path`, are put back before it returns. Leaving the fresh
+    copy installed split the process in two (issue #1800): code that had
+    imported `revl` earlier kept the old `RevlError` class while every later
+    lazy import inside the compiler resolved to the new one, so
+    `except RevlError` stopped catching the compiler's own refusals."""
+    global _GRADED_BY
     src = str(COMPILER_ROOT / "src")
+    saved_path = list(sys.path)
+    saved = {m: mod for m, mod in sys.modules.items() if _is_revl(m)}
     if src in sys.path:
         sys.path.remove(src)
     sys.path.insert(0, src)
-    for mod in [m for m in list(sys.modules) if m == "revl" or m.startswith("revl.")]:
+    for mod in saved:
         del sys.modules[mod]
     try:
-        from revl import RevlError, compile_source
-    except Exception as exc:  # compiler tree mid-edit
-        return False, f"[compiler import failed] {exc}"
-    try:
-        compile_source(code, name)
-        return True, None
-    except RevlError as exc:
-        return False, str(exc)
-    except Exception as exc:
-        return False, f"[compiler crash] {type(exc).__name__}: {exc}"
+        try:
+            import revl  # noqa: PLC0415
+            from revl import RevlError, compile_source  # noqa: PLC0415
+        except Exception as exc:  # compiler tree mid-edit
+            return False, f"[compiler import failed] {exc}"
+        _GRADED_BY = getattr(revl, "__file__", None)
+        try:
+            compile_source(code, name)
+            return True, None
+        except RevlError as exc:
+            return False, str(exc)
+        except Exception as exc:
+            return False, f"[compiler crash] {type(exc).__name__}: {exc}"
+    finally:
+        for mod in [m for m in sys.modules if _is_revl(m)]:
+            del sys.modules[mod]
+        sys.modules.update(saved)
+        sys.path[:] = saved_path
 
-
-# --- runners ---------------------------------------------------------------
 
 def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
               timeout: int, inline_system: bool):
@@ -480,8 +506,10 @@ def scoring_compiler() -> str:
     """The directory `compile_check` actually imported revl from.
 
     Asked after the run, not before, so it reports what graded the corpus."""
-    mod = sys.modules.get("revl")
-    path = getattr(mod, "__file__", None) if mod else None
+    path = _GRADED_BY
+    if path is None:
+        mod = sys.modules.get("revl")
+        path = getattr(mod, "__file__", None) if mod else None
     if not path:
         return "revl was never imported"
     parent = Path(path).parent
