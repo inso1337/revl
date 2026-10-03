@@ -75,6 +75,7 @@ from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import fillspec
+from . import draft as _draft
 from . import edit as _edit
 from . import leases as _leases
 from . import operator as _operator
@@ -840,27 +841,64 @@ def _tool_load(arguments: dict) -> dict:
     Under a policy that enforces leases, a load that would boot a component
     under a name another operator leases is refused, as a swap replacing it is
     (`leases.FENCED` says why a cold load is fenced too)."""
-    if not SESSION.loaded:   # a load over a running composition is refused below
-        refusal = _leases.check(SESSION, "load", arguments)
-        if refusal is not None:
-            return _refused_by_lease(refusal)
     source, files, modules = _candidate_of(arguments)
+    if source is None and not files and _draft.pending(SESSION) is not None \
+            and not SESSION.loaded:
+        return _draft.boot_held(SESSION, arguments, _boot_draft)
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
         return report(error)
+    if not SESSION.loaded and _draft.has_holes(ir):
+        # issue #1727: a holed candidate opens a draft rather than failing.
+        # Nothing boots, so nothing a lease fences happens yet: the lease is
+        # checked when the draft boots (`_boot_draft`)
+        return _draft.open_draft(SESSION, arguments, ir)
+    if not SESSION.loaded:   # a load over a running composition is refused below
+        refusal = _leases.check(SESSION, "load", arguments)
+        if refusal is not None:
+            return _refused_by_lease(refusal)
+    return _boot(ir, source, modules, arguments.get("config"),
+                 bool(arguments.get("record")), _origin(arguments))
+
+
+def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
+    """Boot a compiled composition: `Session.load`, then record what it
+    authored. Shared by `revl_load` and a draft that has no holes left."""
     authored = _authored_host_bodies(ir, source, modules)
     try:
-        state = SESSION.load(ir, arguments.get("config"),
-                             record=bool(arguments.get("record")),
-                             origin=_origin(arguments))
+        state = SESSION.load(ir, config, record=record, origin=origin)
     except SessionError as error:
         return _session_error(str(error))
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
+    _draft.discard(SESSION)
     return {"ok": True, **_summary(ir), **state}
+
+
+def _boot_draft(vs: dict, config, record) -> dict:
+    """Boot a hole-free draft through every gate `revl_load` runs (issue
+    #1727): the load half of the operator gate, a lease on a cold load, the
+    compile, and `Session.load`. Refused, the draft stays held."""
+    candidate = _edit.candidate_arguments(vs)
+    decision = _operator.decide(SESSION, "revl_load", candidate)
+    if decision.gated and not decision.allowed:
+        return _draft.still_a_draft(_refused_by_operator(decision))
+    refusal = _leases.check(SESSION, "load", candidate)
+    if refusal is not None:
+        return _draft.still_a_draft(_refused_by_lease(refusal))
+    try:
+        ir = _edit.compile_virtual(vs)
+    except RevlError as error:
+        return _draft.still_a_draft(report(error))
+    modules = _edit.file_modules(vs) if vs.get("files") else vs.get("modules")
+    booted = _boot(ir, vs.get("source"), modules, config, bool(record),
+                   _edit._origin_from(vs))
+    if not booted.get("ok"):
+        return _draft.still_a_draft(booted)
+    return {**booted, "draft": False, "booted": True, "loaded": True}
 
 
 def _tool_call(arguments: dict) -> dict:
@@ -995,6 +1033,9 @@ def _tool_source(arguments: dict) -> dict:
 def _source_set(arguments: dict) -> dict:
     if SESSION.loaded:
         return _edit.running_source(SESSION)
+    if _draft.pending(SESSION) is not None and arguments.get("source") is None \
+            and not arguments.get("files"):
+        return _draft.pending(SESSION)["vs"]
     if arguments.get("source") is not None:
         return {"source": arguments["source"],
                 "modules": dict(arguments.get("modules") or {})}
@@ -1045,6 +1086,8 @@ def _tool_edit(arguments: dict) -> dict:
     through `revl_load` itself, then edits it (issue #1690): an agent never has
     to learn that the edit verb needs a load verb before it."""
     carried = any(arguments.get(k) is not None for k in ("source", "files"))
+    if not carried and not SESSION.loaded and _draft.pending(SESSION) is not None:
+        return _edit_draft(arguments)
     if carried and SESSION.loaded:
         return _session_error(
             "a composition is already loaded: revl_edit patches it, so omit "
@@ -1063,8 +1106,17 @@ def _tool_edit(arguments: dict) -> dict:
         loaded = _tool_load(load_arguments)
         if not loaded.get("ok"):
             return {**loaded, "loaded": False, "edited": False, "swapped": False}
+        if loaded.get("draft"):
+            return _edit_draft(arguments)
     result = _edit_loaded(arguments)
     return {**result, "loaded": True} if loaded is not None else result
+
+
+def _edit_draft(arguments: dict) -> dict:
+    try:
+        return _draft.edit_draft(SESSION, arguments, _boot_draft)
+    except _edit.EditError as error:
+        return _session_error(str(error), edited=False, swapped=False, draft=True)
 
 
 def _edit_loaded(arguments: dict) -> dict:
@@ -1118,6 +1170,9 @@ def _tool_unload(arguments: dict) -> dict:
         refusal = _leases.check(SESSION, "unload", arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
+    elif _draft.discard(SESSION):
+        return {"ok": True, "discardedDraft": True,
+                "note": "the held draft was discarded; nothing was running"}
     try:
         return {"ok": True, **SESSION.unload()}
     except SessionError as error:
@@ -1542,7 +1597,15 @@ def _tool_estop_report(_arguments: dict) -> dict:
 
 
 def _tool_state(_arguments: dict) -> dict:
-    return {"ok": True, **SESSION.state(drain=True)}
+    state = {"ok": True, **SESSION.state(drain=True)}
+    held = _draft.pending(SESSION)
+    if held is not None and not SESSION.loaded:
+        try:
+            holes = len(_draft.collect_holes(_edit.compile_virtual(held["vs"])))
+        except RevlError:
+            holes = None
+        state["draft"] = {"holes": holes}
+    return state
 
 
 def _tool_gauntlet(arguments: dict) -> dict:
