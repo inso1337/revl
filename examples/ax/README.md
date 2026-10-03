@@ -102,8 +102,8 @@ Read from AX's source at the pinned commit:
   cannot call the provider's `host_file` directly, and cannot name files outside
   `--root /workspace/app`. `tests/test_examples_ax.py` checks the refusal.
 - **Classified calls.** Every operation's effect class comes from the compiler,
-  not from the tool author's say-so. Under `--approval-policy auto` an emission
-  with no inverse needs an approval before it fires.
+  not from the tool author's say-so. Under the approval gate an emission with
+  no inverse needs an approval before it fires.
 - **A durable record.** With `record: true` the session keeps a JSON Lines WAL,
   fsynced per record, under `REVL_WAL_DIR`, set to `/workspace/app/.revl/wal`.
   Each outside crossing is recorded with its target and arguments.
@@ -155,11 +155,13 @@ operator exactly what to reconcile by hand.
   too. Keeping it away from the agent needs the gate outside the sandbox (AX's
   `MCPServer.endpoint`), which needs an MCP transport over the network that
   `revl mcp serve` does not have: it speaks stdio only.
-- **The approval is advisory here.** With no `--operator-profile`, the calling
-  identity may answer its own class (c) tickets, and the server says so on
-  stderr at startup. Making it a gate needs an operator profile that grants
-  `approve` only to a human, and a channel for that human into the sandbox,
-  which this example does not set up.
+- **The approval is advisory here.** The example serves with
+  `--approval-policy advisory`, so the calling identity may answer its own
+  class (c) tickets, and the server says so on stderr at startup. Without the
+  flag, `revl mcp serve` refuses that (issue #1706): approval then needs a
+  second operator identity, which means serving with `--http` and an operator
+  profile that grants `approve` only to a human, and a channel for that human
+  into the sandbox. This example does not set those up.
 - **Crash revert.** When Substrate reverts a crashed actor to its last snapshot,
   the WAL goes back with it, and so the record of crossings after the snapshot
   is lost. A WAL that must survive this has to live outside the actor.

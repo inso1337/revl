@@ -76,7 +76,7 @@ spec:
             --provider tickets.rvl
             --grant Tickets
             --root /workspace/app
-            --approval-policy auto
+            --approval-policy advisory
       # Slot for `revl mcp proxy` (issue #1463, not released yet). It is meant
       # to sit in front of an existing MCP server with no .rvl written. Once
       # it ships, an entry here would launch the proxy with the upstream

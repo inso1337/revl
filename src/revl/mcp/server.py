@@ -94,7 +94,7 @@ from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
-from .session import Session, SessionError
+from .session import ApprovalRefused, Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -828,8 +828,14 @@ def _tool_load(arguments: dict) -> dict:
         return report(error)
     authored = _authored_host_bodies(ir, source, modules)
     try:
+        # issue #1706: the gate is on by default and its spend must be durable,
+        # so a load that does not say otherwise records; an explicit
+        # `record: false` under the gate is still refused by `Session.load`.
+        record = arguments.get("record")
+        if record is None:
+            record = SESSION.approval_policy is not None
         state = SESSION.load(ir, arguments.get("config"),
-                             record=bool(arguments.get("record")),
+                             record=bool(record),
                              origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
@@ -858,6 +864,47 @@ def _tool_call(arguments: dict) -> dict:
     except Exception as exc:  # the callee raised — that is a result, not a crash
         return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
                               trace=SESSION.state().get("trace", []))
+
+
+def _tool_act(arguments: dict) -> dict:
+    """One call per agent action (issue #1708): classify the proposed action,
+    then execute it (class (a), or (c) already approved), defer it to commit
+    (class (b)), or ticket it (class (c), nothing fired), and record a receipt
+    the commit manifest lists. Returns `{class, outcome, receipt, residue}`; a
+    ticket comes back in the same two-step shape `revl_call` uses, with those
+    fields beside it."""
+    key, method = arguments.get("key"), arguments.get("method")
+    if not key or not method:
+        return _session_error("`key` and `method` are required")
+    try:
+        return {"ok": True, **SESSION.act(key, method, arguments.get("args") or [])}
+    except ApprovalRefused as error:
+        return _session_error(str(error), outcome="refused",
+                              ticket=error.ticket.get("hash"))
+    except SessionError as error:
+        return _session_error(str(error))
+    except ApprovalRequired as exc:
+        payload = _approval_required(exc)
+        receipt = getattr(exc, "receipt", None) or {}
+        return {**payload, "class": receipt.get("class", "c"),
+                "outcome": "ticket", "receipt": receipt, "residue": []}
+    except Exception as exc:  # the callee raised: a result, not a crash
+        return _session_error(f"{type(exc).__name__}: {exc}", raised=True,
+                              outcome="raised",
+                              trace=SESSION.state().get("trace", []))
+
+
+def _tool_counterfactual(arguments: dict) -> dict:
+    """What the gate would have decided had the agent acted differently at one
+    action (issue #1752): replace, insert or drop it in this session's revl_act
+    log, decide both arms with the gate's pure parts, and report the
+    divergence. Runs nothing and changes nothing."""
+    try:
+        return {"ok": True, **SESSION.counterfactual(
+            arguments.get("at"), replace=arguments.get("replace"),
+            insert=arguments.get("insert"), drop=bool(arguments.get("drop")))}
+    except SessionError as error:
+        return _session_error(str(error))
 
 
 def _tool_swap(arguments: dict) -> dict:
@@ -1210,6 +1257,23 @@ def _host_code_fields(bodies: list) -> dict:
             f"`--author-trust trusted`; the default refuses agent-authored "
             f"host code outright."),
     }
+
+def _approval_instructions() -> str:
+    """The `initialize` instructions' sentence on the approval gate (issue
+    #1706), true of this session's mode."""
+    if SESSION.approval_policy is None:
+        return ("No approval gate is configured: a class-(c) crossing fires "
+                "when called.")
+    text = ("The approval gate is on: a witnessed crossing with an inverse "
+            "proceeds, a deferred emission waits for commit, and any other "
+            "emission returns approvalRequired with a ticket and fires nothing. "
+            "Relay the ticket to a human and re-issue the identical call once "
+            "it is approved.")
+    if getattr(SESSION, "approval_separation", False):
+        text += (" You cannot approve a ticket you raised: revl_approve must "
+                 "come from a separate operator identity.")
+    return text
+
 
 def _tool_approve(arguments: dict) -> dict:
     """Say YES to a class-(c) crossing (item 246 / roadmap item 344). Two shapes,
@@ -2459,6 +2523,61 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": False},
         "handler": _tool_call,
+    },
+    {
+        "name": "revl_act",
+        "description": "One call per agent action through the approval gate "
+                       "(issue #1708). Classifies the proposed action by its "
+                       "checked effect class, then: class (a) (witnessed, with an "
+                       "inverse) executes; class (b) (deferred) is queued for "
+                       "revl_commit; class (c) (any other emission) returns a "
+                       "ticket and fires nothing until an operator approves it, "
+                       "after which the identical re-issue executes. Returns "
+                       "`class`, `outcome` (executed, deferred or ticket), the "
+                       "`receipt` recorded for the commit manifest and the "
+                       "`residue` (crossings fired that no inverse can take "
+                       "back). Needs the approval gate on.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "key": {"type": "string", "description": "provided key, e.g. `ops`"},
+                "method": {"type": "string", "description": "operation name"},
+                "args": {"type": "array", "description": "positional arguments"},
+            },
+            "required": ["key", "method"],
+        },
+        "annotations": {"readOnlyHint": False, "destructiveHint": False},
+        "handler": _tool_act,
+    },
+    {
+        "name": "revl_counterfactual",
+        "description": "What would the gate have decided if the agent had acted "
+                       "differently (issue #1752)? Takes this session's revl_act "
+                       "log, replaces, inserts or drops the action at `at`, and "
+                       "decides both arms with the gate's own rules: each "
+                       "action's class, whether it executes, defers or tickets, "
+                       "which recorded approvals still cover what, and the "
+                       "irreversible residue. Reports where the arms diverge and "
+                       "whether the recorded arm reproduces the recording. "
+                       "Nothing is run and the session is unchanged.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "at": {"type": "integer",
+                       "description": "the action index (receipt `seq`) to vary"},
+                "replace": {"type": "object",
+                            "description": "the action to run instead: "
+                                           "`{key, method, args}`"},
+                "insert": {"type": "object",
+                           "description": "an action to add before `at`: "
+                                          "`{key, method, args}`"},
+                "drop": {"type": "boolean",
+                         "description": "leave the action at `at` out"},
+            },
+            "required": ["at"],
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_counterfactual,
     },
     {
         "name": "revl_swap",
@@ -3804,8 +3923,10 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": _INSTRUCTIONS if runtime_available()
-                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
+            "instructions": f"{_INSTRUCTIONS} {_approval_instructions()}"
+                            if runtime_available()
+                            else f"{_INSTRUCTIONS} {_approval_instructions()} "
+                                 f"{_runtime_gate.announcement()}",
         }
     elif method == "tools/list":
         result = {"tools": _ADVERTISED}

@@ -1009,14 +1009,23 @@ def build_parser() -> argparse.ArgumentParser:
     # auto-approve policy (item 246): the second orthogonal gate. `auto` proceeds
     # silently on class (a) (witnessed-revertible), enumerates class (b) (deferred)
     # at commit, and prompts per call on class (c) (an irreversible emission with
-    # no checked inverse). Off by default — omit for byte-identical behaviour.
+    # no checked inverse). Issue #1706: `auto` is the DEFAULT, and the identity
+    # that raised a ticket cannot approve it. `advisory` is the pre-#1706 `auto`
+    # (the raiser may approve), and `off` the pre-#1706 default: no policy, so a
+    # class-(c) crossing fires unprompted.
     mcp_serve.add_argument("--approval-policy", default=None, metavar="MODE",
-                           choices=("auto",),
-                           help="enable the auto-approve policy (item 246): class "
-                                "(a)/(b) crossings auto-approve, class (c) prompts "
-                                "per call via the ticket two-step. Requires "
-                                "`record: true` at load. Omit for no policy "
-                                "(today's behaviour)")
+                           choices=("auto", "advisory", "off"),
+                           help="the effect-class approval gate (item 246). `auto` "
+                                "(the default): class (a) witnessed crossings with "
+                                "an inverse proceed, class (b) deferred emissions "
+                                "wait for commit, class (c) emissions return a "
+                                "ticket and fire nothing, and the identity that "
+                                "raised a ticket cannot approve it (issue #1706). "
+                                "`advisory`: the same gate, but the raiser may "
+                                "approve its own ticket (what `auto` meant before "
+                                "issue #1706). `off`: no gate, so a class-(c) "
+                                "crossing fires unprompted (the default before "
+                                "issue #1706)")
     # roadmap 425 F3 / 427 F5: whether an approved crossing's CALLER-SUPPLIED
     # resource value (`host=`, `path=`, `table=`) is written into the durable
     # cross-session approval WAL. Defaults to `withheld` — an operator who never
@@ -1616,6 +1625,23 @@ def build_parser() -> argparse.ArgumentParser:
                               "flag the exit status follows the modelled "
                               "residue instead (0 clean, 1 residue)")
     recover.add_argument("--json", action="store_true", help="machine-readable output")
+
+    act = sub.add_parser(
+        "act",
+        help="the agent tool loop in one call per action (issue #1708): boot the "
+             "composition under the approval gate, read proposed actions from "
+             "stdin (one JSON object per line: key, method, args), and print "
+             "each one's class, outcome (executed, deferred or ticket), receipt "
+             "and residue, then the commit manifest")
+    act.add_argument("files", nargs="+")
+    act.add_argument("--wal", default=None, metavar="FILE",
+                     help="the session's write-ahead log (default: a file in the "
+                          "per-user approval WAL directory)")
+    act.add_argument("--commit", action="store_true",
+                     help="at end of input, confirm the commit manifest: flush "
+                          "the deferred actions and keep the witnessed ones. "
+                          "Without it the session is aborted: nothing deferred "
+                          "fires and the witnessed actions are undone")
 
     estop = sub.add_parser(
         "estop",
