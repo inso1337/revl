@@ -156,10 +156,17 @@ def _trust(session) -> dict:
 
 # ---------------------------------------------------------------- evidence (slice 4)
 
-#: the static query verbs a `query` evidence may name: read-only by construction
-QUERY_VERBS = {"emits-to": ("target", "emitters"), "withdraw": ("component", "withdrawal"),
-               "depends-on": ("target", "dependents"), "reaches": ("component", "reach"),
-               "drift": ("service", "drift")}
+def query_verbs() -> dict:
+    """verb -> (argument name, query function): the static query verbs a
+    `query` evidence may name, read-only by construction. Read off
+    `query.QUERIES`, the one table of those verbs, and each function's own
+    second parameter, so no second copy of the vocabulary lives here."""
+    import inspect  # noqa: PLC0415
+
+    from .. import query as Q  # noqa: PLC0415
+
+    return {verb: (list(inspect.signature(fn).parameters)[1], fn)
+            for verb, fn in Q.QUERIES.items()}
 #: evidence the server re-runs; `test` and `issue` are citations
 RERUNNABLE = ("diagnostic", "query", "audit")
 
@@ -171,11 +178,12 @@ def _validate_evidence(item) -> None:
                         "server may run, never a call or a swap")
     kind = item["kind"]
     if kind == "query":
-        if item.get("verb") not in QUERY_VERBS:
+        verbs = query_verbs()
+        if item.get("verb") not in verbs:
             raise NoteError("a `query` evidence names one of the read-only query "
-                            f"verbs ({', '.join(QUERY_VERBS)}); "
+                            f"verbs ({', '.join(verbs)}); "
                             f"{item.get('verb')!r} is not one")
-        arg = QUERY_VERBS[item["verb"]][0]
+        arg = verbs[item["verb"]][0]
         if not isinstance((item.get("args") or {}).get(arg), str):
             raise NoteError(f"a `{item['verb']}` query evidence needs `args.{arg}`")
         if not isinstance(item.get("expect"), dict) or not item["expect"]:
@@ -218,10 +226,8 @@ def run_evidence(session, item: dict) -> bool | None:
         return None
     try:
         if kind == "query":
-            from .. import query as Q  # noqa: PLC0415
-
-            arg, fn = QUERY_VERBS[item["verb"]]
-            answer = getattr(Q, fn)(session.ir, item["args"][arg])
+            arg, fn = query_verbs()[item["verb"]]
+            answer = fn(session.ir, item["args"][arg])
             if answer.get("ok") is False:
                 return False
             return all(_project(answer.get(key), want) ==
@@ -564,7 +570,7 @@ def _declarations(text: str, name: str) -> list:
         return []
 
 
-__all__ = ["KINDS", "EVIDENCE_KINDS", "QUERY_VERBS", "RERUNNABLE", "run_evidence",
+__all__ = ["KINDS", "EVIDENCE_KINDS", "query_verbs", "RERUNNABLE", "run_evidence",
            "NoteError", "notes", "add", "op_record",
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
            "load_vendored", "vendored_trucs",
