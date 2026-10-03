@@ -1818,10 +1818,10 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     41 |                   41 (100%) |             39 (95.1%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **294** | **294 (100%)** | **267 (90.8%)** |
+| **total** | **295** | **295 (100%)** | **268 (90.8%)** |
 
-Every one of the 294 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 267 of
+Every one of the 295 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 268 of
 them survive the **fully-native** chain, so all 27 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
