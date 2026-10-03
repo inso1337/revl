@@ -134,6 +134,18 @@ either. The artifact source crosses it in the clear. Cross-machine dispatch
 over a confidential channel is roadmap item 118's mTLS work
 (`revl deploy`, issue #79) and this module is deliberately its caller rather
 than a second implementation of it.
+
+Signing off loopback needs the constant-time backend
+====================================================
+
+Both ends sign with ECDSA. `revl.tee_quote`'s pure-Python signer takes time
+that depends on the secret nonce, and a peer bound off loopback signs a receipt
+in answer to every task a remote party sends it, which is exactly the setting
+where an attacker can time enough signatures to recover the key (issue #1460).
+So a non-loopback ``serve`` and a dispatch to a non-loopback ``--peer-addr``
+refuse to start without the ``revl[crypto]`` extra, and name it. On loopback
+the pure path is kept; if you tunnel that loopback port to another machine you
+have made it network-exposed, and the extra is what you need.
 """
 
 from __future__ import annotations
@@ -151,6 +163,7 @@ from typing import Any, Mapping, Optional, Union
 from . import (peer_identity, peer_pool, pool_bundle, pool_health,
                pool_receipt, pool_state)
 from .lawful_retry import EffectClass
+from .tee_quote import SigningBackendUnavailable, require_signing_backend
 
 # ---------------------------------------------------------------------------
 # kinds, domains and the runner set
@@ -503,15 +516,18 @@ def build_task(*, pool_id: str, charter_digest: str, peer_id: str,
 
 
 def sign_task(body: Mapping[str, Any],
-              identity: peer_identity.PeerIdentity) -> dict:
+              identity: peer_identity.PeerIdentity, *,
+              network_exposed: bool = False) -> dict:
     """Sign a task under the operator's identity key pair.
 
     Asymmetric, so the peer holds only a public key. A peer that could verify a
     task under a SHARED key could also mint one, and a peer that can mint its
-    own work has no bound at all."""
+    own work has no bound at all. ``network_exposed`` is passed to
+    :func:`revl.peer_identity.sign_record` (issue #1460)."""
     if not isinstance(identity, peer_identity.PeerIdentity):
         raise DispatchError("signing a task needs the operator's PeerIdentity")
-    return peer_identity.sign_record(TASK_DOMAIN, body, identity)
+    return peer_identity.sign_record(TASK_DOMAIN, body, identity,
+                                     network_exposed=network_exposed)
 
 
 def _task_shape(record: Any) -> str:
@@ -899,7 +915,14 @@ class PeerRunner:
     def __init__(self, *, charter_record: Mapping[str, Any],
                  identity: peer_identity.PeerIdentity,
                  operator_public: peer_identity.PublicIdentity,
-                 workspace: Path, timeout: float = 300.0):
+                 workspace: Path, timeout: float = 300.0,
+                 network_exposed: bool = False):
+        #: Whether a remote party can time this runner's receipt signatures.
+        #: Checked here, so a runner that would have to refuse at its first
+        #: receipt refuses at construction instead, before it runs any work.
+        self.network_exposed = False
+        if network_exposed:
+            self.mark_network_exposed("a pool peer's receipts")
         self.charter_record = dict(charter_record)
         self.charter_digest = peer_pool.canonical_digest(self.charter_record)
         self.identity = identity
@@ -910,6 +933,13 @@ class PeerRunner:
         #: side too, so a captured task cannot be re-run for a second receipt.
         self.seen: dict[str, str] = {}
 
+    def mark_network_exposed(self, purpose: str) -> None:
+        """Sign every later receipt as network-exposed, after checking that the
+        constant-time backend is there (``DispatchError`` naming the extra if
+        it is not)."""
+        _require_backend(purpose)
+        self.network_exposed = True
+
     def handle(self, record: Any) -> dict:
         """Check one task and, if it passes every check, run it and sign a
         receipt. Never raises: the wire is hostile.
@@ -917,11 +947,26 @@ class PeerRunner:
         A liveness probe shares the channel and is answered by
         `pool_health.answer_probe`, which checks it against the same pinned
         operator key and signs a heartbeat. It runs nothing and does not
-        touch `seen`."""
+        touch `seen`.
+
+        A runner flagged network-exposed whose signing backend is missing
+        answers with the same `task-shape` refusal `serve`'s backstop would
+        give, naming the extra, rather than raising (issue #1460). The
+        construction and `serve` checks make that unreachable in practice;
+        the contract holds without them."""
+        try:
+            return self._handle(record)
+        except SigningBackendUnavailable as error:
+            return _refusal(LINK_TASK_SHAPE,
+                            f"the frame could not be processed: "
+                            f"{type(error).__name__}: {error}")
+
+    def _handle(self, record: Any) -> dict:
         if pool_health.is_probe(record):
             return pool_health.answer_probe(
                 record, charter_record=self.charter_record,
-                identity=self.identity, operator_public=self.operator_public)
+                identity=self.identity, operator_public=self.operator_public,
+                network_exposed=self.network_exposed)
         shape = _task_shape(record)
         if shape:
             return _refusal(LINK_TASK_SHAPE, f"not a task: {shape}")
@@ -987,7 +1032,7 @@ class PeerRunner:
         receipt = pool_receipt.issue_receipt(
             pool_id=record["pool_id"], task_id=task_id,
             artifact_digest=actual, result=result, identity=self.identity,
-            bundle=_bundle_of(source))
+            bundle=_bundle_of(source), network_exposed=self.network_exposed)
         self.seen[task_id] = pool_receipt.receipt_digest(receipt)
         return {"ok": True, "task_id": task_id, "receipt": receipt,
                 "result": result}
@@ -999,6 +1044,38 @@ class PeerRunner:
 
 
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _require_backend(purpose: str) -> None:
+    """The constant-time signing backend, or a ``DispatchError`` naming the
+    ``revl[crypto]`` extra (issue #1460). A caller fault, like an unusable key:
+    the CLI prints it and exits 2 before anything is bound, sent or recorded."""
+    try:
+        require_signing_backend(purpose, peer_identity.IDENTITY_CURVE)
+    except SigningBackendUnavailable as error:
+        raise DispatchError(str(error)) from None
+
+
+def off_loopback(host: str) -> bool:
+    """Is a signer that talks to ``host`` exposed to a network? Anything that
+    is not a loopback name is, which is the same line ``serve`` already draws
+    for ``--allow-remote``."""
+    return host not in LOOPBACK_HOSTS
+
+
+def signer_exposure(host: str, purpose: str) -> bool:
+    """The ``network_exposed`` flag for a signer that talks to ``host``.
+
+    Off loopback it checks the constant-time backend FIRST and raises
+    ``DispatchError`` naming ``revl[crypto]`` when it is missing, so a caller
+    refuses before it records, binds or sends anything. Every operator-side
+    signer in the pool protocols takes its flag from here and hands it to
+    :func:`revl.peer_identity.sign_record`, which is the one place the refusal
+    is enforced at signing time."""
+    exposed = off_loopback(host)
+    if exposed:
+        _require_backend(purpose)
+    return exposed
 
 
 def _read_frame(conn: socket.socket, limit: int = MAX_FRAME_BYTES) -> bytes:
@@ -1033,6 +1110,12 @@ def serve(runner: PeerRunner, *, host: str = "127.0.0.1", port: int = 0,
             f"artifact source crosses it in the clear. Pass --allow-remote if "
             f"that is acceptable on your network, or keep it on loopback and "
             f"tunnel it ({LINK_NON_LOOPBACK_BIND})")
+    if off_loopback(host):
+        # Before the bind: a peer that cannot sign safely must not be
+        # reachable, not reachable and then unable to answer.
+        runner.mark_network_exposed(
+            f"`revl pool serve` bound to {host}, which signs a receipt for "
+            f"every task a remote party sends")
     served = 0
     with socket.socket(socket.AF_INET6 if ":" in host else socket.AF_INET,
                        socket.SOCK_STREAM) as server:
@@ -1130,7 +1213,8 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
                     member: peer_pool.Membership,
                     directory: peer_identity.IdentityDirectory,
                     attesting_identity: peer_identity.PeerIdentity,
-                    when: Optional[datetime] = None) -> dict:
+                    when: Optional[datetime] = None,
+                    network_exposed: bool = False) -> dict:
     """Check what came back: the hash first, then the receipt.
 
     In that order deliberately. A hash failure says the bytes in hand are not
@@ -1150,8 +1234,8 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
     if not ok:
         return _refusal(LINK_RESULT_DIGEST, reason,
                         task_id=str(receipt.get("task_id", "")))
-    attestation = pool_receipt.attest_receipt(receipt,
-                                              identity=attesting_identity)
+    attestation = pool_receipt.attest_receipt(
+        receipt, identity=attesting_identity, network_exposed=network_exposed)
     check = pool_receipt.check_receipt(
         receipt, attestation, pool_id=str(charter_record.get("pool_id", "")),
         peer_id=member.peer_id, artifact_digest=member.artifact_digest,
@@ -1249,7 +1333,8 @@ def _prepare(*, pool_dir, peer_id: str, source: Artifact, runner: str,
 
 def _settle(*, pool_dir, peer_id: str, task_id: str,
             member: peer_pool.Membership, answer: Mapping[str, Any],
-            attesting_identity: peer_identity.PeerIdentity) -> dict:
+            attesting_identity: peer_identity.PeerIdentity,
+            network_exposed: bool = False) -> dict:
     """Everything after the answer came back, as a second transaction under the
     pool lock.
 
@@ -1267,7 +1352,8 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
                                  directory=directory, peer_id=peer_id,
                                  task_id=task_id, member=member,
                                  answer=answer,
-                                 attesting_identity=attesting_identity)
+                                 attesting_identity=attesting_identity,
+                                 network_exposed=network_exposed)
         roster.outstanding = ledger.outstanding()
         peer_pool.save_roster(pool_dir, roster)
         save_ledger(pool_dir, ledger)
@@ -1277,7 +1363,8 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
 def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
                    peer_id: str, task_id: str, member: peer_pool.Membership,
                    answer: Mapping[str, Any],
-                   attesting_identity: peer_identity.PeerIdentity) -> dict:
+                   attesting_identity: peer_identity.PeerIdentity,
+                   network_exposed: bool = False) -> dict:
     """Decide what the answer means and write it into ``ledger``."""
     if not answer.get("ok"):
         link = str(answer.get("link", LINK_RECEIPT_REFUSED))
@@ -1290,7 +1377,8 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
         return dict(answer, task_id=task_id)
     verdict = verify_delivery(answer, charter_record=charter_record,
                               member=member, directory=directory,
-                              attesting_identity=attesting_identity)
+                              attesting_identity=attesting_identity,
+                              network_exposed=network_exposed)
     if not verdict.get("ok"):
         ledger.refuse(task_id=task_id, link=str(verdict.get("link", "")),
                       reason=str(verdict.get("reason", "")))
@@ -1325,7 +1413,14 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
     command and nothing written in the meantime is lost.
 
     ``source`` is one file's bytes or a `pool_bundle.Bundle`; the digest, the
-    ledger entry, the task and the receipt all follow from it."""
+    ledger entry, the task and the receipt all follow from it.
+
+    A dispatch to a non-loopback ``host`` signs as network-exposed and refuses
+    FIRST, before the pool lock is taken and before the ledger or roster is
+    touched, when the ``revl[crypto]`` backend is missing (issue #1460): a task
+    written down and then never signed would read as outstanding work that was
+    never sent."""
+    exposed = signer_exposure(host, f"a dispatch to the remote peer {host}")
     prepared = _prepare(pool_dir=pool_dir, peer_id=peer_id, source=source,
                         runner=runner, task_id=task_id)
     if not prepared.get("ok"):
@@ -1337,11 +1432,13 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
                       charter_digest=peer_pool.canonical_digest(charter_record),
                       peer_id=peer_id, task_id=task_id, artifact=source,
                       runner=runner, effect_class=effect_class)
-    answer = send_task(sign_task(body, dispatch_identity), host=host,
-                       port=port, timeout=timeout)
+    answer = send_task(sign_task(body, dispatch_identity,
+                                 network_exposed=exposed),
+                       host=host, port=port, timeout=timeout)
     outcome = _settle(pool_dir=pool_dir, peer_id=peer_id, task_id=task_id,
                       member=prepared["member"], answer=answer,
-                      attesting_identity=attesting_identity)
+                      attesting_identity=attesting_identity,
+                      network_exposed=exposed)
     if answer.get("link") == LINK_PEER_UNREACHABLE:
         _note_contact(pool_dir, peer_id, pool_health.HEALTH_UNREACHABLE,
                       host, port, link=LINK_PEER_UNREACHABLE,

@@ -300,7 +300,11 @@ operator bob may approve on payments*
 
 The operator signs each cast over the question's binding (`revl.mcp.quorum.
 cast_message` is the canonical message and `sign_cast` the reference signer)
-and sends the raw `R || S` hex as `asProof`. Retiring the credential is one
+and sends the raw `R || S` hex as `asProof`. `sign_cast` needs the
+`revl[crypto]` extra by default and refuses, naming it, without: the proof goes
+to a session the quorum does not trust, and the pure-Python signer's timing
+leaks the key (issue #1460). For a session on your own machine,
+`sign_cast(..., network_exposed=False)` keeps the pure path. Retiring the credential is one
 line, effective on the next cast:
 
 ```

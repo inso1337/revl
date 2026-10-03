@@ -205,7 +205,8 @@ def cast_message(binding: dict) -> bytes:
     }).encode("utf-8")
 
 
-def sign_cast(private_key: int, binding: dict) -> str:
+def sign_cast(private_key: int, binding: dict, *,
+              network_exposed: bool = True) -> str:
     """Sign one cast, returning the raw `R || S` hex a caller puts in `asProof`.
 
     The signer lives beside the verifier deliberately. An operator needs SOME
@@ -215,9 +216,20 @@ def sign_cast(private_key: int, binding: dict) -> str:
     refusals rather than as the interop bug they are. It takes the private scalar
     and never a file: where an operator's private key lives is the operator's
     problem and not this module's, and a helper that read keys off disk would
-    quietly become the place they get stored."""
+    quietly become the place they get stored.
+
+    Network-exposed BY DEFAULT (issue #1460). A proof exists to cross the MCP
+    transport to a session, and this module's threat model trusts neither the
+    session nor the transport; the binding it signs is the question's, chosen on
+    the far side. An operator client that signs as questions arrive therefore
+    hands the far side a timing measurement of every signature, and the pure
+    signer's timing depends on the secret nonce. Without the ``revl[crypto]``
+    extra this refuses, naming it. A caller that knows its session is local
+    (a stdio session on the operator's own machine, a test) passes
+    ``network_exposed=False`` and keeps the pure path."""
     from ..tee_quote import CURVE_P256, ecdsa_sign
-    return ecdsa_sign(CURVE_P256, private_key, cast_message(binding)).hex()
+    return ecdsa_sign(CURVE_P256, private_key, cast_message(binding),
+                      network_exposed=network_exposed).hex()
 
 
 def _verify_cast(public_key_hex: str, binding: dict, proof: str) -> bool:
