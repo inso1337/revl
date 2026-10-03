@@ -210,7 +210,7 @@ def path_normalized_ir(ir):
     shape — sign in CI at one checkout path, verify against the same source at
     another — could not work while it was.
 
-    This is not a new decision. `revl bundle`, `registry.build_evidence` and
+    This is not a new decision. `revl bundle`, `registry_evidence.build_evidence` and
     `truc reproduce` each already normalized these exact fields for exactly
     this reason, and each did it in its own copy; two of those copies drifted
     apart and left `truc reproduce`'s attestation tier structurally dead
@@ -570,10 +570,23 @@ def discharged_guarantees() -> list[str]:
 
 
 def compiler_version() -> str:
-    """The revl toolchain version recorded as `checker.compiler`."""
-    from .gate import _language_version  # noqa: PLC0415 — lazy, avoids an import cycle
+    """The revl toolchain version recorded as `checker.compiler`: the installed
+    distribution's version, falling back to the in-repo package version when
+    running from a checkout with no install. `revl.gate` reports the same value
+    as `gate_version().language`.
 
-    return _language_version()
+    Defined here, not in `revl.gate`: the compiler's import chain reaches this
+    module, and importing `revl.gate` from it put the gate, and through the
+    gate `revl.mcp`, on that chain (issue #1780)."""
+    try:
+        from importlib.metadata import PackageNotFoundError, version  # noqa: PLC0415
+        try:
+            return version("revl")
+        except PackageNotFoundError:
+            pass
+    except Exception:  # noqa: BLE001 — metadata is a convenience, never fatal
+        pass
+    return "2.0.0"
 
 
 def checker_identity() -> dict:
