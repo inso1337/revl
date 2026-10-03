@@ -2689,6 +2689,158 @@ fn tests_use_advance(ir: Any) -> Bool {
   return false
 }
 
+// `_revl_teardown_preamble`: the three-entry-kind teardown loop's runtime
+// substrate (item 243 + the two-phase abort of docs/design/teardown-contract.md),
+// a literal block built on cordis-rs's public API. Emitted once per module that
+// `uses_teardown`.
+fn revl_teardown_preamble() -> List[Str] {
+  var o = []
+  o = o.push("/// item 243 / docs/design/teardown-contract.md: the per-activation")
+  o = o.push("/// three-entry-kind teardown accumulator (transactional + compensation).")
+  o = o.push("/// See `_revl_teardown_preamble` in the emitter for the design.")
+  o = o.push("struct RevlTeardown {")
+  o = o.push("    committed: std::sync::atomic::AtomicBool,")
+  o = o.push("    phase2: std::sync::Mutex<Vec<RevlPendingCompensation>>,")
+  o = o.push("    budget_ms: u64,")
+  o = o.push("    #[allow(dead_code)] // read for config-surface parity; see the")
+  o = o.push("    // preamble docstring — rust has no in-call preemption to bound with it.")
+  o = o.push("    per_call_ms: u64,")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("struct RevlPendingCompensation {")
+  o = o.push("    label: String,")
+  o = o.push("    call: Box<dyn FnOnce() + Send>,")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("fn revl_compensation_budget_ms() -> u64 {")
+  o = o.push("    std::env::var(\"REVL_COMPENSATION_BUDGET_MS\").ok()")
+  o = o.push("        .and_then(|v| v.parse::<u64>().ok())")
+  o = o.push("        .unwrap_or(5000)")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("fn revl_compensation_per_call_ms() -> u64 {")
+  o = o.push("    std::env::var(\"REVL_COMPENSATION_PER_CALL_MS\").ok()")
+  o = o.push("        .and_then(|v| v.parse::<u64>().ok())")
+  o = o.push("        .unwrap_or(1000)")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// item 324: the out-of-band abort registry — the faithful mirror of the")
+  o = o.push("/// py runtime's `_FRAME_BY_CTX` + `_sole_frame`. A session-level reject")
+  o = o.push("/// (item 245's explicit commit/abort UX) runs OUTSIDE the fiber and must")
+  o = o.push("/// reach an already-activated component's `RevlTeardown` to clear")
+  o = o.push("/// `committed`, so its next unload REPLAYS the per-tool-call (and")
+  o = o.push("/// activation-body) transactional inverses instead of discharging them.")
+  o = o.push("/// The state itself lives on the fiber's (private) extended context, which")
+  o = o.push("/// no out-of-fiber caller can reach — cordis-rs's `Context::extend` derives")
+  o = o.push("/// a child whose metadata the parent/fiber context cannot see — so this")
+  o = o.push("/// weak, label-keyed registry is the reach-in seam. Weak so a disposed")
+  o = o.push("/// activation's teardown is collected normally; the registry never keeps")
+  o = o.push("/// one alive.")
+  o = o.push("#[allow(clippy::type_complexity)]")
+  o = o.push("static REVL_TEARDOWN_REGISTRY: std::sync::OnceLock<")
+  o = o.push("    std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>>>")
+  o = o.push("    = std::sync::OnceLock::new();")
+  o = o.push("")
+  o = o.push("fn revl_teardown_registry()")
+  o = o.push("    -> &'static std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>> {")
+  o = o.push("    REVL_TEARDOWN_REGISTRY.get_or_init(|| std::sync::Mutex::new(Vec::new()))")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("fn revl_teardown_remember(label: &str, state: &std::sync::Arc<RevlTeardown>) {")
+  o = o.push("    revl_teardown_registry().lock().unwrap()")
+  o = o.push("        .push((label.to_string(), std::sync::Arc::downgrade(state)));")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Abort every live activation registered under `label`: clear `committed`")
+  o = o.push("/// so the next teardown REPLAYS its transactional inverses (py's")
+  o = o.push("/// `Frame.abort`). Idempotent; skips dead weak entries. The driver/harness")
+  o = o.push("/// calls this before unloading the fiber to reject the session's work.")
+  o = o.push("#[allow(dead_code)]")
+  o = o.push("fn revl_abort(label: &str) {")
+  o = o.push("    let registry = revl_teardown_registry().lock().unwrap();")
+  o = o.push("    for (entry_label, weak) in registry.iter() {")
+  o = o.push("        if entry_label == label {")
+  o = o.push("            if let Some(state) = weak.upgrade() {")
+  o = o.push("                state.committed.store(false, std::sync::atomic::Ordering::Release);")
+  o = o.push("            }")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Register the phase-2 drain hook FIRST — so cordis-rs's LIFO dispose")
+  o = o.push("/// runs it LAST, after every bracket/transactional inverse — and return")
+  o = o.push("/// the shared accumulator plus a `Context` extended to carry it, so a")
+  o = o.push("/// provide-method on this same fiber can recover it later via")
+  o = o.push("/// `revl_teardown_of`.")
+  o = o.push("fn revl_teardown_begin(ctx: &cordis::Context, label: &str)")
+  o = o.push("    -> cordis::Result<(cordis::Context, std::sync::Arc<RevlTeardown>)> {")
+  o = o.push("    let state = std::sync::Arc::new(RevlTeardown {")
+  o = o.push("        committed: std::sync::atomic::AtomicBool::new(false),")
+  o = o.push("        phase2: std::sync::Mutex::new(Vec::new()),")
+  o = o.push("        budget_ms: revl_compensation_budget_ms(),")
+  o = o.push("        per_call_ms: revl_compensation_per_call_ms(),")
+  o = o.push("    });")
+  o = o.push("    let ctx = ctx.extend(\"_revl_teardown\", state.clone());")
+  o = o.push("    revl_teardown_remember(label, &state);  // item 324: out-of-band abort reach-in")
+  o = o.push("    let sentinel = state.clone();")
+  o = o.push("    ctx.effect(label.to_string(), move || {")
+  o = o.push("        if !sentinel.committed.load(std::sync::atomic::Ordering::Acquire) {")
+  o = o.push("            revl_drain_phase2(&sentinel);")
+  o = o.push("        }")
+  o = o.push("        Ok(())")
+  o = o.push("    })?;")
+  o = o.push("    Ok((ctx, state))")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// A provide-method's own recovery of its activation's teardown state")
+  o = o.push("/// (`self.ctx` is the same fiber `revl_teardown_begin` extended).")
+  o = o.push("fn revl_teardown_of(ctx: &cordis::Context) -> std::sync::Arc<RevlTeardown> {")
+  o = o.push("    (*ctx.metadata::<std::sync::Arc<RevlTeardown>>(\"_revl_teardown\")")
+  o = o.push("        .ok()")
+  o = o.push("        .flatten()")
+  o = o.push("        .expect(\"revl: teardown state missing — a compensated effect ran \\")
+  o = o.push("                outside an activation that registered one\"))")
+  o = o.push("        .clone()")
+  o = o.push("}")
+  o = o.push("")
+  o = o.push("/// Phase 2: best-effort compensation replay, LIFO within itself (the")
+  o = o.push("/// queue already holds that order — see the preamble docstring), bounded")
+  o = o.push("/// by `REVL_COMPENSATION_BUDGET_MS` checked BETWEEN calls (rust has no")
+  o = o.push("/// in-call preemption of a synchronous compensation — see the rust row")
+  o = o.push("/// of docs/design/teardown-contract.md). A panicking compensation is")
+  o = o.push("/// caught (best-effort, never fails the abort) and logged; the loop")
+  o = o.push("/// continues to the next queued compensation either way.")
+  o = o.push("fn revl_drain_phase2(state: &RevlTeardown) {")
+  o = o.push("    let queued: Vec<RevlPendingCompensation> = {")
+  o = o.push("        let mut guard = state.phase2.lock().unwrap();")
+  o = o.push("        std::mem::take(&mut *guard)")
+  o = o.push("    };")
+  o = o.push("    if queued.is_empty() {")
+  o = o.push("        return;")
+  o = o.push("    }")
+  o = o.push("    let unbounded = state.budget_ms == 0;")
+  o = o.push("    let deadline = std::time::Instant::now()")
+  o = o.push("        + std::time::Duration::from_millis(state.budget_ms);")
+  o = o.push("    for pending in queued {")
+  o = o.push("        if !unbounded && std::time::Instant::now() >= deadline {")
+  o = o.push("            eprintln!(")
+  o = o.push("                \"revl: compensation {:?} skipped (deadline-expired, budget={}ms)\",")
+  o = o.push("                pending.label, state.budget_ms,")
+  o = o.push("            );")
+  o = o.push("            continue;")
+  o = o.push("        }")
+  o = o.push("        let label = pending.label;")
+  o = o.push("        let outcome = std::panic::catch_unwind(")
+  o = o.push("            std::panic::AssertUnwindSafe(pending.call));")
+  o = o.push("        if outcome.is_err() {")
+  o = o.push("            eprintln!(\"revl: compensation {:?} failed\", label);")
+  o = o.push("        }")
+  o = o.push("    }")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
 // `_revl_timer_preamble`: the clock coeffect + timer scheduler (item 57), the
 // rust mirror of backends/python/runtime.py's Clock/TimerHandle. A literal
 // block, deterministic tick-for-tick: time moves only on `revl_clock_advance`,
@@ -4483,23 +4635,28 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
         let undoR = method_undo_rename(comp, method)
         var acqR = scope
         for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
-        let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
-        var registers_undo = kind == "effect"
-        var undonode: Any = value_field(step, "undo")
         if (kind == "emit") {
-          undonode = value_field(step, "compensate")
-          if (!value_is_null(undonode)) { registers_undo = true }
-        }
-        var acqnode = value_field(step, "acquire")
-        if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
-        if (registers_undo) {
+          // the emission fires, then its `compensate` (item 247, the
+          // teardown-contract two-phase abort) is registered on the
+          // activation's accumulator, recovered through the same fiber's ctx:
+          // it discharges on commit and queues onto phase 2 on abort.
+          out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), set_rn(c, acqR))};`)
+          let cnode = value_field(step, "compensate")
+          if (!value_is_null(cnode)) {
+            out = out.concat(method_undo_clones(comp, method, indent))
+            // host-Map reclone (item 114): DEFERRED — no host Map in subset.
+            out = out.push(`${pad}let _revl_teardown = revl_teardown_of(&self.ctx);`)
+            out = out.concat(compensation_registration(cnode, c, undoR, `${name}.${mnm}.compensate.${num_str(index)}`, "self.ctx", false, indent))
+          }
+        } else {
+          let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
+          var acqnode = value_field(step, "acquire")
+          if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
           out = out.concat(method_undo_clones(comp, method, indent))
           // host-Map reclone (item 114): DEFERRED — no host Map in subset.
-        }
-        let acq = render_expr(acqnode, set_rn(c, acqR))
-        out = out.push(`${pad}let _ = ${acq};`)
-        if (registers_undo) {
-          let undox = render_expr(undonode, set_rn(c, undoR))
+          let acq = render_expr(acqnode, set_rn(c, acqR))
+          out = out.push(`${pad}let _ = ${acq};`)
+          let undox = render_expr(value_field(step, "undo"), set_rn(c, undoR))
           out = out.push(`${pad}let _ = self.ctx.effect(${label}, move || { ${undox}; Ok(()) });`)
         }
       } else {
@@ -4681,6 +4838,147 @@ fn witnessed_acquire(ir: Any, acq: Any) -> Bool {
   return false
 }
 
+// item 243 Slice 2b: the per-activation `RevlTeardown` accumulator. The
+// reference's `_component_needs_teardown` asks whether a component holds an
+// `emit ... compensate` in the activation body or in a provide method, or a
+// `witnessed` acquisition. A program with none emits byte-identically, with no
+// teardown runtime at all.
+//
+// Two of the reference's arms are not mirrored. A witnessed acquisition is not
+// ported, so neither is the accumulator it would open: in the activation body
+// the step is a `DEFER-*-witnessed` marker, and a provide method still lowers
+// one as a plain bracket (the reference's `_emit_method_witnessed_step`), a
+// divergence no corpus document reaches because none declares a witnessed
+// extern. And the reference walks a component `if` for a
+// compensation, but a component `if` is a guard that holds only `fail` (G6), so
+// no compensation can sit in one.
+fn body_has_compensation(steps: List[Any]) -> Bool {
+  for (s of steps) {
+    if (value_str(value_field(s, "step")) == "emit"
+        && !value_is_null(value_field(s, "compensate"))) { return true }
+  }
+  return false
+}
+
+fn component_needs_teardown(comp: Any) -> Bool {
+  let body = value_list(value_field(comp, "body"))
+  if (body_has_compensation(body)) { return true }
+  for (step of body) {
+    if (value_str(value_field(step, "step")) == "provide") {
+      for (m of value_list(value_field(step, "methods"))) {
+        if (body_has_compensation(value_list(value_field(m, "body")))) { return true }
+      }
+    }
+  }
+  return false
+}
+
+// `_uses_teardown`: gates `revl_teardown_preamble` for the whole module.
+fn uses_teardown(ir: Any) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    if (component_needs_teardown(comp)) { return true }
+  }
+  return false
+}
+
+// An emission extern that declares its own `compensate` (item 254, issue
+// #1592, the reference's non-empty `_compensated_table`) registers it at every
+// site its emission reaches. This port does not lower that, so a document
+// declaring one gets a marker in the module instead of a silent omission.
+fn declared_compensate_marker(ir: Any) -> List[Str] {
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "emission"
+        && !value_is_null(value_field(ext, "compensate"))) { return ["<<DEFER-declared-compensate>>"] }
+  }
+  return []
+}
+
+// `_expr_var_names`: every bare variable a compensate expression reads (a
+// `var`, `name` or `req` node), so exactly those activation binds are cloned
+// into its `move` closure.
+fn expr_var_names(node: Any) -> List[Str] {
+  var acc: List[Str] = []
+  if (value_kind(node) == "record") {
+    let k = node_kind(node)
+    if (k == "var" || k == "name" || k == "req") {
+      var ident = value_str(value_field(node, "id"))
+      if (ident == "") { ident = value_str(value_field(node, "name")) }
+      if (ident != "") { acc = acc.push(ident) }
+    }
+    for (key of value_keys(node)) { acc = acc.concat(expr_var_names(value_field(node, key))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { acc = acc.concat(expr_var_names(item)) }
+  }
+  return acc
+}
+
+// The activation `let-effect` binds a run of steps adds, in emission order
+// (an `if` arm's included): the reference appends each to
+// `env.activation_binds` as it emits it, and a pure walk threads the same list.
+fn step_let_binds(steps: List[Any]) -> List[Str] {
+  var out: List[Str] = []
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "let-effect") { out = out.push(value_str(value_field(s, "bind"))) }
+    if (k == "if") {
+      out = out.concat(step_let_binds(value_list(value_field(s, "then"))))
+      out = out.concat(step_let_binds(value_list(value_field(s, "else"))))
+    }
+  }
+  return out
+}
+
+fn str_in(xs: List[Str], x: Str) -> Bool {
+  for (y of xs) { if (y == x) { return true } }
+  return false
+}
+
+// `sorted(referenced & set(activation_binds))`, deduplicated.
+fn sorted_common(xs: List[Str], ys: List[Str]) -> List[Str] {
+  var out: List[Str] = []
+  for (x of xs) { if (str_in(ys, x) && !str_in(out, x)) { out = out.push(x) } }
+  return list_sort(out)
+}
+
+// `_emit_compensation_registration`: wrap the compensate call in a boxed
+// `FnOnce` and register a disposer that discharges on commit or queues onto
+// the activation's phase-2 queue on abort. `propagate` is the activation
+// spelling (`ctx`, `?`); a provide method and a timer firing register
+// fire-and-forget through their own handle on the activation ctx.
+fn compensation_registration(node: Any, ctx: Ctx, rn: Map[Str, Str], label_text: Str,
+                             ctx_expr: Str, propagate: Bool, indent: Int) -> List[Str] {
+  let pad = ind(indent)
+  let call = render_expr(node, set_rn(ctx, rn))
+  let label = string_lit(label_text)
+  var tail = ";"
+  var lead = "let _ = "
+  if (propagate) {
+    tail = "?;"
+    lead = ""
+  }
+  var o = []
+  o = o.push(`${pad}let _revl_state = _revl_teardown.clone();`)
+  o = o.push(`${pad}let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || { let _ = ${call}; });`)
+  o = o.push(`${pad}${lead}${ctx_expr}.effect(${label}, move || {`)
+  o = o.push(`${pad}    if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {`)
+  o = o.push(`${pad}        _revl_state.phase2.lock().unwrap().push(`)
+  o = o.push(`${pad}            RevlPendingCompensation { label: ${label}.to_string(), call: _revl_call });`)
+  o = o.push(`${pad}    }`)
+  o = o.push(`${pad}    Ok(())`)
+  o = o.push(`${pad}})${tail}`)
+  return o
+}
+
+// `_emit_teardown_begin`: open the accumulator before any user step registers
+// an effect. `_emit_teardown_commit`'s line, which flips `committed` right
+// before the activation reports success, is written at its two sites.
+fn teardown_begin(comp: Any) -> Str {
+  let label = string_lit(`${value_str(value_field(comp, "name"))}.teardown.phase2`)
+  return `            let (ctx, _revl_teardown) = revl_teardown_begin(&ctx, ${label})?;`
+}
+
+
 fn emit_let_effect_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
                         map_values: Map[Str, Str], indent: Int) -> List[Str] {
   let pad = ind(indent)
@@ -4774,7 +5072,7 @@ fn count_timers(steps: List[Any]) -> Int {
 
 fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
                   map_values: Map[Str, Str], indent: Int, tbase: Int,
-                  sbase: Int) -> List[Str] {
+                  sbase: Int, abinds: List[Str]) -> List[Str] {
   let pad = ind(indent)
   let kind = value_str(value_field(step, "step"))
   let name = value_str(value_field(comp, "name"))
@@ -4960,7 +5258,7 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     // this discards the TYPED binding, which is the one the body reads.
     out = out.push(`${pad}            let _ = &${bind};`)
     for (nested of body) {
-      out = out.concat(emit_comp_step(comp, nested, ir, bodyctx, map_values, indent + 3, tbase, sbase))
+      out = out.concat(emit_comp_step(comp, nested, ir, bodyctx, map_values, indent + 3, tbase, sbase, abinds))
     }
     out = out.push(`${pad}        }`)
     out = out.push(`${pad}    }`)
@@ -4969,8 +5267,21 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
   }
   if (kind == "emit") {
     out = out.push(`${pad}let _ = ${render_expr(value_field(step, "expr"), ctx)};`)
-    if (!value_is_null(value_field(step, "compensate"))) {
-      out = out.push(`${pad}<<DEFER-emit-compensate:${name}>>`)
+    let cnode = value_field(step, "compensate")
+    if (!value_is_null(cnode)) {
+      // `_emit_activation_compensation`: pre-clone every required service and
+      // every prior activation bind the compensate reads, so the `move`
+      // closure owns copies the forward emit cannot have moved.
+      var cR: Map[Str, Str] = Map.empty()
+      for (req of value_keys(value_field(comp, "requires"))) {
+        out = out.push(`${pad}let ${req}_comp = ${req}.clone();`)
+        cR = cR.set(req, `${req}_comp`)
+      }
+      for (local of sorted_common(expr_var_names(cnode), abinds)) {
+        out = out.push(`${pad}let ${local}_comp = ${local}.clone();`)
+        cR = cR.set(local, `${local}_comp`)
+      }
+      out = out.concat(compensation_registration(cnode, ctx, cR, `${name}.compensate`, "ctx", true, indent))
     }
     return out
   }
@@ -4983,18 +5294,21 @@ fn emit_comp_step(comp: Any, step: Any, ir: Any, ctx: Ctx,
     out = out.push(`${pad}if ${render_expr(value_field(step, "cond"), ctx)} {`)
     var tb = tbase
     var sb = sbase
+    var ab = abinds
     for (nested of value_list(value_field(step, "then"))) {
-      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb))
+      out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb, ab))
       tb = tb + count_timers([nested])
       sb = sb + count_stream_events([nested])
+      ab = ab.concat(step_let_binds([nested]))
     }
     let alt = value_list(value_field(step, "else"))
     if (alt.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (nested of alt) {
-        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb))
+        out = out.concat(emit_comp_step(comp, nested, ir, ctx, map_values, indent + 1, tb, sb, ab))
         tb = tb + count_timers([nested])
         sb = sb + count_stream_events([nested])
+        ab = ab.concat(step_let_binds([nested]))
       }
     }
     out = out.push(`${pad}}`)
@@ -5051,21 +5365,26 @@ fn emit_component(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.push(`        ${string_lit(name)},`)
   out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
   out = out.push(closure_open)
+  let teardown = component_needs_teardown(comp)
+  if (teardown) { out = out.push(teardown_begin(comp)) }
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
   var tb = 0
   var sb = 0
+  var ab: List[Str] = []
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, false, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb, ab))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
+      ab = ab.concat(step_let_binds([step]))
     }
   }
+  if (teardown) { out = out.push("            _revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);") }
   out = out.push("            Ok(cordis::PluginOutput::none())")
   out = out.push("        },")
   out = out.push("    )")
@@ -5128,21 +5447,26 @@ fn emit_component_new(comp: Any, services: Any, ir: Any) -> List[Str] {
   out = out.push(`        ${string_lit(name)},`)
   out = out.push(`        cordis::${rust_inject(value_keys(reqs))},`)
   out = out.push(closure_open)
+  let teardown = component_needs_teardown(comp)
+  if (teardown) { out = out.push(teardown_begin(comp)) }
   out = out.concat(emit_config_application(comp, cty, 3))
   out = out.concat(emit_provide_config_local(comp, 3))
   out = out.concat(emit_req_bindings(reqs, 3))
   var tb = 0
   var sb = 0
+  var ab: List[Str] = []
   for (step of body) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "provide") {
       out = out.concat(emit_provide_construction(comp, step, has_eff, 3))
     } else {
-      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb))
+      out = out.concat(emit_comp_step(comp, step, ir, activation_ctx(tables, fr, map_values), map_values, 3, tb, sb, ab))
       tb = tb + count_timers([step])
       sb = sb + count_stream_events([step])
+      ab = ab.concat(step_let_binds([step]))
     }
   }
+  if (teardown) { out = out.push("            _revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);") }
   out = out.push("            Ok(cordis::PluginOutput::none())")
   out = out.push("        },")
   out = out.push("    )")
@@ -5669,6 +5993,8 @@ pub fn emit_rust_src(ir: Any) -> Str {
   }
   let components = value_list(value_field(ir, "components"))
   if (needs_realm_helper(components)) { out = out.concat(revl_realm_helper(components)) }
+  if (uses_teardown(ir)) { out = out.concat(revl_teardown_preamble()) }
+  out = out.concat(declared_compensate_marker(ir))
   for (comp of components) {
     out = out.concat(emit_component_auto(comp, services, ir))
   }

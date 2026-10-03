@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+    "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -764,8 +764,8 @@
               },
               "rust": {
                 "residual": 1,
-                "corpus": 41,
-                "reproduced": 40,
+                "corpus": 42,
+                "reproduced": 41,
                 "documents": [
                   "comp_stream.rvl"
                 ]
@@ -801,7 +801,7 @@
               }
             },
             "total_residual": 26,
-            "total_corpus": 294,
+            "total_corpus": 295,
             "clean_tiers": [
               "java",
               "wasm"
@@ -1010,13 +1010,10 @@
                 }
               },
               "rust": {
-                "unported_constructs": 21,
-                "unported_reasons": 8,
-                "blind_constructs": 14,
+                "unported_constructs": 20,
+                "unported_reasons": 7,
+                "blind_constructs": 15,
                 "reasons": {
-                  "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
-                    "class=emission"
-                  ],
                   "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
                     "secret=<true>",
                     "secret_return=<true>"
@@ -1139,7 +1136,7 @@
                 }
               }
             },
-            "total_unported": 174
+            "total_unported": 173
           },
           "unreached-constructs": {
             "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -1172,8 +1169,8 @@
       },
       "headline": {
         "documents_refused": 26,
-        "corpus": 294,
-        "n": 294,
+        "corpus": 295,
+        "n": 295,
         "per_tier": {
           "go": 3,
           "java": 0,
@@ -1189,7 +1186,7 @@
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
-      "unported_constructs": 174,
+      "unported_constructs": 173,
       "fail_open_programs": 0
     },
     "unload-paths": {
@@ -2551,11 +2548,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 26 of 294 corpus documents that the reference compiler accepts (n=294)",
+      "text": "the fully-native revl chain does not reproduce 26 of 295 corpus documents that the reference compiler accepts (n=295)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2565,7 +2562,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2575,7 +2572,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2585,7 +2582,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2595,7 +2592,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2605,7 +2602,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2615,7 +2612,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2625,7 +2622,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "c43cc0e63cec98b84f18cf803820f2a113de5d1d",
+        "compiler_commit": "3c9536230b012a6e6d472d82867ea26ed4286a57",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }

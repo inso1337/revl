@@ -281,6 +281,11 @@ CORPUS = [
                              #   a std `Result` (return and argument, the canonical
                              #   `{"$kind","$value"}`), a List and a record through
                              #   serde, an `Opt[Float]` return
+    "teardown_compensate.rvl",  # item 391: the per-activation teardown
+                             #   accumulator: `RevlTeardown` opened first and
+                             #   committed last, an activation `emit ...
+                             #   compensate` (on both provider paths) and a
+                             #   provide method's one queued for phase 2
 ]
 
 

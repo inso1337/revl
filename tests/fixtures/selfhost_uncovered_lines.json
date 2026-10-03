@@ -52,7 +52,7 @@
       "go": 2541,
       "java": 986,
       "py": 669,
-      "rust": 1184,
+      "rust": 1134,
       "ts": 285,
       "wasm": 1558
     },
@@ -60,7 +60,7 @@
       "go": 103,
       "java": 175,
       "py": 103,
-      "rust": 280,
+      "rust": 278,
       "ts": 94,
       "wasm": 63
     }
@@ -853,8 +853,8 @@
     "rust": {
       "statements": 3859,
       "uncovered": {
-        "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm. That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
-          "_emit_step": 24,
+        "Activation-body runtime lowering: _emit_step's residual arms implement let-effect setup/undo, witnessed calls, compensation, timers, failure, branches, await Job/Stream, and the stream-iter arm (emit_rust_corpus/teardown_compensate.rvl, item 391, reaches the `emit ... compensate` arm, 24 -> 23). That arm holds the plain `every ... in` loop and, since item 130 Slice 5, the typed-event contract gate: the contract built once above the loop, the `admit` test placed between the `Closed` arm and the body of the `Item` arm, and the `Err` propagation out of the loop. All of it requires the live plugin/frame runtime that the self-host component slice explicitly marks DEFER, and no corpus document reaches it: the rust byte-agreement corpus holds no document with a component-held stream, and the port (selfhost/emit_rust.rvl) carries no stream-iter surface at all, so there is nothing to hold a byte-identical oracle over one.": {
+          "_emit_step": 23,
           "_guard_frame_neutral_loop": 1,
           "_uses_timer.walk": 1
         },
@@ -865,22 +865,21 @@
           "_emit_bridge": 1,
           "_split_result": 1
         },
-        "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls.": {
-          "_emit_component": 5,
-          "_emit_component_new": 23,
-          "_emit_components": 6,
+        "Component construction fallbacks: residuals cover absent/malformed service or requirement declarations, effectful-method routing, configuration-use alternatives, and older constructor selection. The corpus exercises valid service traits, scalar config, pure provide methods, and direct free-function calls. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 2 more statements each of `_emit_component`, `_emit_component_new` and `_emit_components`: the teardown begin and commit lines on both provider paths, and the module's teardown preamble.": {
+          "_emit_component": 3,
+          "_emit_component_new": 21,
+          "_emit_components": 4,
           "_emit_req_bindings": 2,
           "_provide_let_type": 1
         },
         "Concrete->Any boxing coercion (`_coerce_any_arg`): a concrete scalar flowing into an `Any`/`Value` parameter is boxed as `Value::new(serde_json::Value::from(..))` (native `compile_to`, #106/#98). The firing path is not reached by the byte-agreement corpus yet: a concrete->Any document would need the self-host `emit_rust.rvl` call renderer to mirror the same boxing (a tracked follow-up), or the two tiers diverge on it. Recorded until that mirror + corpus case land. The count rose 3 -> 5 when the non-finite-`Float` arm was added: `serde_json::Value::from(f64)` maps a non-finite float to `Null` silently, so a `Float` argument boxes through a checked `serde_json::Number::from_f64` and refuses the `None` rather than substituting a different value. The `Some` arm is corpus-reachable in principle once the mirror lands. The `None` arm is structurally unreachable from ANY static corpus document: a non-finite `Float` has no literal spelling (the frontend refuses it, item 312) and arises only at runtime, through IEEE true division. Recorded rather than chased, because the corpus case cannot exist before the mirror does. The count rose 5 -> 7 with the RETURN and `??`-DEFAULT positions: a declared `-> Any` erases to the same opaque `Value`, so returning a concrete scalar from such a function is the identical E0308 the argument position had, and an `Opt[Any] ?? <scalar>` default fills the same slot through `unwrap_or_else`. Both route through this function, and both are blocked from the corpus by the same missing mirror. The `List[Any]` arm arrives with them: a `Vec<Value>` boxes as the JSON array `stdlib/value.rvl`'s `value_list` reads back, the one container with a canonical image, and it is the coercion that let `selfhost/emit_rust.rvl` itself build as rust (the Stage-4 precondition).": {
           "_coerce_any_arg": 7
         },
-        "Demand-selected formatting helpers: canonical Float interpolation and record/timer/teardown preambles are emitted only when those deferred runtime features are present. Ordinary string interpolation and checked arithmetic are covered without selecting these helper bodies.": {
+        "Demand-selected formatting helpers: canonical Float interpolation and record/timer preambles are emitted only when those deferred runtime features are present. The teardown preamble left this group with item 391: emit_rust_corpus/teardown_compensate.rvl selects it. Ordinary string interpolation and checked arithmetic are covered without selecting these helper bodies.": {
           "_format": 20,
           "_format.literal": 2,
           "_revl_ftoa_helper": 1,
           "_revl_record_preamble": 2,
-          "_revl_teardown_preamble": 1,
           "_uses_float_interp.walk": 5
         },
         "Explicit invalid-input guards: accepted frontend IR contains no unresolved holes; `_refuse_holes` and its walker make such direct or stale IR fail loudly instead of generating Rust. `_refuse_deferred_emissions` used to be recorded here and is now recorded beside `_refuse_validated_emissions`, with the reason both carry (issue #1431).": {
@@ -895,8 +894,8 @@
           "_emit_v3_externs": 11,
           "_rust_extern_config_bind": 9
         },
-        "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs.": {
-          "_host_of": 4,
+        "Host Map binding inference: these functions scan let-effect acquisitions and Map insert expressions, infer a homogeneous runtime value type, and emit host stubs. Pure v3 modules and the mirrored component subset do not construct host bindings, so the reference-only host ABI remains outside this oracle. Two further statements joined with item 130 Slice 5: the gate that extends the stream host runtime to a document holding an `on <Event> as <e> in <sub>` handler and the conditional append of the typed-event contract preamble. No corpus document holds such a handler, so neither runs. emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `_host_of`'s statements.": {
+          "_host_of": 3,
           "_map_expr_inserts": 3,
           "_map_insert_candidates": 7,
           "_map_value_expr_type": 67,
@@ -998,22 +997,18 @@
           "_emit_v3": 7,
           "emit": 3
         },
-        "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction.": {
-          "_body_has_compensation": 3,
+        "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers the witnessed half rather than emitting a partial transaction. The compensation half is ported since item 391 and held to byte agreement by emit_rust_corpus/teardown_compensate.rvl, which reaches `_emit_teardown_begin`, `_emit_teardown_commit`, `_emit_compensation_registration` and `_emit_activation_compensation` in full, 6 more of `_method_body_lines`'s statements and 1 more each of `_body_has_compensation`'s and `_method_bodies_have_compensation`'s. What is left of those is the witnessed half, the extern-declared compensation (issue #1592) and the component-`if` walk, which no document can reach because a component `if` is a guard that holds only `fail` (G6).": {
+          "_body_has_compensation": 2,
           "_body_has_witnessed": 2,
           "_dedup_colour_erased_poly_externs": 11,
           "_dedup_colour_erased_poly_externs._rewrite": 6,
-          "_emit_activation_compensation": 13,
-          "_emit_compensation_registration": 14,
           "_emit_method_witnessed_step": 19,
           "_emit_setup_step": 22,
           "_emit_setup_value": 1,
-          "_emit_teardown_begin": 3,
-          "_emit_teardown_commit": 2,
           "_emit_witnessed_step": 26,
-          "_method_bodies_have_compensation": 2,
+          "_method_bodies_have_compensation": 1,
           "_method_bodies_have_witnessed": 1,
-          "_method_body_lines": 41,
+          "_method_body_lines": 35,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
@@ -1041,11 +1036,11 @@
           "_secret_result_lines": 8,
           "_stream_host_rust": 6
         },
-        "Extern-declared compensate (item 254, issue #1592): `_emit_compensations` adds the compensation an emission extern declares to the ones an `emit` registers, `_reaches_declared` and `_declared_call` register one for a call in any other position of a provide method (a `let`, a `return`, an argument, a nested operand, an `if` arm) as a block expression, and `_as_fn_call` re-spells that slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_rust.rvl ports no compensation registration (the family the witnessed/compensation group above defers). The behaviour is pinned and executed against real cordis-rs by backends/rust/test_emit_rust.py::test_extern_declared_compensation_registers_at_every_site.": {
+        "Extern-declared compensate (item 254, issue #1592): `_emit_compensations` adds the compensation an emission extern declares to the ones an `emit` registers, `_reaches_declared` and `_declared_call` register one for a call in any other position of a provide method (a `let`, a `return`, an argument, a nested operand, an `if` arm) as a block expression, and `_as_fn_call` re-spells that slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_rust.rvl ports the site-spelled registration (item 391) but not the declared one, and names a document that declares one with a `<<DEFER-declared-compensate>>` marker. `_emit_compensations` 4 -> 3: emit_rust_corpus/teardown_compensate.rvl reaches its site-clause statement. The behaviour is pinned and executed against real cordis-rs by backends/rust/test_emit_rust.py::test_extern_declared_compensation_registers_at_every_site.": {
           "_as_fn_call": 5,
           "_component_has_effectful_methods": 1,
           "_declared_call": 7,
-          "_emit_compensations": 4,
+          "_emit_compensations": 3,
           "_reaches_declared": 7
         }
       },
@@ -1884,12 +1879,15 @@
           "emit_v3_externs": 4,
           "extern_body_defer": 2
         },
-        "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153).": {
+        "Extern-declared compensate (item 254, issue #1592): `declared_compensate_marker` returns the `<<DEFER-declared-compensate>>` marker for a document whose emission extern declares its own `compensate`. The port lowers the site-spelled compensation (item 391) but not the declared one, so such a document cannot be a byte-agreement case, and the marker keeps it a loud divergence rather than a silently missing registration. The reference half is recorded under the same issue in the reference ledger.": {
+          "declared_compensate_marker": 1
+        },
+        "Host-bind and realm residuals beyond the two corpus shapes: the FR-4 Map value inference covers every expression form an `insert` value can take (list, builtin, free-fn call, required-service call, record, ADT, `??`) while the corpus pins the parameter case; the `let-effect` arm's remaining statements are the three REPORTED deferrals (a setup block, a witnessed-extern acquisition, the result-declared CAS) plus the required-service reclone; and the timer/stream-event probes only decide whether a host block rides along. Each residual is a marker or a gate, not a silent alternative lowering (issue 1153). emit_rust_corpus/teardown_compensate.rvl (item 391) reaches 1 more of `emit_comp_step`'s statements and 2 more of `host_of`'s.": {
           "by_value_reuse": 2,
           "component_map_values": 1,
-          "emit_comp_step": 8,
+          "emit_comp_step": 7,
           "emit_let_effect_step": 6,
-          "host_of": 6,
+          "host_of": 4,
           "map_insert_candidates": 8,
           "map_value_expr_type": 75,
           "map_value_surface_type": 1,

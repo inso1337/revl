@@ -22,10 +22,10 @@ them. That is the cost, stated first.
 | go | **3** | 38 | 35 |
 | java | **0** | 59 | 59 |
 | py | **6** | 59 | 53 |
-| rust | **1** | 41 | 40 |
+| rust | **1** | 42 | 41 |
 | ts | **16** | 76 | 60 |
 | wasm | **0** | 21 | 21 |
-| **total** | **26** | 294 | 268 |
+| **total** | **26** | 295 | 269 |
 
 Tiers with no residual: java, wasm.
 
@@ -39,10 +39,10 @@ Gate: `python3 tools/selfhost_coverage.py --check`
 | go | **49** | 11 | 1 |
 | java | **30** | 14 | 6 |
 | py | **27** | 10 | 1 |
-| rust | **21** | 8 | 14 |
+| rust | **20** | 7 | 15 |
 | ts | **1** | 1 | 4 |
 | wasm | **46** | 11 | 4 |
-| **total** | **174** | | |
+| **total** | **173** | | |
 
 ## Dispatch arms no corpus document exercises
 

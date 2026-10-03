@@ -891,6 +891,7 @@
    "tests/fixtures/emit_rust_corpus/smart_ptr_methods.rvl",
    "tests/fixtures/emit_rust_corpus/str_borrows.rvl",
    "tests/fixtures/emit_rust_corpus/strings.rvl",
+   "tests/fixtures/emit_rust_corpus/teardown_compensate.rvl",
    "tests/fixtures/emit_rust_corpus/transforms.rvl",
    "tests/fixtures/emit_rust_corpus/v1_components.rvl",
    "tests/fixtures/emit_rust_corpus/variants.rvl",

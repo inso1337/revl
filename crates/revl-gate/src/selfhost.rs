@@ -3963,6 +3963,154 @@ fn tests_use_advance(ir: Value) -> bool {
     return false;
 }
 
+fn revl_teardown_preamble() -> Vec<String> {
+    let mut o: Vec<String> = vec![];
+    o.push(String::from("/// item 243 / docs/design/teardown-contract.md: the per-activation"));
+    o.push(String::from("/// three-entry-kind teardown accumulator (transactional + compensation)."));
+    o.push(String::from("/// See `_revl_teardown_preamble` in the emitter for the design."));
+    o.push(String::from("struct RevlTeardown {"));
+    o.push(String::from("    committed: std::sync::atomic::AtomicBool,"));
+    o.push(String::from("    phase2: std::sync::Mutex<Vec<RevlPendingCompensation>>,"));
+    o.push(String::from("    budget_ms: u64,"));
+    o.push(String::from("    #[allow(dead_code)] // read for config-surface parity; see the"));
+    o.push(String::from("    // preamble docstring — rust has no in-call preemption to bound with it."));
+    o.push(String::from("    per_call_ms: u64,"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("struct RevlPendingCompensation {"));
+    o.push(String::from("    label: String,"));
+    o.push(String::from("    call: Box<dyn FnOnce() + Send>,"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("fn revl_compensation_budget_ms() -> u64 {"));
+    o.push(String::from("    std::env::var(\"REVL_COMPENSATION_BUDGET_MS\").ok()"));
+    o.push(String::from("        .and_then(|v| v.parse::<u64>().ok())"));
+    o.push(String::from("        .unwrap_or(5000)"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("fn revl_compensation_per_call_ms() -> u64 {"));
+    o.push(String::from("    std::env::var(\"REVL_COMPENSATION_PER_CALL_MS\").ok()"));
+    o.push(String::from("        .and_then(|v| v.parse::<u64>().ok())"));
+    o.push(String::from("        .unwrap_or(1000)"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("/// item 324: the out-of-band abort registry — the faithful mirror of the"));
+    o.push(String::from("/// py runtime's `_FRAME_BY_CTX` + `_sole_frame`. A session-level reject"));
+    o.push(String::from("/// (item 245's explicit commit/abort UX) runs OUTSIDE the fiber and must"));
+    o.push(String::from("/// reach an already-activated component's `RevlTeardown` to clear"));
+    o.push(String::from("/// `committed`, so its next unload REPLAYS the per-tool-call (and"));
+    o.push(String::from("/// activation-body) transactional inverses instead of discharging them."));
+    o.push(String::from("/// The state itself lives on the fiber's (private) extended context, which"));
+    o.push(String::from("/// no out-of-fiber caller can reach — cordis-rs's `Context::extend` derives"));
+    o.push(String::from("/// a child whose metadata the parent/fiber context cannot see — so this"));
+    o.push(String::from("/// weak, label-keyed registry is the reach-in seam. Weak so a disposed"));
+    o.push(String::from("/// activation's teardown is collected normally; the registry never keeps"));
+    o.push(String::from("/// one alive."));
+    o.push(String::from("#[allow(clippy::type_complexity)]"));
+    o.push(String::from("static REVL_TEARDOWN_REGISTRY: std::sync::OnceLock<"));
+    o.push(String::from("    std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>>>"));
+    o.push(String::from("    = std::sync::OnceLock::new();"));
+    o.push(String::from(""));
+    o.push(String::from("fn revl_teardown_registry()"));
+    o.push(String::from("    -> &'static std::sync::Mutex<Vec<(String, std::sync::Weak<RevlTeardown>)>> {"));
+    o.push(String::from("    REVL_TEARDOWN_REGISTRY.get_or_init(|| std::sync::Mutex::new(Vec::new()))"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("fn revl_teardown_remember(label: &str, state: &std::sync::Arc<RevlTeardown>) {"));
+    o.push(String::from("    revl_teardown_registry().lock().unwrap()"));
+    o.push(String::from("        .push((label.to_string(), std::sync::Arc::downgrade(state)));"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("/// Abort every live activation registered under `label`: clear `committed`"));
+    o.push(String::from("/// so the next teardown REPLAYS its transactional inverses (py's"));
+    o.push(String::from("/// `Frame.abort`). Idempotent; skips dead weak entries. The driver/harness"));
+    o.push(String::from("/// calls this before unloading the fiber to reject the session's work."));
+    o.push(String::from("#[allow(dead_code)]"));
+    o.push(String::from("fn revl_abort(label: &str) {"));
+    o.push(String::from("    let registry = revl_teardown_registry().lock().unwrap();"));
+    o.push(String::from("    for (entry_label, weak) in registry.iter() {"));
+    o.push(String::from("        if entry_label == label {"));
+    o.push(String::from("            if let Some(state) = weak.upgrade() {"));
+    o.push(String::from("                state.committed.store(false, std::sync::atomic::Ordering::Release);"));
+    o.push(String::from("            }"));
+    o.push(String::from("        }"));
+    o.push(String::from("    }"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("/// Register the phase-2 drain hook FIRST — so cordis-rs's LIFO dispose"));
+    o.push(String::from("/// runs it LAST, after every bracket/transactional inverse — and return"));
+    o.push(String::from("/// the shared accumulator plus a `Context` extended to carry it, so a"));
+    o.push(String::from("/// provide-method on this same fiber can recover it later via"));
+    o.push(String::from("/// `revl_teardown_of`."));
+    o.push(String::from("fn revl_teardown_begin(ctx: &cordis::Context, label: &str)"));
+    o.push(String::from("    -> cordis::Result<(cordis::Context, std::sync::Arc<RevlTeardown>)> {"));
+    o.push(String::from("    let state = std::sync::Arc::new(RevlTeardown {"));
+    o.push(String::from("        committed: std::sync::atomic::AtomicBool::new(false),"));
+    o.push(String::from("        phase2: std::sync::Mutex::new(Vec::new()),"));
+    o.push(String::from("        budget_ms: revl_compensation_budget_ms(),"));
+    o.push(String::from("        per_call_ms: revl_compensation_per_call_ms(),"));
+    o.push(String::from("    });"));
+    o.push(String::from("    let ctx = ctx.extend(\"_revl_teardown\", state.clone());"));
+    o.push(String::from("    revl_teardown_remember(label, &state);  // item 324: out-of-band abort reach-in"));
+    o.push(String::from("    let sentinel = state.clone();"));
+    o.push(String::from("    ctx.effect(label.to_string(), move || {"));
+    o.push(String::from("        if !sentinel.committed.load(std::sync::atomic::Ordering::Acquire) {"));
+    o.push(String::from("            revl_drain_phase2(&sentinel);"));
+    o.push(String::from("        }"));
+    o.push(String::from("        Ok(())"));
+    o.push(String::from("    })?;"));
+    o.push(String::from("    Ok((ctx, state))"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("/// A provide-method's own recovery of its activation's teardown state"));
+    o.push(String::from("/// (`self.ctx` is the same fiber `revl_teardown_begin` extended)."));
+    o.push(String::from("fn revl_teardown_of(ctx: &cordis::Context) -> std::sync::Arc<RevlTeardown> {"));
+    o.push(String::from("    (*ctx.metadata::<std::sync::Arc<RevlTeardown>>(\"_revl_teardown\")"));
+    o.push(String::from("        .ok()"));
+    o.push(String::from("        .flatten()"));
+    o.push(String::from("        .expect(\"revl: teardown state missing — a compensated effect ran \\"));
+    o.push(String::from("                outside an activation that registered one\"))"));
+    o.push(String::from("        .clone()"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    o.push(String::from("/// Phase 2: best-effort compensation replay, LIFO within itself (the"));
+    o.push(String::from("/// queue already holds that order — see the preamble docstring), bounded"));
+    o.push(String::from("/// by `REVL_COMPENSATION_BUDGET_MS` checked BETWEEN calls (rust has no"));
+    o.push(String::from("/// in-call preemption of a synchronous compensation — see the rust row"));
+    o.push(String::from("/// of docs/design/teardown-contract.md). A panicking compensation is"));
+    o.push(String::from("/// caught (best-effort, never fails the abort) and logged; the loop"));
+    o.push(String::from("/// continues to the next queued compensation either way."));
+    o.push(String::from("fn revl_drain_phase2(state: &RevlTeardown) {"));
+    o.push(String::from("    let queued: Vec<RevlPendingCompensation> = {"));
+    o.push(String::from("        let mut guard = state.phase2.lock().unwrap();"));
+    o.push(String::from("        std::mem::take(&mut *guard)"));
+    o.push(String::from("    };"));
+    o.push(String::from("    if queued.is_empty() {"));
+    o.push(String::from("        return;"));
+    o.push(String::from("    }"));
+    o.push(String::from("    let unbounded = state.budget_ms == 0;"));
+    o.push(String::from("    let deadline = std::time::Instant::now()"));
+    o.push(String::from("        + std::time::Duration::from_millis(state.budget_ms);"));
+    o.push(String::from("    for pending in queued {"));
+    o.push(String::from("        if !unbounded && std::time::Instant::now() >= deadline {"));
+    o.push(String::from("            eprintln!("));
+    o.push(String::from("                \"revl: compensation {:?} skipped (deadline-expired, budget={}ms)\","));
+    o.push(String::from("                pending.label, state.budget_ms,"));
+    o.push(String::from("            );"));
+    o.push(String::from("            continue;"));
+    o.push(String::from("        }"));
+    o.push(String::from("        let label = pending.label;"));
+    o.push(String::from("        let outcome = std::panic::catch_unwind("));
+    o.push(String::from("            std::panic::AssertUnwindSafe(pending.call));"));
+    o.push(String::from("        if outcome.is_err() {"));
+    o.push(String::from("            eprintln!(\"revl: compensation {:?} failed\", label);"));
+    o.push(String::from("        }"));
+    o.push(String::from("    }"));
+    o.push(String::from("}"));
+    o.push(String::from(""));
+    return o;
+}
+
 fn revl_timer_preamble() -> Vec<String> {
     let mut o: Vec<String> = vec![];
     o.push(String::from("/// clock coeffect + timer scheduler (item 57, docs/time-coeffect.md):"));
@@ -5828,26 +5976,24 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                     let pn = value_str(p.clone());
                     acqR.insert(pn.clone(), format!("{}.clone()", pn));
                 }
-                let label = string_lit(Value::new(serde_json::Value::from(format!("{}.{}.{}.{}", name, mnm, kind, num_str(Value::new(serde_json::Value::from(index)))))));
-                let mut registers_undo = (kind == "effect");
-                let mut undonode = value_field(step.clone(), String::from("undo"));
                 if (kind == "emit") {
-                    undonode = value_field(step.clone(), String::from("compensate"));
-                    if (!value_is_null(undonode.clone())) {
-                        registers_undo = true;
+                    out.push(format!("{}let _ = {};", pad, render_expr(value_field(step.clone(), String::from("expr")), set_rn(c.clone(), acqR.clone()))));
+                    let cnode = value_field(step.clone(), String::from("compensate"));
+                    if (!value_is_null(cnode.clone())) {
+                        out.extend((method_undo_clones(comp.clone(), method.clone(), indent)).iter().cloned());
+                        out.push(format!("{}let _revl_teardown = revl_teardown_of(&self.ctx);", pad));
+                        out.extend((compensation_registration(cnode.clone(), c.clone(), undoR.clone(), format!("{}.{}.compensate.{}", name, mnm, num_str(Value::new(serde_json::Value::from(index)))), "self.ctx", false, indent)).iter().cloned());
                     }
-                }
-                let mut acqnode = value_field(step.clone(), String::from("acquire"));
-                if value_is_null(acqnode.clone()) {
-                    acqnode = value_field(step.clone(), String::from("expr"));
-                }
-                if registers_undo {
+                } else {
+                    let label = string_lit(Value::new(serde_json::Value::from(format!("{}.{}.{}.{}", name, mnm, kind, num_str(Value::new(serde_json::Value::from(index)))))));
+                    let mut acqnode = value_field(step.clone(), String::from("acquire"));
+                    if value_is_null(acqnode.clone()) {
+                        acqnode = value_field(step.clone(), String::from("expr"));
+                    }
                     out.extend((method_undo_clones(comp.clone(), method.clone(), indent)).iter().cloned());
-                }
-                let acq = render_expr(acqnode.clone(), set_rn(c.clone(), acqR.clone()));
-                out.push(format!("{}let _ = {};", pad, acq));
-                if registers_undo {
-                    let undox = render_expr(undonode.clone(), set_rn(c.clone(), undoR.clone()));
+                    let acq = render_expr(acqnode.clone(), set_rn(c.clone(), acqR.clone()));
+                    out.push(format!("{}let _ = {};", pad, acq));
+                    let undox = render_expr(value_field(step.clone(), String::from("undo")), set_rn(c.clone(), undoR.clone()));
                     out.push(format!("{}let _ = self.ctx.effect({}, move || {{ {}; Ok(()) }});", pad, label, undox));
                 }
             } else {
@@ -6013,6 +6159,137 @@ fn witnessed_acquire(ir: Value, acq: Value) -> bool {
     return false;
 }
 
+fn body_has_compensation(steps: Vec<Value>) -> bool {
+    for s in steps {
+        if ((value_str(value_field(s.clone(), String::from("step"))) == "emit") && (!value_is_null(value_field(s.clone(), String::from("compensate"))))) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn component_needs_teardown(comp: Value) -> bool {
+    let body = value_list(value_field(comp.clone(), String::from("body")));
+    if body_has_compensation(body.clone()) {
+        return true;
+    }
+    for step in body {
+        if (value_str(value_field(step.clone(), String::from("step"))) == "provide") {
+            for m in value_list(value_field(step.clone(), String::from("methods"))) {
+                if body_has_compensation(value_list(value_field(m.clone(), String::from("body")))) {
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
+fn uses_teardown(ir: Value) -> bool {
+    for comp in value_list(value_field(ir.clone(), String::from("components"))) {
+        if component_needs_teardown(comp.clone()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn declared_compensate_marker(ir: Value) -> Vec<String> {
+    for ext in value_list(value_field(ir.clone(), String::from("externs"))) {
+        if ((value_str(value_field(ext.clone(), String::from("class"))) == "emission") && (!value_is_null(value_field(ext.clone(), String::from("compensate"))))) {
+            return vec![String::from("<<DEFER-declared-compensate>>")];
+        }
+    }
+    return vec![];
+}
+
+fn expr_var_names(node: Value) -> Vec<String> {
+    let mut acc: Vec<String> = vec![];
+    if (value_kind(node.clone()) == "record") {
+        let k = node_kind(node.clone());
+        if (((k == "var") || (k == "name")) || (k == "req")) {
+            let mut ident = value_str(value_field(node.clone(), String::from("id")));
+            if (ident == "") {
+                ident = value_str(value_field(node.clone(), String::from("name")));
+            }
+            if (ident != "") {
+                acc.push(ident.clone());
+            }
+        }
+        for key in value_keys(node.clone()) {
+            acc.extend((expr_var_names(value_field(node.clone(), key.clone()))).iter().cloned());
+        }
+    }
+    if (value_kind(node.clone()) == "list") {
+        for item in value_list(node.clone()) {
+            acc.extend((expr_var_names(item.clone())).iter().cloned());
+        }
+    }
+    return acc;
+}
+
+fn step_let_binds(steps: Vec<Value>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for s in steps {
+        let k = value_str(value_field(s.clone(), String::from("step")));
+        if (k == "let-effect") {
+            out.push(value_str(value_field(s.clone(), String::from("bind"))));
+        }
+        if (k == "if") {
+            out.extend((step_let_binds(value_list(value_field(s.clone(), String::from("then"))))).iter().cloned());
+            out.extend((step_let_binds(value_list(value_field(s.clone(), String::from("else"))))).iter().cloned());
+        }
+    }
+    return out;
+}
+
+fn str_in(xs: Vec<String>, x: &str) -> bool {
+    for y in xs {
+        if (y == x) {
+            return true;
+        }
+    }
+    return false;
+}
+
+fn sorted_common(xs: Vec<String>, ys: Vec<String>) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for x in xs {
+        if (str_in(ys.clone(), &x) && (!str_in(out.clone(), &x))) {
+            out.push(x.clone());
+        }
+    }
+    return list_sort(out.clone());
+}
+
+fn compensation_registration(node: Value, ctx_: Ctx__m1, rn: std::collections::HashMap<String, String>, label_text: String, ctx_expr: &str, propagate: bool, indent: i64) -> Vec<String> {
+    let pad = ind(indent);
+    let call = render_expr(node.clone(), set_rn(ctx_.clone(), rn.clone()));
+    let label = string_lit(Value::new(serde_json::Value::from(label_text.clone())));
+    let mut tail = String::from(";");
+    let mut lead = String::from("let _ = ");
+    if propagate {
+        tail = String::from("?;");
+        lead = String::from("");
+    }
+    let mut o: Vec<String> = vec![];
+    o.push(format!("{}let _revl_state = _revl_teardown.clone();", pad));
+    o.push(format!("{}let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || {{ let _ = {}; }});", pad, call));
+    o.push(format!("{}{}{}.effect({}, move || {{", pad, lead, ctx_expr, label));
+    o.push(format!("{}    if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{", pad));
+    o.push(format!("{}        _revl_state.phase2.lock().unwrap().push(", pad));
+    o.push(format!("{}            RevlPendingCompensation {{ label: {}.to_string(), call: _revl_call }});", pad, label));
+    o.push(format!("{}    }}", pad));
+    o.push(format!("{}    Ok(())", pad));
+    o.push(format!("{}}}){}", pad, tail));
+    return o;
+}
+
+fn teardown_begin(comp: Value) -> String {
+    let label = string_lit(Value::new(serde_json::Value::from(format!("{}.teardown.phase2", value_str(value_field(comp.clone(), String::from("name")))))));
+    return format!("            let (ctx, _revl_teardown) = revl_teardown_begin(&ctx, {})?;", label);
+}
+
 fn emit_let_effect_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values: std::collections::HashMap<String, String>, indent: i64) -> Vec<String> {
     let pad = ind(indent);
     let mut out: Vec<String> = vec![];
@@ -6083,7 +6360,7 @@ fn count_timers(steps: Vec<Value>) -> i64 {
     return n;
 }
 
-fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values: std::collections::HashMap<String, String>, indent: i64, tbase: i64, sbase: i64) -> Vec<String> {
+fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values: std::collections::HashMap<String, String>, indent: i64, tbase: i64, sbase: i64, abinds: Vec<String>) -> Vec<String> {
     let pad = ind(indent);
     let kind = value_str(value_field(step.clone(), String::from("step")));
     let name = value_str(value_field(comp.clone(), String::from("name")));
@@ -6197,7 +6474,7 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
         }
         out.push(format!("{}            let _ = &{};", pad, bind));
         for nested in body {
-            out.extend((emit_comp_step(comp.clone(), nested.clone(), ir.clone(), bodyctx.clone(), map_values.clone(), (indent).checked_add(3i64).expect("revl: Int overflow"), tbase, sbase)).iter().cloned());
+            out.extend((emit_comp_step(comp.clone(), nested.clone(), ir.clone(), bodyctx.clone(), map_values.clone(), (indent).checked_add(3i64).expect("revl: Int overflow"), tbase, sbase, abinds.clone())).iter().cloned());
         }
         out.push(format!("{}        }}", pad));
         out.push(format!("{}    }}", pad));
@@ -6206,8 +6483,18 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
     }
     if (kind == "emit") {
         out.push(format!("{}let _ = {};", pad, render_expr(value_field(step.clone(), String::from("expr")), ctx_.clone())));
-        if (!value_is_null(value_field(step.clone(), String::from("compensate")))) {
-            out.push(format!("{}<<DEFER-emit-compensate:{}>>", pad, name));
+        let cnode = value_field(step.clone(), String::from("compensate"));
+        if (!value_is_null(cnode.clone())) {
+            let mut cR = std::collections::HashMap::new();
+            for req in value_keys(value_field(comp.clone(), String::from("requires"))) {
+                out.push(format!("{}let {}_comp = {}.clone();", pad, req, req));
+                cR.insert(req.clone(), format!("{}_comp", req));
+            }
+            for local in sorted_common(expr_var_names(cnode.clone()), abinds.clone()) {
+                out.push(format!("{}let {}_comp = {}.clone();", pad, local, local));
+                cR.insert(local.clone(), format!("{}_comp", local));
+            }
+            out.extend((compensation_registration(cnode.clone(), ctx_.clone(), cR.clone(), format!("{}.compensate", name), "ctx", true, indent)).iter().cloned());
         }
         return out;
     }
@@ -6220,18 +6507,21 @@ fn emit_comp_step(comp: Value, step: Value, ir: Value, ctx_: Ctx__m1, map_values
         out.push(format!("{}if {} {{", pad, render_expr(value_field(step.clone(), String::from("cond")), ctx_.clone())));
         let mut tb = tbase;
         let mut sb = sbase;
+        let mut ab = abinds.clone();
         for nested in value_list(value_field(step.clone(), String::from("then"))) {
-            out.extend((emit_comp_step(comp.clone(), nested.clone(), ir.clone(), ctx_.clone(), map_values.clone(), (indent).checked_add(1i64).expect("revl: Int overflow"), tb, sb)).iter().cloned());
+            out.extend((emit_comp_step(comp.clone(), nested.clone(), ir.clone(), ctx_.clone(), map_values.clone(), (indent).checked_add(1i64).expect("revl: Int overflow"), tb, sb, ab.clone())).iter().cloned());
             tb = (tb).checked_add(count_timers(vec![nested.clone()])).expect("revl: Int overflow");
             sb = (sb).checked_add(count_stream_events(vec![nested.clone()])).expect("revl: Int overflow");
+            ab.extend((step_let_binds(vec![nested.clone()])).iter().cloned());
         }
         let alt = value_list(value_field(step.clone(), String::from("else")));
         if (alt.revl_length() > 0i64) {
             out.push(format!("{}}} else {{", pad));
             for nested in alt {
-                out.extend((emit_comp_step(comp.clone(), nested.clone(), ir.clone(), ctx_.clone(), map_values.clone(), (indent).checked_add(1i64).expect("revl: Int overflow"), tb, sb)).iter().cloned());
+                out.extend((emit_comp_step(comp.clone(), nested.clone(), ir.clone(), ctx_.clone(), map_values.clone(), (indent).checked_add(1i64).expect("revl: Int overflow"), tb, sb, ab.clone())).iter().cloned());
                 tb = (tb).checked_add(count_timers(vec![nested.clone()])).expect("revl: Int overflow");
                 sb = (sb).checked_add(count_stream_events(vec![nested.clone()])).expect("revl: Int overflow");
+                ab.extend((step_let_binds(vec![nested.clone()])).iter().cloned());
             }
         }
         out.push(format!("{}}}", pad));
@@ -6281,20 +6571,29 @@ fn emit_component(comp: Value, services: Value, ir: Value) -> Vec<String> {
     out.push(format!("        {},", string_lit(Value::new(serde_json::Value::from(name.clone())))));
     out.push(format!("        cordis::{},", rust_inject(value_keys(reqs.clone()))));
     out.push(closure_open);
+    let teardown = component_needs_teardown(comp.clone());
+    if teardown {
+        out.push(teardown_begin(comp.clone()));
+    }
     out.extend((emit_config_application(comp.clone(), &cty, 3i64)).iter().cloned());
     out.extend((emit_provide_config_local(comp.clone(), 3i64)).iter().cloned());
     out.extend((emit_req_bindings(reqs.clone(), 3i64)).iter().cloned());
     let mut tb = 0i64;
     let mut sb = 0i64;
+    let mut ab: Vec<String> = vec![];
     for step in body {
         let kind = value_str(value_field(step.clone(), String::from("step")));
         if (kind == "provide") {
             out.extend((emit_provide_construction(comp.clone(), step.clone(), false, 3i64)).iter().cloned());
         } else {
-            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone()), map_values.clone(), 3i64, tb, sb)).iter().cloned());
+            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone()), map_values.clone(), 3i64, tb, sb, ab.clone())).iter().cloned());
             tb = (tb).checked_add(count_timers(vec![step.clone()])).expect("revl: Int overflow");
             sb = (sb).checked_add(count_stream_events(vec![step.clone()])).expect("revl: Int overflow");
+            ab.extend((step_let_binds(vec![step.clone()])).iter().cloned());
         }
+    }
+    if teardown {
+        out.push(String::from("            _revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);"));
     }
     out.push(String::from("            Ok(cordis::PluginOutput::none())"));
     out.push(String::from("        },"));
@@ -6352,20 +6651,29 @@ fn emit_component_new(comp: Value, services: Value, ir: Value) -> Vec<String> {
     out.push(format!("        {},", string_lit(Value::new(serde_json::Value::from(name.clone())))));
     out.push(format!("        cordis::{},", rust_inject(value_keys(reqs.clone()))));
     out.push(closure_open);
+    let teardown = component_needs_teardown(comp.clone());
+    if teardown {
+        out.push(teardown_begin(comp.clone()));
+    }
     out.extend((emit_config_application(comp.clone(), &cty, 3i64)).iter().cloned());
     out.extend((emit_provide_config_local(comp.clone(), 3i64)).iter().cloned());
     out.extend((emit_req_bindings(reqs.clone(), 3i64)).iter().cloned());
     let mut tb = 0i64;
     let mut sb = 0i64;
+    let mut ab: Vec<String> = vec![];
     for step in body {
         let kind = value_str(value_field(step.clone(), String::from("step")));
         if (kind == "provide") {
             out.extend((emit_provide_construction(comp.clone(), step.clone(), has_eff, 3i64)).iter().cloned());
         } else {
-            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone()), map_values.clone(), 3i64, tb, sb)).iter().cloned());
+            out.extend((emit_comp_step(comp.clone(), step.clone(), ir.clone(), activation_ctx(tables.clone(), fr.clone(), map_values.clone()), map_values.clone(), 3i64, tb, sb, ab.clone())).iter().cloned());
             tb = (tb).checked_add(count_timers(vec![step.clone()])).expect("revl: Int overflow");
             sb = (sb).checked_add(count_stream_events(vec![step.clone()])).expect("revl: Int overflow");
+            ab.extend((step_let_binds(vec![step.clone()])).iter().cloned());
         }
+    }
+    if teardown {
+        out.push(String::from("            _revl_teardown.committed.store(true, std::sync::atomic::Ordering::Release);"));
     }
     out.push(String::from("            Ok(cordis::PluginOutput::none())"));
     out.push(String::from("        },"));
@@ -6856,6 +7164,10 @@ pub fn emit_rust_src(ir: Value) -> String {
     if needs_realm_helper(components.clone()) {
         out.extend((revl_realm_helper(components.clone())).iter().cloned());
     }
+    if uses_teardown(ir.clone()) {
+        out.extend((revl_teardown_preamble()).iter().cloned());
+    }
+    out.extend((declared_compensate_marker(ir.clone())).iter().cloned());
     for comp in components {
         out.extend((emit_component_auto(comp.clone(), services.clone(), ir.clone())).iter().cloned());
     }
