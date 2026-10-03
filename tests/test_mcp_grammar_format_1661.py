@@ -24,9 +24,14 @@ from revl.mcp.server import handle  # noqa: E402
 
 
 def _result(arguments: dict) -> dict:
+    """The tool result, without the session footer every response carries
+    (issue #1693; pinned in test_mcp_state_footer_1693.py), so these cases
+    compare the grammar payload alone."""
     response = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
                        "params": {"name": "revl_grammar", "arguments": arguments}})
-    return response["result"]
+    result = response["result"]
+    result["structuredContent"].pop("sessionState")
+    return result
 
 
 def test_no_arguments_is_still_the_prose_summary():

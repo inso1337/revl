@@ -144,6 +144,16 @@ A relay stays class (c) when:
 Before #1707 every service emission was class (c) on its own, so any relay over
 a witnessed op prompted on every call and nothing said so.
 
+Whatever a refactor does to a class, it is reported (issue #1707). Every verb
+that compiles, admits or edits reports each provided operation's class as
+`effectClasses`, and `revl_admit`, `revl_plan`, `revl_ship`, `revl_swap` and
+`revl_edit` add an `EFFECT_CLASS_ROSE` warning for each operation whose class
+rose against the running composition, naming the operation and the crossing
+that raised it. A helper that wraps the witnessed rename and also announces it
+reads ``"`ops.stash` (Agent) rose from class (a) to class (c): `emit
+stage.stage` in Agent, `announce` (emission extern) in Stager raised it"``
+([mcp-reference.md](mcp-reference.md) has the field shapes).
+
 The three classes
 map onto three externs:
 

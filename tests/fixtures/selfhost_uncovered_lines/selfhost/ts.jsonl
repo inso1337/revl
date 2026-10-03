@@ -1,0 +1,115 @@
+["reason", "async-emission-node-negative-tests-emission-call-node", "Async emission-node negative tests: `emission_call_node` returns false for a non-call, a call whose target is not `req`, or a requirement method absent from the component's async operation keys. Async req calls and async arrows exercise its true branch"]
+
+["function", "async-emission-node-negative-tests-emission-call-node", "emission_call_node", 3, 3]
+
+["reason", "canonical-typescript-type-fallbacks-ts-type-handles-an", "Canonical TypeScript type fallbacks: `ts_type` handles an empty type and erases each argument of an unknown generic; `ts_bin_op` retains parser-canonicalized `===`/`!==` aliases and unknown-op empty return. Ordinary scalar (including Bytes, Unit and Never), collection, Result, function and arithmetic types are covered"]
+
+["function", "canonical-typescript-type-fallbacks-ts-type-handles-an", "ts_bin_op", 3, 3]
+
+["function", "canonical-typescript-type-fallbacks-ts-type-handles-an", "ts_type", 5, 5]
+
+["reason", "compiler-inlined-definitions-and-emitter-self-checks-the", "compiler-inlined definitions and emitter self-checks: the Python self-host compiler substitutes `ind`, `sync_acx` and `renders_await` at compile time, while the `expected_*` and indentation predicates are source assertions rather than paths entered by corpus emission"]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "expected_instance_get", 1, 1]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "expected_missing_adt", 1, 1]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "expected_ok_adt", 1, 1]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "expected_result_type", 1, 1]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "ind", 1, 1]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "indentation_is_two_spaces", 1, 1]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "renders_await", 1, 1]
+
+["function", "compiler-inlined-definitions-and-emitter-self-checks-the", "sync_acx", 1, 1]
+
+["reason", "crossing-label-fallbacks-call-method-name-returns-undo", "Crossing-label fallbacks: `call_method_name` returns `undo` for absent/empty method, fn, host or variable-callee names and unknown call shapes; `crossing_key_name` returns `?` for absent/empty requirement/name/variable identifiers or unknown targets. Lowered acquisition/undo calls carry the names used by the covered Frame bracket and compensation fixtures"]
+
+["function", "crossing-label-fallbacks-call-method-name-returns-undo", "call_method_name", 9, 9]
+
+["function", "crossing-label-fallbacks-call-method-name-returns-undo", "crossing_key_name", 12, 12]
+
+["reason", "empty-list-conservative-fallbacks-empty-list-ann-uses", "Empty-list conservative fallbacks: `empty_list_ann` uses `any[]` when no element evidence was inferred, and `list_element` returns empty for non-List or malformed List syntax. Typed empty-list bindings and inferred persistent pushes cover the evidence-bearing paths; the frontend rejects unconstrained empty lists"]
+
+["function", "empty-list-conservative-fallbacks-empty-list-ann-uses", "empty_list_ann", 1, 1]
+
+["function", "empty-list-conservative-fallbacks-empty-list-ann-uses", "list_element", 1, 1]
+
+["reason", "extern-body-and-context-empty-cases-emit-externs", "Extern-body and context empty cases: `emit_externs` writes `<<EXTERN-NO-TS-BODY>>` for a declared extern without an @ts target, while `context_augmentation` returns no declaration for a document with no provided/required keys. Admitted extern fixtures carry @ts bodies; function-only documents bypass component context output at the module gate"]
+
+["function", "extern-body-and-context-empty-cases-emit-externs", "emit_externs", 1, 1]
+
+["reason", "legacy-expression-type-inference-is-float-expr-handles", "Legacy expression-type inference: `is_float_expr` handles unstamped literal Float and returns false for non-minus unary expressions; `surface_type` retains widen-Int, legacy name-id, Float/Str/Int/Bool literals, and unknown literal/list element (the `index` arm, the #957 `Map` value type included, is covered). Current typed IR carries operand/expected stamps on the covered forms"]
+
+["function", "legacy-expression-type-inference-is-float-expr-handles", "is_float_expr", 2, 2]
+
+["function", "legacy-expression-type-inference-is-float-expr-handles", "surface_type", 8, 8]
+
+["reason", "legacy-v1-format-escape-render-format-consumes-as", "Legacy v1 format escape: `render_format` consumes `$$` as one literal dollar before scanning `$N` argument placeholders. Current `compile_files` lowers backtick interpolation to v3 `kind=interp` with explicit text/expr parts (including literal dollar text), never to `kind=format`; v1 component routing is retained only in the Python reference emitter"]
+
+["function", "legacy-v1-format-escape-render-format-consumes-as", "render_format", 5, 5]
+
+["reason", "lexical-scan-rejection-edges-is-digit-rejects-non", "Lexical scan rejection edges: `is_digit` rejects non-ASCII digits; `is_word_ch` rejects non-ASCII letters/punctuation and accepts digits/underscore only after its covered ASCII-letter branch; `is_word` rejects an empty string or one containing such a character. Frontend identifier tokens are nonempty ASCII words; covered interpolation and binding fixtures exercise their admitted path"]
+
+["function", "lexical-scan-rejection-edges-is-digit-rejects-non", "is_digit", 1, 1]
+
+["function", "lexical-scan-rejection-edges-is-digit-rejects-non", "is_word", 2, 2]
+
+["function", "lexical-scan-rejection-edges-is-digit-rejects-non", "is_word_ch", 4, 4]
+
+["reason", "literal-and-match-optional-guards-literal-of-maps", "Literal and match optional guards: `literal_of` maps a null host value, which source literals do not expose; `match_expr`'s no-binding Some arm checks payload against `undefined`, while lowered source Some patterns bind their payload. None/Some and Result/variant match output is otherwise covered"]
+
+["function", "literal-and-match-optional-guards-literal-of-maps", "literal_of", 1, 1]
+
+["function", "literal-and-match-optional-guards-literal-of-maps", "match_expr", 1, 1]
+
+["reason", "nested-component-guard-frame-tests-the-remaining-body", "Nested component-guard frame tests: the remaining `body_has_bracket` and `body_needs_frame` statements are the true returns from recursively scanning an `if` arm. Source component guards admit only `fail` and nested guards (G6), so an arm cannot contain the effect/compensation needed to make either recursive call true; top-level effects and provide-method compensation exercise the reachable true paths"]
+
+["function", "nested-component-guard-frame-tests-the-remaining-body", "body_has_bracket", 4, 4]
+
+["function", "nested-component-guard-frame-tests-the-remaining-body", "body_needs_frame", 2, 2]
+
+["reason", "owned-write-negative-shapes-is-inplace-write-returns", "Owned-write negative shapes: `is_inplace_write` returns false when an assignment's value is neither record-update nor builtin, when uniqueness is absent, and when the builtin is not push/set/remove with the required arity. Covered unique collection updates take the optimization; all other assignments remain on the normal renderer"]
+
+["function", "owned-write-negative-shapes-is-inplace-write-returns", "is_inplace_write", 3, 3]
+
+["reason", "parenthesization-and-empty-update-forms-render-call-wraps", "Parenthesization and empty-update forms: `render_call` wraps a non-atomic call target and `render_record_update` emits a spread-only object when updates are empty. The frontend emits direct var/field call targets and requires at least one source record update field"]
+
+["function", "parenthesization-and-empty-update-forms-render-call-wraps", "render_call", 1, 1]
+
+["function", "parenthesization-and-empty-update-forms-render-call-wraps", "render_record_update", 1, 1]
+
+["reason", "timer-emission-colouring-fallbacks-emission-is-async-returns", "Timer-emission colouring fallbacks: `emission_is_async` returns false for a call whose target is not a requirement, and tests a variable callee against the document's async callables. A timer body admits only emissions, and every admitted one lowers to a requirement-target `call` or to a component-dialect `fn` node, so neither arm has an input; the reference's `_ts_emission_is_async` carries the same three unreached statements. An async extern reached from a timer is refused by the reference before this test runs (\"called outside an async context\")"]
+
+["function", "timer-emission-colouring-fallbacks-emission-is-async-returns", "emission_is_async", 3, 3]
+
+["reason", "type-string-parser-sentinels-fn-type-arrow-index", "Type-string parser sentinels: `fn_type_arrow_index` returns -2 for a leading parenthesis not followed by `->` or with no closing parenthesis; `last_index` reaches -1 when a generic close bracket is missing. Canonical type strings originate in the frontend and exercise balanced function/generic forms"]
+
+["function", "type-string-parser-sentinels-fn-type-arrow-index", "fn_type_arrow_index", 2, 2]
+
+["function", "type-string-parser-sentinels-fn-type-arrow-index", "last_index", 2, 2]
+
+["reason", "unsupported-node-sentinels-component-step-method-body-expr", "Unsupported-node sentinels: `component_step`, `method_body`, `expr_inner`, `render_builtin`, `render_un`, `v3_stmt`, `lifecycle_step` and `render_do` produce explicit `<<UNSUPPORTED-*>>` output only after every mirrored step/expression/operator/method arm misses. Positive corpus input is frontend-lowered to the covered arms, and the reference raises on each of these shapes; the witnessed family is refused before this renderer"]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "component_step", 1, 1]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "expr_inner", 1, 1]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "lifecycle_step", 1, 1]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "method_body", 1, 1]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "render_builtin", 1, 1]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "render_do", 1, 1]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "render_un", 1, 1]
+
+["function", "unsupported-node-sentinels-component-step-method-body-expr", "v3_stmt", 1, 1]
+
+["reason", "v1-component-type-fallback-is-outside-the-mirrored", "v1 component type fallback is outside the mirrored v3 contract; routing selects the legacy reference emitter before self-host emission"]
+
+["function", "v1-component-type-fallback-is-outside-the-mirrored", "ts_type_v1", 1, 1]

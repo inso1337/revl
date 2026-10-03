@@ -295,7 +295,7 @@ is PYTHONSAFEPATH, the safety bit; without it, `-m` puts the CWD at
 never has to touch the filesystem. This is your primary interface.
 
 <!-- docgen:agents-mcp-count begin -->
-The complete advertised verb set is 57 verbs, from
+The complete advertised verb set is 58 verbs, from
 `src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what
 you reach for; each verb's exact inputs and outputs are in
 [mcp-reference.md](mcp-reference.md).
@@ -311,6 +311,7 @@ you reach for; each verb's exact inputs and outputs are in
 | `revl_deploy` | push the running composition onto a **second host** through the ssh leg: admission-gated and approval-gated; without `apply:true` it rehearses | [deploy.md](deploy.md) |
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
+| `revl_idiom` | the minimal admitted example of one construct (every hole's fillSpec carries its own) | [mcp-reference.md](mcp-reference.md#revl_idiom) |
 | `revl_act` | one call per action through the approval gate: its class, and executed (a), deferred to commit (b) or ticketed (c), with a receipt the commit manifest lists | [mcp-reference.md](mcp-reference.md#revl_act) |
 | `revl_counterfactual` | replace, insert or drop one action of the `revl_act` log and see how the gate's decisions would differ, with nothing run | [mcp-reference.md](mcp-reference.md#revl_counterfactual) |
 | `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-reference.md](mcp-reference.md#revl_load) |
