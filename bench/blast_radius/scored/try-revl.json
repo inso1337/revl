@@ -1,0 +1,8 @@
+{
+  "task": "commerce-try-payments-reports",
+  "arm": "revl",
+  "final": "../compositions/commerce.rvl",
+  "answer": "yes",
+  "turns": 3,
+  "tokensWritten": 220
+}
