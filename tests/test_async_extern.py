@@ -264,8 +264,11 @@ def test_py_emits_async_extern_as_async_def_and_awaited_call():
     out = _emit_py(ir)
     # the extern is an `async def`, so its verbatim `await` body is legal python
     assert "async def host_dispose(handle):" in out
-    # the async provide method awaits the async extern — no coroutine leak
-    assert "return (await host_dispose(handle))" in out
+    # the async provide method awaits the async extern — no coroutine leak.
+    # It is an emission in value position, so it fires through the recording
+    # seam (issue #1603) and the `await` stays outside the seam.
+    assert ("return (await _revl_extern_emit(_revl_ctx, 'host_dispose', "
+            "host_dispose, (handle,)))") in out
     # and the whole module is syntactically valid python (the erased `def`
     # holding an `await` used to be a SyntaxError here)
     compile(out, "<emitted>", "exec")
@@ -282,8 +285,11 @@ def test_py_non_async_extern_stays_a_blocking_def_and_is_not_awaited():
     # a NON-async extern is unchanged: a blocking `def`, never awaited
     assert "def tag(x):" in out
     assert "async def tag(" not in out
-    assert "return tag(x)" in out
+    # an emission in value position fires through the recording seam (issue
+    # #1603), and nothing awaits it
+    assert "return _revl_extern_emit(_revl_ctx, 'tag', tag, (x,))" in out
     assert "await tag(" not in out
+    assert "await _revl_extern_emit(_revl_ctx, 'tag'" not in out
 
 
 def test_py_colored_module_fn_awaits_the_async_extern():
