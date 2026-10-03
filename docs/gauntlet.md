@@ -66,10 +66,11 @@ see "the pending slots" below.
       "status": "passed",     // "passed" | "failed" | "unavailable" | "not-run"
       "ran": true,
       "test": "boot/unload no-residue (R4)",
-      "counts": { "checks": 4, "passed": 4, "failed": 0 },
+      "counts": { "checks": 5, "passed": 5, "failed": 0 },
       "checks": { "registry": true, "provisions": true,
-                  "effects": true, "listeners": true },
-      "detail": { "registrySize": 0, "provisions": [], ... }
+                  "effects": true, "listeners": true,
+                  "hostResources": true },
+      "detail": { "registrySize": 0, "provisions": [], "unreleased": [], ... }
     }
   },
 

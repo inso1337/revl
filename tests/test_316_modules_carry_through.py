@@ -310,6 +310,12 @@ MODULES_VERBS = {
     # need a booted composition
     "revl_load": None,
     "revl_swap": None,
+    # its `modules` ride the load it performs with nothing loaded (#1690),
+    # driven in tests/test_mcp_edit_files_1690.py
+    "revl_edit": None,
+    # loads through revl_edit's self-load (#1695), driven in
+    # tests/test_mcp_change_1695.py
+    "revl_change": None,
 }
 
 # rows whose candidate is nested: where the SAME source + modules go

@@ -936,8 +936,10 @@ def test_real_cordis_step_back_then_unload_still_leaves_no_residue(session):
 
     report = session.unload()
     assert report["noResidue"] is True
+    # issue #1859: the fifth check pairs every host acquire with its release
     assert report["checks"] == {"registry": True, "provisions": True,
-                                "effects": True, "listeners": True}
+                                "effects": True, "listeners": True,
+                                "hostResources": True}
 
 
 @needs_cordis
