@@ -434,11 +434,14 @@ def _expr(node, env: _Env, expected=None) -> str:
             # runtime carrying it is emitted only when a document reaches a
             # stream (see `_COMP_NEEDS_STREAM`).
             _flag_stream()
-            # §4.5: a provider-side `replay(…)` declaration this tier cannot
-            # honour. Refused rather than dropped — a declared backlog nothing
-            # holds is exactly the vacuous durability claim §4.5 keeps off the
-            # wire, one end earlier than the consumer's request.
-            _refuse_unlowered_stream_surface(node, "cordis-go")
+            # §4.5: a provider-side `replay(…)` declaration. The last-n form
+            # is lowered (the source holds that many items), and the durable
+            # cursor is refused by name rather than dropped: a declared cursor
+            # nothing can resume is exactly the vacuous durability claim §4.5
+            # keeps off the wire, one end earlier than the consumer's request.
+            count = _replay_count(node, "cordis-go")
+            if count is not None:
+                return "%s(%d)" % (go, count)
         return "%s(%s)" % (go, args)
     if kind == "subscribe":
         # item 130 Slice 3 (design §4.6, the go row): this tier ERASES the async
@@ -447,11 +450,18 @@ def _expr(node, env: _Env, expected=None) -> str:
         # bracket inverse is reachable off the teardown goroutine even while a
         # `next` is parked: teardown never has to wait for the provider.
         _flag_stream()
-        _refuse_unlowered_stream_surface(node, "cordis-go")
+        replay = _replay_count(node, "cordis-go")
         stream = _stream_chain(node.get("stream") or {},
                                node.get("stages") or [], env, "cordis-go")
         policy = node.get("policy") or "error"
         capacity = int(node.get("buffer") or 0)
+        # §4.5: a last-n request opens through `StreamSubscribeReplay`, which
+        # delivers the provider's held backlog ahead of any live item. A
+        # replay-free subscription keeps the exact `StreamSubscribe` call.
+        if replay is None:
+            call, head = "StreamSubscribe", "%s" % stream
+        else:
+            call, head = "StreamSubscribeReplay", "%s, %d" % (stream, replay)
         # §8's `block` drain WINDOW. `StreamSubscribe` is VARIADIC in the
         # window, so a subscription that declares none emits the exact
         # three-argument call it always has — the same shape the py reference
@@ -459,11 +469,10 @@ def _expr(node, env: _Env, expected=None) -> str:
         # options object only when something is declared.
         drain = node.get("drain")
         if drain is None:
-            return "StreamSubscribe(%s, %s, %d)" % (stream, _go_string(policy),
-                                                    capacity)
+            return "%s(%s, %s, %d)" % (call, head, _go_string(policy), capacity)
         _flag_stream_drain()
-        return "StreamSubscribe(%s, %s, %d, %d)" % (
-            stream, _go_string(policy), capacity, int(drain))
+        return "%s(%s, %s, %d, %d)" % (
+            call, head, _go_string(policy), capacity, int(drain))
     if kind == "call":
         # A built-in Opt/Result constructor arriving as call(callee=Some, ...).
         callee = node.get("callee")
@@ -2949,41 +2958,49 @@ def _emit_method_witnessed_step(out, pad, step, ext, env) -> None:
     _COMP_NEEDS_METHOD_WITNESSED = True
 
 
-def _refuse_unlowered_stream_surface(node, tier: str) -> None:
-    """Refuse the item-130 stream surface this tier does not lower.
+def _replay_count(node, tier: str):
+    """The item-130 §4.5 last-n `replay(<n>)` a stream node carries, or None;
+    refuse the durable cursor, the one stream surface this tier does not lower.
 
-    Only §4.5's `replay(…)` is left here. Slice 2 arrived in three landings and
-    nothing of it outlived them: the derived combinator chain
-    (`map`/`filter`/`take`) is lowered as derived stream links inside the
-    subscription's acquisition (see `_stream_chain`); all four §4.4 backpressure
-    policies mirror the py reference's `Subscription._deliver` arm for arm; and
-    the §8 `block` drain WINDOW now arms against this tier's own clock coeffect
-    (`revlScheduleAfter`/`RevlClockAdvance`, item 57), so its resume is the same
-    deterministic timeline step it is on the reference rather than an early
-    wall-clock guess. The window was refused here for as long as the reason held
-    — "no deterministic clock on this tier" — and that reason stopped being true
-    once the clock coeffect landed; the refusal outlived it. The other two
-    blocking tiers still refuse the window, each for a reason of its own: rust
-    has a clock but a `thread_local!` one, so a window would be armed by the
-    provider's thread and advanced by the consumer's and would never fire, and
-    java has no clock at all (it refuses an `advance` step by name).
+    Slice 2 arrived in three landings and nothing of it outlived them: the
+    derived combinator chain (`map`/`filter`/`take`) is lowered as derived
+    stream links inside the subscription's acquisition (see `_stream_chain`);
+    all four §4.4 backpressure policies mirror the py reference's
+    `Subscription._deliver` arm for arm; and the §8 `block` drain WINDOW arms
+    against this tier's own clock coeffect (`revlScheduleAfter`/
+    `RevlClockAdvance`, item 57), so its resume is the same deterministic
+    timeline step it is on the reference rather than an early wall-clock guess.
+    The other two blocking tiers still refuse the window, each for a reason of
+    its own: rust has a clock but a `thread_local!` one, and java has no clock
+    at all (it refuses an `advance` step by name).
 
-    Replay is refused for a reason of its own rather than for a clock. It is a
-    DURABILITY claim, and the half that makes it worth anything is §4.9's: a
-    durable cursor is what turns a crashed subscription from residue into a
-    re-issuable descriptor, and that recovery surface is the WAL's, which lives
-    on the py reference tier. A tier that emitted a subscription while silently
-    dropping the backlog would deliver only live items and call it replay.
-    Refused at the provider's declaration as well as at the consumer's request,
-    because a declared backlog nothing holds is the same vacuous claim one end
-    earlier."""
-    if node.get("replay"):
+    §4.5's last-n backlog is lowered too. The provider holds the newest n items
+    in memory and a subscription that asks for k of them receives them through
+    the provider's forward path before any live item (`StreamSubscribeReplay`).
+    The py reference makes no recovery claim for that form either (its bracket
+    is the ordinary closure-only one), so lowering it here agrees with the
+    reference in full.
+
+    The durable `replay(from: "<name>")` cursor is refused, for a reason of its
+    own rather than for a clock. What makes it worth anything is §4.9: a durable
+    cursor is what turns a crashed subscription from residue into a re-issuable
+    descriptor, and that recovery surface is the WAL's, which lives on the py
+    reference tier. A tier that resumed an in-memory position and called it
+    durable would make a claim nothing backs. Refused at the provider's
+    declaration as well as at the consumer's request, because a declared cursor
+    nothing can resume is the same vacuous claim one end earlier."""
+    replay = node.get("replay")
+    if not replay:
+        return None
+    if "cursor" in replay:
         raise EmitError(
-            "a stream `replay(…)` is not lowered on the %s tier; replay is a "
-            "durability claim — the provider holds the backlog, and a durable "
-            "cursor is what makes a crashed subscription reconstructible rather "
-            "than residue — and that recovery surface is the py reference "
-            "tier's (item 130 §4.5, §4.9) — try `--backend py`" % tier)
+            "a durable stream `replay(from: …)` cursor is not lowered on the %s "
+            "tier; a durable cursor is what makes a crashed subscription "
+            "reconstructible rather than residue, and that recovery surface is "
+            "the py reference tier's WAL (item 130 §4.5, §4.9). The last-n "
+            "`replay(<n>)` form does lower here; try `--backend py` for the "
+            "cursor" % tier)
+    return int(replay["count"])
 
 
 def _document_holds_stream(ir: dict) -> bool:
@@ -7905,12 +7922,28 @@ type Stream struct {
 	state       string    // "open" | "closed" | "faulted"
 	faultReason string
 	released    bool
+	// §4.5's last-n backlog: `replayCap` is the DECLARED `replay(<n>)`, 0 for
+	// the default of no backlog, and `backlog` holds the newest `replayCap`
+	// emitted items, oldest first. `emitMu` serialises an emission against a
+	// late subscriber's replay on a DECLARED provider only, so a live item can
+	// never overtake the backlog; an undeclared provider never takes it.
+	replayCap int
+	backlog   []string
+	emitMu    sync.Mutex
 }
 
 // StreamSource opens a provider. It takes a live-resource slot; `Close`
 // returns it, so a source that outlives its owner shows up as residue.
-func StreamSource() *Stream {
+//
+// `replay` is VARIADIC so an undeclared source emits the exact zero-argument
+// call it always has; at most one is ever passed, by the emitter, and it is the
+// provider's §4.5 `replay(<n>)` declaration: how many items it holds for a
+// consumer that subscribes later.
+func StreamSource(replay ...int) *Stream {
 	s := &Stream{kind: "source", state: "open"}
+	if len(replay) > 0 {
+		s.replayCap = replay[0]
+	}
 	_revlStreamMu.Lock()
 	_revlStreams = append(_revlStreams, s)
 	_revlStreamMu.Unlock()
@@ -8036,8 +8069,21 @@ func (s *Stream) detach(sub *Subscription) {
 // on acceptance, `stream.emit <item> refused` otherwise — so a refusal is never
 // silent, and the line matches the py reference and ts tiers byte for byte.
 func (s *Stream) Emit(item string) bool {
+	if s.replayCap > 0 {
+		s.emitMu.Lock()
+		defer s.emitMu.Unlock()
+	}
 	s.mu.Lock()
 	open := s.state == "open"
+	if open && s.replayCap > 0 {
+		// §4.5: the declared backlog is recorded BEFORE delivery and whether
+		// or not anyone is listening, since a consumer that subscribes LATER
+		// is the case replay exists for (the py reference's `_hold`).
+		s.backlog = append(s.backlog, item)
+		if len(s.backlog) > s.replayCap {
+			s.backlog = s.backlog[len(s.backlog)-s.replayCap:]
+		}
+	}
 	s.mu.Unlock()
 	if !open {
 		return false
@@ -8316,6 +8362,58 @@ func StreamSubscribe(src *Stream, policy string, capacity int,
 		sub.terminate(state, reason)
 	}
 	return sub
+}
+
+// StreamSubscribeReplay is `subscribe <src> replay(<n>)` (design §4.5): the
+// subscription StreamSubscribe opens, followed by the newest `n` items the
+// provider holds, delivered through the PROVIDER's own forward path before any
+// live item. So a replayed item takes the combinator chain, the declared buffer
+// and the overflow policy exactly as a live one does, a backlog larger than the
+// buffer is ordinary backpressure rather than a special case, and each one is
+// traced `stream.replay <item>`: the py reference's `Stream.subscribe`,
+// statement for statement.
+//
+// `src` is the head the emitter built, which may be a combinator chain; the
+// backlog lives on the provider at its root. The frontend refuses a replay on a
+// `merge(a, b)` fan-in, so the walk up the chain always ends at one source. The
+// subscribe and the replay run under the provider's `emitMu`, so a live
+// emission on another goroutine lands after the backlog, never inside it.
+//
+// Only the last-n form reaches this tier. The durable `replay(from: …)` cursor
+// is refused by name at emit time: its worth is §4.9's crash recovery, which is
+// the py reference tier's WAL.
+func StreamSubscribeReplay(src *Stream, n int, policy string, capacity int,
+	drainMs ...int64) *Subscription {
+	root := src
+	for up := root.stageUpstream(); up != nil; up = root.stageUpstream() {
+		root = up
+	}
+	root.emitMu.Lock()
+	defer root.emitMu.Unlock()
+	sub := StreamSubscribe(src, policy, capacity, drainMs...)
+	root.mu.Lock()
+	held := root.backlog
+	if n < len(held) {
+		held = held[len(held)-n:]
+	}
+	backlog := append([]string(nil), held...)
+	root.mu.Unlock()
+	for _, item := range backlog {
+		hostRecord("stream.replay " + item)
+		root.forward(item)
+	}
+	return sub
+}
+
+// stageUpstream is the stream a combinator link reads from, or nil when this
+// stream is not a link (a provider, or a merge).
+func (s *Stream) stageUpstream() *Stream {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.kind == "stage" && len(s.up) == 1 {
+		return s.up[0]
+	}
+	return nil
 }
 
 // deliver buffers one item under the declared overflow policy (§4.4). The

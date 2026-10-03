@@ -47,8 +47,26 @@ def _emit_module():
 emit = _emit_module()
 
 
+# §4.5's last-n backlog, appended to the stream fixture (the harness drives
+# `LoadReplayed`). Kept inline rather than in testdata/stream_130.rvl on
+# purpose: every `.rvl` under testdata/ is a case in the gate/reference census
+# (tools/gate_reference_census.py), and the native gate, built from
+# selfhost/lower.rvl, does not carry §4.5 replay yet, so a replay document there
+# reads as a new false-reject divergence.
+_REPLAYED = """
+component Replayed requires sink: Sink {
+  let src = effect Stream.source() replay(3) undo src.close()
+  let sub = subscribe src replay(3) undo sub.close()
+  every o in sub {
+    emit sink.write(o)
+  }
+}
+"""
+
+
 def _emit_go() -> str:
-    return emit.emit(compile_source(FIXTURE.read_text(encoding="utf-8")),
+    return emit.emit(compile_source(FIXTURE.read_text(encoding="utf-8")
+                                    + _REPLAYED),
                      package="stream130")
 
 
@@ -131,7 +149,7 @@ def test_stream_host_gets_no_no_op_stub():
     constructor and silently drop the semantics."""
     src = _emit_go()
     assert "func StreamSource(_args ...any) any {" not in src
-    assert "func StreamSource() *Stream {" in src
+    assert "func StreamSource(replay ...int) *Stream {" in src
 
 
 def test_iteration_lowers_as_a_blocking_next_loop():
@@ -274,3 +292,53 @@ def test_go_typed_event_scenario_builds_and_runs():
             run.stdout + run.stderr):  # pragma: no cover — offline module cache
         pytest.skip("stc-go is not in the local module cache")
     assert run.returncode == 0, (run.stdout + "\n" + run.stderr)
+
+
+# ---------------------------------------------------------------------------
+# §4.5's last-n backlog (the go row): lowered, and the durable cursor refused
+# ---------------------------------------------------------------------------
+
+def test_a_declared_last_n_backlog_lowers_on_both_ends():
+    """The provider's `replay(3)` becomes the source's held-backlog size, and
+    the consumer's request opens through `StreamSubscribeReplay`, which delivers
+    that backlog through the provider's own forward path before any live item.
+    The subscription is still the ordinary closure bracket: a last-n backlog
+    makes no recovery claim on the reference either."""
+    src = _emit_go()
+    assert "src = StreamSource(3)" in src
+    assert 'sub = StreamSubscribeReplay(src, 3, "error", 0)' in src
+    assert "return func() error { sub.Close(); return nil }" in src
+
+
+def test_a_replay_free_program_keeps_the_exact_calls():
+    """Byte-identity for everything that declares no replay: the zero-argument
+    `StreamSource()` and the three-argument `StreamSubscribe` stand as they
+    were, so only a document that declares a backlog changes shape."""
+    src = emit.emit(compile_source(
+        "component C {\n"
+        "  let src = effect Stream.source() undo src.close()\n"
+        "  let sub = subscribe src undo sub.close()\n"
+        "  await sub.next()\n"
+        "}\n"), package="p")
+    assert "src = StreamSource()\n" in src
+    assert 'sub = StreamSubscribe(src, "error", 0)' in src
+    assert "= StreamSubscribeReplay(" not in src
+
+
+def test_a_durable_cursor_is_refused_by_name_at_both_ends():
+    """§4.9: a durable cursor's worth is the WAL's crash recovery, which is the
+    py reference tier's. Refused at the declaration even when nobody asks, since
+    a declared cursor nothing can resume is the same vacuous claim."""
+    for head in ("", 'replay(from: "orders")'):
+        ir = compile_source(
+            "component C {\n"
+            '  let src = effect Stream.source() replay(from: "orders") '
+            "undo src.close()\n"
+            f"  let sub = subscribe src {head} undo sub.close()\n"
+            "  await sub.next()\n"
+            "}\n")
+        with pytest.raises(emit.EmitError) as excinfo:
+            emit.emit(ir, package="p")
+        msg = str(excinfo.value)
+        assert "durable stream `replay(from: …)` cursor is not lowered" in msg
+        assert "cordis-go" in msg and "§4.9" in msg
