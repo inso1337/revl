@@ -2123,6 +2123,24 @@ _GRAMMAR_FORMATS = _source_grammar.FORMATS
 _GRAMMAR_CATEGORIES = tuple(_source_grammar.CATEGORIES)
 
 
+def _tool_idiom(arguments: dict) -> dict:
+    """revl_idiom (issue #1701): the minimal admitted example of one construct
+    with the rules that make it correct, by name; with no `name`, the list of
+    idioms. A hole's fillSpec already carries the idiom of its construct, so
+    this is for asking about a construct before there is a hole in it."""
+    from .. import idioms  # noqa: PLC0415 - reads the idiom files on first use
+
+    name = arguments.get("name")
+    if name is None:
+        return {"ok": True, "idioms": [
+            {"name": n, "summary": idioms.get(n)["summary"]} for n in idioms.names()]}
+    entry = idioms.get(str(name))
+    if entry is None:
+        return _session_error(
+            f"no idiom named {name!r}; the idioms are {', '.join(idioms.names())}")
+    return {"ok": True, "idiom": idioms.served(entry)}
+
+
 def _tool_grammar(arguments: dict) -> dict:
     """revl_grammar: the prose summary by default; with `format`, the grammar
     of revl source derived from the parser (issue #1661, the MCP twin of
@@ -3512,6 +3530,26 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_grammar,
+    },
+    {
+        "name": "revl_idiom",
+        "description": "The minimal admitted example of one construct (a "
+                       "provide method, an emission method, an effect's "
+                       "acquisition or inverse, a spawn, a subscription, ...) "
+                       "with the one or two rules that make it correct. Every "
+                       "hole's fillSpec already carries the idiom of its "
+                       "construct; ask by `name` for any other, or omit it for "
+                       "the list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "the idiom (construct) name, e.g. "
+                                        "`emission-method`; omit to list them"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_idiom,
     },
 ]
 
