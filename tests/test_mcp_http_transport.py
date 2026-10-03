@@ -830,7 +830,22 @@ def _pki(tmp_path, names):
                    .not_valid_before(now - datetime.timedelta(minutes=5))
                    .not_valid_after(now + datetime.timedelta(hours=1))
                    .add_extension(x509.BasicConstraints(ca=ca, path_length=None),
-                                  critical=True))
+                                  critical=True)
+                   # Python 3.13 verifies with VERIFY_X509_STRICT by default, which
+                   # refuses a chain whose certificates lack key identifiers or
+                   # whose CA lacks keyUsage ("Missing Authority Key Identifier").
+                   .add_extension(x509.SubjectKeyIdentifier.from_public_key(key.public_key()),
+                                  critical=False)
+                   .add_extension(x509.AuthorityKeyIdentifier.from_issuer_public_key(
+                                      (issuer_key or key).public_key()),
+                                  critical=False))
+        if ca:
+            builder = builder.add_extension(
+                x509.KeyUsage(digital_signature=True, content_commitment=False,
+                              key_encipherment=False, data_encipherment=False,
+                              key_agreement=False, key_cert_sign=True, crl_sign=True,
+                              encipher_only=False, decipher_only=False),
+                critical=True)
         if san:
             builder = builder.add_extension(x509.SubjectAlternativeName(san),
                                             critical=False)
