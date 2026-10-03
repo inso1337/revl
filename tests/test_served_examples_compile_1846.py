@@ -72,6 +72,22 @@ SPECS = {
                            "config": ["base: Int"]},
     "named resource": {"service": "Pool", "resource": "Socket"},
     "no effect": {"service": "Echo", "effect": False},
+    # issue #1857: a `Unit` method's fill is the crossing it makes
+    "unit emission": {"service": "Audit", "requires": ["sink"],
+                      "capabilities": ["sink"],
+                      "emits": ["record(line: Str) -> Unit"]},
+    "unit split emission": {"service": "Relay", "requires": ["db", "net"],
+                            "capabilities": ["db", "net"],
+                            "emits": ["push(item: Str) -> Unit"]},
+}
+
+# What the scaffold's `// TODO: declare the operations X must offer.` asks the
+# agent to write first: the operation a crossing goes through. Only a `Unit`
+# method needs it, since a `Str` crossing hole has a literal fill.
+STUB_OPERATIONS = {
+    "unit emission": {"Sink": "emission fn write(line: Str)"},
+    "unit split emission": {"Db": "emission fn put(item: Str)",
+                            "Net": "emission fn send(item: Str) -> Unit"},
 }
 
 _PLACEHOLDER = re.compile(r"<(\w+): ([^>]+)>")
@@ -132,11 +148,16 @@ def _fill_minimally(source: str) -> str:
     raise AssertionError("the holes did not run out")
 
 
-@pytest.mark.parametrize("arguments", list(SPECS.values()), ids=list(SPECS))
-def test_a_served_scaffold_compiles_with_its_holes_minimally_filled(arguments):
-    served = _call("revl_scaffold", arguments)
+@pytest.mark.parametrize("name", list(SPECS))
+def test_a_served_scaffold_compiles_with_its_holes_minimally_filled(name):
+    served = _call("revl_scaffold", SPECS[name])
     assert served["ok"] is True, served
-    filled = _fill_minimally(served["source"])
+    source = served["source"]
+    for service, operation in STUB_OPERATIONS.get(name, {}).items():
+        stub = f"service {service} {{ }}"
+        assert stub in source, stub
+        source = source.replace(stub, f"service {service} {{\n  {operation}\n}}")
+    filled = _fill_minimally(source)
     ir = compile_source(filled, "filled.rvl")
     assert not ir.get("holes")
 
@@ -188,3 +209,15 @@ def test_the_scaffold_doc_shows_what_the_server_writes():
         "service": "Analysis", "provides": "analysis", "requires": ["filesystem"],
         "capabilities": ["filesystem.read"]})["source"]
     assert shown == served
+
+
+def test_a_pure_unit_method_is_refused_with_the_reason():
+    """A pure operation that returns `Unit` has no fill (revl has no unit
+    value) and computes nothing a caller can see, so the scaffold says so
+    instead of writing a hole nothing can fill (#1857)."""
+    refused = _call("revl_scaffold", {"service": "Log",
+                                      "methods": ["note(a: Str) -> Unit"]})
+    assert refused["ok"] is False
+    message = refused["diagnostics"][0]["message"]
+    assert "`note` returns `Unit` and is pure" in message
+    assert "--emits" in message

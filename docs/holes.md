@@ -342,7 +342,9 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   function returning it. `Unit` has no literal (revl has no unit
   expression), so a `Unit` hole, such as an `effect`'s inverse, is built by a
   call that returns nothing: the inverse an `acquire` extern names, applied to
-  the acquired binding, which is in scope in its own `undo`. One case is
+  the acquired binding, which is in scope in its own `undo`, or in an
+  emission method the crossing itself. A declaration written without a return
+  type returns `Unit`, the same as one written `-> Unit`. One case is
   decided outright: a bare nominal type
   no declaration builds (an extern's handle type, such as `LogHandle`) with
   no producer in reach needs new host code (`needsHostCode: true`). A trusted

@@ -347,6 +347,12 @@ def _type_head(t: str) -> str:
     return t.split("[", 1)[0].strip()
 
 
+def _declared_return(returns: str | None) -> str:
+    """A declaration's return type: one declared without a return type
+    returns `Unit`, the same as one that writes `-> Unit` (#1857)."""
+    return returns or "Unit"
+
+
 def _returns_of(signature: str | None) -> str | None:
     """A rendered signature's return type; one with no `->` returns `Unit`."""
     if not signature:
@@ -409,13 +415,13 @@ def _fillable(expected: str | None, visible: list[dict],
             producers.append({"kind": "service",
                               "write": f"{e['instance']}.{e['signature']}"})
     for c in calls:
-        if c.get("returns") == expected:
+        if _declared_return(c.get("returns")) == expected:
             producers.append({"kind": "crossing", "write": c["write"]})
     for ext in externs.get("declared") or []:
         if ext.get("callableHere") and _returns_of(ext["signature"]) == expected:
             producers.append({"kind": "extern", "write": ext["write"]})
     for name, fn in sorted(functions.items()):
-        if fn.get("returns") == expected:
+        if _declared_return(fn.get("returns")) == expected:
             params = ", ".join(f"<{p['name']}: {p['type']}>"
                                for p in fn.get("params", []))
             producers.append({"kind": "function", "write": f"{name}({params})"})
