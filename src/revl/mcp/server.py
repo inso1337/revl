@@ -321,6 +321,27 @@ def _collect_module_keys(node, out: set) -> None:
             _collect_module_keys(item, out)
 
 
+def _operator_text_of(in_memory: dict, providers: dict) -> dict:
+    """The operator's own text of each file an in-memory source stands in for
+    (issue #1715): the file on disk, read only inside the sanctioned roots. A
+    path outside them has no operator text, so everything sent for it stays the
+    author's; reading it would make the trust decision an oracle on a file the
+    jail exists to keep closed. An operator-sanctioned provider is the
+    operator's text by configuration."""
+    roots = _file_roots()
+    operator: dict = {os.path.abspath(p): text for p, text in providers.items()}
+    for path in in_memory:
+        if path in operator or not _within_roots(path, roots) \
+                or not os.path.isfile(path):
+            continue
+        try:
+            with open(path, encoding="utf-8") as handle:
+                operator[path] = handle.read()
+        except (OSError, UnicodeDecodeError):
+            continue
+    return operator
+
+
 def _jail_refusal(arguments: dict) -> dict | None:
     """The refusal payload when a tool call names a path outside the sanctioned
     roots, or `None` when every path is inside. Fails CLOSED: refused before the
@@ -569,7 +590,10 @@ def compile_under_authoring(source: str | None, files: list[str] | None,
         if files:
             return compile_files(list(files), manifest=manifest,
                                  replacing=replacing, profile=prof,
-                                 sources=in_memory or None)
+                                 sources=in_memory or None,
+                                 operator_sources=(
+                                     _operator_text_of(in_memory, providers)
+                                     if prof is not None else None))
         raise ValueError("provide `source` or `files`")
 
     if providers and profile is not None:

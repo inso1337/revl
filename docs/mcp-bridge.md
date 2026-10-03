@@ -209,6 +209,35 @@ an imported module, no self-minted declassifier, and **no self-chosen realm**.
 writes to disk — so they compile unprofiled, the way an embedder's own sources
 do.
 
+**Edited files: trust follows the text (issue #1715).** When transport-carried
+text stands in for one of those files (`revl_edit` on a files-loaded
+composition, or `revl_swap {files, modules}` with a module keyed by a file's
+path), the boundary is drawn declaration by declaration against the operator's
+own text of that file, which is the file on disk inside the sanctioned roots:
+
+- a declaration that parses identically to one in the operator's text of the
+  same file (source positions ignored, so moving it is not changing it) is the
+  operator's and is not checked by the profile, exactly as at load. That covers
+  an unchanged host extern, the unchanged functions and components that call
+  it, and an unchanged `use` (including one that leaves the admitting
+  directory: same path, same file, the operator's layout);
+- every other declaration in that text is the agent's and gets the whole
+  untrusted-author profile: an added or changed `extern` is refused (`G8`,
+  naming it), as is any reach into host code from an agent declaration,
+  directly or through any function, the operator's included; a self-minted
+  declassifier, a realm, an `asset`, the granted allowlist, and `use`
+  confinement all apply to it;
+- a file the call did not overlay is the operator's, as at load. An imported
+  file the call did overlay is checked the same way as a root, so rewriting an
+  operator library under an untouched operator component is still swept;
+- text for a path outside the sanctioned roots is never compared with that
+  path: all of it is the agent's, so the trust decision cannot become an oracle
+  on a file the jail keeps closed. An operator-sanctioned `--provider` module is
+  the operator's text by configuration.
+
+Inline `source` and `modules` that stand in for no file are unchanged: all of
+it is the agent's.
+
 The realm half is the one that reads as decoration and is not. A realm is an
 authority ADDRESS: the item-246/251 approval policy scopes standing approvals
 and auto-approve rules by `(component glob, realm)` and matches the realm half
@@ -420,12 +449,11 @@ revl_edit  {edits: [{target: "lib.rvl", anchor: "}\n",
                      replacement: "= label2()"}]}        -> admitted, swapped
 ```
 
-Edited file text arrived over the transport, so it is not the operator's own
-file any more: a compile with any edited file runs under the authoring profile,
-exactly as `revl_swap {files, modules}` does. A host extern an edit adds is
-refused. So is any edit, under the default untrusted authoring, to a
-composition whose files declare host externs of their own; such a composition
-is changed on disk by the operator, then swapped.
+Edited file text arrived over the transport, so what an edit changes is the
+agent's while what it leaves alone stays the operator's
+([Authoring trust](#authoring-trust--the-agent-is-not-a-host-code-author), "Edited files"). An edit may not add
+or change a host extern; it may change the rest of a file that declares one, and
+the operator's components keep calling it.
 
 The path jail reads the patched text, not the edits (issue #1709). Before
 anything compiles, every buffer an edit touched is scanned, as it reads after
