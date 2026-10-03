@@ -1006,9 +1006,10 @@ jobs:
           echo "    --diff-base $base --count 200"
           exit 1
 
-  # Issue #1572: the committed census artifact (`docs/census-artifact.{md,json}`,
-  # roadmap item 549) had drifted from main with nothing reporting it, because
-  # no step ran its check. A check nobody runs reads as a pass.
+  # Issue #1572: the committed census artifact (roadmap item 549; since issue
+  # #1768 the records in `docs/census-artifact/`, from which the report is
+  # rendered) had drifted from main with nothing reporting it, because no step
+  # ran its check. A check nobody runs reads as a pass.
   #
   # This job keeps the committed copy CURRENT. On a pull request it asks
   # `census_artifact.py --moved-inputs` whether the diff moves an input of the
@@ -1016,9 +1017,10 @@ jobs:
   # census run opens, a report input), a program it carries, a new `.rvl` under
   # a census directory, a gate crate source, or the tool and the artifact
   # themselves. If one moved, `--verify --strict` re-runs the census (about 20
-  # seconds) and fails unless the committed file reproduces program by program
-  # with no program missing and no report input moved. The fix is to run
-  # `python3 tools/census_artifact.py --write` in the same pull request.
+  # seconds) and fails unless the committed records reproduce program by
+  # program with no program missing, no report input moved and every record
+  # file byte-identical to the run. The fix, and the resolution of a merge
+  # conflict in the records, is `python3 tools/census_artifact.py --write`.
   #
   # A diff that moves no input is not checked, and says so. On every other
   # event (push to main, schedule, dispatch) it always checks, so a merge race
