@@ -719,6 +719,13 @@ the counters, 248 ships the evaluation.
     demands a fresh approval, so no cut position exists where the token
     is valid while the emission is out. Cut before `approval-consumed`:
     the token is intact and nothing fired.
+    Note (issue #1781): `revl recover` reads no approval record, so it is
+    the WAL, not recover, that states the owed spend. Each spend and
+    emission the session writes carries `use`, and
+    `revl.wal.approval_spends` joins them on `(requestId, use)`: a spend with
+    no emission is owed or ambiguous. Before #1781 the `Session.call` path
+    wrote no `approval-emission` at all, and a multi-use grant's spends were
+    identical records.
 15. Unreachable-without, runtime half: a hand-built IR (no checker run)
     reaching an approval-required capability with no token is refused AT
     THE CROSSING by the frame check, independent of the static

@@ -38,6 +38,13 @@ What is implemented
   constant, and `tests/test_tee_quote.py` re-derives the generator's membership
   and order from the parameters, so a typo in a constant reddens rather than
   quietly verifying nothing.
+* **Signing** (:func:`ecdsa_sign`) goes through `cryptography` when it is
+  installed (the optional extra ``revl[crypto]``, issue #1460), because the
+  pure scalar multiplication takes time that depends on the secret nonce. The
+  two backends are byte-compatible (RFC 6979 on both). A caller that signs
+  where an attacker can time it passes ``network_exposed=True`` and is refused
+  rather than handed the pure path. Verification stays pure Python: its inputs
+  are public, so its timing has nothing to leak.
 
 The root, and why it is not the record's business
 -------------------------------------------------
@@ -83,6 +90,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Mapping, Optional
 
+from . import _ecdsa_backend
+from ._ecdsa_backend import SigningBackendUnavailable
 from .attest import NotCanonicalizable, _canonical_bytes, key_id
 
 __all__ = [
@@ -94,6 +103,10 @@ __all__ = [
     "CURVES",
     "ecdsa_verify",
     "ecdsa_sign",
+    "ecdsa_sign_pure",
+    "signing_backend",
+    "require_signing_backend",
+    "SigningBackendUnavailable",
     "derive_public_key",
     "private_key_from_seed",
     "public_key_id",
@@ -228,10 +241,16 @@ def _add(curve: Curve, left: _Point, right: _Point) -> _Point:
 
 
 def _mul(curve: Curve, scalar: int, point: _Point) -> _Point:
-    """Double-and-add. Not constant time, and deliberately so: every scalar this
-    module multiplies by is PUBLIC (a verification scalar, or a fixture key that
-    signs nothing secret), so there is no secret to leak through the timing and
-    no reason to hand-roll a hardened ladder in a compiler."""
+    """Double-and-add. NOT constant time: the loop does one addition per set bit
+    of ``scalar``, so its running time depends on the scalar's bits.
+
+    For verification that is harmless, because every scalar there is public.
+    For signing it is not: the scalar is the secret nonce (or, deriving a public
+    key, the private key itself). That is why :func:`ecdsa_sign` and
+    :func:`derive_public_key` use the `cryptography` backend whenever it is
+    installed, and why a network-exposed signer refuses to reach this loop at
+    all (issue #1460). Hand-rolling a hardened ladder in Python integers would
+    not fix it: big-integer arithmetic is itself variable time."""
     result: _Point = None
     addend = point
     while scalar:
@@ -282,14 +301,28 @@ def _encode_public_key(curve: Curve, point: tuple[int, int]) -> bytes:
     return point[0].to_bytes(width, "big") + point[1].to_bytes(width, "big")
 
 
-def derive_public_key(curve: Curve, private_key: int) -> bytes:
-    """The raw `X || Y` public key for a private scalar."""
+def _check_private_key(curve: Curve, private_key: int) -> None:
     if not isinstance(private_key, int) or isinstance(private_key, bool):
         raise QuoteFormatError("a private key is an integer scalar")
     if not 1 <= private_key < curve.n:
         raise QuoteFormatError(
             f"a {curve.name} private scalar must lie in [1, n); got one that "
             f"does not")
+
+
+def derive_public_key(curve: Curve, private_key: int) -> bytes:
+    """The raw `X || Y` public key for a private scalar.
+
+    Derived by the `cryptography` backend when it is installed, since this is a
+    scalar multiplication by the private key itself; by the pure path
+    otherwise. The point is the same either way."""
+    _check_private_key(curve, private_key)
+    if _ecdsa_backend.supports(curve):
+        return _ecdsa_backend.public_key(curve, private_key)
+    return _derive_public_key_pure(curve, private_key)
+
+
+def _derive_public_key_pure(curve: Curve, private_key: int) -> bytes:
     point = _mul(curve, private_key, (curve.gx, curve.gy))
     if point is None:  # unreachable for a scalar in [1, n)
         raise QuoteFormatError("the derived public key is the point at infinity")
@@ -367,13 +400,64 @@ def _rfc6979_k(curve: Curve, private_key: int, digest: bytes) -> int:
         v = mac(k, v)
 
 
-def ecdsa_sign(curve: Curve, private_key: int, message: bytes) -> bytes:
+def signing_backend(curve: Curve = CURVE_P256) -> str:
+    """Which backend :func:`ecdsa_sign` uses for ``curve`` on this machine:
+    ``"cryptography"`` (constant time, from the ``revl[crypto]`` extra) or
+    ``"pure"`` (this module's integers, timing-variable)."""
+    return _ecdsa_backend.NAME if _ecdsa_backend.supports(curve) else "pure"
+
+
+def require_signing_backend(purpose: str, curve: Curve = CURVE_P256) -> None:
+    """Refuse, naming the extra, unless the constant-time backend can sign on
+    ``curve``. ``purpose`` says which signer is asking, so the refusal reads as
+    a statement about that signer rather than about the library.
+
+    Called by every signing path an attacker can time over a network, BEFORE
+    it does anything else, so a refusal leaves no half-done work behind."""
+    if _ecdsa_backend.supports(curve):
+        return
+    found = _ecdsa_backend.probe()
+    why = (found.reason if not found.available
+           else f"it does not implement {curve.name} with {curve.digest}")
+    raise SigningBackendUnavailable(
+        f"refusing to sign for {purpose}: this signer is exposed to a network, "
+        f"and pure-Python ECDSA takes time that depends on the secret nonce, "
+        f"which leaks the private key to anyone who can time enough "
+        f"signatures. It needs the constant-time backend from the optional "
+        f"extra {_ecdsa_backend.EXTRA}: {_ecdsa_backend.INSTALL_HINT}. "
+        f"Backend status: {why}.")
+
+
+def ecdsa_sign(curve: Curve, private_key: int, message: bytes, *,
+               network_exposed: bool = False) -> bytes:
     """Deterministic ECDSA (RFC 6979) over ``message``, as raw `R || S`.
 
-    The signer exists for the reference attester and for the fixtures: a test
-    that mutates a quote and RE-SIGNS it proves the accept path is unreachable
-    with a well-formed forgery, which a test that only corrupts a signature
-    cannot show. The verifier is the part a deployment runs."""
+    Signs through `cryptography` when it is installed and through
+    :func:`ecdsa_sign_pure` otherwise. The bytes are the same either way.
+
+    ``network_exposed=True`` says an attacker can time this signature (it
+    answers a request from another machine, or its output goes to one). Such a
+    call REFUSES with :class:`SigningBackendUnavailable`, naming the
+    ``revl[crypto]`` extra, instead of falling back to the pure path. Local
+    signing (fixtures, the reference attester, records written to a file)
+    keeps the pure path when the extra is absent; what that path does not
+    protect against is a timing measurement of many signatures under one key.
+    """
+    _check_private_key(curve, private_key)
+    if _ecdsa_backend.supports(curve):
+        return _ecdsa_backend.sign(curve, private_key, bytes(message))
+    if network_exposed:
+        require_signing_backend("a network-exposed signer", curve)
+    return ecdsa_sign_pure(curve, private_key, message)
+
+
+def ecdsa_sign_pure(curve: Curve, private_key: int, message: bytes) -> bytes:
+    """:func:`ecdsa_sign` in this module's own integers, whatever is installed.
+
+    Timing-variable (see :func:`_mul`). It is public so the differential tests
+    and the byte-compatibility tests can name the implementation they check;
+    production code calls :func:`ecdsa_sign`."""
+    _check_private_key(curve, private_key)
     digest = curve.hash(message)
     e = _bits2int(digest, curve.n.bit_length()) % curve.n
     k = _rfc6979_k(curve, private_key, digest)
