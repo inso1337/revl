@@ -1,0 +1,251 @@
+["reason", "deferred-in-file-test-section-marked-rather-than", "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_java_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry"]
+
+["function", "deferred-in-file-test-section-marked-rather-than", "deferred_test_markers", 2, 2]
+
+["function", "deferred-in-file-test-section-marked-rather-than", "emit_java_src", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-bind-type-the-empty", "selfhost/emit_java.rvl::bind_type: The empty Map surface branch cannot occur: component_map_values always supplies at least Str. Remaining record/list/scalar inference requires nonhost let-effect, explicitly excluded by body_step_supported."]
+
+["function", "selfhost-emit-java-rvl-bind-type-the-empty", "bind_type", 27, 27]
+
+["reason", "selfhost-emit-java-rvl-body-step-supported-remaining", "selfhost/emit_java.rvl::body_step_supported: Remaining false returns reject nonhost let-effect, nonempty setup, unsupported provided-method steps, invalid nested guards and other unsupported body steps. These are the existing admission boundaries, not missing accepted implementations."]
+
+["function", "selfhost-emit-java-rvl-body-step-supported-remaining", "body_step_supported", 5, 5]
+
+["reason", "selfhost-emit-java-rvl-build-ctx-the-remaining", "selfhost/emit_java.rvl::build_ctx: The remaining assignment records duplicate variant case ownership as <<AMBIG>>. Reference _V3Ctx.__init__ rejects duplicates immediately; this is reference refusal, not a successful supported document."]
+
+["function", "selfhost-emit-java-rvl-build-ctx-the-remaining", "build_ctx", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-call-label-residual-returns", "selfhost/emit_java.rvl::call_label: Residual '?' returns guard null/missing/unknown labels. The callee-name compatibility branch requires call without target; lower.py emits req target/method and kind=fn for free calls. Canonical host/req/fn labels are covered."]
+
+["function", "selfhost-emit-java-rvl-call-label-residual-returns", "call_label", 9, 9]
+
+["reason", "selfhost-emit-java-rvl-collect-hosts-residual-addition", "selfhost/emit_java.rvl::collect_hosts: Residual addition recognizes kind=host as a call target; lower.py's host-effect node uses a dotted fn such as Map.new instead. The canonical Map/Job host scan is covered."]
+
+["function", "selfhost-emit-java-rvl-collect-hosts-residual-addition", "collect_hosts", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-component-simple-ok-the", "selfhost/emit_java.rvl::component_simple_ok: The remaining false return rejects non-provide legacy body steps. Those belong to the explicitly deferred nonsimple legacy effect/bind path, not modern host components."]
+
+["function", "selfhost-emit-java-rvl-component-simple-ok-the", "component_simple_ok", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-contains-expr-residual-true", "selfhost/emit_java.rvl::contains_expr: Residual true return detects call with non-null callee. Component direct calls lower to kind=fn or target/method; callee forms require the explicitly deferred local-arrow/first-class/value-builtin path. Other non-v1 expression detection is covered."]
+
+["function", "selfhost-emit-java-rvl-contains-expr-residual-true", "contains_expr", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-covers-variant-residual-false", "selfhost/emit_java.rvl::covers_variant: Residual false returns require unknown variant, malformed case list or a missing case. The typed frontend supplies declared variants and rejects nonexhaustive matches (lower.py:1880)."]
+
+["function", "selfhost-emit-java-rvl-covers-variant-residual-false", "covers_variant", 3, 3]
+
+["reason", "selfhost-emit-java-rvl-emit-component-stmts-setup", "selfhost/emit_java.rvl::emit_component_stmts: Setup emission is unreachable after the no-setup admission check. The remaining flat compensation branch is also unreachable: any compensate expression makes component_needs_frame true, selecting the frame branch."]
+
+["function", "selfhost-emit-java-rvl-emit-component-stmts-setup", "emit_component_stmts", 4, 4]
+
+["reason", "selfhost-emit-java-rvl-emit-host-stubs-only", "selfhost/emit_java.rvl::emit_host_stubs: Only <<DEFER-host-stub:Pool>> remains, the declared Pool boundary retained by the strict pg-pool regression. Map/Job stubs are covered."]
+
+["function", "selfhost-emit-java-rvl-emit-host-stubs-only", "emit_host_stubs", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-emit-setup-stmt-only", "selfhost/emit_java.rvl::emit_setup_stmt: Only the deferred setup-step marker remains; body_step_supported rejects nonempty setup before invoking this emitter."]
+
+["function", "selfhost-emit-java-rvl-emit-setup-stmt-only", "emit_setup_stmt", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-emitter-reserved-the-emitted", "selfhost/emit_java.rvl::emitter_reserved: The emitted Python definition has no Name-call sites: the Python backend inlines this constant-list helper at all production callers. The retained wrapper is dead, not an untested Java identifier rule."]
+
+["function", "selfhost-emit-java-rvl-emitter-reserved-the-emitted", "emitter_reserved", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-exact-method-the-python", "selfhost/emit_java.rvl::exact_method: The Python backend inlines production +/-/* dispatch; emitted exact_method calls exist only in the emitter's own in-file tests, which the oracle does not run. Production checked arithmetic output is covered."]
+
+["function", "selfhost-emit-java-rvl-exact-method-the-python", "exact_method", 5, 5]
+
+["reason", "selfhost-emit-java-rvl-host-method-the-emitted", "selfhost/emit_java.rvl::host_method: The emitted Python definition has zero Name-call sites; the backend inlines the new-to-create mapping into production callers. Map creation and ordinary host method names are covered there."]
+
+["function", "selfhost-emit-java-rvl-host-method-the-emitted", "host_method", 3, 3]
+
+["reason", "selfhost-emit-java-rvl-host-of-residual-revlspawnhandle", "selfhost/emit_java.rvl::host_of: Residual RevlSpawnHandle/Object branches require spawn or nonhost/malformed acquisitions. Spawn and nonhost activation binds are explicit admission boundaries; host Map/Job types are covered."]
+
+["function", "selfhost-emit-java-rvl-host-of-residual-revlspawnhandle", "host_of", 3, 3]
+
+["reason", "selfhost-emit-java-rvl-host-root-of-the", "selfhost/emit_java.rvl::host_root_of: The residual return requires a dotless host fn. lower.py materializes host effects as dotted roots/methods (Map.new, Job.run); dotless compatibility IR is not emitted by compile_files."]
+
+["function", "selfhost-emit-java-rvl-host-root-of-the", "host_root_of", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-host-roots-the-emitted", "selfhost/emit_java.rvl::host_roots: The emitted Python definition has zero Name-call sites because its constant host-name list is inlined; the retained wrapper cannot execute on the production emitter path."]
+
+["function", "selfhost-emit-java-rvl-host-roots-the-emitted", "host_roots", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-ind-the-emitted-python", "selfhost/emit_java.rvl::ind: The emitted Python definition has zero Name-call sites: indentation multiplication is inlined at every caller. The emitted Java indentation itself is compared throughout the corpus."]
+
+["function", "selfhost-emit-java-rvl-ind-the-emitted-python", "ind", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-is-addsubmul-the-emitted", "selfhost/emit_java.rvl::is_addsubmul: The emitted Python definition has zero Name-call sites; its three-operator predicate is inlined into render_bin. Each arithmetic operator is covered at those callers."]
+
+["function", "selfhost-emit-java-rvl-is-addsubmul-the-emitted", "is_addsubmul", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-is-builtin-ctor-the", "selfhost/emit_java.rvl::is_builtin_ctor: The emitted Python definition has zero Name-call sites; its constructor-name predicate is inlined at callers. Some/None are covered, while Result remains an explicit runtime boundary."]
+
+["function", "selfhost-emit-java-rvl-is-builtin-ctor-the", "is_builtin_ctor", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-is-postfix-safe-only", "selfhost/emit_java.rvl::is_postfix_safe: Only req and host true branches remain. They denote services/effect acquisition, not Optional or interpolated value receivers; lower.py types coalesce operands and interpolation values, so these nodes cannot reach those postfix-safe callers in the admitted subset."]
+
+["function", "selfhost-emit-java-rvl-is-postfix-safe-only", "is_postfix_safe", 2, 2]
+
+["reason", "selfhost-emit-java-rvl-is-relational-the-emitted", "selfhost/emit_java.rvl::is_relational: the emitted Python definition has zero Name-call sites, so the `def` body does not run while its logic executes at the site it was folded into. Item 458 gave it two callers; the item-433-F6 helper splice replaced the `uses_str_cmp` demand scan with `stdlib_helpers_reached`, leaving `render_bin` as the only caller, and the python backend inlines a single-call-site helper. Every relational comparison in tests/fixtures/emit_java_corpus/strings.rvl runs it at that site."]
+
+["function", "selfhost-emit-java-rvl-is-relational-the-emitted", "is_relational", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-java-bin-ops-only", "selfhost/emit_java.rvl::java_bin_ops: Only the empty unmapped-operator return remains. Typed frontend operators are handled by render_bin's dedicated equality/coalesce branches or this table; unknown operators are invalid IR and reference refusal."]
+
+["function", "selfhost-emit-java-rvl-java-bin-ops-only", "java_bin_ops", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-java-lit-only-null", "selfhost/emit_java.rvl::java_lit: Only null/unsupported literal markers remain. lower.py rejects explicit null, Opt None is not a null literal, and typed source literals cannot contain arbitrary host objects."]
+
+["function", "selfhost-emit-java-rvl-java-lit-only-null", "java_lit", 2, 2]
+
+["reason", "selfhost-emit-java-rvl-java-v3-type-residual", "selfhost/emit_java.rvl::java_v3_type: Residual null/empty type defaults require malformed type metadata; function types are explicitly refused; Result boxing is deferred. Unknown generic-head Object boxing cannot arise for a validated supported type."]
+
+["function", "selfhost-emit-java-rvl-java-v3-type-residual", "java_v3_type", 9, 9]
+
+["reason", "selfhost-emit-java-rvl-let-keyword-only-defer", "selfhost/emit_java.rvl::let_keyword: Only <<DEFER-map-local-unpinned>> remains, the preexisting boundary for unannotated VALUE Map.empty inference. Annotated value Maps and inferred host Map.new are separate and covered."]
+
+["function", "selfhost-emit-java-rvl-let-keyword-only-defer", "let_keyword", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-list-nonempty-only-the", "selfhost/emit_java.rvl::list_nonempty: Only the missing-list false return remains. Callers inspect component config lists; lower.py always materializes that list, including empty config."]
+
+["function", "selfhost-emit-java-rvl-list-nonempty-only-the", "list_nonempty", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-lit-value-only-null", "selfhost/emit_java.rvl::lit_value: Only null/unsupported literal markers remain: lower.py rejects explicit null and typed literals have bool/int/float/string values. Opt None uses its own constructor path."]
+
+["function", "selfhost-emit-java-rvl-lit-value-only-null", "lit_value", 2, 2]
+
+["reason", "selfhost-emit-java-rvl-map-expr-inserts-residual", "selfhost/emit_java.rvl::map_expr_inserts: Residual callee.field writer form is compatibility IR; lower.py emits target/method for component receiver calls. The canonical host Map put/compare-and-set value inference paths are covered."]
+
+["function", "selfhost-emit-java-rvl-map-expr-inserts-residual", "map_expr_inserts", 8, 8]
+
+["reason", "selfhost-emit-java-rvl-map-insert-candidates-residual", "selfhost/emit_java.rvl::map_insert_candidates: Residual setup recursion and local let/assign RHS scans are explicitly deferred by admission gates. Missing provided service requires invalid typed IR, since frontend provision resolution validates it."]
+
+["function", "selfhost-emit-java-rvl-map-insert-candidates-residual", "map_insert_candidates", 3, 3]
+
+["reason", "selfhost-emit-java-rvl-map-value-expr-type", "selfhost/emit_java.rvl::map_value_expr_type: An absent named function can be an extern (deferred). Compatibility callee.field req calls are not canonical target/method IR. Missing typed node/config/record/ctx data and null values cannot arise on valid admitted calls; supported host Map data cases are covered, the builtin arm included since item 429's java blind-spot closure (tests/fixtures/emit_java_corpus/map_inference_builtins.rvl)."]
+
+["function", "selfhost-emit-java-rvl-map-value-expr-type", "map_value_expr_type", 16, 16]
+
+["reason", "selfhost-emit-java-rvl-match-expr-only-nonexhaustive", "selfhost/emit_java.rvl::match_expr: Only nonexhaustive user-variant default generation remains. lower.py rejects nonexhaustive source matches; ignored binds, exhaustive cases and wildcard defaults are covered."]
+
+["function", "selfhost-emit-java-rvl-match-expr-only-nonexhaustive", "match_expr", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-metadata-lit-only-the", "selfhost/emit_java.rvl::metadata_lit: Only the unsupported metadata marker remains. parser.literal/record_literal produce JSON-like scalar/list metadata (including null, now covered), never arbitrary host objects."]
+
+["function", "selfhost-emit-java-rvl-metadata-lit-only-the", "metadata_lit", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-method-body-lines-only", "selfhost/emit_java.rvl::method_body_lines: Only flat fx.track compensation remains. A provided-method compensation makes component_needs_frame true, so admitted emission necessarily selects the frame compensation branch."]
+
+["function", "selfhost-emit-java-rvl-method-body-lines-only", "method_body_lines", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-method-body-residual-effectful", "selfhost/emit_java.rvl::method_body: Residual effectful/multistep trap and nonvoid bare-return marker are outside method_simple_ok; the void value-expression branch requires nonsimple legacy calls. Scalar/name and bare void return cases are covered."]
+
+["function", "selfhost-emit-java-rvl-method-body-residual-effectful", "method_body", 4, 4]
+
+["reason", "selfhost-emit-java-rvl-method-simple-ok-the", "selfhost/emit_java.rvl::method_simple_ok: the residual `return false` rejects a multi-step legacy method, the documented simple-method admission boundary. The single-step non-return arm is reached by tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), whose provide method is one `emit` step; valid bare void returns are accepted and covered."]
+
+["function", "selfhost-emit-java-rvl-method-simple-ok-the", "method_simple_ok", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-modern-supported-only-the", "selfhost/emit_java.rvl::modern_supported: Only the false return remains, propagating body_step_supported's existing rejection of setup, nonhost binds and unsupported methods/steps."]
+
+["function", "selfhost-emit-java-rvl-modern-supported-only-the", "modern_supported", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-newline-the-emitted-python", "selfhost/emit_java.rvl::newline: The emitted Python definition has zero Name-call sites; the newline constant is inlined into every production caller. Its retained wrapper is unreachable from emit_src."]
+
+["function", "selfhost-emit-java-rvl-newline-the-emitted-python", "newline", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-node-ref-name-residual", "selfhost/emit_java.rvl::node_ref_name: Residual name-field fallback handles pure kind=var nodes. Host Map inference runs on component-lowered names with id fields; pure/value Map inference and arrow-local names are the explicitly deferred paths that would require the alternate name spelling."]
+
+["function", "selfhost-emit-java-rvl-node-ref-name-residual", "node_ref_name", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-opt-arm-body-only", "selfhost/emit_java.rvl::opt_arm_body: Only missing-arm empty text remains. Frontend exhaustiveness checks require Some/None or a wildcard, so valid Optional matches always supply the requested arm."]
+
+["function", "selfhost-emit-java-rvl-opt-arm-body-only", "opt_arm_body", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-provide-methods-residual-empty", "selfhost/emit_java.rvl::provide_methods: Residual empty result requires a provided key without a matching provide step; frontend resolves and validates every declared provision before emission."]
+
+["function", "selfhost-emit-java-rvl-provide-methods-residual-empty", "provide_methods", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-render-adt-residual-ok", "selfhost/emit_java.rvl::render_adt: Residual Ok/Err markers are the explicit Result boundary (strict result_ctor_302 reproduction). The final unknown-constructor marker requires invalid typed IR; valid user variants and Opt are covered."]
+
+["function", "selfhost-emit-java-rvl-render-adt-residual-ok", "render_adt", 3, 3]
+
+["reason", "selfhost-emit-java-rvl-render-bin-only-the", "selfhost/emit_java.rvl::render_bin: Only the unsupported-operator marker remains. Frontend operator validation plus dedicated render_bin/table dispatch covers all admitted operators; malformed IR has no successful reference bytes."]
+
+["function", "selfhost-emit-java-rvl-render-bin-only-the", "render_bin", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-render-call-residual-field", "selfhost/emit_java.rvl::render_call: Residual field/apply forms belong to the deferred first-class/local-arrow surface. Raw user-case/None/Ok/Err compatibility call forms are frontend-canonicalized to adt/var; unknown raw named calls are not the canonical kind=fn or target/method req calls."]
+
+["function", "selfhost-emit-java-rvl-render-call-residual-field", "render_call", 15, 15]
+
+["reason", "selfhost-emit-java-rvl-render-format-only-out", "selfhost/emit_java.rvl::render_format: Only out-of-range placeholder substitution remains. lower.py constructs each positional placeholder with the current len(args) while appending that argument, so valid source cannot reference a missing slot."]
+
+["function", "selfhost-emit-java-rvl-render-format-only-out", "render_format", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-render-inner-only-the", "selfhost/emit_java.rvl::render_inner: Only the final unsupported-expression marker remains. Explicitly deferred arrow/builtin/len/spawn/instance/extern forms reach it in strict boundary tests; malformed kinds are not a supported source branch."]
+
+["function", "selfhost-emit-java-rvl-render-inner-only-the", "render_inner", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-render-interp-only-revlftoa", "selfhost/emit_java.rvl::render_interp: Only revlFtoa insertion remains, the explicitly deferred Float-to-Str boundary retained by floats.rvl. Empty segment-list interpolation is now covered."]
+
+["function", "selfhost-emit-java-rvl-render-interp-only-revlftoa", "render_interp", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-render-un-only-the", "selfhost/emit_java.rvl::render_un: Only the unsupported unary marker remains; frontend unary expressions are minus or logical-not, both covered, and rejects other operators."]
+
+["function", "selfhost-emit-java-rvl-render-un-only-the", "render_un", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-render-var-only-returning", "selfhost/emit_java.rvl::render_var: Only returning fn_name for a callable used as a value remains, part of the explicitly deferred first-class function/arrow boundary."]
+
+["function", "selfhost-emit-java-rvl-render-var-only-returning", "render_var", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-starts-with-residual-length", "selfhost/emit_java.rvl::starts_with: Residual length-too-short return is impossible at production callers: rendered string segments are nonempty before quote-prefix tests, and dotted host fn names are at least as long as Map. before host-prefix tests."]
+
+["function", "selfhost-emit-java-rvl-starts-with-residual-length", "starts_with", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-stdlib-block-header-stdlib", "selfhost/emit_java.rvl::stdlib_block_header, stdlib_group_names: constant-returning helpers with no remaining Name-call sites in the emitted Python. The backend folds each into its call site, so the `def` body does not run while its value is emitted by every document that reaches a stdlib helper group (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl)."]
+
+["function", "selfhost-emit-java-rvl-stdlib-block-header-stdlib", "stdlib_block_header", 1, 1]
+
+["function", "selfhost-emit-java-rvl-stdlib-block-header-stdlib", "stdlib_group_names", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-stdlib-group-lines-the", "selfhost/emit_java.rvl::stdlib_group_lines: the residual statement is the trailing empty-list return, reached only by a helper name outside the seventeen groups. `stdlib_group_names` is the only source of that argument, so no caller can spell one."]
+
+["function", "selfhost-emit-java-rvl-stdlib-group-lines-the", "stdlib_group_lines", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-step-forces-modern-only", "selfhost/emit_java.rvl::step_forces_modern: Only step=setup true remains, an explicitly deferred component feature rejected by body_step_supported."]
+
+["function", "selfhost-emit-java-rvl-step-forces-modern-only", "step_forces_modern", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-step-needs-frame-residual", "selfhost/emit_java.rvl::step_needs_frame: Residual true returns are witnessed acquire (explicit extern boundary) and recursive guard-arm frame needs. G6 guards permit fail/nested guards, not registering effects/compensations, so those recursion-true branches cannot occur in valid admitted guards."]
+
+["function", "selfhost-emit-java-rvl-step-needs-frame-residual", "step_needs_frame", 3, 3]
+
+["reason", "selfhost-emit-java-rvl-type-map-only-unit", "selfhost/emit_java.rvl::type_map: Only Unit-to-void remains. Its sole caller java_v3_type returns void for raw Unit before calling type_map, making this redundant table arm unreachable."]
+
+["function", "selfhost-emit-java-rvl-type-map-only-unit", "type_map", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-uses-equality-only-equality", "selfhost/emit_java.rvl::uses_equality: Only equality found in the tests subtree remains. In-file tests are explicitly deferred; equality in functions and components is covered."]
+
+["function", "selfhost-emit-java-rvl-uses-equality-only-equality", "uses_equality", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-uses-revl-frame-only", "selfhost/emit_java.rvl::uses_revl_frame: Only the missing-components early return remains. lower.py always materializes components, even when empty, in every versioned document (6637)."]
+
+["function", "selfhost-emit-java-rvl-uses-revl-frame-only", "uses_revl_frame", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-v1-method-expr-only", "selfhost/emit_java.rvl::v1_method_expr: Only the deferred expression marker remains. method_simple_ok admits lit/name or a bare return before this helper is called; other legacy expressions are rejected by that existing gate."]
+
+["function", "selfhost-emit-java-rvl-v1-method-expr-only", "v1_method_expr", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-v3-builtin-the-four", "selfhost/emit_java.rvl::v3_builtin: the four residual statements are the loud deferral markers for the families this port does not carry, each excluded from the corpus by tests/test_selfhost_emit_java.py: the Result-valued `checked_*` division forms, the `revlDivFloor`/`revlDivEuclid`/`revlMod` int-arith block, a Float `to_str` (the canonical `revlFtoa`), and the unknown-method fallback the reference spells as a raise. A document reaching one diverges from the reference by design; the covered dispatch is tests/fixtures/emit_java_corpus/stdlib_builtins.rvl."]
+
+["function", "selfhost-emit-java-rvl-v3-builtin-the-four", "v3_builtin", 4, 4]
+
+["reason", "selfhost-emit-java-rvl-v3-stmt-only-unsupported", "selfhost/emit_java.rvl::v3_stmt: Only unsupported-step output remains; local destructuring is explicitly deferred and unknown IR steps are invalid. Supported pure-function control flow is covered."]
+
+["function", "selfhost-emit-java-rvl-v3-stmt-only-unsupported", "v3_stmt", 1, 1]
+
+["reason", "selfhost-emit-java-rvl-witnessed-names-the-remaining", "selfhost/emit_java.rvl::witnessed_names: the remaining statement inserts the name of a `witnessed`-class extern. The class filter runs now, over the extern in tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), which is `emission`-class. Java corpus externs are explicitly deferred; the insertion is reproduced by method_witnessed.rvl."]
+
+["function", "selfhost-emit-java-rvl-witnessed-names-the-remaining", "witnessed_names", 1, 1]
