@@ -121,7 +121,8 @@ in full at [`revl_scaffold`](mcp-reference.md#revl_scaffold),
 [`revl_explain`](mcp-reference.md#revl_explain).
 
 <!-- docgen:authoring-mcp-count begin -->
-`revl mcp serve` advertises 55 verbs in total; the full list is in
+`revl mcp serve` serves 56 verbs in total and lists 7 of them
+by default (`revl_verbs` finds the rest); the full list is in
 [mcp-reference.md](mcp-reference.md).
 <!-- docgen:authoring-mcp-count end -->
 

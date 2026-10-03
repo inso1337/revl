@@ -94,6 +94,7 @@ from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
 from . import ambient as _ambient
+from . import disclosure as _disclosure
 from . import remedy as _remedy
 from . import repeat as _repeat
 from .session import NothingLoaded, Session, SessionError
@@ -3805,6 +3806,52 @@ _SESSION_QUERY_HANDLERS = {
 for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
     TOOLS.append({**_schema, "handler": _SESSION_QUERY_HANDLERS[_schema["name"]]})
 
+
+def _tool_verbs(arguments: dict) -> dict:
+    """Discovery (issue #1697): with no arguments, every verb by topic, each
+    with one sentence and no schema; with `topic` or `names`, those verbs'
+    exact advertised schemas. Every verb is callable by name either way."""
+    names = list(arguments.get("names") or [])
+    topic = arguments.get("topic")
+    if topic is None and not names:
+        return {"ok": True, "listed": [t["name"] for t in _disclosure.listed(_ADVERTISED)],
+                "topics": _disclosure.index(_ADVERTISED)}
+    if topic is not None:
+        verbs = _disclosure.topic_names(topic)
+        if verbs is None:
+            return _session_error(
+                f"no topic {topic!r}; the topics are "
+                f"{', '.join(_disclosure.TOPICS)}",
+                next=_remedy.call(_disclosure.DISCOVERY, {}))
+        names = list(verbs) + [n for n in names if n not in verbs]
+    found, unknown = _disclosure.schemas(_ADVERTISED, names)
+    if unknown:
+        return _session_error(
+            f"no verb named {', '.join(map(repr, unknown))}",
+            next=_remedy.call(_disclosure.DISCOVERY, {}))
+    return {"ok": True, "tools": found}
+
+
+TOOLS.append({
+    "name": _disclosure.DISCOVERY,
+    "description": "Find a verb. tools/list shows the core verbs; this returns "
+                   "the rest. With no arguments: every verb grouped by topic, "
+                   "one sentence each. With `topic` or `names`: those verbs' "
+                   "exact schemas. Any verb can be called by name, listed or "
+                   "not.",
+    "inputSchema": {
+        "type": "object",
+        "properties": {
+            "topic": {"type": "string", "enum": list(_disclosure.TOPICS),
+                      "description": "a topic from the no-argument answer"},
+            "names": {"type": "array", "items": {"type": "string"},
+                      "description": "verb names whose schemas to return"},
+        },
+    },
+    "annotations": {"readOnlyHint": True, "destructiveHint": False},
+    "handler": _tool_verbs,
+})
+
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
@@ -3829,6 +3876,18 @@ def set_runtime_available(available: bool | None) -> None:
 _INSTRUCTIONS = ("Compile revl components before proposing them; use "
                  "revl_admit against the running manifest before a swap, "
                  "and revl_plan to see what that swap would do first.")
+_TIERED_INSTRUCTIONS = ("tools/list shows the core verbs only; call revl_verbs "
+                        "to see every other verb by topic and get its schema. "
+                        "Any verb can be called by name.")
+
+
+def _instructions() -> str:
+    parts = [_INSTRUCTIONS]
+    if not _disclosure.all_tools():
+        parts.append(_TIERED_INSTRUCTIONS)
+    if not runtime_available():
+        parts.append(_runtime_gate.announcement())
+    return " ".join(parts)
 
 
 # ---------------------------------------------------------------- protocol
@@ -3843,11 +3902,11 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": _INSTRUCTIONS if runtime_available()
-                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
+            "instructions": _instructions(),
         }
     elif method == "tools/list":
-        result = {"tools": _ADVERTISED}
+        # issue #1697: the core tier unless the client asked for every verb
+        result = {"tools": _disclosure.listed(_ADVERTISED)}
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")

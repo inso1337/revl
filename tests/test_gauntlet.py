@@ -88,7 +88,7 @@ def _fresh_session():
 
 # ------------------------------------------------------ the dossier shape
 
-def test_the_verb_is_advertised():
+def test_the_verb_is_advertised(all_mcp_tools):
     listed = handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
     names = {t["name"] for t in listed["result"]["tools"]}
     assert "revl_gauntlet" in names

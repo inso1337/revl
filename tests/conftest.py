@@ -312,3 +312,16 @@ def _isolate_import_state():
         sys.path[:] = path_before
         for name in _generation_modules() - generations_before:
             del sys.modules[name]
+
+
+@pytest.fixture
+def all_mcp_tools():
+    """`tools/list` advertises every MCP verb for this test. Since issue #1697
+    the default is the core tier plus `revl_verbs`, so a test that checks a
+    verb's advertised schema by name reads the full list through this."""
+    from revl.mcp import disclosure
+
+    before = disclosure.all_tools()
+    disclosure.set_all_tools(True)
+    yield
+    disclosure.set_all_tools(before)
