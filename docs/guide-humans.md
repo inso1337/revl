@@ -260,6 +260,7 @@ below; the exhaustive per-command flag reference is
 |---|---|---|
 | `revl compile FILES` | parse → check → link → IR (`-o OUT`, `--json-diagnostics`) | [commands-reference.md](commands-reference.md#revl-compile) · [backend-ir-v1.md](backend-ir-v1.md) |
 | `revl explain CODE` | what a diagnostic code guarantees and how to fix it | [commands-reference.md](commands-reference.md#revl-explain) · [why-traces.md](why-traces.md) |
+| `revl idiom` | the minimal admitted example of one construct and the rules that make it correct | [commands-reference.md](commands-reference.md#revl-idiom) |
 | `revl grammar` | the language surface, sized for a prompt (`--prompt` prints the full pinnable grammar, `--format lark\|gbnf\|ebnf` a grammar derived from the parser for constrained decoding) | [commands-reference.md](commands-reference.md#revl-grammar) · [syntax-2.0.md](syntax-2.0.md) |
 | `revl doctor` | diagnose each backend tier, runtime and dependency (OK/WARN/MISSING + version), then smoke-test every available tier (`--json`, `--no-smoke`, `--smoke-timeout`) | [commands-reference.md](commands-reference.md#revl-doctor) |
 | `revl scaffold --service NAME` | generate a typed, holed composition skeleton from a spec (`--requires`/`--capabilities`/`--method`/`--emits`/`--config`, `-o`, `--json`) | [scaffold.md](scaffold.md) |

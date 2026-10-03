@@ -41,6 +41,7 @@ from revl.tee_quote import (
     CURVE_P384,
     Curve,
     ecdsa_sign,
+    ecdsa_sign_pure,
     ecdsa_verify,
     derive_public_key,
     _bits2int,
@@ -254,11 +255,17 @@ def test_rfc6979_deterministic_nonce_and_signature(curve_name: str,
         f"deterministic nonce is {nonce:x}, the RFC says {case['k'].lower()}"
     )
 
-    signature = ecdsa_sign(curve, private_key, message)
+    # Both signers, by name: `ecdsa_sign` goes through `cryptography` when it
+    # is installed (issue #1460), so on a machine that has it the pure path
+    # would otherwise meet these vectors nowhere.
     width = curve.order_len
-    assert len(signature) == 2 * width
-    assert int.from_bytes(signature[:width], "big") == int(case["r"], 16)
-    assert int.from_bytes(signature[width:], "big") == int(case["s"], 16)
+    for signer in (ecdsa_sign_pure, ecdsa_sign):
+        signature = signer(curve, private_key, message)
+        assert len(signature) == 2 * width
+        assert int.from_bytes(signature[:width], "big") == int(case["r"], 16), \
+            signer.__name__
+        assert int.from_bytes(signature[width:], "big") == int(case["s"], 16), \
+            signer.__name__
 
     public_key = bytes.fromhex(group["ux"] + group["uy"])
     assert ecdsa_verify(curve, public_key, message, signature) is True
