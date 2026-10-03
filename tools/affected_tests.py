@@ -86,6 +86,9 @@ BENCH_DEPENDENT_TESTS = (
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",
     "tests/test_admission_latency.py",
+    # Issue #1702: checks the blast-radius task set, its expected states, its
+    # TypeScript renderings and its scorer, all under bench/blast_radius/.
+    "tests/test_blast_radius_bench.py",
     # Issue #1462: runs `bench/structured_output_bench.py` against a fake
     # server.
     "tests/test_constrained_decoding_1462.py",
