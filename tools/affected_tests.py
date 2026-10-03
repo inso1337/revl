@@ -15,8 +15,10 @@ the FULL gate, never fails open. Concretely:
   * A change to any file on the compile-reachable import graph of `compile_source`
     (the frontend pipeline: parser, typecheck, lower, compiler, lexer, and the
     modules they transitively load, lazy imports included) -> FULL. That graph is
-    computed here from the real tree (see `compile_reachable`) so a newly added
-    core module cannot silently fall through to a narrow selection.
+    computed here from the real tree, one MODULE at a time (see
+    `compile_reachable`), so a newly added core module cannot silently fall
+    through to a narrow selection. A `src/revl` module off that graph selects the
+    tests that name it or any module that imports it.
   * A changed file matching NO mapping rule -> FULL.
   * Structural changes (Makefile, tools/pre_merge.sh, CI config, tests/conftest.py,
     shared test helpers/fixtures, the reference IR, or a test file DELETED) -> FULL.
@@ -893,10 +895,48 @@ _REACH_CACHE: dict[Path, object] = {}
 
 
 def compile_reachable(root: Path):
-    """Top-level module names reachable from the package entry (`revl/__init__`)
-    through ALL imports, lazy/nested included. A change to any of these can run
-    during compilation, so it fails safe to the FULL gate. Returns None if the
-    tree cannot be analyzed (also -> FULL at the call site)."""
+    """The `src/revl` MODULES the compile path can execute, as dotted names
+    relative to the package (`parser`, `mcp.session`, `mcp.__init__`). A change
+    to one of them can run during compilation, so it fails safe to the FULL
+    gate. Returns None if the tree cannot be analyzed (also -> FULL at the call
+    site).
+
+    Issue #1780. This used to answer with TOP-LEVEL names, so one module of a
+    subpackage on the graph put the whole subpackage on it: `revl.mcp.session`
+    reached through one lazy import marked `revl.mcp.server`, `http_stream` and
+    the rest. It also resolved every relative import against the top package,
+    so `from .approval import ...` inside `revl/mcp/` named a top-level
+    `approval` that does not exist and the edge was dropped. No subpackage
+    module was ever walked, and 25 top-level modules reachable only through one
+    (`run`, `plan`, `lifecycle`, `formatter`, ...) were classed as leaves and
+    got a narrow selection. That was the unsound direction.
+
+    WHY THIS IS STILL A SUPERSET (the soundness argument). Python executes a
+    module's code only when an import names it, and importing `a.b.c` also
+    executes `a/__init__` and `a/b/__init__`. So the modules that can run
+    during compilation are the closure, over import edges, of what the compile
+    path imports, with each module's parent packages added. That is what is
+    computed here, with three conservative choices:
+
+    * The root is `revl/__init__`. `compile_source` lives in `revl.compiler`,
+      and importing `revl.compiler` executes `revl/__init__` first, so the
+      package entry is not an over-approximation of the entry, it IS the entry.
+    * Every import in a reached module is followed, the lazy ones inside a
+      function body too. A function in a reached module may be called while
+      compiling, and whether it is depends on a call graph this tool does not
+      build. Following the edge costs a FULL run when it was not needed; not
+      following it could skip a test that a change breaks.
+    * Every `revl.*` module that a `backends/**/*.py` file imports is a root
+      too. The reached modules load backend files by path
+      (`spec_from_file_location`), and an import inside one of those files is
+      invisible to an import walk of `src/revl` alone. No `src/revl` module is
+      loaded by path or by a computed name (checked: every
+      `spec_from_file_location` / `import_module` under src/revl targets a
+      `backends/` file or a backend runtime module).
+
+    What it gives up compared with a module-granular graph is nothing: a
+    module that no chain of imports names cannot execute during compilation.
+    """
     key = Path(root).resolve()
     if key in _REACH_CACHE:
         cached = _REACH_CACHE[key]
@@ -906,48 +946,193 @@ def compile_reachable(root: Path):
     return result
 
 
-def _compile_reachable_uncached(root: Path):
+def _module_index(pkg: Path) -> dict[str, Path]:
+    """Every module under `pkg`, by dotted name relative to the package."""
+    return {".".join(p.relative_to(pkg).with_suffix("").parts): p
+            for p in pkg.rglob("*.py")}
+
+
+def _resolve_module(mods: dict[str, Path], dotted: str) -> str | None:
+    """The module that executes for an import of `dotted`: itself, its package's
+    `__init__`, or None when `dotted` names no module (a function, a class)."""
+    if dotted in mods:
+        return dotted
+    if dotted + ".__init__" in mods:
+        return dotted + ".__init__"
+    return None
+
+
+def _with_parents(mods: dict[str, Path], module: str) -> set[str]:
+    """`module` and every package `__init__` importing it executes."""
+    base = module[: -len(".__init__")] if module.endswith(".__init__") else module
+    parts = [] if base == "__init__" else base.split(".")
+    out = {"__init__", module}
+    for i in range(1, len(parts)):
+        parent = _resolve_module(mods, ".".join(parts[:i]))
+        if parent:
+            out.add(parent)
+    return out
+
+
+def _package_of(module: str) -> list[str]:
+    """The package a module's relative imports resolve against, as parts."""
+    if module == "__init__":
+        return []
+    if module.endswith(".__init__"):
+        return module[: -len(".__init__")].split(".")
+    return module.split(".")[:-1]
+
+
+def _import_targets(module: str, node: ast.AST) -> list[str]:
+    """The dotted names (package-relative) one import statement may execute:
+    the imported module, and for `from X import a`, `X.a` in case `a` is a
+    submodule. Imports outside `revl` give nothing."""
+    if isinstance(node, ast.Import):
+        return [a.name[len("revl."):] if a.name != "revl" else "__init__"
+                for a in node.names if a.name == "revl" or a.name.startswith("revl.")]
+    if not isinstance(node, ast.ImportFrom):
+        return []
+    if node.level:
+        base = _package_of(module)
+        if node.level - 1 > len(base):
+            return []
+        base = base[: len(base) - (node.level - 1)]
+        head = ".".join(base + ([node.module] if node.module else []))
+    elif node.module == "revl" or (node.module or "").startswith("revl."):
+        head = node.module[len("revl"):].lstrip(".")
+    else:
+        return []
+    targets = [head] if head else []
+    return targets + [f"{head}.{a.name}" if head else a.name for a in node.names]
+
+
+_IMPORT_LINE = re.compile(r"^[ \t]*(?:from[ \t]+[\w.]+[ \t]+import\b|import[ \t]+[\w.])")
+
+
+def _import_nodes(text: str) -> list[ast.AST]:
+    """Every import statement in `text`, at any depth, as parsed nodes.
+
+    A full `ast.parse` of the 200-odd modules cost about 24 s; only the imports
+    are read, so each import statement is cut out (with its parenthesized or
+    backslash continuation lines) and parsed alone. A line inside a string that
+    looks like an import parses as one too, which can only ADD an edge, so the
+    graph stays a superset. A statement that does not parse on its own falls
+    back to parsing the whole file, so no import is lost to the shortcut."""
+    lines = text.splitlines()
+    nodes: list[ast.AST] = []
+    i = 0
+    while i < len(lines):
+        if not _IMPORT_LINE.match(lines[i]):
+            i += 1
+            continue
+        stmt = [lines[i].strip()]
+        depth = stmt[0].count("(") - stmt[0].count(")")
+        while (depth > 0 or stmt[-1].endswith("\\")) and i + 1 < len(lines):
+            i += 1
+            stmt.append(lines[i].strip())
+            depth += lines[i].count("(") - lines[i].count(")")
+        i += 1
+        source = "\n".join(stmt).split(";")[0]
+        try:
+            nodes.extend(ast.parse(source).body)
+        except SyntaxError:
+            return [n for n in ast.walk(ast.parse(text))
+                    if isinstance(n, (ast.Import, ast.ImportFrom))]
+    return nodes
+
+
+def _module_edges(mods: dict[str, Path], module: str, tree: ast.AST) -> set[str]:
+    """Every module an import anywhere in `tree` (lazy ones included) executes.
+    `tree` is a module or a list of import nodes (`_import_nodes`)."""
+    out: set[str] = set()
+    nodes = tree if isinstance(tree, list) else ast.walk(tree)
+    for node in nodes:
+        for dotted in _import_targets(module, node):
+            resolved = _resolve_module(mods, dotted)
+            if resolved:
+                out |= _with_parents(mods, resolved)
+    out.discard(module)
+    return out
+
+
+def _backend_roots(root: Path, mods: dict[str, Path]) -> set[str]:
+    """`revl.*` modules imported by a backend file the compile path may load by
+    path (see `compile_reachable`)."""
+    out: set[str] = set()
+    for path in (root / "backends").rglob("*.py"):
+        if "node_modules" in path.parts or ".venv" in path.parts:
+            continue
+        out |= _module_edges(mods, "__backend__",
+                             _import_nodes(path.read_text(encoding="utf-8")))
+    return out
+
+
+_GRAPH_CACHE: dict[Path, object] = {}
+
+
+def import_graph(root: Path) -> dict[str, set[str]] | None:
+    """`{module: modules its imports execute}` over `src/revl`, or None when the
+    tree cannot be parsed. Parsed once per tree, like `compile_reachable`."""
+    key = Path(root).resolve()
+    if key not in _GRAPH_CACHE:
+        _GRAPH_CACHE[key] = _import_graph_uncached(Path(root))
+    return _GRAPH_CACHE[key]
+
+
+def _import_graph_uncached(root: Path) -> dict[str, set[str]] | None:
     pkg = root / "src" / "revl"
     if not pkg.is_dir():
         return None
     try:
-        mods: dict[str, Path] = {}
-        for p in pkg.rglob("*.py"):
-            name = ".".join(p.relative_to(pkg).with_suffix("").parts)
-            mods[name] = p
-
-        def deps(path: Path) -> set[str]:
-            out: set[str] = set()
-            tree = ast.parse(path.read_text(encoding="utf-8"))
-            for n in ast.walk(tree):
-                if isinstance(n, ast.ImportFrom):
-                    if n.level >= 1 and n.module:
-                        out.add(n.module.split(".")[0])
-                    elif n.level >= 1:
-                        for a in n.names:
-                            out.add(a.name.split(".")[0])
-                    elif n.module and n.module.startswith("revl."):
-                        out.add(n.module.split(".")[1])
-            return out
-
-        seen: set[str] = set()
-        stack = ["__init__"]
-        while stack:
-            m = stack.pop()
-            if m in seen:
-                continue
-            seen.add(m)
-            p = mods.get(m) or mods.get(m + ".__init__")
-            if not p:
-                continue
-            for d in deps(p):
-                if d in seen:
-                    continue
-                if d in mods or (d + ".__init__") in mods:
-                    stack.append(d)
-        return {m.split(".")[0] for m in seen}
+        mods = _module_index(pkg)
+        graph = {name: _module_edges(mods, name,
+                                     _import_nodes(path.read_text(encoding="utf-8")))
+                 for name, path in mods.items()}
+        graph["__backend__"] = _backend_roots(root, mods)
     except (OSError, SyntaxError, ValueError):
         return None
+    return graph
+
+
+def _compile_reachable_uncached(root: Path):
+    graph = import_graph(root)
+    if graph is None:
+        return None
+    seen: set[str] = set()
+    stack = ["__init__", *graph["__backend__"]]
+    while stack:
+        module = stack.pop()
+        if module in seen or module not in graph:
+            continue
+        seen.add(module)
+        stack.extend(graph[module] - seen)
+    seen.discard("__backend__")
+    return seen
+
+
+def module_of(path: str) -> str:
+    """`src/revl/mcp/session.py` -> `mcp.session`."""
+    return ".".join(Path(path[len("src/revl/"):]).with_suffix("").parts)
+
+
+def importers_of(root: Path, module: str) -> set[str]:
+    """Every `src/revl` module that executes `module` through some chain of
+    imports, itself included."""
+    graph = import_graph(root) or {}
+    reverse: dict[str, set[str]] = {}
+    for src, targets in graph.items():
+        for target in targets:
+            reverse.setdefault(target, set()).add(src)
+    seen: set[str] = set()
+    stack = [module]
+    while stack:
+        current = stack.pop()
+        if current in seen:
+            continue
+        seen.add(current)
+        stack.extend(reverse.get(current, set()) - seen)
+    seen.discard("__backend__")
+    return seen
 
 
 # --------------------------------------------------------------------------- #
@@ -1157,16 +1342,27 @@ def select(changed, root) -> dict:
             gates.add("site-wheel")
             if reach is None:
                 return _full("cannot analyze src/revl imports -> full")
-            top = f[len("src/revl/"):].split("/")[0]
-            top = top[:-3] if top.endswith(".py") else top
-            if top in reach:
+            module = module_of(f)
+            top = module.split(".")[0]
+            if top in DOCUMENTED_CORE or module in reach:
                 where = "core" if top in DOCUMENTED_CORE else "compile-reachable"
-                return _full(f"src/revl/{top} is {where} -> full")
-            hits = _word_tests(root, top)
+                return _full(f"src/revl/{module.replace('.', '/')} is {where} -> full")
+            # Not on the compile path, so only a test that executes this module
+            # can see the change, and a test executes it only by importing it or
+            # a module that imports it. Select every test naming any of them:
+            # each importer's own name and, for a subpackage module, its
+            # package's (issue #1780).
+            names = set()
+            for importer in importers_of(root, module):
+                parts = importer.split(".")
+                if parts[-1] == "__init__":
+                    parts = parts[:-1]
+                names.update(parts[:1] + parts[-1:])
+            hits = set().union(*(_word_tests(root, n) for n in sorted(names)))
             if not hits:
-                return _full(f"src/revl/{top} (leaf) has no referencing test -> full")
+                return _full(f"src/revl/{module} (leaf) has no referencing test -> full")
             pytest_nodes |= hits
-            reasons.append(f"src/revl/{top} (leaf)")
+            reasons.append(f"src/revl/{module} (leaf)")
             continue
         if f.startswith("src/"):
             return _full(f"unmapped source path {f} -> full")
