@@ -204,6 +204,15 @@ With no `--gains`/`--loses`, the current shape: per method, whether it is an
 
 `impacted` unions the two, which is the set you feed to `revl_admit`.
 
+With gains or losses named, the top-level `callSites` and `impacted` are scoped
+to them (issue #1849): `callSites` are the sites of the named methods, and
+`impacted` is what that change touches, every provider for a gain and the
+providers and call sites of a lost method. Gaining `count` on a service whose
+`find` has six callers reports no call sites and only the providers.
+`callSitesScope` names the methods the answer is scoped to, and
+`existingCallSites` keeps the roll-up over every declared method. With nothing
+named, `callSites` and `impacted` are that roll-up.
+
 **Exact** — providers are declarations and call sites are syntactic call
 nodes, both enumerable. It is a complete list of what the admission gate would
 flag, *not* a promise the edit is safe once those sites are fixed: a signature
