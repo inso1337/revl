@@ -1,0 +1,42 @@
+// Issue #1592 on the self-host ts port: an emission extern that DECLARES its
+// own `compensate` (item 254) registers that compensation at every site it is
+// emitted from, exactly as backends/typescript/emit.py renders it:
+//
+//   * an activation-body `emit` (`yield $revl_frame.compensation(...)`), alone
+//     and beside a site-spelled `compensate` (the site clause first);
+//   * a provide-method `emit` (`$revl_frame.compensationMethod(...)`);
+//   * a sync timer firing, and the plain emission of an async timer body (the
+//     provide-method form, once per firing).
+//
+// The declared slot is lowered in the pure-expression call dialect; the port
+// reads a bare named call there as a component `fn` node, so a constant
+// argument is bound to a temp at registration.
+
+service Ledger {
+  emission fn note(x: Str)
+  emission async fn tick()
+}
+
+extern emission fn put_row(body: Str) -> Int compensate restore_row("undo") = @py { return 1 } = @ts { return 1n; }
+extern emission fn restore_row(reason: Str) -> Int = @py { return 0 } = @ts { return 0n; }
+extern emission fn audit(line: Str) -> Int = @py { return 0 } = @ts { return 0n; }
+
+component Book provides ledger: Ledger {
+  emit put_row("open")
+  emit put_row("site") compensate audit("site")
+  provide ledger {
+    fn note(x) { emit put_row(x) }
+    async fn tick() { emit audit("tick") }
+  }
+}
+
+component Beat {
+  every 10s { emit put_row("beat") }
+}
+
+component Pulse requires ledger: Ledger {
+  every 5s {
+    emit ledger.tick()
+    emit put_row("pulse")
+  }
+}

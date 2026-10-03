@@ -96,21 +96,37 @@ at runtime or in the harness can move a call between classes.
 
 | class | derivation | policy posture | what the harness sees |
 |---|---|---|---|
-| (a) revertible | every crossing is a `witnessed` extern with its registered inverse (243) | auto-approve silently | the call returns; no ticket, no prompt |
-| (b) deferrable | every non-(a) crossing is a `deferred` emission (245) | auto-approve; enumerate at commit | the call returns; the crossing appears in the commit manifest's `summary` |
+| (a) revertible | every crossing is a `witnessed` extern with its registered inverse (243), or a relay to an operation whose own reach is (a) | auto-approve silently | the call returns; no ticket, no prompt |
+| (b) deferrable | every non-(a) crossing is a `deferred` emission (245), or a relay to an operation whose own reach is (b) | auto-approve; enumerate at commit | the call returns; the crossing appears in the commit manifest's `summary` |
 | (c) immediate | any emission crossing that is neither (a `compensate` does not change this, 247) | prompt per call | `revl_call` returns `approvalRequired` with a ticket; nothing fired |
 
 A call's class is the worst class over every crossing its checked reach
 includes: one prompt covers the whole call or none of it.
 
-Because the class is the worst over the WHOLE reach, an indirection does not
-preserve it. A class-(a) `witnessed` op is 0-prompt, but an `emission fn` that
-merely forwards to it reaches an emission crossing and is class-(c), one prompt
-per call (D1). So a witnessed call factored behind any relay, wrapper, or helper
-emission silently loses the auto-approve guarantee: the natural refactor is not
-class-preserving, and there is no warning at the call site. To keep a witnessed
-op's (a) guarantee, keep the crossing direct. A relay over it is a deliberate
-escalation to (c), not a free abstraction.
+Because the class is the worst over the WHOLE reach, a relay's class is the
+worst over what it relays (D1, issue #1707). A service emission
+(`emit key.method(...)`) crosses no host boundary itself: it runs the target
+operation's body in the same session, and the fold already reads that body's
+crossings through the reach closure. So an `emission fn` that forwards to a
+class-(a) `witnessed` op is class (a) too, 0-prompt, and so is a relay of a
+relay. Factoring witnessed calls behind a helper keeps the auto-approve
+guarantee, and the helper's inverse is the inner inverses replayed in reverse
+order of firing: each witnessed effect registers its own inverse as it fires,
+so `revl_abort` undoes a relay exactly as it undoes the direct calls.
+
+A relay stays class (c) when:
+
+- it also reaches any non-witnessed emission (the worst rule is unchanged);
+- the forwarding emission is `compensate`d (a compensation offsets an
+  irreversible crossing, it does not make one revertible, 247);
+- its target is not provided inside the composition (a host-provided or
+  missing key), or is reached through a routed require or a `carrying(...)`
+  adapter, so no single target scope can be read;
+- its target crosses no checked boundary at all: the `emission` marking on the
+  service operation is then the only boundary signal, so it stands.
+
+Before #1707 every service emission was class (c) on its own, so any relay over
+a witnessed op prompted on every call and nothing said so.
 
 The three classes
 map onto three externs:
@@ -227,3 +243,56 @@ Two derived numbers ride on those:
 These are the numbers a harness dogfood measures before and after wiring the
 gate. `tests/test_approval_policy.py` asserts both on a live cordis-py
 composition end to end.
+
+## The agent-loop axes (`revl_state` `loopAxes`)
+
+`revl_state` also reports six axes in `loopAxes` (issue #1738). Unlike the
+`approval` block they are always present, with or without a policy, and they
+are cumulative for the whole MCP session: an unload, a commit or an abort does
+not reset them. Each is `{numerator, denominator, value}`, where `value` is the
+ratio rounded to four places, or null while the denominator is 0.
+
+| axis | numerator | denominator |
+|---|---|---|
+| `reversibilityRate` | executed boundary calls witnessed with a registered inverse, class (a) | executed boundary calls, classes (a), (b) and (c) |
+| `autoApprovedWithProof` | executed boundary calls the checker proved revertible or deferred, classes (a) and (b) | the same |
+| `promptsPerSession` | prompts raised: per-call tickets, commit prompts and residue prompts (the `prompts` tally above) | commit sessions, from a `load` to the unload, commit or abort that ends it, the open one included |
+| `preflightCoverage` | composition edits whose touched components were all named by an earlier blast-radius query, or by the cascade the edit's response carries | composition edits |
+| `violationsCaughtBeforeExecution` | refusals at check, admit, plan, load, swap or edit time whose diagnostics name a guarantee | those, plus `revl_call`s that failed at run time |
+| `residueAfterAbort` | unresolved compensation records `revl_abort` left | aborts |
+
+Details that decide the counts:
+
+- A boundary call is a `revl_call` whose reach crosses a boundary. It is
+  counted once, when it is decided and about to run. A ticketed call counts
+  when it runs after its approval; the refused first attempt crossed nothing.
+  A call the seam cache answered crossed nothing either. With no policy the
+  class comes from a policy-independent class map of the live generation; a
+  call that cannot be classified is counted under `boundaryCalls.unclassified`
+  and in no axis.
+- A class (c) call covered by a standing approval, a grant or a distilled rule
+  is in the `autoApprovedWithProof` denominator but not its numerator: consent
+  is not proof. This is why it can differ from `approval.percentAutoApproved`,
+  which leaves such calls out of both.
+- A blast-radius query is `revl_query_withdraw`, `revl_query_drift`,
+  `revl_query_dependents`, `revl_query_reach`, `revl_query_emitters`,
+  `revl_live_query` or `revl_plan`. The components it covers are the one it
+  asked about and every component its result names (cascade, providers, call
+  sites, `components`, `impacted`). An edit whose response carries
+  `blastRadius` (`revl_edit`, #1704) covers its own touched components and
+  their cascades, for itself and for later edits.
+- A composition edit is a `revl_swap`, `revl_edit`, `revl_rollback`,
+  `revl_undo`, `revl_restore`, `revl_ship` or `revl_repair` that changed at
+  least one component of the running composition. A refused or no-op one is
+  not an edit. `revl_load`, `revl_unload`, commit and abort are not edits.
+- A refusal that names no guarantee (a session precondition, a usage error)
+  is in neither count of `violationsCaughtBeforeExecution`. An approval ticket
+  is a question, not a run-time refusal.
+- A failed swap that reboots its predecessor is not an abort for
+  `residueAfterAbort`.
+
+The preflight and refusal axes are measured where MCP tool calls are
+dispatched (`revl.mcp.server.handle`), so a program driving `Session` directly
+moves only the call, prompt and abort axes. `tests/test_loop_axes_1738.py`
+runs a scripted session with a known mix and asserts all six values, with and
+without a policy.

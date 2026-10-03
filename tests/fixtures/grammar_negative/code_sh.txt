@@ -1,0 +1,2 @@
+revl check app.rvl --json > out.json
+python3 tools/check_site_wheel.py --write

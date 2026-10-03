@@ -134,13 +134,33 @@ def test_cli_check_reports_no_drift(capsys):
 
 # ---- the Lark grammar under llguidance --------------------------------------
 
+def _compiles(text, name):
+    import warnings  # noqa: PLC0415
+
+    from revl import compile_source  # noqa: PLC0415
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        try:
+            compile_source(text, name)
+        except (RevlError, RecursionError):
+            return False
+    return True
+
+
 def test_every_parseable_corpus_document_is_accepted_by_the_lark_grammar():
+    """Every document the parser accepts, except where the grammar is
+    deliberately narrower (issue #1698: an expression statement on the line
+    of the statement before it, which is how prose reads). Each document that
+    exception refuses must be one the compiler refuses, so the grammar never
+    refuses code revl admits."""
     grammar = _compiled(sg.render("lark"))
     listed, parseable = _parseable_corpus()
-    refused = [name for name, text in parseable if not _accepts(grammar, text)]
+    refused = [(name, text) for name, text in parseable if not _accepts(grammar, text)]
     # a named count, so an empty corpus cannot pass
     assert len(listed) > 1000 and len(parseable) > 1000, (len(listed), len(parseable))
-    assert refused == [], f"{len(refused)} of {len(parseable)} refused: {refused[:20]}"
+    admitted = [name for name, text in refused if _compiles(text, name)]
+    assert admitted == [], f"refused, though the compiler admits them: {admitted}"
+    assert len(refused) <= 10, [name for name, _ in refused]
 
 
 @pytest.mark.parametrize("text", REFUSED_PROGRAMS)
@@ -249,7 +269,9 @@ def test_cli_prints_each_format_and_category(capsys):
 def test_cli_notes_list_every_loose_read(capsys):
     assert main(["grammar", "--notes"]) == 0
     out = capsys.readouterr().out
-    _, _, unguarded = sg.derive()
-    assert unguarded, "the notes check needs at least one loose read to name"
-    for method in {m for m, _ in unguarded}:
+    _, notes, unguarded = sg.derive()
+    # issue #1698: no read is modelled as any token any more
+    assert unguarded == []
+    assert "0 reads take any token" in out
+    for method in notes:
         assert method in out
