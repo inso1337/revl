@@ -1223,9 +1223,12 @@ JOINS one fails the gate, and a line no longer in its bucket fails it
 until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
 a new G6 purity fixture, cannot arrive while the model stays silent
 about it. `agree-*` and the generic `out-of-fragment` stay
-informational; that one collects every code the model states no row
-about at all, so it grows with corpus work that never touched this
-layer.
+informational; that one collects every refusal under a rule the model
+states no row about, so it is the list of unbuilt work. `out-of-scope`
+is informational too and is not a hole: a type-checker refusal (T1, T2,
+T3) or name resolution of declarations and of the lifecycle test DSL,
+routed by an explicit rule (`out_of_scope`), so it grows with corpus
+work that never touched this layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1255,9 +1258,10 @@ layer.
 | `missed-G6` | 0 | **FATAL** |
 | `missed-intercept` | 0 | **FATAL** |
 | `missed-prelude` | 0 | **FATAL** |
-| `out-of-fragment` | 37 | informational |
+| `out-of-fragment` | 16 | informational |
 | `out-of-fragment-G5` | 0 | ratcheted |
 | `out-of-fragment-G6` | 0 | ratcheted |
+| `out-of-scope` | 21 | informational |
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.
@@ -1319,7 +1323,14 @@ other language, so both now fail the gate too.
 A genuine fragment gap does not land in either. It lands in
 `out-of-fragment` (the checker refused under a rule the model states
 nothing about) or, where the rule IS modelled but the facts stop short, in
-a named `out-of-fragment-G5` / `out-of-fragment-G6`:
+a named `out-of-fragment-G5` / `out-of-fragment-G6`. A refusal that is out
+of scope BY KIND lands in neither: since issue #1810 a type-checker
+refusal (T1, T2, T3) and an uncoded name-resolution refusal (the
+lifecycle test DSL's names, a declaration naming an unknown or duplicate
+service) file under the informational `out-of-scope` bucket, by the
+explicit rule `out_of_scope` in `formal/harness/diff_corpus.py`, never by
+a list of files. A guarantee-coded refusal never does, so
+`out-of-fragment` is the list of unbuilt work:
 
 - **G5**: the U5 row is stated over the file's `Prog` — the extern table
   plus the fn call graph, so it counts a teardown crossing only where the

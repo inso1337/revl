@@ -84,6 +84,7 @@ import dataclasses
 import itertools
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -1421,6 +1422,42 @@ def approval_rows(rel: str, comp, ctx: _ApprovalCtx, svc_objs: dict,
             rows.append("\t".join(["AE", rel, comp.name, str(ord_), edge]))
         ord_ += 1
     return rows
+
+
+# ------------------------------- out of scope by kind (issue #1810)
+#
+# `out-of-fragment` collects refusals under a rule the model states no row
+# about. Some are rules the model could carry (unbuilt work); others are out
+# of scope BY KIND: the type checker, which STATUS.md places outside the
+# guarantee backbone, and name resolution of declarations and of the
+# lifecycle test DSL. The second kind is routed to an informational
+# `out-of-scope` bucket by an explicit rule, never by a list of files, so
+# `out-of-fragment` holds only unbuilt work.
+
+#: The type-checker codes: out of scope whatever the message.
+OUT_OF_SCOPE_CODES = frozenset({"T1", "T2", "T3"})
+
+#: The uncoded (`REVL`) refusals that are name resolution, by message: the
+#: lifecycle test DSL's names, and a declaration naming an unknown or
+#: duplicate service.
+OUT_OF_SCOPE_MESSAGES = (
+    re.compile(r"is not a config field of "),
+    re.compile(r"^`[^`]+` is already loaded$"),
+    re.compile(r"^unknown lifecycle assertion `"),
+    re.compile(r"^unknown component `"),
+    re.compile(r"is not an operation of service "),
+    re.compile(r"^unknown service `[^`]+` in `requires`"),
+    re.compile(r"^duplicate service `"),
+)
+
+
+def out_of_scope(code: str, message: str) -> bool:
+    """Whether a refusal is out of the model's scope by kind. A refusal with
+    a guarantee code (anything but the type-checker codes and the uncoded
+    `REVL`) never is."""
+    if code in OUT_OF_SCOPE_CODES:
+        return True
+    return code == "REVL" and any(p.search(message) for p in OUT_OF_SCOPE_MESSAGES)
 
 
 # ------------------------ three declaration rules (issue #1809)
@@ -5033,6 +5070,14 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             else:
                 record("out-of-fragment-G6" if formal_clean
                        else "formal-found-other", rel)
+        elif out_of_scope(code, checker_message(rel)):
+            # Out of scope BY KIND (issue #1810): a type-checker refusal, or
+            # name resolution of declarations and of the lifecycle test DSL.
+            # Modelling them buys no guarantee, so they are not holes and are
+            # not ratcheted; keeping them apart is what makes
+            # `out-of-fragment` mean unbuilt work.
+            record("out-of-scope" if formal_clean else "formal-found-other",
+                   rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -5330,8 +5375,12 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             "the `Prog` cannot resolve, or a new G6 purity fixture, cannot arrive "
             "while the model stays silent about it. `agree-*` and the "
             "generic `out-of-fragment` stay informational; that one collects "
-            "every code the model states no row about at all, so it grows "
-            "with corpus work that never touched this layer."),
+            "every refusal under a rule the model states no row about, so it "
+            "is the list of unbuilt work. `out-of-scope` is informational "
+            "too and is not a hole: a type-checker refusal (T1, T2, T3) or "
+            "name resolution of declarations and of the lifecycle test DSL, "
+            "routed by an explicit rule (`out_of_scope`), so it grows with "
+            "corpus work that never touched this layer."),
         "",
         "| bucket | files | gate |",
         "| --- | --- | --- |",
