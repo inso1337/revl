@@ -224,7 +224,7 @@ below are the values you should get.
 | programs run, 1040 | the length of the same list, repeats included |
 | run `census-selfhost-6ad06bea7a74` | sha256 over every `(case id, source)` the run read, ids repo-relative |
 | checker version `GATE-CENSUS-1+6feced95a60e` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
-| `src/revl@sha256:eb399b5f334c` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
+| `src/revl@sha256:5c23423ae478` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
 | every bucket count | `tools/gate_reference_census.py --json out.json` |
 | the false-admit allowance | `tools/gate_reference_census_baseline.json`, which is in the tree |
 | the provenance columns | `tools/corpus_provenance.py` over `tests/fixtures/corpus_provenance.json` |
