@@ -5,7 +5,8 @@ A refusal that has a known remedy returns it as data, beside the prose:
     "next": {"tool": "revl_load", "arguments": {...}, "ready": true}
 
 `tool` is the verb to call and `arguments` its arguments, pre-filled from
-session state. `ready` says whether `arguments`, sent as-is, are expected to
+session state. A remedy no MCP call can perform is an operator step instead,
+`{"operator": "<what to do>", "ready": false}` (`operator_step`). `ready` says whether `arguments`, sent as-is, are expected to
 succeed. When they are not (nothing this session holds says what the caller
 meant), `needs` names what the caller must add. Where several remedies exist,
 `next` is a list of calls in preference order.
@@ -36,6 +37,13 @@ def call(tool: str, arguments: dict, *, ready: bool = True,
     if needs is not None:
         entry["needs"] = needs
     return entry
+
+
+def operator_step(action: str) -> dict:
+    """A remedy no MCP call can perform: what an operator must do outside the
+    session (install a runtime, restart the server). Never `ready`, because
+    the caller cannot send it."""
+    return {"operator": action, "ready": False}
 
 
 def remember(session) -> None:
@@ -139,6 +147,8 @@ def attach(payload: dict, nxt) -> dict:
 def describe(nxt: dict | list) -> str:
     """One sentence naming the remedy, for the refusal's message."""
     first = nxt[0] if isinstance(nxt, list) else nxt
+    if "operator" in first:
+        return f"Next, for an operator: {first['operator']}."
     tool = first["tool"]
     if not first.get("ready", True):
         return f"Next: {tool} with {first['needs']}; `next` holds the call."

@@ -22,6 +22,44 @@ fn args_of(probe: &J) -> Vec<J> {
     probe["args"].as_array().cloned().unwrap_or_default()
 }
 
+/// The contexts the served keys resolve in, filled as each key's provider
+/// activates, and the keys refused by name (issue #1567).
+type Served = std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, cordis::Context>>>;
+
+/// Where a served or probed key resolves (issue #1567).
+enum Resolved {
+    In(cordis::Context),
+    Refused(String),
+}
+
+/// Resolve `key` in the py tier's `resolve_key` order, off the spec's
+/// `placements` (key -> this process's provisions of it, each with its realm):
+/// the shared realm when the key is provided there, or when this process does
+/// not provide it at all (a proxy); else its one isolated realm, read through
+/// the providing component's isolated context (`_revl_isolate_ctx`, the context
+/// `_revl_load` plugged it into). A key isolated in two or more realms has no
+/// single provider for a call that names only the key, so it is refused naming
+/// each provider and realm. A shared-realm read of an isolated key used to
+/// leave the probe or serve plugin Pending forever, and the runner panicked.
+fn resolve_key(root: &cordis::Context, placements: &J, key: &str) -> Resolved {
+    let at = placements[key].as_array().cloned().unwrap_or_default();
+    if at.is_empty() || at.iter().any(|p| p["realm"].is_null()) {
+        return Resolved::In(root.clone());
+    }
+    if at.len() == 1 {
+        let plugin = at[0]["plugin"].as_str().unwrap_or("");
+        return Resolved::In(components::_revl_isolate_ctx(root, plugin));
+    }
+    let where_: Vec<String> = at
+        .iter()
+        .map(|p| format!("`{}` in realm `{}`",
+                         p["component"].as_str().unwrap_or("?"), p["realm"].as_str().unwrap_or("?")))
+        .collect();
+    Resolved::Refused(format!(
+        "key '{key}' is provided in {} realms ({}); a call names a key, not a realm, so it has no single provider to reach",
+        at.len(), where_.join(", ")))
+}
+
 /// What this process serves: the keys other processes consume from it
 /// (`serve.keys`) and, per key, the operations its service declaration admits
 /// (`serve.methods`, the allowlist `placement.py` reads off the IR).
@@ -80,8 +118,15 @@ impl Exported {
 }
 
 /// Provider side: dispatch one connection's requests to locally-provided
-/// services via the generated `_revl_invoke`, inside the exported surface.
-fn handle_conn(stream: UnixStream, ctx: &cordis::Context, exported: &Exported) {
+/// services via the generated `_revl_invoke`, inside the exported surface and
+/// each in the context its key resolves in. The allowlist is checked first, so
+/// a request outside the surface never reaches realm resolution.
+fn handle_conn(
+    stream: UnixStream,
+    served: &Served,
+    refused: &std::collections::HashMap<String, String>,
+    exported: &Exported,
+) {
     let reader = BufReader::new(match stream.try_clone() {
         Ok(s) => s,
         Err(_) => return,
@@ -135,15 +180,26 @@ fn handle_conn(stream: UnixStream, ctx: &cordis::Context, exported: &Exported) {
         // Record the crossing as in flight WHILE its handler runs: a crossing
         // still executing when the latch trips is the AMBIGUOUS one the halt
         // inventory names (item 440). The guard clears it on any exit.
-        let value = {
-            let _guard = estop::CrossingGuard::new(key, method, "accept");
-            components::_revl_invoke(ctx, key, method, &args)
-        };
-        // issue #1634: a call the generated dispatch could not make is an error
-        // reply. It used to come back as `null` and be sent as `ok: true`.
-        let reply = match value {
-            Ok(value) => serde_json::json!({ "ok": true, "value": value }),
-            Err(error) => serde_json::json!({ "ok": false, "error": error }),
+        let resolved = served.lock().ok().and_then(|m| m.get(key).cloned());
+        let reply = match resolved {
+            Some(ctx) => {
+                let value = {
+                    let _guard = estop::CrossingGuard::new(key, method, "accept");
+                    components::_revl_invoke(&ctx, key, method, &args)
+                };
+                // issue #1634: a call the generated dispatch could not make is
+                // an error reply. It used to come back as `null` and be sent as
+                // `ok: true`.
+                match value {
+                    Ok(value) => serde_json::json!({ "ok": true, "value": value }),
+                    Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                }
+            }
+            None => serde_json::json!({
+                "ok": false,
+                "error": refused.get(key).cloned()
+                    .unwrap_or_else(|| format!("key {key} is not exported by this process")),
+            }),
         };
         let mut out = serde_json::to_string(&reply).unwrap_or_else(|_| "{\"ok\":false}".into());
         out.push('\n');
@@ -153,31 +209,42 @@ fn handle_conn(stream: UnixStream, ctx: &cordis::Context, exported: &Exported) {
     }
 }
 
-/// A plugin that requires the served keys (so its provider components have
-/// activated), then spawns a blocking accept loop that serves them.
-fn serve_plugin(socket: String, keys: Vec<String>, exported: Exported) -> cordis::PluginHandle {
-    let inject: Vec<&str> = keys.iter().map(|k| k.as_str()).collect();
-    let exported = std::sync::Arc::new(exported);
-    cordis::plugin_sync::<(), _>("RevlServe", cordis::Inject::new(inject), move |ctx, _config| {
-        let served = ctx.clone();
-        let socket = socket.clone();
-        let exported = exported.clone();
-        std::thread::spawn(move || {
-            let _ = std::fs::remove_file(&socket);
-            let listener = match UnixListener::bind(&socket) {
-                Ok(l) => l,
-                Err(_) => return,
-            };
-            for conn in listener.incoming() {
-                if let Ok(stream) = conn {
-                    let ctx = served.clone();
-                    let exported = exported.clone();
-                    std::thread::spawn(move || handle_conn(stream, &ctx, &exported));
-                }
-            }
-        });
+/// A plugin that requires one served key in the context it is plugged into
+/// (so its provider component has activated there) and records that context
+/// for the accept loop.
+fn serve_plugin(key: String, served: Served) -> cordis::PluginHandle {
+    cordis::plugin_sync::<(), _>("RevlServe", cordis::Inject::new([key.as_str()]), move |ctx, _config| {
+        if let Ok(mut map) = served.lock() {
+            map.insert(key.clone(), ctx.clone());
+        }
         Ok(cordis::PluginOutput::none())
     })
+}
+
+/// The blocking accept loop that serves every key, each in its own context.
+fn spawn_listener(
+    socket: String,
+    served: Served,
+    refused: std::collections::HashMap<String, String>,
+    exported: Exported,
+) {
+    let refused = std::sync::Arc::new(refused);
+    let exported = std::sync::Arc::new(exported);
+    std::thread::spawn(move || {
+        let _ = std::fs::remove_file(&socket);
+        let listener = match UnixListener::bind(&socket) {
+            Ok(l) => l,
+            Err(_) => return,
+        };
+        for conn in listener.incoming() {
+            if let Ok(stream) = conn {
+                let served = served.clone();
+                let refused = refused.clone();
+                let exported = exported.clone();
+                std::thread::spawn(move || handle_conn(stream, &served, &refused, &exported));
+            }
+        }
+    });
 }
 
 /// A driver plugin that requires `key` and runs one probe call during its
@@ -366,9 +433,22 @@ fn main() {
             .as_array()
             .map(|a| a.iter().filter_map(|k| k.as_str().map(|s| s.to_string())).collect())
             .unwrap_or_default();
-        let fiber = root.plugin(serve_plugin(socket.clone(), keys.clone(), Exported::from_spec(serve)), ());
-        fiber.try_wait().unwrap();
-        fibers.push(("serve".to_string(), fiber));
+        let served: Served = Default::default();
+        let mut refused = std::collections::HashMap::new();
+        for key in &keys {
+            match resolve_key(&root, &spec["placements"], key) {
+                Resolved::In(ctx) => {
+                    let fiber = ctx.plugin(serve_plugin(key.clone(), served.clone()), ());
+                    fiber.try_wait().unwrap();
+                    fibers.push(("serve".to_string(), fiber));
+                }
+                Resolved::Refused(why) => {
+                    log("serve", key, &format!("REFUSED {why}"));
+                    refused.insert(key.clone(), why);
+                }
+            }
+        }
+        spawn_listener(socket.clone(), served, refused, Exported::from_spec(serve));
         log("serve", &keys.join(", "), &format!("-> {socket}"));
     }
 
@@ -377,7 +457,15 @@ fn main() {
         for probe in probes {
             let key = probe["key"].as_str().unwrap_or("").to_string();
             let method = probe["method"].as_str().unwrap_or("").to_string();
-            let fiber = root.plugin(
+            let ctx = match resolve_key(&root, &spec["placements"], &key) {
+                Resolved::In(ctx) => ctx,
+                Resolved::Refused(why) => {
+                    println!("{}", confidential::revl_redact_text(format!(
+                        "[{name}] probe | {key}.{method}(...) ERROR {why}")));
+                    continue;
+                }
+            };
+            let fiber = ctx.plugin(
                 probe_plugin(name.clone(), key, method, args_of(probe)),
                 (),
             );

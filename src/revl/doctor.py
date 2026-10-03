@@ -496,6 +496,29 @@ def check_cordis_py(prober: Prober) -> Check:
     return Check("cordis-py runtime", OK, version, detail)
 
 
+def check_mcp_runtime(prober: Prober, backends_dir: Path) -> Check:
+    """What `revl mcp serve` will do on this interpreter (issue #1692): serve
+    every verb (cordis importable), re-execute under the repository's runtime
+    venv (that venv can import cordis), or serve with the runtime verbs refused
+    by name. The last is a WARN that names them, so a benchmark or an agent
+    learns it before the first call rather than one failed verb at a time."""
+    from .mcp.runtime_gate import RUNTIME_VERBS  # noqa: PLC0415 — lazy
+
+    if prober.module_available("cordis"):
+        return Check("mcp server runtime", OK, None,
+                     "every MCP verb is available under this interpreter")
+    venv = backends_dir / "python" / ".venv" / "bin" / "python"
+    if prober.run([str(venv), "-P", "-c", "import cordis, revl"]).ok:
+        return Check("mcp server runtime", OK, None,
+                     f"`revl mcp serve` re-executes under {venv}, which can "
+                     "import cordis")
+    return Check("mcp server runtime", WARN, None,
+                 f"`revl mcp serve` would refuse {len(RUNTIME_VERBS)} verbs "
+                 f"({', '.join(sorted(RUNTIME_VERBS))}): no cordis here and no "
+                 f"runtime venv at {venv}. Fix: sh "
+                 f"{backends_dir / 'python' / 'setup.sh'}")
+
+
 def _package_json_version(prober: Prober, path: Path) -> str | None:
     """The ``version`` field of a JS package's ``package.json`` at *path*, read
     off disk (never launching node), or None if it is unreadable or malformed."""
@@ -635,6 +658,7 @@ def diagnose(prober: Prober | None = None,
         check_wasm_tools(prober),
         check_cordis_py(prober),
         check_cordis_ts(prober, backends_dir),
+        check_mcp_runtime(prober, backends_dir),
         check_mtls(prober),
         check_otel(prober),
         check_stdlib_version(prober),
