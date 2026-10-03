@@ -561,11 +561,16 @@ def _capturing_driver_class():
     class _CapturingDriver(_Driver):
         def __init__(self, *args, **kwargs):
             self.events: list[dict] = []
+            # issue #1859: every host-stub event of the driver's life, never
+            # drained, so teardown can pair each acquire with its release
+            self.host_events: list[str] = []
             super().__init__(*args, **kwargs)
 
         def _log(self, channel: str, subject: str, detail: str = "") -> None:
             self.events.append({"channel": channel, "subject": subject,
                                 "detail": detail})
+            if channel == "host":
+                self.host_events.append(f"{subject} {detail}".rstrip())
 
         def drain_events(self) -> list[dict]:
             events, self.events = self.events, []
@@ -976,7 +981,19 @@ class Session:
             # close its loop when it is collected rather than leave that to
             # the loop's own finalizer and its ResourceWarning (issue #1720)
             weakref.finalize(self, _close_abandoned_loop, self._loop)
+        self._own_host_trace()
         return self._loop.run_until_complete(coro)
+
+    def _own_host_trace(self) -> None:
+        """Route the host stubs' trace to THIS session's driver while it runs
+        (issue #1859). The trace is one process-wide callback, and each driver
+        installs its own at boot, so with two sessions loaded the later one
+        would otherwise receive the earlier one's releases, and the earlier
+        one's teardown would read its own released resources as unreleased."""
+        driver = self._driver
+        on_host = getattr(driver, "_on_host", None)
+        if on_host is not None:
+            driver.runtime.set_trace(on_host)
 
     def _close_loop(self) -> None:
         """Close the event loop a torn-down session ran on (issue #1720).
@@ -3424,6 +3441,7 @@ class Session:
         def _drive() -> None:
             driver._settlement_ledger = ledger
             try:
+                self._own_host_trace()             # issue #1859
                 self._loop.run_until_complete(driver._dispose_all(self.ir))
                 disposal["returned"] = True
             except asyncio.CancelledError:
@@ -4349,9 +4367,33 @@ class Session:
             "disposables": driver.root.fiber._disposables.length,
             "disposablesBaseline": driver._baseline_disposables,
         }
+        unverified = self._check_host_resources(driver, checks, detail)
         driver.runtime.set_trace(None)
-        return {"noResidue": all(checks.values()), "checks": checks,
-                "detail": detail, "trace": driver.drain_events()}
+        report = {"noResidue": all(checks.values()) and not unverified,
+                  "checks": checks, "detail": detail,
+                  "trace": driver.drain_events()}
+        if unverified:
+            report["unverified"] = unverified
+        return report
+
+    @staticmethod
+    def _check_host_resources(driver, checks: dict, detail: dict) -> list:
+        """Issue #1859: the four counters above see the disposer RUN, not the
+        resource RELEASED. An undo that is not the acquire's release, or a
+        release that raised, still drains the effect stack. The host trace
+        pairs each `new`/`open` with its `drop`/`close`
+        (`fault._unreleased_host_resources`, the lifecycle `no_residue`
+        rule), so it is the fifth check. With no host trace the check cannot
+        run: it is returned as unverified, and `noResidue` is never true on a
+        check that did not run."""
+        events = getattr(driver, "host_events", None)
+        if events is None:
+            return ["hostResources"]
+        from ..fault import _unreleased_host_resources  # noqa: PLC0415
+        unreleased = _unreleased_host_resources(events)
+        checks["hostResources"] = not unreleased
+        detail["unreleased"] = unreleased
+        return []
 
     def _commit_wal(self, driver) -> None:
         """Stamp `activation-complete` and close the session's WAL (the recorder
