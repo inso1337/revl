@@ -3,14 +3,48 @@
   "arm": "revl",
   "correct": true,
   "problems": [],
-  "touched": ["InvoiceService", "OrderService", "ShippingDesk"],
-  "touchedBeyondCascade": ["ShippingDesk"],
+  "touched": [
+    "InvoiceService",
+    "OrderService",
+    "ShippingDesk"
+  ],
+  "touchedBeyondCascade": [
+    "ShippingDesk"
+  ],
   "missedCascade": [],
   "turns": 7,
   "tokensWritten": 1840,
   "gate": {
-    "promptsPerSession": 1,
-    "percentAutoApprovedWithProof": 75.0,
-    "notInRevlState": ["reversibilityRate", "preflightCoverage", "violationsCaughtBeforeExecution", "residueAfterAbort"]
+    "reversibilityRate": {
+      "numerator": 3,
+      "denominator": 4,
+      "value": 0.75
+    },
+    "autoApprovedWithProof": {
+      "numerator": 3,
+      "denominator": 4,
+      "value": 0.75
+    },
+    "promptsPerSession": {
+      "numerator": 1,
+      "denominator": 1,
+      "value": 1.0
+    },
+    "preflightCoverage": {
+      "numerator": 1,
+      "denominator": 2,
+      "value": 0.5
+    },
+    "violationsCaughtBeforeExecution": {
+      "numerator": 2,
+      "denominator": 2,
+      "value": 1.0
+    },
+    "residueAfterAbort": {
+      "numerator": 0,
+      "denominator": 0,
+      "value": null
+    },
+    "notInRevlState": []
   }
 }
