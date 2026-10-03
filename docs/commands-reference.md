@@ -1771,6 +1771,10 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
     (repeatable); required for a wildcard bind.
   - `--allow-origin ORIGIN` - a browser origin that may call the server
     (repeatable); any other `Origin` is refused.
+- `--profile-settle-ms MS` - adopt an edited `--operator-profile` only once it
+  reads identical twice this far apart (default: `1000`). Requests other than
+  `revl_estop` are refused while it settles. `0` removes the protection against
+  adopting a half-written file; write the profile atomically either way.
 
 `revl mcp schema FILES` - project provided services to MCP tool definitions
 (the `revl -> MCP` direction, annotations derived from the checker).
@@ -1816,6 +1820,7 @@ write-ahead log and declared undos apply at call time.
 - `--http HOST:PORT`, `--auth`, `--tls-cert`, `--tls-key`, `--tls-client-ca`,
   `--allow-host`, `--allow-origin` - serve the gated tools over HTTP, one
   operator per request, as for `revl mcp serve`.
+- `--profile-settle-ms MS` - as for `revl mcp serve`.
 
 ### `revl import`
 
@@ -2054,6 +2059,9 @@ that composes `stdlib/auth.rvl` for them is refused at compile time.
     `readOnly`/`emission` hints, and its routes) and the gate FRONTIER the face
     was projected under. The face is LOCAL contract only - it makes no safety
     claim about any callee it in turn reaches - and binds loopback by default.
+    Requests are served one at a time against the one live session (issue
+    #1488): concurrent requests all complete, but a slow operation delays every
+    request queued behind it.
 - `--host HOST` - `--http` bind address (default: `127.0.0.1`). Any address
   other than loopback needs `--tls-cert` and `--tls-key`, or the server refuses
   to start.

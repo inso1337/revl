@@ -221,6 +221,24 @@ def _http_exposure(args):
     return exposure, None
 
 
+def _stdio_live_profile(args):
+    """`(hook, None)` that re-binds the stdio session to the operator profile
+    file before each message, `(None, None)` with no profile, or `(None, exit
+    code)` when the file cannot be loaded (issue #1463, `live_profile`)."""
+    if not getattr(args, "operator_profile", None):
+        return None, None
+    from ..mcp import server as _server
+    from ..mcp.live_profile import ProfileSource, ProfileUnavailable, StdioBinding
+
+    try:
+        source = ProfileSource(args.operator_profile,
+                               settle_ms=getattr(args, "profile_settle_ms", 1000))
+    except (ProfileUnavailable, ValueError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return None, 1
+    return StdioBinding(source, _server, _server.SESSION.operator.token), None
+
+
 def _run_mcp(args) -> int:
     """`revl mcp {serve,schema,import,proxy}`: the MCP bridge (docs/mcp-bridge.md)."""
     from ..mcp.schema import import_tools, tools_from_ir
@@ -285,14 +303,18 @@ def _run_mcp(args) -> int:
 
             try:
                 transport = HttpTransport(ServerDispatcher(_server),
-                                          registry=_server.SESSION.operator_registry,
                                           exposure=exposure, auth=args.auth,
-                                          server_module=_server)
+                                          server_module=_server,
+                                          profile_path=args.operator_profile,
+                                          profile_settle_ms=args.profile_settle_ms)
             except TransportError as error:
                 print(f"error: {error}", file=sys.stderr)
                 return 1
             return transport.serve_forever()
-        return serve()
+        live, code = _stdio_live_profile(args)
+        if code is not None:
+            return code
+        return serve(before=live)
 
     if args.mcp_command == "schema":
         try:
@@ -360,12 +382,18 @@ def _run_mcp_proxy(args) -> int:
         return refused
     if args.http:
         http = {"exposure": exposure, "auth": args.auth,
-                "registry": SESSION.operator_registry}
+                "profile_path": args.operator_profile,
+                "profile_settle_ms": args.profile_settle_ms}
     if args.wal:
         SESSION._wal_path = args.wal
+    live = None
+    if http is None:
+        live, code = _stdio_live_profile(args)
+        if code is not None:
+            return code
     return proxy.run(command, undo=undo,
                      trust_read_only=args.trust_read_only_hints,
-                     timeout=args.upstream_timeout, http=http)
+                     timeout=args.upstream_timeout, http=http, live=live)
 
 
 def _run_serve(args) -> int:

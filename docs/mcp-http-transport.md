@@ -79,8 +79,49 @@ Two ways to authenticate, one per server (`--auth`):
   refused: two identities are none.
 
 An operator's `until` is checked on every request, so an expired credential is
-refused the moment it lapses. `revoked` and every other profile change take
-effect when the server restarts: the profile is read once, at start.
+refused the moment it lapses.
+
+**Profile changes take effect without a restart** (`src/revl/mcp/live_profile.py`,
+one mechanism for HTTP and stdio). The server checks the profile file on every
+request with one `stat`, and re-reads it when its stat signature (mtime, ctime,
+size, inode) changed, or when its mtime is within two seconds of the last read,
+where two writes in one timestamp tick could leave the signature unchanged.
+
+**New content is adopted only once it has settled:** it must read identical
+twice, at least `--profile-settle-ms` apart (default 1000 ms). A profile caught
+mid-write can still parse, and one cut off just before a `may not` line would
+widen a grant, so an unsettled profile is never used. While the content is
+settling, every request is answered `503` ("the operator profile is changing").
+The previous profile is not used in that window either: the edit in progress may
+be a revocation, and serving the old grants would delay it. So adding `operator
+bob revoked`, removing an operator, or narrowing a grant is refused, then applied,
+about one second after the file stops changing, and never served under a
+half-written file.
+
+**Write the profile atomically:** write a temporary file in the same directory,
+then rename it over the profile. The settle window makes a partial file hard to
+adopt; it cannot make it impossible, because a writer that pauses mid-file for
+longer than the window leaves settled, partial content. A rename never exposes a
+partial file at all. `--profile-settle-ms 0` removes the settle protection
+entirely.
+
+A profile that can no longer be read or parsed **fails closed**: every request
+is answered `503` naming the problem, until the file is fixed.
+
+**E-Stop is never fenced by a profile edit.** While the profile is settling or
+broken, `revl_estop` is still accepted, from a caller authorized for it under the
+last profile that was adopted. An E-Stop only stops things, so honouring it under
+the prior profile cannot widen anyone's authority. Every other verb in that
+window gets the refusal above. The server also prints its E-Stop latch path at
+start (`revl estop --latch <path>`), which halts it with no request at all; that
+is the only path when no profile has ever been adopted.
+
+Over stdio (`revl mcp serve`, `revl mcp proxy`) the same file is re-read before
+each message, with the same settling rule and the same E-Stop exception: the
+session's own operator and the registry quorum casts are checked against are the
+file as it is now. If that serve-time operator is revoked, past its `until`, or
+no longer declared, every message except `revl_estop` is refused with a JSON-RPC
+error. A revocation that left management verbs working would not be one.
 
 ## One identity at a time
 
@@ -133,7 +174,8 @@ transport uses that one; otherwise it arms a private one for its lifetime.
 
 ## The one lock, a known limit
 
-Every other request waits while one is dispatched. A proxied call that blocks for
+Every other request waits while one is dispatched (`http_guard.DispatchLock`,
+the same lock `revl serve --http` takes, issue #1488). A proxied call that blocks for
 its full `--upstream-timeout` (120 s by default) blocks every other caller for
 that long, except `revl_estop`. This is slice 1's bound; per-request concurrency
 needs a session that can run more than one call at a time.
@@ -174,13 +216,20 @@ can.
 4. An E-Stop lands while another request holds the session.
 5. A non-loopback listener is TLS or does not start, and a request with a
    foreign `Host` or `Origin` is refused before it is read.
+6. An edit to the operator profile file applies without a restart, and until
+   it has settled every request but `revl_estop` is refused rather than served
+   under either the old or the new version. A profile that no longer parses
+   refuses every request but `revl_estop`. A partial file that stays unchanged
+   for the whole settle window can still be adopted: write atomically.
 
 ## What it does not guarantee
 
 1. That an operator is one person. A shared or stolen secret is that operator.
 2. Per-caller transactions. Commit and abort are session-wide: one operator's
    `revl_abort` reverts another's witnessed calls unless a lease fences it.
-3. Immediate revocation. `revoked` needs a restart.
+3. Revocation of a request already being dispatched. A profile change applies
+   from the first request after it has settled (about one second by default),
+   and requests in between are refused, except `revl_estop`.
 4. Concurrency. See the one lock above.
 5. Delivery of notifications or progress. There is no stream in this slice.
 6. The OAuth 2.1 profile of the MCP spec (slice 3).

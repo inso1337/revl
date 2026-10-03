@@ -240,6 +240,12 @@ revl mcp serve --operator-profile ops.profile --operator alice
 
 `--operator` is optional when the profile declares exactly one operator. The
 stdio transport carries a single session, so one served process is one operator.
+The profile FILE is live on every transport: an edit (a `revoked` line, an
+`until`, a removed operator, a changed grant) applies once it has settled
+(`--profile-settle-ms`, default 1000), with no restart. A profile that is mid-edit
+or does not parse refuses every request except `revl_estop`, and a revoked stdio
+serve-time operator is refused everything except `revl_estop`
+([mcp-http-transport.md](mcp-http-transport.md#identity)).
 
 Over HTTP (`--http HOST:PORT`, issue #1463, [mcp-http-transport.md](mcp-http-transport.md))
 it is the other way round: the process runs as no operator (`--operator` is

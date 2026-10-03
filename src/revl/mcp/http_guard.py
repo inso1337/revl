@@ -22,6 +22,11 @@ its body when:
     spec requires exactly this (`Origin` present and invalid: 403);
   * it carries either header more than once.
 
+It also holds the one dispatch lock both listeners use (`DispatchLock`): a
+live `Session` runs one asyncio loop with `run_until_complete`, so two request
+threads calling it at once fail with "This event loop is already running"
+(issue #1488).
+
 This module decides nothing about WHO the caller is; authentication is the
 listener's own (`http_transport.Authenticator`).
 """
@@ -31,7 +36,9 @@ from __future__ import annotations
 import ipaddress
 import socket
 import ssl
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from http.server import ThreadingHTTPServer
 
@@ -246,3 +253,49 @@ class Listener(ThreadingHTTPServer):
         # the clear-text path; a TLS request was detached by `wrap_socket` and
         # is already closed above, so this is a no-op for it
         close_after_draining(request)
+
+
+class DispatchLock:
+    """One request at a time against one live session (issue #1488).
+
+    A `Session` drives a single asyncio loop with `run_until_complete`, so it
+    can serve one call at a time; a threaded HTTP listener that dispatched two
+    requests into it at once had all but one fail with "This event loop is
+    already running". Every revl HTTP listener that fronts a session takes this
+    lock around dispatch: the MCP transport (`http_transport.CallerBinding`) and
+    the composition's own face (`http_face`).
+
+    The cost is throughput: requests are served one after another, so one slow
+    call delays every request behind it. Usable as `with lock:` like a
+    `threading.Lock`, or with `hold(blocking=False)` to try without waiting."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+
+    def acquire(self, blocking: bool = True) -> bool:
+        return self._lock.acquire(blocking)
+
+    def release(self) -> None:
+        self._lock.release()
+
+    def locked(self) -> bool:
+        return self._lock.locked()
+
+    def __enter__(self) -> "DispatchLock":
+        self._lock.acquire()
+        return self
+
+    def __exit__(self, *_exc) -> None:
+        self._lock.release()
+
+    @contextmanager
+    def hold(self, *, blocking: bool = True):
+        """Yield True while holding the lock, or False at once when
+        `blocking=False` and another request holds it."""
+        if not self._lock.acquire(blocking):
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            self._lock.release()
