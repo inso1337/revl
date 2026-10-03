@@ -77,15 +77,15 @@ Measured over each tier's own emitter corpus, the enumerated document list
 |------|-------:|----------------------------:|-----------------------:|
 | py   |     59 |                   59 (100%) |             53 (89.8%) |
 | ts   |     76 |                   76 (100%) |             60 (78.9%) |
-| go   |     38 |                   38 (100%) |             35 (92.1%) |
+| go   |     55 |                   55 (100%) |             49 (89.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **293** | **293 (100%)** | **266 (90.8%)** |
+| **total** | **310** | **310 (100%)** | **280 (90.3%)** |
 
-Every one of the 293 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 266 of
-them survive the **fully-native** chain, so all 27 residual documents
+Every one of the 310 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 280 of
+them survive the **fully-native** chain, so all 30 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -309,7 +309,7 @@ What Stage 4 still needs after this is no longer an emit gap:
   tier is missing;
 * `selfhost/emit_rust.rvl` does not mirror `_coerce_any_arg`, so no byte-agreement
   corpus document can reach the four crossings above without flipping the oracle
-  red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines.json` with
+  red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines/` with
   that reason, which is the same shape the boxing coercion already carried.
 
 ## Files

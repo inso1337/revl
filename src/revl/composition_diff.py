@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 
 from .audit_diff import audit_report, diff_crossings
+from .lower import SHARED_REALM
 
 
 def load_composition(path: str) -> dict:
@@ -69,6 +70,7 @@ def _components(ir: dict) -> dict[str, dict]:
             out[comp["name"]] = {
                 "requires": dict(comp.get("requires") or {}),
                 "provides": dict(comp.get("provides") or {}),
+                "isolate": dict(comp.get("isolate") or {}),
             }
         return out
     # fallback: manifest entries (keys only, service identity unknown)
@@ -77,28 +79,58 @@ def _components(ir: dict) -> dict[str, dict]:
         out[entry["name"]] = {
             "requires": {k: None for k in entry.get("inject") or []},
             "provides": {k: None for k in entry.get("provides") or []},
+            "isolate": dict(entry.get("isolate") or {}),
         }
     return out
+
+
+def _realm(rec: dict, key: str) -> str:
+    """The realm one component reaches `key` in: its `isolate` for the key, or
+    the shared realm. The same rule `query.Composition.realm` applies, so a
+    provider is matched to exactly the consumers `revl_query` matches it to."""
+    return rec["isolate"].get(key, SHARED_REALM)
+
+
+def _record(key: str, realm: str, **fields) -> dict:
+    """A provider or edge record. `realm` appears only for a realm-scoped key,
+    so a single-realm composition's delta is the same as before."""
+    out = {"key": key}
+    if realm != SHARED_REALM:
+        out["realm"] = realm
+    out.update(fields)
+    return out
+
+
+def _in_realm(record: dict) -> str:
+    """` in realm `b`` for a realm-scoped record, else nothing."""
+    return f" in realm `{record['realm']}`" if record.get("realm") else ""
 
 
 def facts(ir: dict) -> dict:
     """The three guarantee surfaces of one composition, in a shape set-diffable
     against another generation's facts.
 
-        components   name -> {requires:{key:service}, provides:{key:service}}
-        providers    key  -> {service, component}     (the composition-wide DI wiring)
-        require_edges set of (component, key)
+        components   name -> {requires:{key:service}, provides:{key:service},
+                              isolate:{key:realm}}
+        providers    (key, realm) -> {service, component}  (the DI wiring)
+        require_edges set of (component, key, realm)
+
+    Keyed by realm (issue #1848): two realms may each provide `db`, and a
+    consumer is satisfied only by the provider in ITS realm. Keyed by key
+    alone, the second provider overwrote the first, and removing realm B's
+    provider left B's consumers reading as satisfied while A still provided
+    the key.
         audit        the `audit_diff.audit_report` — reused verbatim for the
                      authority (emission / reached-host) surface
     """
     comps = _components(ir)
-    providers: dict[str, dict] = {}
-    require_edges: set[tuple[str, str]] = set()
+    providers: dict[tuple[str, str], dict] = {}
+    require_edges: set[tuple[str, str, str]] = set()
     for name, rec in comps.items():
         for key, service in rec["provides"].items():
-            providers[key] = {"service": service, "component": name}
+            providers[(key, _realm(rec, key))] = {"service": service, "component": name}
         for key in rec["requires"]:
-            require_edges.add((name, key))
+            require_edges.add((name, key, _realm(rec, key)))
     return {
         "components": comps,
         "providers": providers,
@@ -140,32 +172,32 @@ def diff(before: dict, after: dict) -> dict:
     # authority surface — the reused drift relation
     cross = diff_crossings(bf["audit"], af["audit"])
 
-    # providers (composition-wide DI wiring), keyed by DI key
+    # providers (the DI wiring), keyed by (DI key, realm)
     prov_added, prov_removed, prov_changed = [], [], []
-    for key in sorted(set(af["providers"]) - set(bf["providers"])):
-        prov_added.append({"key": key, **af["providers"][key]})
-    for key in sorted(set(bf["providers"]) - set(af["providers"])):
-        prov_removed.append({"key": key, **bf["providers"][key]})
-    for key in sorted(set(bf["providers"]) & set(af["providers"])):
-        b, a = bf["providers"][key], af["providers"][key]
+    for key, realm in sorted(set(af["providers"]) - set(bf["providers"])):
+        prov_added.append(_record(key, realm, **af["providers"][(key, realm)]))
+    for key, realm in sorted(set(bf["providers"]) - set(af["providers"])):
+        prov_removed.append(_record(key, realm, **bf["providers"][(key, realm)]))
+    for key, realm in sorted(set(bf["providers"]) & set(af["providers"])):
+        b, a = bf["providers"][(key, realm)], af["providers"][(key, realm)]
         # a provider *swap* is a change of the concrete providing component
         # (the DI wiring), or of the service interface it satisfies
         if (b["component"], b["service"]) != (a["component"], a["service"]):
-            prov_changed.append({
-                "key": key,
-                "from": b["component"], "to": a["component"],
-                "from_service": b["service"], "to_service": a["service"]})
+            prov_changed.append(_record(
+                key, realm,
+                **{"from": b["component"], "to": a["component"],
+                   "from_service": b["service"], "to_service": a["service"]}))
 
     # require edges (the depends-on graph)
     req_added = sorted(af["require_edges"] - bf["require_edges"])
     req_removed = sorted(bf["require_edges"] - af["require_edges"])
 
-    # a require edge is *broken* when the key has no provider in that
-    # generation; a NEWLY broken edge (satisfiable before, dangling now) is the
-    # dependency the change quietly severed.
-    def _broken(f: dict) -> set[tuple[str, str]]:
+    # a require edge is *broken* when the key has no provider IN ITS REALM in
+    # that generation; a NEWLY broken edge (satisfiable before, dangling now) is
+    # the dependency the change quietly severed.
+    def _broken(f: dict) -> set[tuple[str, str, str]]:
         provided = set(f["providers"])
-        return {(c, k) for (c, k) in f["require_edges"] if k not in provided}
+        return {(c, k, r) for (c, k, r) in f["require_edges"] if (k, r) not in provided}
 
     broken_after = _broken(af)
     newly_broken = sorted(broken_after - _broken(bf))
@@ -175,7 +207,7 @@ def diff(before: dict, after: dict) -> dict:
     changed_c = []
     for name in sorted(common_c):
         touched = any(_split(t)[1] == name for t in cross["added"] + cross["removed"])
-        req_moved = any(c == name for (c, _k) in req_added + req_removed)
+        req_moved = any(c == name for (c, _k, _r) in req_added + req_removed)
         prov_moved = (
             any(p["component"] == name for p in prov_added + prov_removed)
             or any(p["from"] == name or p["to"] == name
@@ -188,15 +220,22 @@ def diff(before: dict, after: dict) -> dict:
         "providers": {"added": prov_added, "removed": prov_removed,
                       "changed": prov_changed},
         "requires": {
-            "added": [{"component": c, "key": k} for (c, k) in req_added],
-            "removed": [{"component": c, "key": k} for (c, k) in req_removed],
-            "broken": [{"component": c, "key": k} for (c, k) in newly_broken],
+            "added": [_edge(c, k, r) for (c, k, r) in req_added],
+            "removed": [_edge(c, k, r) for (c, k, r) in req_removed],
+            "broken": [_edge(c, k, r) for (c, k, r) in newly_broken],
         },
         "crossings": {"added": cross["added"], "removed": cross["removed"]},
     }
     delta["guarantees"] = _guarantees(delta, bf, af)
     delta["changed"] = _nonempty(delta)
     return delta
+
+
+def _edge(component: str, key: str, realm: str) -> dict:
+    out = {"component": component, "key": key}
+    if realm != SHARED_REALM:
+        out["realm"] = realm
+    return out
 
 
 def _nonempty(delta: dict) -> bool:
@@ -245,21 +284,21 @@ def _guarantees(delta: dict, bf: dict, af: dict) -> list[str]:
 
     for p in delta["providers"]["changed"]:
         if p["from"] != p["to"]:
-            out.append(f"provider of key `{p['key']}` changed from "
+            out.append(f"provider of key `{p['key']}`{_in_realm(p)} changed from "
                        f"`{p['from']}` to `{p['to']}`")
         else:
-            out.append(f"provider of key `{p['key']}` (`{p['from']}`) now "
+            out.append(f"provider of key `{p['key']}`{_in_realm(p)} (`{p['from']}`) now "
                        f"satisfies service `{p['to_service']}` "
                        f"(was `{p['from_service']}`)")
     for p in delta["providers"]["added"]:
         svc = p.get("service")
         via = f" by `{svc}`" if svc else ""
-        out.append(f"key `{p['key']}` is now provided{via} "
+        out.append(f"key `{p['key']}`{_in_realm(p)} is now provided{via} "
                    f"(component `{p['component']}`)")
     for p in delta["providers"]["removed"]:
         svc = p.get("service")
         was = f" (was `{svc}`)" if svc else ""
-        out.append(f"key `{p['key']}` is no longer provided{was}")
+        out.append(f"key `{p['key']}`{_in_realm(p)} is no longer provided{was}")
 
     for e in delta["requires"]["added"]:
         if e["component"] in added_c:
@@ -270,7 +309,7 @@ def _guarantees(delta: dict, bf: dict, af: dict) -> list[str]:
             continue
         out.append(f"`{e['component']}` no longer requires `{e['key']}`")
     for e in delta["requires"]["broken"]:
-        out.append(f"`{e['component']}` requires `{e['key']}` — "
+        out.append(f"`{e['component']}` requires `{e['key']}`{_in_realm(e)} — "
                    f"no provider in the composition (broken dependency)")
 
     return out
