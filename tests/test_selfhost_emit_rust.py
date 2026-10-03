@@ -238,6 +238,10 @@ CORPUS = [
                              #   `let-effect` acquisition prelude and its
                              #   `ctx.effect` inverse, and the host-Map call
                              #   convention (`get`/`remove` borrow the key)
+    "comp_host_map_undo_local.rvl",  # a host-Map `insert(key, v)` whose undo
+                             #   re-reads the moved body local `key`: the
+                             #   `let key_undo = key.clone();` pre-clone (item
+                             #   114, `_undo_reclone_locals`)
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
@@ -506,6 +510,47 @@ fn main() {
     assert_eq!(edge_direct(4), 5);
     assert!(edge_borrow(true, "pre".into(), "other".into()));
     assert_eq!(edge_self_reference("x".into()), "prefixxx");
+}
+""", encoding="utf-8")
+    result = bench._cargo("run", tmp_path, "--quiet")
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_host_map_undo_reclones_a_moved_body_local(emitted, reference):
+    # item 114: `insert(key, v)` moves the body local `key`, so the undo must
+    # read a clone taken before the acquire. The port used to read `key` itself.
+    ir = compile_files([str(CORPUS_DIR / "comp_host_map_undo_local.rvl")])
+    src = emitted["emit_rust_src"](ir)
+    clone = src.index("let key_undo = key.clone();")
+    assert clone < src.index("let _ = self.store.insert(key, v.clone());")
+    assert "store_undo.remove(&key_undo)" in src
+    assert "remove(&key)" not in src
+
+
+@pytest.mark.skipif(shutil.which("cargo") is None, reason="cargo not installed")
+@pytest.mark.parametrize("backend", ["reference", "selfhost"])
+def test_host_map_undo_local_builds_and_runs(emitted, reference, tmp_path, backend):
+    ir = compile_files([str(CORPUS_DIR / "comp_host_map_undo_local.rvl")])
+    src = (reference.emit(ir) if backend == "reference"
+           else emitted["emit_rust_src"](ir))
+    bench = _load_bench_rust()
+    reason = bench.rust_runtime_reason()
+    if reason is not None:
+        pytest.skip(f"cordis-rs runtime does not resolve here: {reason}")
+    (tmp_path / "src").mkdir()
+    (tmp_path / "Cargo.toml").write_text(
+        reference.cargo_toml("revl_host_map_undo_local"), encoding="utf-8")
+    (tmp_path / "src" / "main.rs").write_text(src + r"""
+fn main() {
+    let root = cordis::Context::new();
+    let cfg = serde_json::json!({"Slots": {}});
+    let f = _revl_load(&root, "slots", &cfg).expect("load Slots");
+    f.try_wait().expect("Slots is ACTIVE");
+    let cache = root.require::<Box<dyn Cache>>("cache").expect("cache is ACTIVE");
+    assert_eq!(cache.put(String::from("a"), String::from("1")), "1");
+    drop(cache);
+    f.dispose().expect("unload Slots");
+    assert_eq!(REVL_LIVE_HOST_RESOURCES.with(|c| c.get()), 0);
 }
 """, encoding="utf-8")
     result = bench._cargo("run", tmp_path, "--quiet")

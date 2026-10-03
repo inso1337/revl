@@ -38,7 +38,7 @@
 
 ["function", "compiler-inlined-helper-copies-the-python-bootstrap-emitter", "rstrip", 5, 5]
 
-["reason", "component-construction-and-provide-method-alternatives-these", "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered."]
+["reason", "component-construction-and-provide-method-alternatives-these", "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered. `method_body_lines` 5 -> 7 when item 391's teardown port met main's item-114 undo reclone: a provide method's `emit ... compensate` now reclones the locals its compensate reads that the emission moves (`_undo_reclone_locals`, as the reference does), and no corpus document has a compensating emission that moves a local, so the two statements of that loop are unreached."]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "config_default_lit", 1, 1]
 
@@ -50,7 +50,7 @@
 
 ["function", "component-construction-and-provide-method-alternatives-these", "is_extra_linebreak", 3, 3]
 
-["function", "component-construction-and-provide-method-alternatives-these", "method_body_lines", 5, 5]
+["function", "component-construction-and-provide-method-alternatives-these", "method_body_lines", 7, 7]
 
 ["function", "component-construction-and-provide-method-alternatives-these", "mname", 1, 1]
 
@@ -94,7 +94,7 @@
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "host_of", 4, 4]
 
-["function", "host-bind-and-realm-residuals-beyond-the-two", "map_insert_candidates", 8, 8]
+["function", "host-bind-and-realm-residuals-beyond-the-two", "map_insert_candidates", 7, 7]
 
 ["function", "host-bind-and-realm-residuals-beyond-the-two", "map_value_expr_type", 75, 75]
 

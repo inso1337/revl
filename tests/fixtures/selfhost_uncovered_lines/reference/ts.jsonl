@@ -46,7 +46,7 @@
 
 ["reason", "expression-residuals-expr-rejects-a-malformed-node-async", "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, legacy-format `$$`, and the top-level `stream-merge` arm: the frontend produces a `stream-merge` only as a `subscribe`'s stream, which `_stream_head` renders directly. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. The routed requirement proxy, the `Map` subscript, the `do` block and the `subscribe` lowering are covered (issue #106)"]
 
-["function", "expression-residuals-expr-rejects-a-malformed-node-async", "_expr", 17, 17]
+["function", "expression-residuals-expr-rejects-a-malformed-node-async", "_expr", 19, 19]
 
 ["function", "expression-residuals-expr-rejects-a-malformed-node-async", "_fn_call", 2, 2]
 
@@ -84,9 +84,9 @@
 
 ["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_tests", 1, 1]
 
-["reason", "item-130-4-5-replay-refusal-backends-typescript", "Item 130 §4.5 replay refusal: backends/typescript/emit.py::_refuse_unlowered_replay refuses a `replay(…)` declaration or request this tier does not lower. It is a refusal, so no successful corpus document can reach it — a document that did would fail to emit rather than compare bytes. Pinned by tests/test_stream_reactive.py."]
+["reason", "item-130-4-5-replay-backends-typescript-emit-py-replay-count", "Item 130 §4.5 replay: backends/typescript/emit.py::_replay_count reads a last-n `replay(<n>)` declaration or request, which this tier now lowers, and refuses the durable `replay(from: …)` cursor, which it does not. Both arms are reached only by a component that holds a stream, and no ts corpus document can hold one because selfhost/emit_ts.rvl ports no stream lowering; a cursor REFUSAL document cannot stand in either, because every `.rvl` under tests/fixtures is a gate/reference census case and the native gate (selfhost/lower.rvl) false-rejects any document carrying `replay(…)`. Replaces `_refuse_unlowered_replay` (1), and `_expr` (in the expression-residuals group) rises by 2 for the `host.Stream.source({ replay: n })` and `replay: k` arms. Pinned by tests/test_stream_reactive.py and run under plain node by backends/typescript/test_stream_ts.py."]
 
-["function", "item-130-4-5-replay-refusal-backends-typescript", "_refuse_unlowered_replay", 1, 1]
+["function", "item-130-4-5-replay-backends-typescript-emit-py-replay-count", "_replay_count", 3, 3]
 
 ["reason", "literal-and-float-shape-invariants-finite-float-rejects", "Literal and Float-shape invariants: `_finite_float` rejects NaN/Infinity; `_float_literal` returns None for non-float values; `_is_float_expr`'s unstamped literal/unary inference handles legacy IR; `_literal` maps null and rejects foreign Python values. Typed finite source literals carry canonical stamps and are covered"]
 
