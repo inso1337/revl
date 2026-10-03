@@ -1543,13 +1543,14 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_formal_a9_row.py")
             pytest_nodes.add("tests/test_formal_a2_row.py")
             pytest_nodes.add("tests/test_formal_alignment.py")
-            # `formal/STATUS.md` is not only prose: `revl.cert` PARSES it for
-            # the census the component certificate reports, and the alignment
-            # census is generated into it by the harness. Rewriting that
-            # section without this node reds `test_826_component_certificate`
-            # in CI while the selector says the change was covered (measured
-            # on issue #1169, where the rewrite dropped the agree/mismatch
-            # clause `cert.oracle_census` reads).
+            # `formal/` is not only prose: `revl.cert` PARSES `STATUS.md` for
+            # the map rows and injection tables the component certificate
+            # reports, and since issue #1768 runs `harness/diff_corpus.py
+            # --census-json` for its oracle census. Changing either without
+            # this node reds `test_826_component_certificate` in CI while the
+            # selector says the change was covered (measured on issue #1169,
+            # where a STATUS.md rewrite dropped the clause the census reader
+            # then parsed, and again on #1768).
             pytest_nodes.add("tests/test_826_component_certificate.py")
             reasons.append(f"{f} (formal gate)")
             continue
