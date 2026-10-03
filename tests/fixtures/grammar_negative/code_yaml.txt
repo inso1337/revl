@@ -1,0 +1,5 @@
+name: cache
+keys:
+  - a
+  - b
+ttl: 60

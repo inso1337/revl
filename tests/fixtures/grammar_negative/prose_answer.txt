@@ -1,0 +1,2 @@
+Sure! Here is a component that caches user lookups. It requires a database
+and provides a cache service, so other components can depend on it.

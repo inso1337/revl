@@ -17,6 +17,7 @@ from ..compiler import compile_files, compile_source
 from ..diagnostics import report
 from ..errors import RevlError
 from .. import query as Q
+from .authoring_loop import step_label
 
 _SOURCE_INPUT = {
     "source": {"type": "string",
@@ -125,6 +126,7 @@ QUERY_TOOLS = [
     {
         "name": "revl_query_withdraw",
         "description":
+            step_label("revl_query_withdraw") + " "
             "WHAT BREAKS IF I WITHDRAW C? The reactive cascade: components "
             "that inject a provision C provides, then their dependents, with "
             "the LIFO order the runtime would tear them down in and the keys "
