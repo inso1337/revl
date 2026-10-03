@@ -28,7 +28,8 @@ revl:
     for a G5 or a G6 checker code, so `g5_undo_handle_emission.rvl` landed
     in `formal-found-other` and eleven more G5 refusals in the generic
     `out-of-fragment`. There is a G5 arm now, and a documented reason there
-    is no `agree-G6` (below).
+    is no `agree-G6` keyed on the `C` row (below); since issue #1812 the
+    G6 binding refusal has its own row, `BU`.
 
 And the promotion the first four were the precondition for: `formal-strict`
 and `formal-found-other` are in `FATAL_BUCKETS`. Informational is how the
@@ -533,16 +534,38 @@ def test_the_confinement_row_fails_on_a_program_the_checker_accepts(
     assert any(x == "fail" for x in ref.confinements.values())
 
 
-def test_a_g6_refusal_is_out_of_fragment_with_the_model_clean(
+def test_a_g6_binding_refusal_agrees_by_the_binding_row(
         align, verdicts, rows, harness):
     """revl's G6 is purity outside effect forms and the duplicate-binding
-    refusal; the model states neither. Its verdicts on the file are all
-    `ok`, and the `C` rows that do `fail` are about something else."""
-    assert harness.checker_code(G6)[0] == "G6"
+    refusal. The file is a binding refusal, and the `BU` row (issue #1812)
+    is what agrees with it: the `G` row is `ok`, and the `C` rows that do
+    `fail` are about something else."""
+    assert harness.checker_code(G6) == ("G6", "binding")
     assert verdicts.comps[(G6, "C")] == "ok"
     assert any(x == "fail" for k, x in verdicts.confinements.items()
                if k[0] == G6)
-    counts, fatal, out = align(G6, verdicts, rows)
+    assert verdicts.bindings[(G6, "C", "cache.set")] == "fail"
+    counts, fatal, _out = align(G6, verdicts, rows)
+    assert counts == {"agree-G6": 1}
+    assert fatal == []
+
+
+def _as_purity_refusal(harness, monkeypatch):
+    """Report the G6 file as a PURITY refusal, the G6 category the model
+    still states no rule about. No corpus file outside the parse refusals
+    has one, so the arm is exercised on the one G6 file the checker sees."""
+    real = harness.checker_code
+    monkeypatch.setattr(harness, "checker_code", lambda rel: (
+        ("G6", "purity") if rel == G6 else real(rel)))
+
+
+def test_a_g6_purity_refusal_is_out_of_fragment_with_the_model_clean(
+        align, verdicts, rows, harness, monkeypatch):
+    """The model states nothing about purity outside an effect form, so a
+    purity refusal with every row `ok` is an absence, ratcheted by name."""
+    _as_purity_refusal(harness, monkeypatch)
+    clean = verdicts._replace(bindings={k: "ok" for k in verdicts.bindings})
+    counts, fatal, out = align(G6, clean, rows)
     assert counts == {"out-of-fragment-G6": 1}
     assert fatal == []
     assert f"ALIGN out-of-fragment-G6: {G6}" in out
@@ -568,11 +591,15 @@ def test_a_model_refusal_on_an_accepted_file_fails_the_gate(
 
 
 def test_a_model_refusal_under_an_unmodelled_code_fails_the_gate(
-        align, verdicts, rows):
+        align, verdicts, rows, harness, monkeypatch):
     """The input that still FAILS for `formal-found-other`: revl refuses the
-    G6 file for a rule the model does not state, and a model row refuses it
-    for some other reason. `out-of-fragment-G6` is only for a CLEAN model."""
-    dirty = verdicts._replace(comps={**verdicts.comps, (G6, "C"): "fail"})
+    G6 file for a rule the model does not state (purity), and a model row
+    refuses it for some other reason. `out-of-fragment-G6` is only for a
+    CLEAN model."""
+    _as_purity_refusal(harness, monkeypatch)
+    dirty = verdicts._replace(
+        comps={**verdicts.comps, (G6, "C"): "fail"},
+        bindings={k: "ok" for k in verdicts.bindings})
     counts, fatal, _out = align(G6, dirty, rows)
     assert counts == {"formal-found-other": 1}
     assert fatal == [f"formal-found-other: {G6}"]
@@ -713,7 +740,7 @@ def test_a_file_joining_the_g6_bucket_fails_the_gate(harness, status, ledger):
     write(samples)
     newcomer = "examples/rejections/g6_new_shape.rvl"
     findings = check({**samples, "out-of-fragment-G6": [
-        *samples["out-of-fragment-G6"], newcomer]})
+        *samples.get("out-of-fragment-G6", []), newcomer]})
     assert len(findings) == 1
     assert findings[0].startswith(f"joined out-of-fragment-G6: {newcomer}")
 

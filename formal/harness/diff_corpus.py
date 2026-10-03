@@ -1421,6 +1421,130 @@ def approval_rows(rel: str, comp, ctx: _ApprovalCtx, svc_objs: dict,
     return rows
 
 
+# ------------------------------------ binding uniqueness (issue #1812)
+#
+# The checker's G6 `binding` refusal (`Env.bind_local` in the activation body,
+# `_check_rebind` in a provide method): a binding whose name is already in
+# view. The model states the rule over a scope's steps
+# (`RevL.G6Binding.ScopeOK`); the exporter carries them, one `BE` row each:
+#
+#   BE <file> <comp> <scope> <ord> seed  <name>  a name in view at the start
+#   BE <file> <comp> <scope> <ord> bind  <name>  a binding
+#   BE <file> <comp> <scope> <ord> enter -       a block opens
+#   BE <file> <comp> <scope> <ord> leave -       the innermost block closes
+#
+# `@act` is the activation body, seeded with the `requires` locals. A provide
+# method `<key>.<method>` is seeded with the activation bindings made before
+# its `provide` block and with its own parameters; a `requires` local is not
+# in view there (`_check_rebind` consults params, method locals and
+# `env.locals`). Blocks are the method's `if` arms and `while`/`for` bodies
+# (`_lower_scoped_block`), a `for` binder living in its loop's block, and in
+# the activation body an effect's `setup { ... }` block and a stream
+# iteration's body.
+
+ACT_SCOPE = "@act"
+
+
+def _act_binding_events(stmt, out: list) -> None:
+    """The `BE` events one activation-body statement contributes."""
+    setup = getattr(stmt, "setup", None)
+    if isinstance(stmt, (LetEffect, EffectStmt)) and setup:
+        out.append(("enter", "-"))
+        for inner in setup:
+            if type(inner).__name__ == "LetStmt":
+                out.append(("bind", inner.name))
+        out.append(("leave", "-"))
+    if isinstance(stmt, (LetEffect, LetApprovalStmt)) \
+            and isinstance(getattr(stmt, "bind", None), str):
+        out.append(("bind", stmt.bind))
+    elif isinstance(stmt, StreamIterStmt):
+        out.append(("enter", "-"))
+        out.append(("bind", stmt.bind))
+        for inner in stmt.body or ():
+            _act_binding_events(inner, out)
+        out.append(("leave", "-"))
+
+
+def _method_binding_events(stmts, out: list) -> None:
+    """The `BE` events a provide-method body contributes, in source order."""
+    for ms in stmts or ():
+        kind = type(ms).__name__
+        if kind == "LetStmt":
+            out.append(("bind", ms.name))
+        elif isinstance(ms, LetEffect) and isinstance(ms.bind, str):
+            out.append(("bind", ms.bind))
+        elif kind == "IfStmt":
+            out.append(("enter", "-"))
+            _method_binding_events(ms.then, out)
+            out.append(("leave", "-"))
+            if ms.otherwise is not None:
+                out.append(("enter", "-"))
+                _method_binding_events(ms.otherwise, out)
+                out.append(("leave", "-"))
+        elif kind == "WhileStmt":
+            out.append(("enter", "-"))
+            _method_binding_events(ms.body, out)
+            out.append(("leave", "-"))
+        elif kind == "ForStmt":
+            out.append(("enter", "-"))
+            out.append(("bind", ms.bind))
+            _method_binding_events(ms.body, out)
+            out.append(("leave", "-"))
+
+
+def binding_rows(rel: str, comp) -> list[str]:
+    """The `BE` rows of one component: its activation body, then each
+    provide method."""
+    rows: list[str] = []
+
+    def emit(scope: str, seed: list, events: list) -> None:
+        steps = [("seed", n) for n in seed] + events
+        for ord_, (kind, name) in enumerate(steps):
+            rows.append("\t".join(["BE", rel, comp.name, scope, str(ord_),
+                                   kind, name]))
+
+    act: list = []
+    bound: list[str] = []   # the activation's top-level bindings so far
+    methods: list = []
+    for stmt in comp.body:
+        if isinstance(stmt, ProvideStmt):
+            for pm in stmt.methods:
+                events: list = []
+                _method_binding_events(pm.body, events)
+                methods.append((f"{stmt.key}.{pm.name}",
+                                list(bound) + list(pm.params), events))
+            continue
+        mine: list = []
+        _act_binding_events(stmt, mine)
+        depth = 0
+        for kind, name in mine:
+            depth += {"enter": 1, "leave": -1}.get(kind, 0)
+            if kind == "bind" and depth == 0:
+                bound.append(name)
+        act.extend(mine)
+    emit(ACT_SCOPE, [local for local, _svc, _line in comp.requires], act)
+    for scope, seed, events in methods:
+        emit(scope, seed, events)
+    return rows
+
+
+def binding_verdict(seed: list[str], events: list[tuple[str, str]]) -> bool:
+    """The reference's binding rule over one scope, recomputed from the `BE`
+    rows: every bind's name is in no open frame, and a block's bindings are
+    dropped when it closes. The outermost frame is never dropped."""
+    frames: list[set[str]] = [set(seed)]
+    for kind, name in events:
+        if kind == "bind":
+            if any(name in f for f in frames):
+                return False
+            frames[-1].add(name)
+        elif kind == "enter":
+            frames.append(set())
+        elif kind == "leave" and len(frames) > 1:
+            frames.pop()
+    return True
+
+
 def collect_spawns(node, handles: dict, rows: list) -> None:
     """Fill `handles` (var -> spawned component) and `rows` (`(bind, comp)`
     spawn payloads) from spawn acquisitions."""
@@ -2223,6 +2347,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                 tsv.extend(approval_rows(rel, c, _ApprovalCtx(
                     require_map, bounds, em_set, handles, psvc, aliases,
                     extern_caps, host_tokens), svc_objs, psvc))
+            # binding-uniqueness facts (BE, issue #1812): each scope's seed
+            # names and its bind/enter/leave steps.
+            tsv.extend(binding_rows(rel, c))
 
             calls: list[tuple[str, str, str, str]] = []
             kinds: list[str] = []
@@ -3279,6 +3406,39 @@ def approval_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each binding scope: (admitted, binds,
+#: opens a block). Filled by `reference_from_tsv`, read by `binding_coverage`.
+_BINDING_ROWS: dict = {}
+
+
+def binding_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `BU` row (issue #1812).
+
+    A row that said `ok` over scopes that bind nothing, or never saw a block,
+    would agree vacuously. The corpus must carry:
+
+      * a scope REFUSED for a binding that reuses a name in view (the
+        method of `examples/rejections/g6_method_local_shadows_component.rvl`);
+      * an ADMITTED scope that binds a name and opens a block, so the block
+        scoping is exercised on the admitted side.
+
+    Returns findings, treated as gate failures."""
+    witnesses = {"refused": None, "scoped": None}
+    for key, (ok, binds, blocks) in sorted(_BINDING_ROWS.items()):
+        if not ok:
+            witnesses["refused"] = witnesses["refused"] or key
+        if ok and binds and blocks:
+            witnesses["scoped"] = witnesses["scoped"] or key
+    labels = {"refused": "a scope refused for rebinding a name in view",
+              "scoped": "an admitted scope that binds a name and opens a block"}
+    findings = [f"binding coverage: NO witness of {labels[k]} — the BU row "
+                "would agree vacuously" for k, w in witnesses.items() if w is None]
+    if not findings:
+        print(f"binding coverage: {len(_BINDING_ROWS)} scopes; "
+              + " ".join(f"{k}={w}" for k, w in witnesses.items()))
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -3312,7 +3472,9 @@ class Verdicts(NamedTuple):
     a component's activation body), `deferred` DF rows (G4 deferred position:
     a `deferred` emission is reached only by a call in a component),
     `approvals` AP rows (the G4 approval floor: every approval-required token
-    a marked crossing reaches is covered by its `with` edge, issue #1455)."""
+    a marked crossing reaches is covered by its `with` edge, issue #1455),
+    `bindings` BU rows (G6 binding uniqueness: no binding reuses a name in
+    view, issue #1812)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -3329,7 +3491,7 @@ class Verdicts(NamedTuple):
     a2: dict[tuple[str, str], str]
     deferred: dict[str, str]
     approvals: dict[tuple[str, str, str], str]
-
+    bindings: dict[tuple[str, str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -3339,7 +3501,7 @@ class Verdicts(NamedTuple):
 
                 + len(self.g5reg) + len(self.a9) + len(self.configs)
                 + len(self.a2) + len(self.deferred)
-                + len(self.approvals))
+                + len(self.approvals) + len(self.bindings))
 
 
 
@@ -3367,6 +3529,7 @@ def parse_verdicts(text: str) -> Verdicts:
     a2: dict[tuple[str, str], str] = {}
     deferred: dict[str, str] = {}
     approvals: dict[tuple[str, str, str], str] = {}
+    bindings: dict[tuple[str, str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -3442,11 +3605,15 @@ def parse_verdicts(text: str) -> Verdicts:
             # The approval floor: (file, comp, crossing ord) -> ok|fail.
             approvals[(parts[1], parts[2], parts[3])] = \
                 parts[4].split("=", 1)[1]
+        elif parts[0] == "BU" and len(parts) == 5:
+            # G6 binding uniqueness: (file, comp, scope) -> ok|fail.
+            bindings[(parts[1], parts[2], parts[3])] = \
+                parts[4].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
-                    a2, deferred, approvals)
+                    a2, deferred, approvals, bindings)
 
 
 
@@ -3869,6 +4036,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
             crossing_edge[(r[1], r[2], r[3])] = r[4]
     _APPROVAL_ROWS.clear()
     approvals: dict[tuple[str, str, str], str] = {}
+    bindings: dict[tuple[str, str, str], str] = {}
     for key, tokens in crossing_tokens.items():
         needed = tokens & required_by_file.get(key[0], set())
         edge = crossing_edge.get(key)
@@ -3876,10 +4044,27 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         approvals[key] = "ok" if ok else "fail"
         _APPROVAL_ROWS[key] = (ok, edge is not None, bool(needed))
 
+    # BU verdicts (G6 binding uniqueness, issue #1812), recomputed from the BE
+    # rows: one verdict per scope.
+    scope_steps: dict[tuple[str, str, str], list[tuple[int, str, str]]] = {}
+    for r in rows:
+        if r and r[0] == "BE" and len(r) == 7:
+            scope_steps.setdefault((r[1], r[2], r[3]), []).append(
+                (int(r[4]), r[5], r[6]))
+    _BINDING_ROWS.clear()
+    for key, steps in scope_steps.items():
+        steps.sort()
+        seed = [n for _o, k, n in steps if k == "seed"]
+        events = [(k, n) for _o, k, n in steps if k != "seed"]
+        ok = binding_verdict(seed, events)
+        bindings[key] = "ok" if ok else "fail"
+        _BINDING_ROWS[key] = (ok, sum(1 for k, _n in events if k == "bind"),
+                              any(k == "enter" for k, _n in events))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
 
                     recoveries, confinements, g8surface, g5reg, a9,
-                    configs, a2, deferred, approvals)
+                    configs, a2, deferred, approvals, bindings)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -3998,8 +4183,9 @@ def a9_coverage() -> list[str]:
 # about that other language. Both are 0 on the corpus, so both are fatal; a
 # genuine fragment gap has `out-of-fragment*` to land in, which is the bucket
 # that says "the model has no fact here" rather than "the model disagrees".
-FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-G5", "missed-A9",
-                 "missed-A2", "formal-strict", "formal-found-other")
+FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-G5", "missed-G6",
+                 "missed-A9", "missed-A2", "formal-strict",
+                 "formal-found-other")
 
 
 def checker_code(rel: str) -> tuple[str, str]:
@@ -4148,6 +4334,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # checker reports under G4 (category `approval`), so it joins the
         # fold the same way.
         ap_rows = [(k, x) for k, x in v.approvals.items() if k[0] == rel]
+        # The BU row is G6 binding uniqueness (issue #1812): checker-visible
+        # in both directions, like A2.
+        bu_fail = any(x == "fail" for k, x in v.bindings.items() if k[0] == rel)
         g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows + ap_rows
         # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
         # refuses the shape with code A2, so a model `fail` on an accepted
@@ -4160,7 +4349,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # a file the checker accepts is `formal-strict` like any other.
         df_fail = v.deferred.get(rel, "ok") == "fail"
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in g4_rows + a9_rows + a2_rows) and not df_fail
+            x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
+            and not df_fail and not bu_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -4233,10 +4423,18 @@ def checker_alignment(file_facts: dict, componentless: list[str],
             # `Map.new` is not a declared require, and STATUS.md says so. An
             # agreement keyed on it could not fail, which is the informational
             # bucket this issue is about, one level down. The model states no
-            # rule about purity outside an effect form or about a duplicate
-            # binding, so a G6 refusal is honestly outside its fragment.
-            record("out-of-fragment-G6" if formal_clean
-                   else "formal-found-other", rel)
+            # rule about purity outside an effect form, so a G6 PURITY refusal
+            # is honestly outside its fragment.
+            #
+            # The duplicate-binding refusal (category `binding`) IS modelled
+            # since issue #1812: the `BU` row decides `RevL.G6Binding` over
+            # each scope's bindings, so a binding refusal the row admits is
+            # the model being weaker than the checker, and fatal.
+            if category == "binding":
+                record("agree-G6" if bu_fail else "missed-G6", rel)
+            else:
+                record("out-of-fragment-G6" if formal_clean
+                       else "formal-found-other", rel)
         else:
             record("out-of-fragment" if formal_clean else "formal-found-other",
                    rel)
@@ -4307,7 +4505,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 #
 #   * a file that JOINS one of these buckets and is not in the ledger fails
 #     the gate. A new `undo` shape the `Prog` cannot resolve, or a new
-#     G6-coded fixture, can no longer arrive while the model stays silent:
+#     G6 purity fixture, can no longer arrive while the model stays silent:
 #     somebody has to model it, or write its name down and own the hole.
 #   * a ledger entry that is NO LONGER in its bucket fails the gate too and
 #     must be DELETED. So the list shrinks only, and a file cannot be parked
@@ -4349,8 +4547,10 @@ OOF_LEDGER_ABOUT = [
     "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
     "G4 approval floor left it in issue #1455: `RevL.G4Approval`, decided",
     "as the `AP` row. The G5 list emptied in issue #1792, when the exporter",
-    "began resolving an inverse's indirections; the bucket stays, so a new",
-    "unresolvable `undo` still reds the gate.)",
+    "began resolving an inverse's indirections, and the G6 list in issue",
+    "#1812, when binding uniqueness became `RevL.G6Binding` (the `BU`",
+    "row). Both buckets stay, so a new unresolvable `undo` or a new G6",
+    "purity refusal still reds the gate.)",
     "",
     "Both buckets record an absence, so neither can disagree with anything",
     "and neither could fail the gate on its own (issue #1169). This ledger",
@@ -4488,6 +4688,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         f"{len(ref.configs)} config fields", f"{len(ref.a2)} A2 bodies",
         f"{len(ref.deferred)} deferred-position files",
         f"{len(ref.approvals)} approval crossings",
+        f"{len(ref.bindings)} binding scopes",
     ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
@@ -4524,7 +4725,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
             f"in `{OOF_LEDGER_PATH.relative_to(REPO)}`, which shrinks only. "
             "A file that JOINS one fails the gate, and a line no longer in "
             "its bucket fails it until it is deleted. So a new `undo` shape "
-            "the `Prog` cannot resolve, or a new G6 fixture, cannot arrive "
+            "the `Prog` cannot resolve, or a new G6 purity fixture, cannot arrive "
             "while the model stays silent about it. `agree-*` and the "
             "generic `out-of-fragment` stay informational; that one collects "
             "every code the model states no row about at all, so it grows "
@@ -4660,7 +4861,8 @@ def main() -> int:
             ("config_data", ref.configs, formal.configs),
             ("a2", ref.a2, formal.a2),
             ("deferred", ref.deferred, formal.deferred),
-            ("approval", ref.approvals, formal.approvals)):
+            ("approval", ref.approvals, formal.approvals),
+            ("binding", ref.bindings, formal.bindings)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -4683,7 +4885,8 @@ def main() -> int:
         f"{len(ref.configs)} config fields + "
         f"{len(ref.a2)} a2 bodies + "
         f"{len(ref.deferred)} deferred-position files + "
-        f"{len(ref.approvals)} approval crossings) — "
+        f"{len(ref.approvals)} approval crossings + "
+        f"{len(ref.bindings)} binding scopes) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -4698,6 +4901,7 @@ def main() -> int:
     mismatches.extend(a2_coverage())
     mismatches.extend(deferred_coverage())
     mismatches.extend(approval_coverage())
+    mismatches.extend(binding_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

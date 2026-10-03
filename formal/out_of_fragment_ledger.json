@@ -7,8 +7,10 @@
     "model states it as `RevL.G4Deferred`, decided as the `DF` row. The",
     "G4 approval floor left it in issue #1455: `RevL.G4Approval`, decided",
     "as the `AP` row. The G5 list emptied in issue #1792, when the exporter",
-    "began resolving an inverse's indirections; the bucket stays, so a new",
-    "unresolvable `undo` still reds the gate.)",
+    "began resolving an inverse's indirections, and the G6 list in issue",
+    "#1812, when binding uniqueness became `RevL.G6Binding` (the `BU`",
+    "row). Both buckets stay, so a new unresolvable `undo` or a new G6",
+    "purity refusal still reds the gate.)",
     "",
     "Both buckets record an absence, so neither can disagree with anything",
     "and neither could fail the gate on its own (issue #1169). This ledger",
@@ -26,7 +28,5 @@
     "is identical under CI's python 3.11 and a 3.14 developer venv."
   ],
   "out-of-fragment-G5": [],
-  "out-of-fragment-G6": [
-    "examples/rejections/g6_method_local_shadows_component.rvl"
-  ]
+  "out-of-fragment-G6": []
 }

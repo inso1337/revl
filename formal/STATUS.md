@@ -50,7 +50,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **G3** acyclic dependencies | full | 9 | **yes** (V rows, 1 agree-G3) | the layering certificate is *derived* from `LinkOK`, so nothing is assumed. No known gap |
 | **G4** inverse-or-emit | full over the lattice; the shape-level statement is weak and marked | 2 + 7 + 10 | **yes** (182 G rows, 25 P rows, 6 agree-G4; one AP row per marked crossing for the approval floor, whose 34 refusals file under agree-G4) | `G4.inverse_or_emit` is shape-level and superseded. For the lattice form: the reach fold's **fuel bound** is real and named (`fold_must_run_to_stability`), `FnDecl.calls` stands in for `_calls_in` (an empirical obligation on the lowering), first-class dispatch is `*`, and `inverseOK` reads `undo` only where the reference walks `compensate` too. **Unbuilt work**, not modelling limits. The approval floor (item 246, issue #1455) is `RevL.G4Approval.CrossingOK` over three exported facts: the approval-required capability TOKENS (`AR`, keyed by token as `lower._approval_index` keys them), the tokens one marked crossing reaches (`AX`, as `lower._approval_crossed_caps` resolves them, a `compensate` slot's crossings included) and its `with` edge (`AE`, none for the value form); `crossingB_iff` bridges the printed verdict, and `approval_coverage` fails the gate unless the corpus carries a covered crossing, one refused under another edge, one refused with no edge and an unrequired one admitted. Not modelled there: a `[...]` class in a glob scope, an edge the exporter cannot name (read as none, fail-closed), and a required token declared in a `use`d module |
 | **G5** teardown registers nothing | full over the lattice; the shape-level statement is **contentless** and registered as a finding | 2 + 15 | **yes** (one U5 row per effect statement; the generated census below carries the count) | `G5.teardown_registers_nothing` is true by definition (`registrations` is constant zero) and says so in the registry. `G5Classified` carries the real count, including two operational runs. The oracle now reconstructs the file's `RevL.Lemmas.Prog` from the `EX`/`FN`/`PG` rows and decides `registrations` over each effect's inverse body (`Oracle.registrationsB`, `registrationsB_iff`); the reference recomputes the same reach fold independently from the TSV, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries a clean teardown (count 0) AND a caught crossing (`examples/rejections/g5_undo_fn_emission.rvl`, an `undo` reaching an emission through a `fn`), and `g5_row_not_vacuous` proves the count flips to 0 when the wrapping fn stops calling the emission. An inverse's indirections are resolved by the exporter as the checker resolves them (issue #1792): a dispatched `let`-bound arrow, an emitting fn passed as a value, and a service operation read off a spawn handle (declared in the `Prog` as an `emission` boundary `<Service>.<op>`) count as heads, so all twelve G5 fixtures are `agree-G5`. First-class dispatch (`star`) is `n/a` on both sides, outside the model as in G4 |
-| **G6** purity outside effect forms | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 | **yes** (one C row per reconstructed statement; the generated census below carries the count) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on every one of them. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe |
+| **G6** purity outside effect forms, binding uniqueness | full at head granularity; the shape-level statement is the content of `TypedIn`/`ReachIn` | 3 + 8 | **yes** (one C row per reconstructed statement, one BU row per binding scope; the generated census below carries the count) | the row reconstructs each lowered statement from its exported heads (`Oracle.exprOfHeads`, proved non-lossy by `heads_exprOfHeads`) and decides `∀ k ∈ stmtHeads s, k ∈ C` with `confinedB` (`confinedB_iff`), against a declared context of the component's require locals (M) plus its require-held binding roots (K). The reference computes the same head-roots membership independently from the TSV, and the two agree on every one of them. A leak is a `fail` on both sides, so the row bites without an admitted violation to point at (the checker refuses those at parse); `confinement_coverage` fails the gate unless the corpus carries both a confined statement over a non-empty reach and a caught violation (281 today), and `g6_row_not_vacuous` proves the verdict flips when a leaking head is accepted. Still not under the row: the derived form (reach computed from program text) lives only in `CapCeilings.derived_confinement_within_ceiling`, and host builtins and let-bound locals count as reach, so a component using them is a faithful `fail` rather than a claim it is unsafe. Binding uniqueness (issue #1812) is `RevL.G6Binding.BindingOK` over each scope's `BE` steps, decided by the `BU` row (`bindingB_iff`), and the corpus's one G6 binding refusal is `agree-G6` |
 | **G7** derived LIFO teardown | full for *which* entries run, in *what order*, under *which verdict* — including the E-Stop | 32 + 7 | **yes** (267 D rows) | the row RUNS `backends/python/runtime.py` over an enumerated scenario corpus and diffs the reference's observed disposition against the model's predicted one, with a coverage ratchet (`teardown_coverage`) that fails the gate if the corpus stops distinguishing LIFO from FIFO, Phase 2 from Phase 1, or the three dispositions from one another. Still deliberately not modelled, and so not under the row: Phase-1 continue-and-record and its residue severities, the Phase-2 budget, escrow under a pending session verdict (item 245), cascading abort. This model says which entries run, **not what happens when one of them fails**. The cordis LIFO unwind of the activation-body stack is supplied by the harness, not observed — only `drain`'s own `reversed` loop (item 369) is revl's own ordering code. **Modelling limit, scoped on purpose** |
 | **G8** boundary enumerable | full over the lattice; the marker-level statement is weak and marked | 3 + 9 | **yes** (one S8 row per reconstructed statement; the generated census below carries the count) | `G8.boundary_only_declared` rests on `boundaryOf (.effect _ _) = []` **by definition**. The lattice form drops the typing hypothesis entirely. The oracle now decides `RevL.G8Classified.stmtSurface` over each reconstructed statement's heads against the file's `Prog` (`Oracle.stmtSurfaceB`, `stmtSurfaceB_iff`); the reference recomputes the same reach caps independently from the `EX`/`FN` rows, and the two agree on every one of them. `prog_coverage` fails the gate unless the corpus carries both a non-empty and an empty surface, and `g8_row_not_vacuous` proves the surface goes empty when the wrapping fn stops reaching the crossing. First-class dispatch (`star`) is `n/a` on both sides |
 | **G9** no authority from untrusted | rule proved; **coverage unproved and unstatable** | 18 | no | `Flow` starts from a path that is *given*. That the checker WALKS every path is where the real bugs were (`_walk_component_methods` skipped activation bodies entirely). **Modelling limit**: L0 has no component bodies, no provide/activation distinction and no typed parameters, so the obligation cannot be stated, let alone proved. Carried as the one **UNPROVED** row in the table |
@@ -320,6 +320,14 @@ Three summary readings of that map:
 | `RevL.G4Approval.globMatch_star_any` | G4 approval floor — the prefix glob | **proved** | `propext` | a trailing `*` matches any rest, the shape of `approval["production.*"]` |
 | `RevL.G4Approval.approval_not_vacuous` | G4 approval floor — non-vacuity | **proved** | `propext, Classical.choice, Quot.sound` | `g4_approval_scoped_extern.rvl` refused, admitted under the exact and the glob edge, refused under `staging.*`; `g4_approval_compensate_other_edge.rvl`'s head admitted and compensation refused; an unrequired head admitted with no edge |
 | `RevL.G4Approval.approval_row_not_vacuous` | G4 approval floor — the row | **proved** | `propext, Classical.choice, Quot.sound` | the verdict moves with the edge alone, the required set alone and the token alone, so each of `AE`, `AR` and `AX` is load-bearing |
+| `RevL.G6Binding.okB_iff` | G6 binding uniqueness — the frame walk (issue #1812) | **proved** | `propext, Quot.sound` | `okB fs evs = true ↔ ScopeOK fs evs`: the decider over the frames of names in view is the inductive rule |
+| `RevL.G6Binding.bindingB_iff` | G6 binding uniqueness — the bridge | **proved** | `propext, Quot.sound` | `bindingB seed evs = true ↔ BindingOK seed evs`: the printed `BU` verdict is exactly the rule |
+| `RevL.G6Binding.visibleB_iff` | G6 binding uniqueness — in view | **proved** | `propext, Quot.sound` | a name is in view exactly when some open frame holds it |
+| `RevL.G6Binding.seed_rebind_refused` | G6 binding uniqueness — the seed | **proved** | none | a name in view when the scope starts cannot be bound: a method `let` reusing an activation binding or a parameter, an activation binding reusing a `requires` local |
+| `RevL.G6Binding.rebind_refused` | G6 binding uniqueness — twice in a row | **proved** | `propext` | a name bound twice in a row is refused, in any frames |
+| `RevL.G6Binding.inner_shadow_refused` | G6 binding uniqueness — blocks see outward | **proved** | `propext` | rebinding an outer name inside a block is refused |
+| `RevL.G6Binding.fixtures_decided` | G6 binding uniqueness — the corpus shapes | **proved** | none | `g6_method_local_shadows_component.rvl`'s method refused and its unseeded twin admitted; sibling arms reusing a name admitted; a `let` then a `for` binder of the same name refused |
+| `RevL.G6Binding.binding_not_vacuous` | G6 binding uniqueness — non-vacuity | **proved** | `propext, Quot.sound` | the rule refuses the corpus shape and admits the twin and the sibling arms, so it is neither always true nor always false |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -905,6 +913,30 @@ Verdicts:
   elaborating. `approval_coverage` fails the gate unless the corpus
   carries a covered crossing, one refused under another edge, one refused
   with no edge and an unrequired one admitted.
+- **BU rows (per binding scope, G6 binding uniqueness, issue #1812)**:
+  `Oracle.bindingRowB` — `RevL.G6Binding.bindingB` — over one scope's
+  `BE` steps: the names in view when it starts (`seed`), then its binds
+  and its block boundaries (`enter`/`leave`), in source order. The
+  activation body is one scope, seeded with the `requires` locals
+  (`Env.bind_local`); each provide method is another, seeded with the
+  activation bindings made before its `provide` block and its own
+  parameters (`_check_rebind`, which does not consult `requires`). Blocks
+  are a method's `if` arms and `while`/`for` bodies
+  (`_lower_scoped_block`), a `for` binder living in its loop's block, and
+  in the activation body an effect's `setup` block and a stream
+  iteration's body. `bindingRowB_iff` proves the printed Bool is
+  `RevL.G6Binding.BindingOK`, and the reference recomputes the same frame
+  walk from the rows. A G6 `binding` refusal files under `agree-G6` when a
+  scope fails and under the fatal `missed-G6` when none does; a failing
+  scope in a file the checker accepts is `formal-strict`. Blinding the
+  printed verdict (`ok` for every scope) was seen to produce 1 `binding`
+  mismatch and `missed-G6 1 FATAL`; checking only the innermost frame
+  stops `okB_iff` and `fixtures_decided` from elaborating.
+  `binding_coverage` fails the gate unless the corpus carries a refused
+  scope and an admitted one that binds a name and opens a block. Not
+  modelled: pattern binders in a `match` arm, the body of an `every`
+  timer, and the other G6 refusals (purity outside an effect form,
+  reassigning an immutable binding).
 
 ### The G7 row, and what it is evidence of
 
@@ -1078,12 +1110,13 @@ printed 1. Nothing compared the two, in either direction.
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
 **697 .rvl files -> 635 components -> 1559 statements = 445 modeled +
-223 componentless + 29 refused at parse**, and **8521 verdicts compared
+223 componentless + 29 refused at parse**, and **9420 verdicts compared
 (445 files + 635 components + 224 provide methods + 38 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1559
 confinements + 1559 surfaces + 423 teardowns + 503 provide-clause
 components + 83 config fields + 635 A2 bodies + 445 deferred-position
-files + 56 approval crossings), 8521 agree, 0 mismatches**.
+files + 56 approval crossings + 899 binding scopes), 9420 agree, 0
+mismatches**.
 
 Checker alignment over the 445 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
@@ -1098,10 +1131,11 @@ does carry are `ratcheted` instead: `out-of-fragment-G5` and
 `formal/out_of_fragment_ledger.json`, which shrinks only. A file that
 JOINS one fails the gate, and a line no longer in its bucket fails it
 until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
-a new G6 fixture, cannot arrive while the model stays silent about it.
-`agree-*` and the generic `out-of-fragment` stay informational; that one
-collects every code the model states no row about at all, so it grows
-with corpus work that never touched this layer.
+a new G6 purity fixture, cannot arrive while the model stays silent
+about it. `agree-*` and the generic `out-of-fragment` stay
+informational; that one collects every code the model states no row
+about at all, so it grows with corpus work that never touched this
+layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1111,6 +1145,7 @@ with corpus work that never touched this layer.
 | `agree-G3` | 1 | informational |
 | `agree-G4` | 131 | informational |
 | `agree-G5` | 12 | informational |
+| `agree-G6` | 1 | informational |
 | `agree-accept` | 225 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
@@ -1119,14 +1154,10 @@ with corpus work that never touched this layer.
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
+| `missed-G6` | 0 | **FATAL** |
 | `out-of-fragment` | 70 | informational |
 | `out-of-fragment-G5` | 0 | ratcheted |
-| `out-of-fragment-G6` | 1 | ratcheted |
-
-Nothing is counted without being named; the files in the non-`agree`
-buckets are:
-
-- `out-of-fragment-G6`: `examples/rejections/g6_method_local_shadows_component.rvl`
+| `out-of-fragment-G6` | 0 | ratcheted |
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.
@@ -1218,8 +1249,12 @@ a named `out-of-fragment-G5` / `out-of-fragment-G6`:
   `fail`s on a hundred-odd corpus files the checker ACCEPTS, because a
   host root like `Map.new` is not a declared require. An `agree-G6` keyed
   on a `C` fail would therefore be an agreement that cannot fail, which is
-  the informational-bucket problem one level down, so the G6 refusal is
-  reported as out of fragment instead.
+  the informational-bucket problem one level down. The duplicate-binding
+  refusal is decided by its own row since issue #1812 (`BU`, above), so a
+  G6 `binding` refusal is `agree-G6` or the fatal `missed-G6`. A G6
+  purity refusal is still reported as out of fragment; no corpus file
+  outside the parse refusals has one today, so the `out-of-fragment-G6`
+  list is empty and a file joining it reds the gate.
 
 The A9 row moved
 `examples/rejections/a9_provide_key_not_declared.rvl` from out-of-fragment

@@ -30,3 +30,4 @@ import RevL.Theorems.A9_ProvideKeyDeclared
 import RevL.Theorems.A2_NoAcquisitionAfterProvision
 import RevL.Theorems.G4_DeferredPosition
 import RevL.Theorems.G4_ApprovalFloor
+import RevL.Theorems.G6_BindingUnique
