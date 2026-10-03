@@ -235,6 +235,9 @@ The `revl_check` MCP result enriches every open hole with one:
     "version": 2,
     "expected": "Str",
     "grammarCategory": "expression",
+    "construct": "provide-method",
+    "idiom": {"name": "provide-method", "summary": "…", "rules": ["G4: …", "A6: …"],
+              "fill": "db.get(key)", "example": "service Db { … }\n…"},
     "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                    "reason": "a non-emission provide-method — pure"},
     "crossing": {"permitted": false, "required": false, "form": null,
@@ -257,6 +260,16 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
 
 * **`expected`** — the hole's type (§2). A fill that does not have it is a
   type error before it is a wrong answer.
+* **`construct`** and **`idiom`** (additive, still version 2; issue #1701):
+  where the hole stands, one of `provide-method`, `emission-method`,
+  `component-setup`, `effect-acquire`, `effect-undo`, `function`, `test`,
+  and that construct's minimal admitted example with the one or two rules
+  that make it correct (`{name, summary, rules, fill, example}`; `fill` is
+  what stands at the construct's position in the example). The idioms live
+  in `src/revl/idioms/`; `revl idiom NAME` and the MCP `revl_idiom` tool
+  serve them by name. Each one compiles and admits, and with its `fill`
+  replaced by a hole yields a fillSpec naming that same construct, so the
+  table cannot drift from the compiler.
 * **`grammarCategory`** (additive, still version 2): the syntactic category a fill is a
   document of, one of `program`, `component-body`, `statements`, `expression`,
   `type`. Pass it to `revl grammar --format lark|gbnf|ebnf --category <it>` or
