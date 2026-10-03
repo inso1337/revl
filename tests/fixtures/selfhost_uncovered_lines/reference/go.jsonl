@@ -1,0 +1,379 @@
+["reason", "a-non-string-surface-answers-false-and-the", "A non-string surface answers False and the lowercase `any` answers True. The emitter only asks with a string, and an erased `any` reaches a scrutinee only nested inside `Opt[...]`/`Result[...]`, never as the whole surface. Opt, Result and declared-variant scrutinees are in the corpus."]
+
+["function", "a-non-string-surface-answers-false-and-the", "_go_v3_is_interface", 2, 2]
+
+["reason", "backends-go-emit-py-refuse-stream-document-top", "backends/go/emit.py::_refuse_stream_document_top_level: every statement is on the refusal path. item 130 diverts a stream document to the live stc-go path so its component is not dropped, and that path renders no top-level `fn` and no plain `test` block, so a document holding BOTH is refused by name rather than compiled to a module quietly short of a section. The byte-agreement corpus is documents the reference EMITS, so no corpus document can reach the raise, and its call site is on the same unentered path (`_emit` counts that one). Pinned by tests/test_stream_reactive.py::test_go_refuses_a_stream_document_whose_top_level_it_would_drop, with ::test_go_still_emits_a_stream_document_whose_top_level_it_can_carry as its control."]
+
+["function", "backends-go-emit-py-refuse-stream-document-top", "_refuse_stream_document_top_level", 3, 3]
+
+["reason", "blocking-tier-stream-and-typed-event-runtime-reached", "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every … in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on … as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 §8's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the §4.5 `replay(…)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead."]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_document_holds_stream", 2, 2]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_flag_stream", 1, 1]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_flag_stream_drain", 3, 3]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_flag_stream_event", 2, 2]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_is_stream_next", 7, 7]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_raw_go_ident", 3, 3]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_refuse_required_stream", 1, 1]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_refuse_unlowered_stream_surface", 2, 2]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_stream_chain", 13, 13]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_stream_head", 4, 4]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_stream_stage_arrow", 16, 16]
+
+["reason", "component-effect-undo-frame-and-witnessed-wal-emission", "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port."]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_body_needs_frame", 6, 6]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_call_descriptor", 15, 15]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_effect_step", 11, 11]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_method_witnessed_step", 45, 45]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_pins", 4, 4]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_witnessed_step", 53, 53]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_method_body_has_compensate", 1, 1]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_method_body_has_witnessed", 1, 1]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_teardown_preamble", 8, 8]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_wal_referent", 3, 3]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_witnessed_extern", 5, 5]
+
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_witnessed_result_types", 5, 5]
+
+["reason", "component-method-expression-renderer-and-tuple-return-conven", "Component/method expression renderer and tuple-return convention, reached from _emit_component_step/_emit_method_body, not the pure _go_v3_expr renderer. This includes legacy name/fn/format literals and component Opt/Result spreading; the selfhost module port excludes that live ABI, not the corresponding pure literals or user ADTs. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1321 adds two statements to `_comp_infer`: the `fn` arm that reads a top-level fn/extern's declared return type off `_FN_RET`, so a receiver-typed builtin (`firsts(xs).length()`) can tell a Str receiver from a List one instead of guessing. It sits on the same deferred component/method path. Three later changes land on this same deferred component/method path. Issue #1347 adds three statements to `_comp_builtin`: the `to_int32` arm that flags the checked narrow `revlToI32`, which the pure typed-core path already carried, so a method body calling it no longer falls through to the unknown-method arm and the conformance matrix stops reading that as a go tier limit. Issue #1356 adds nine to `_comp_infer`: a `call` arm that reads a required service method's declared return type off the document's service table, and a `config` arm that reads a config field's declared surface type, both registries being populated only by `_emit_component`. Issue #1376 adds five more to `_comp_infer` and six to `_emit_return`: the `??` arm answers `T` rather than the left operand's `Opt[T]`, and a ternary in RETURN position over the tuple convention has no single-expression Go form, so it spreads into an `if` statement and each branch takes the ordinary return lowering."]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_builtin", 64, 64]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_checked_div_expr", 9, 9]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_infer", 76, 76]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_construction_case", 6, 6]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_emit_return", 23, 23]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_expr", 142, 142]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_format", 50, 50]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_format.flush_text", 4, 4]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_comp_match", 52, 52]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_comp_match_tuple", 72, 72]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_literal", 2, 2]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_return", 4, 4]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_type", 10, 10]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_widen_int", 1, 1]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_zero", 10, 10]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_v3_case_layout", 9, 9]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_v3_case_payload", 5, 5]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_v3_comp_construct", 15, 15]
+
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_v3_record_type_for_fields", 10, 10]
+
+["reason", "declared-out-of-every-self-host-slice-realm", "declared out of every self-host slice: realm placements, routers, spawn/instances. The two lines the item 421 F5 stage-2 seam hook adds -- `if _SECRET_MODE:` installing `bridge.SecretScrub` -- sit inside that slice: the hook is only built when the composition declares `Secret[T]`, and no placement corpus document is a secret-mode composition, so the generated seam funnel is never asked to redact a secret value. Two more statements arrive on this same excluded path. PR #1378 pins `_RECORD_MODE` to False on entry, because `--record` is an `emit` option that placement never sets and `_reset_v3_typed_component_state` does not restore it. Issue #1379 folds the document-level refusals into one shared `_DOCUMENT_REFUSALS` tuple so `emit` and `emit_placement` cannot disagree about admissibility, and the placement entry walks it here; before that a fault test and a called `deferred` emission were refused through `emit` and ADMITTED through `emit_placement`. Neither statement is reachable from a corpus module, and `tests/test_go_placement_refusals.py` pins the tuple."]
+
+["function", "declared-out-of-every-self-host-slice-realm", "_emit_placement", 20, 20]
+
+["reason", "emit-calls-this-secret-marking-scan-only-after", "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity."]
+
+["function", "emit-calls-this-secret-marking-scan-only-after", "_declares_secret", 8, 8]
+
+["reason", "extern-declared-compensate-item-254-issue-1592-compensated", "Extern-declared compensate (item 254, issue #1592): `_compensated_table` builds the table of emission externs that declare their own `compensate`, `_emit_compensations` adds that compensation to the ones an `emit` registers, `_timer_has_compensate` flags a timer firing that registers one, `_declared_call` and `_reaches_declared` register one for a call in a value position of a provide method (a `let`, a `return`, an argument, a nested operand, through `revlDeclared`), and `_as_fn_call` re-spells the slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_go.rvl ports no extern-declared compensation. The behaviour is pinned and executed against real stc-go by backends/go/scenarios/emitted/extern_compensate/exec_test.go."]
+
+["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_as_fn_call", 5, 5]
+
+["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_declared_call", 11, 11]
+
+["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_emit_compensations", 9, 9]
+
+["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_reaches_declared", 7, 7]
+
+["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_timer_has_compensate", 1, 1]
+
+["reason", "host-map-acquisition-cas-type-discovery-scans-component", "Host Map acquisition/CAS type discovery scans component and provide-method bodies for insert values. This is the host-component Map ABI, not the pure Map value renderer; no component acquisition is accepted by emit_go.rvl."]
+
+["function", "host-map-acquisition-cas-type-discovery-scans-component", "_infer_map_value_go_type", 20, 20]
+
+["function", "host-map-acquisition-cas-type-discovery-scans-component", "_is_map_cas", 1, 1]
+
+["function", "host-map-acquisition-cas-type-discovery-scans-component", "_map_insert_value_types", 14, 14]
+
+["function", "host-map-acquisition-cas-type-discovery-scans-component", "_scan_step_for_inserts", 20, 20]
+
+["reason", "issue-1356-the-component-tier-shapes-among-the", "issue #1356: the component-tier shapes among the causes behind the sixteen carried documents that emitted Go which did not build: a function-typed service parameter, an `Int32` receiver rendered in a method body, a bare integer local in one, a host family beyond Pool/Map whose bound receiver takes methods, `??` over an Opt that is read rather than called, and a declared record named `Row`. What reaches them is tests/test_go_carried_set_builds.py, which emits all 123 carried documents and `go build`s them, and the twelve named tests in backends/go/test_emit_go.py. selfhost/emit_go.rvl does not emit the component tier, so the byte-agreement oracle is silent here; the pure-path halves of the same issue (the `assert` in an ordinary fn, the `Any` subscript, the host constructor in a plain fn) are ported and in the corpus since issue #106."]
+
+["function", "issue-1356-the-component-tier-shapes-among-the", "_collect_host_bind_methods", 12, 12]
+
+["function", "issue-1356-the-component-tier-shapes-among-the", "_collect_host_binds", 12, 12]
+
+["function", "issue-1356-the-component-tier-shapes-among-the", "_stub_host_type", 4, 4]
+
+["reason", "issue-1559-drop-unused-time-import-removes-the", "Issue #1559: `_drop_unused_time_import` removes the `\"time\"` import from a live stc-go module that never uses it (a `lifecycle test` with no `unload` step imported it unused and did not build). It runs on the finished text of `_emit` and `_emit_v3_combined`, live-component and lifecycle emission that selfhost/emit_go.rvl excludes, which no emit_go_corpus document reaches. The input family is backends/go/test_emit_go.py::test_a_lifecycle_test_without_unload_builds_and_passes."]
+
+["function", "issue-1559-drop-unused-time-import-removes-the", "_drop_unused_time_import", 4, 4]
+
+["reason", "issue-1631-the-arity-guard-in-v3-fill", "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus."]
+
+["function", "issue-1631-the-arity-guard-in-v3-fill", "_v3_fill_erased", 1, 1]
+
+["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
+
+["function", "issue-721-issue-1321-component-is-observable-decides", "_component_is_observable", 4, 4]
+
+["reason", "json-file-command-line-entry-and-output-writing", "JSON-file command-line entry and output writing are not entered by the in-process emit(ir) oracle."]
+
+["function", "json-file-command-line-entry-and-output-writing", "<module>", 1, 1]
+
+["function", "json-file-command-line-entry-and-output-writing", "main", 10, 10]
+
+["reason", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "Lifecycle test harness acquires/loads/unloads component instances and checks tuple-return service results. The selfhost oracle emits pure modules and explicitly defers lifecycle/in-file harness generation. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py."]
+
+["function", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "_emit_stc_lifecycle_tests", 130, 130]
+
+["function", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "_go_lifecycle_arg", 7, 7]
+
+["function", "lifecycle-test-harness-acquires-loads-unloads-component-inst", "_go_lifecycle_assert", 28, 28]
+
+["reason", "live-component-binding-environment-emit-component-emit-provi", "Live-component binding environment: _emit_component/_emit_provide_impl construct _Env to resolve Apply receiver fields, requires, config and context; pure _emit_v3_go uses _V3GoCtx instead. The module-only port deliberately has no stc-go activation/provide ABI."]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.config_ref", 2, 2]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.ctx_ref", 1, 1]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.name_ref", 7, 7]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_bind_field", 1, 1]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_bind_is_ptr", 1, 1]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_bind_star", 1, 1]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_collect_refs", 10, 10]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_host_of_bind", 1, 1]
+
+["function", "live-component-binding-environment-emit-component-emit-provi", "_safe_local", 2, 2]
+
+["reason", "live-component-config-structs-defaults-service-key-registrat", "Live-component config structs/defaults, service-key registration, realm load helpers and routed-require realization. These are called by component assembly, not pure function/type emission; config/provide/req/realms are outside the module-only selfhost ABI."]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_component_config_fields", 4, 4]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_component_has_config", 4, 4]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_default_lit", 6, 6]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_config_struct", 15, 15]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_go_router_struct", 82, 82]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_load_helpers", 27, 27]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_realm_helper", 19, 19]
+
+["function", "live-component-config-structs-defaults-service-key-registrat", "_realm_helper_name", 1, 1]
+
+["reason", "match-arms-the-parser-cannot-produce-a-wildcard", "Match arms the parser cannot produce: a wildcard arm that binds the scrutinee (the source `_` pattern takes no binder, `_match_pattern` returns `('_', None)`), so every `wbind` arm here is compatibility IR; the non-exhaustive panics, which the checker's exhaustiveness rule keeps out of an admitted document; and an unresolvable case name. The Opt and Result two-value matches, with and without their wildcard arms, are in the corpus (emit_go_corpus/stdlib_surface.rvl, issue #106)."]
+
+["function", "match-arms-the-parser-cannot-produce-a-wildcard", "_go_v3_match", 4, 4]
+
+["function", "match-arms-the-parser-cannot-produce-a-wildcard", "_go_v3_match_opt", 14, 14]
+
+["function", "match-arms-the-parser-cannot-produce-a-wildcard", "_go_v3_match_result", 14, 14]
+
+["reason", "merge-the-same-body-async-sync-twins-of", "Merge the same-body async/sync twins of a caller-decided-colour extern (item 388) and rewrite calls to the surviving name. A twin needs an async caller, which only a component's async provide method is, so a pure module never carries one; selfhost/emit_go.rvl names such a clone with a marker rather than rewriting the IR."]
+
+["function", "merge-the-same-body-async-sync-twins-of", "_dedup_colour_erased_poly_externs", 11, 11]
+
+["function", "merge-the-same-body-async-sync-twins-of", "_dedup_colour_erased_poly_externs._rewrite", 6, 6]
+
+["reason", "only-carriage-return-escaping-remains-parser-parse-file", "Only carriage-return escaping remains: parser.parse_file normalizes literal CR to LF, and the lexer preserves backslash-r verbatim rather than interpreting it. This file-corpus input boundary cannot produce a CR string literal. Newline, tab, BMP and astral scalar escaping are covered."]
+
+["function", "only-carriage-return-escaping-remains-parser-parse-file", "_go_string", 1, 1]
+
+["reason", "placement-interop-bridge-entry-point-emits-wire-codecs", "Placement/interop bridge entry point emits wire codecs, service dispatch/proxies and host orchestration, including Opt/Result wire payloads. It is not invoked by the module emit oracle, and emit_go.rvl explicitly excludes placement and cross-tier interop. Issue #957's `Map` subscript arm adds three statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458's `Int.MIN` closure adds statements to the same deferred integer-division helper block: `revlDivEuclid` is rewritten so it never negates an operand (`-b` wraps for b == Int.MIN, the leading `-` wraps for b == -1), and `revlMul` names the one product its `p / b != a` readback cannot see. No corpus document calls a named division, and one that did would flip the oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole helper block; the reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py. Item 458's structural `List.indexOf` adds two statements to the same deferred helper block: `revlListIndexOfEq` is emitted beside `revlEq` because it calls it, so a module that never demands `revlEq` never demands the walk either. No corpus document calls `indexOf`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl defers the whole stdlib scaffold; the reference half is executed on all six tiers by tests/test_458_captures_and_collections.py. Issue #721's Float half adds five statements to the same deferred preamble block: the `math` import and the `revlF` identity helper that keeps a Float literal out of Go's CONSTANT world (a constant fold has no signed zero and no infinity), plus the `math.Mod` arm for `%` on Float, which Go does not define on float64 at all. No PLACEMENT corpus document carries a Float, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_go.rvl excludes placement entirely; the reference half is executed on all six tiers by tests/test_458_float_division_and_remainder.py. Issue #1321 split this entry point: the module half is `_emit_v3_combined` (the typed-core tier plus the live stc-go components in one package) and `_emit_v3_placement` is the three-line placement caller, so the 221 statements move to the new name and 1 stays. `emit` reaches `_emit_v3_combined` now for a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside an observable component, but no emit_go_corpus document declares a component at all, so the oracle still never runs it. Twenty more statements arrive on this same uninvoked entry point. Issue #1347 adds one, the `or _COMP_NEEDS_OVERFLOW32` disjunct, because the checked narrow can come from a component method body as well as from a top-level fn and the method renderer does not write into `ctx`. PR #1378 adds nineteen, mirroring `_emit`'s per-emit state onto this path: the items 243/247 witnessed-extern registry, without which a witnessed effect in a carried component lowered as an ordinary bracket with a nil inverse and dropped the proof inverse silently; the stream-event flag and stream iteration counter; and item 102's scan that flags the timer preamble when a lifecycle test carries only an `advance` step. All of it is live component/placement assembly that emit_go.rvl excludes and the module oracle never reaches. Issue #1559 adds two to `_emit_go_dispatch`: an argument the declared type cannot hold now returns an error instead of decoding to the zero value (the placement probe's `\"41\"` read as 0), on this same placement path the module oracle never enters. Issue #1567 adds fifteen to `_emit_go_bridge`: `RevlRealmContext`, the child context an isolated provision is served and probed through, one `case` per isolated provided key; it is placement-only emission that no corpus document reaches."]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_bridge_decode_expr", 16, 16]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_bridge_encode_expr", 16, 16]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_go_bridge", 132, 132]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_go_dispatch", 20, 20]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_go_dispatch_encode", 30, 30]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_go_proxy_decode", 49, 49]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_go_proxy_method", 15, 15]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_bridge_helpers", 52, 52]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_combined", 215, 215]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_placement", 1, 1]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_go_bridge_arg_expr", 4, 4]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_go_opt_inner", 4, 4]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_go_result_inner", 5, 5]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_revl_decode_fn", 1, 1]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_revl_encode_fn", 1, 1]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_v3_declared_variant", 4, 4]
+
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "emit_placement", 3, 3]
+
+["reason", "refusals-and-fallbacks-of-the-pure-typed-core", "Refusals and fallbacks of the pure typed-core path that the frontend never reaches, left after issue #106 ported the rest of the path: the empty-document refusal (`_emit_v3_go`), the missing-`@go`-body refusal (`_emit_v3_go_externs`), the unknown-step refusal (`_go_v3_stmt`), an optional-chaining receiver that is not an Opt (`_go_v3_optchain`), the unknown-builtin refusal and the `to_str` row for an Int32 receiver, which the checker rejects (`_go_v3_builtin`), a `lookup` on a receiver that is not a Map and an unknown method (`_v3_builtin_ret_type`), a variant case given the wrong payload arity, an argument to `None`, an unknown constructor, and an `Ok`/`Err` with neither an expected type nor an argument (`_go_v3_construct`), and a named type the document does not declare (`_go_v3_type`). Each is rejected by the parser or the checker before the emitter runs."]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_emit_v3_go", 1, 1]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_emit_v3_go_externs", 1, 1]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_builtin", 2, 2]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_construct", 5, 5]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_optchain", 1, 1]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_stmt", 1, 1]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_go_v3_type", 1, 1]
+
+["function", "refusals-and-fallbacks-of-the-pure-typed-core", "_v3_builtin_ret_type", 2, 2]
+
+["reason", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/go/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_go_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper."]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_deferred_emissions", 8, 8]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_validated_emissions", 8, 8]
+
+["reason", "remaining-branches-are-inference-fallbacks-for-nodes-the", "Remaining branches are inference fallbacks for nodes the frontend does not put in a typed position: a non-dict node, a literal with no scalar type, a field read on a non-record, an index into a non-List with no `value_type`, a call whose callee is not a plain name, an unknown operator, an ambiguous record literal, and the late Float `%` arm (the frontend rejects Float remainder). The builtin, `len`, `maplit`, constructor and Map-subscript arms are in the corpus since issue #106."]
+
+["function", "remaining-branches-are-inference-fallbacks-for-nodes-the", "_go_v3_infer_type", 9, 9]
+
+["reason", "remaining-entry-paths-accept-the-package-name-compatibility", "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead. Issue #1347 adds three statements: `Int.to_int32` in a component METHOD body flags the checked narrow `revlToI32`, so this path resets `_COMP_NEEDS_OVERFLOW32` and writes the helper that the pure typed-core path emits off `ctx.needs_overflow32`. It sits in the same live-component assembly after the pure-module early return, which the module oracle never enters. Issue #1669 adds two statements: an ir_version 3 document that carries a `lifecycle test`, components and a module `fn` takes the combined renderer, because the live stc-go path never renders module fns. A component document cannot be a go corpus case (selfhost/emit_go.rvl names its components instead); backends/go/test_module_fn_lifecycle_1669.py runs it under `go test` against the pinned stc-go."]
+
+["function", "remaining-entry-paths-accept-the-package-name-compatibility", "_emit", 84, 84]
+
+["reason", "remaining-fallbacks-reject-a-signature-without-a-parenthesiz", "Remaining fallbacks reject a signature without a parenthesized argument list or without its closing parenthesis; canonical frontend function types are well formed."]
+
+["function", "remaining-fallbacks-reject-a-signature-without-a-parenthesiz", "_v3_split_fn_type", 1, 1]
+
+["reason", "remaining-paths-find-and-reject-an-unresolved-hole", "Remaining paths find and reject an unresolved hole, or visit component service signatures looking for one. Successful frontend corpus documents contain no unresolved holes."]
+
+["function", "remaining-paths-find-and-reject-an-unresolved-hole", "_refuse_holes", 4, 4]
+
+["function", "remaining-paths-find-and-reject-an-unresolved-hole", "_refuse_holes.walk", 1, 1]
+
+["reason", "remaining-paths-handle-null-none-an-already-discriminated", "Remaining paths handle null/None, an already-discriminated Bool fallback, or reject an unsupported literal value; ordinary Bool, numeric and string literals are covered."]
+
+["function", "remaining-paths-handle-null-none-an-already-discriminated", "_go_v3_lit", 3, 3]
+
+["reason", "remaining-raise-rejects-a-loop-carrying-an-effect", "Remaining raise rejects a loop carrying an effect/undo frame; successful pure-function loops are frame-neutral."]
+
+["function", "remaining-raise-rejects-a-loop-carrying-an-effect", "_guard_frame_neutral_loop", 1, 1]
+
+["reason", "remaining-raise-rejects-anonymous-field-sets-with-no", "Remaining raise rejects anonymous field sets with no unique declared record; successful typed corpus records have a unique layout."]
+
+["function", "remaining-raise-rejects-anonymous-field-sets-with-no", "_V3GoCtx.record_type_for_fields", 1, 1]
+
+["reason", "remaining-raise-rejects-invalid-empty-go-identifiers-accepte", "Remaining raise rejects invalid/empty Go identifiers; accepted frontend names take the covered escaping path."]
+
+["function", "remaining-raise-rejects-invalid-empty-go-identifiers-accepte", "_v3_ident", 1, 1]
+
+["reason", "remaining-raise-rejects-nan-infinity-literal-ir-source", "Remaining raise rejects NaN/infinity literal IR; source numeric literals in successful frontend documents are finite."]
+
+["function", "remaining-raise-rejects-nan-infinity-literal-ir-source", "_finite_float", 1, 1]
+
+["reason", "remaining-raises-reject-duplicate-variant-constructors-and-u", "Remaining raises reject duplicate variant constructors and unsupported declared type kinds; valid record/variant emission is covered."]
+
+["function", "remaining-raises-reject-duplicate-variant-constructors-and-u", "_emit_v3_go_types", 2, 2]
+
+["reason", "spawn-handle-runtime-and-instance-key-lookup-require", "Spawn-handle runtime and instance-key lookup require live component acquisitions. The residual _spawn_targets/_iter_spawn_nodes branches inspect actual component let-effect spawn nodes; the empty pure-module scan runs but cannot enter those branches."]
+
+["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_emit_spawn_support", 89, 89]
+
+["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_instance_get_expr", 9, 9]
+
+["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_iter_spawn_nodes", 3, 3]
+
+["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_spawn_expr", 9, 9]
+
+["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_spawn_targets", 5, 5]
+
+["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_uses_spawn", 1, 1]
+
+["reason", "stc-go-component-activation-and-provided-service-implementat", "stc-go component activation and provided-service implementation, including host acquisition/stubs and runtime imports. emit returns through _emit_v3_go for corpus modules before constructing these runtime sections; emit_go.rvl explicitly excludes components/services/provide/host effects. The one statement item 130 adds here is the `_refuse_required_stream` call guarding the required-`Stream[T]` coeffect, on this same unentered live-component path. Issue #1321 adds four statements to `_emit_method_body`: the item-280 twin that pins a user-variant `let` to its INTERFACE type rather than the concrete case struct `:=` infers, without which a later `match` type-switch is a Go compile error. `_go_v3_stmt` has carried the same rule on the pure tier since item 280; the method body only reached the shape once the combined renderer started carrying documents that declare a type beside a component. Issue #1356 adds two statements: the `global` declaration and the population of `_CONFIG_TYPES` and `_SERVICES`, the two registries `_comp_infer`'s new `call` and `config` arms read. They are per-component state, so they are written here, on this same unentered path."]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_acquire_value_go_type", 17, 17]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_collect_host_calls", 10, 10]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component", 34, 34]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component_step", 152, 152]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_host_stubs", 30, 30]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_method_body", 84, 84]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_provide_impl", 7, 7]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_services", 1, 1]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_host_runtime", 14, 14]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_host_type_of_acquire", 9, 9]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_method_ret", 1, 1]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_method_returns_value", 1, 1]
+
+["function", "stc-go-component-activation-and-provided-service-implementat", "_needs_sync", 1, 1]
+
+["reason", "the-go-v3-expr-arms-the-frontend-never", "The `_go_v3_expr` arms the frontend never feeds: a malformed node, an unknown binary or unary operator, an unknown expression kind, a nullary case read as a bare name and a user constructor in call shape (both compatibility IR: the frontend lowers a declared variant application as `adt`), and an unpinned `Map.empty()` (the checker requires the annotation the frontend threads onto the node, so neither the fallback read of that pin nor the refusal runs). Functional record update is the one refusal here a document reaches, tests/fixtures/emit_go_refusals/record_update.rvl."]
+
+["function", "the-go-v3-expr-arms-the-frontend-never", "_go_v3_expr", 8, 8]
+
+["reason", "the-item-445-unique-stamp-lands-only-on", "The item 445 `unique` stamp lands only on a self-rebind through `push`/`set`/`remove` of the binding itself, so the two guards that reject a stamped write through another method or from another receiver never fail. The destructive `append`, map store and `delete` are in the corpus (emit_go_corpus/stdlib_surface.rvl, loop_shapes.rvl)."]
+
+["function", "the-item-445-unique-stamp-lands-only-on", "_go_v3_self_rebind", 2, 2]
+
+["reason", "the-three-guards-that-answer-none-for-a", "The three guards that answer None for a field-call callee that is not a host family root: a receiver that is not a plain name, a name outside Map/Pool/Job/Stream, and a root the document bound or declared. Records carry no methods, so a field call is only ever spelled on a host root; `Map.new()` and `Pool.open()` in a plain fn are in the corpus (emit_py_corpus/hostroots.rvl, issue #106)."]
+
+["function", "the-three-guards-that-answer-none-for-a", "_v3_host_constructor", 3, 3]
+
+["reason", "v3-own-continue-skips-a-statement-that-is", "`_v3_own_continue` skips a statement that is not a dict and `_v3_str_concat_pieces` refuses a `.concat` with other than one argument; the IR carries neither. The code-point scan with every near miss it must refuse, and the `.concat` string builder, are in the corpus (emit_go_corpus/loop_shapes.rvl, issue #106)."]
+
+["function", "v3-own-continue-skips-a-statement-that-is", "_v3_own_continue", 1, 1]
+
+["function", "v3-own-continue-skips-a-statement-that-is", "_v3_str_concat_pieces", 1, 1]

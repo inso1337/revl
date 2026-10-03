@@ -1,0 +1,475 @@
+["reason", "backends-java-emit-py-arrow-callee-the-remaining", "backends/java/emit.py::_arrow_callee: The remaining returns recognize inline arrows and locally bound arrow callees. Local arrows/beta reduction are an existing port boundary; control.rvl is a strict divergent regression."]
+
+["function", "backends-java-emit-py-arrow-callee-the-remaining", "_arrow_callee", 3, 3]
+
+["reason", "backends-java-emit-py-arrow-repeatable-the-recursive", "backends/java/emit.py::_arrow_repeatable: The recursive repeatability predicate is only called by _inline_arrow when deciding whether to pin multiply-used arguments. Local-arrow lowering is explicitly deferred."]
+
+["function", "backends-java-emit-py-arrow-repeatable-the-recursive", "_arrow_repeatable", 10, 10]
+
+["reason", "backends-java-emit-py-bind-decl-type-legacy", "backends/java/emit.py::_bind_decl_type: Legacy effect-binding declaration types (including Map boxing and scalar host lookup) require nonsimple v1/v2 components, rejected by the port's simple-component gate; modern host Map bindings are covered separately."]
+
+["function", "backends-java-emit-py-bind-decl-type-legacy", "_bind_decl_type", 7, 7]
+
+["reason", "backends-java-emit-py-bind-local-arrow-the", "backends/java/emit.py::_bind_local_arrow: The remaining capture-renaming and argument-pinning branches require a let-bound arrow. Local arrows are explicitly deferred; the simple non-arrow return is covered."]
+
+["function", "backends-java-emit-py-bind-local-arrow-the", "_bind_local_arrow", 11, 11]
+
+["reason", "backends-java-emit-py-bind-type-residual-record", "backends/java/emit.py::_bind_type: Residual record/list/scalar acquire inference, its ambiguous-record catch and final Object fallback require nonhost let-effect, excluded by body_step_supported's host-only binding gate. Host Map/Job typing is covered."]
+
+["function", "backends-java-emit-py-bind-type-residual-record", "_bind_type", 24, 24]
+
+["reason", "backends-java-emit-py-call-label-missing-returns", "backends/java/emit.py::_call_label: Missing '?' returns require non-dict/unknown label nodes; the callee-name compatibility call lacks target, whereas lower.py emits target/method for service calls and kind=fn for free calls. Valid host, fn and service labels are covered."]
+
+["function", "backends-java-emit-py-call-label-missing-returns", "_call_label", 4, 4]
+
+["reason", "backends-java-emit-py-check-fn-name-collisions", "backends/java/emit.py::_check_fn_name_collisions: The residual continue skips invalid names already rejected by _fn_name; the other branch raises on two callable names mapping to one Java name. Neither produces successful reference bytes."]
+
+["function", "backends-java-emit-py-check-fn-name-collisions", "_check_fn_name_collisions", 2, 2]
+
+["reason", "backends-java-emit-py-component-needs-frame-step", "backends/java/emit.py::_component_needs_frame.step_needs: The remaining true branch detects witnessed extern acquire calls, explicitly deferred; compensation, abort/fail and ordinary bracket frames are covered."]
+
+["function", "backends-java-emit-py-component-needs-frame-step", "_component_needs_frame.step_needs", 1, 1]
+
+["reason", "backends-java-emit-py-component-needs-modern-the", "backends/java/emit.py::_component_needs_modern: The remaining true returns are routes and step setup. Routers and setup are explicitly outside the admitted component subset, unlike config, requirements and realm placement. Issue #1511 (declared compensations, java tier) adds one: the branch that sends a component crossing an extern that declares `compensate` to the modern path. selfhost/emit_java.rvl does not port that registration and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge."]
+
+["function", "backends-java-emit-py-component-needs-modern-the", "_component_needs_modern", 4, 4]
+
+["reason", "backends-java-emit-py-contains-expr-the-remaining", "backends/java/emit.py::_contains_expr: The remaining true return detects call with callee in a component expression. Component direct calls lower to kind=fn or target/method; callee calls require the explicitly deferred local-arrow/first-class/value-builtin path. Non-v1 kind detection and ordinary traversal are covered."]
+
+["function", "backends-java-emit-py-contains-expr-the-remaining", "_contains_expr", 1, 1]
+
+["reason", "backends-java-emit-py-core-imports-only-contexts", "backends/java/emit.py::_core_imports: Only Contexts for lifecycle tests and CordisException for routers remain. In-file lifecycle tests and routers are declared boundaries; fail/frame/core imports are covered."]
+
+["function", "backends-java-emit-py-core-imports-only-contexts", "_core_imports", 3, 3]
+
+["reason", "backends-java-emit-py-covers-variant-the-remaining", "backends/java/emit.py::_covers_variant: The remaining false return is a missing user-variant case. lower.py rejects nonexhaustive user matches before emission; exhaustive and wildcard matches are covered."]
+
+["function", "backends-java-emit-py-covers-variant-the-remaining", "_covers_variant", 1, 1]
+
+["reason", "backends-java-emit-py-declares-secret-item-421", "backends/java/emit.py::_declares_secret: item 421 F6: scans the IR for a surviving `Secret[T]` marking (service param `secret`, extern `secret_return`, config-field `secret`) to gate `_SECRET_MODE`. No java corpus document declares a secret, so the scan's positive branches never run; selfhost/emit_java.rvl has no secret-redaction port (item-429(d)), so a corpus document reaching them would flip the byte-agreement oracle red rather than close this gap."]
+
+["function", "backends-java-emit-py-declares-secret-item-421", "_declares_secret", 7, 7]
+
+["reason", "backends-java-emit-py-dedup-colour-erased-poly", "backends/java/emit.py::_dedup_colour_erased_poly_externs._rewrite: Recursive callee-name rewriting runs only after an erased polymorphic extern collision is found; extern emission is explicitly deferred."]
+
+["function", "backends-java-emit-py-dedup-colour-erased-poly", "_dedup_colour_erased_poly_externs._rewrite", 6, 6]
+
+["reason", "backends-java-emit-py-dedup-colour-erased-poly-2", "backends/java/emit.py::_dedup_colour_erased_poly_externs: the per-extern scan runs now, over the extern in tests/fixtures/emit_java_refusals/deferred_emission_call.rvl (issue #1431), because `emit` calls it before the tier refusals. The 11 statements left collapse a `_revl_sync` clone into its async twin and rewrite its call sites, which needs a caller-decided-colour extern instantiated in both colours. No java corpus document declares one: java corpus externs are explicitly deferred."]
+
+["function", "backends-java-emit-py-dedup-colour-erased-poly-2", "_dedup_colour_erased_poly_externs", 11, 11]
+
+["reason", "backends-java-emit-py-emit-checked-div-helpers", "backends/java/emit.py::_emit_checked_div_helpers: The returned checked-division helper text is demanded by Int checked division, whose Result-valued operation/runtime is explicitly deferred. Float division is covered and does not demand this helper."]
+
+["function", "backends-java-emit-py-emit-checked-div-helpers", "_emit_checked_div_helpers", 1, 1]
+
+["reason", "backends-java-emit-py-emit-component-modern-missing", "backends/java/emit.py::_emit_component_modern: Missing branches reject invalid isolate/intercept keys, bind a routed requirement and emit the router class. Frontend validates placement keys; routers remain an explicit boundary, not general realm exclusion. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d))."]
+
+["function", "backends-java-emit-py-emit-component-modern-missing", "_emit_component_modern", 7, 7]
+
+["reason", "backends-java-emit-py-emit-component-residual-requirement", "backends/java/emit.py::_emit_component: Residual requirement/bind fields and constructor assignments, config fields, ctx.get and let-effect/effect/emit branches are the nonsimple legacy effect/bind path, excluded by component_simple_ok. The final unsupported-step raise is refusal. Empty and provide-only legacy components are now covered."]
+
+["function", "backends-java-emit-py-emit-component-residual-requirement", "_emit_component", 18, 18]
+
+["reason", "backends-java-emit-py-emit-component-stmts-residual", "backends/java/emit.py::_emit_component_stmts: Residual setup delegation and nonhost/witnessed or Map.compare_and_set let-effect acquisition are excluded by the host-only binding/setup gate. Body return raises (methods only); unknown body steps delegate to deferred setup lowering."]
+
+["function", "backends-java-emit-py-emit-component-stmts-residual", "_emit_component_stmts", 17, 17]
+
+["reason", "backends-java-emit-py-emit-ftoa-helper-only", "backends/java/emit.py::_emit_ftoa_helper: Only the Float-to-Str formatter text is missing, an explicit port boundary reproduced by strict floats.rvl divergence; Float literals, arithmetic and widening are covered."]
+
+["function", "backends-java-emit-py-emit-ftoa-helper-only", "_emit_ftoa_helper", 1, 1]
+
+["reason", "backends-java-emit-py-emit-host-stubs-only", "backends/java/emit.py::_emit_host_stubs: Only Pool runtime insertion remains: emit_host_stubs emits <<DEFER-host-stub:Pool>>, reproduced by the strict pg-pool regression. Map and Job stubs are covered."]
+
+["function", "backends-java-emit-py-emit-host-stubs-only", "_emit_host_stubs", 6, 6]
+
+["reason", "backends-java-emit-py-emit-host-stubs-walk", "backends/java/emit.py::_emit_host_stubs.walk: The missing walk addition recognizes a host used as call target (rather than kind=host dotted fn). lower.py's host-effect lowering materializes dotted host fn nodes; Map/Job acquisition and uses are covered in that canonical form."]
+
+["function", "backends-java-emit-py-emit-host-stubs-walk", "_emit_host_stubs.walk", 1, 1]
+
+["reason", "backends-java-emit-py-emit-inverse-pins-the", "backends/java/emit.py::_emit_inverse_pins: The remaining inverse expression rewrites require witnessed acquisition or Map CAS binding in provided methods. Witnessed externs and method let-effect are explicit port boundaries."]
+
+["function", "backends-java-emit-py-emit-inverse-pins-the", "_emit_inverse_pins", 8, 8]
+
+["reason", "backends-java-emit-py-emit-java-router-class", "backends/java/emit.py::_emit_java_router_class: Route-provider construction, candidate ordering and dispatch runtime are only emitted when requires.routes is populated. Routers were explicitly deferred; router.rvl is a strict divergent regression."]
+
+["function", "backends-java-emit-py-emit-java-router-class", "_emit_java_router_class", 51, 51]
+
+["reason", "backends-java-emit-py-emit-lifecycle-no-residue", "backends/java/emit.py::_emit_lifecycle_no_residue_helper: The no-residue helper text is emitted only for lifecycle assert_no_residue tests, explicitly deferred with in-file tests."]
+
+["function", "backends-java-emit-py-emit-lifecycle-no-residue", "_emit_lifecycle_no_residue_helper", 1, 1]
+
+["reason", "backends-java-emit-py-emit-pool-runtime-the", "backends/java/emit.py::_emit_pool_runtime: The Pool host runtime text is only requested by Pool roots, explicitly deferred and reproduced by the strict pg-pool regression."]
+
+["function", "backends-java-emit-py-emit-pool-runtime-the", "_emit_pool_runtime", 1, 1]
+
+["reason", "backends-java-emit-py-emit-record-sink-record", "backends/java/emit.py::_emit_record_sink: Record sink support belongs to emit(ir, record=True), not the oracle's default emit(ir) API. This optional instrumentation mode was not part of the port contract. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d))."]
+
+["function", "backends-java-emit-py-emit-record-sink-record", "_emit_record_sink", 2, 2]
+
+["reason", "backends-java-emit-py-emit-result-type-built", "backends/java/emit.py::_emit_result_type: Built-in Result wrapper text is demanded by Ok/Err and checked division, explicitly deferred; result_ctor_302.rvl is a strict divergent regression. User variants and Opt are covered."]
+
+["function", "backends-java-emit-py-emit-result-type-built", "_emit_result_type", 1, 1]
+
+["reason", "backends-java-emit-py-emit-secret-registry-item", "backends/java/emit.py::_emit_secret_registry: item 421 F6: the redaction registry preamble, emitted into Components once under `_SECRET_MODE`. No java corpus document enables secret mode, and selfhost/emit_java.rvl does not port the registry (item-429(d))."]
+
+["function", "backends-java-emit-py-emit-secret-registry-item", "_emit_secret_registry", 1, 1]
+
+["reason", "backends-java-emit-py-emit-service-interfaces-the", "backends/java/emit.py::_emit_service_interfaces: The missing idempotent annotation is in the legacy service path: lower.py version selection forces v3 for any idempotent/async/commutative method (6567-6571), so source input cannot reach that legacy branch."]
+
+["function", "backends-java-emit-py-emit-service-interfaces-the", "_emit_service_interfaces", 1, 1]
+
+["reason", "backends-java-emit-py-emit-setup-stmt-setup", "backends/java/emit.py::_emit_setup_stmt: Setup-local declarations/assignments, destructuring, loop lowering and its rejection guards are behind component setup, explicitly rejected by body_step_supported. Pure-function loops are independently covered."]
+
+["function", "backends-java-emit-py-emit-setup-stmt-setup", "_emit_setup_stmt", 53, 53]
+
+["reason", "backends-java-emit-py-emit-spawn-handle-instance", "backends/java/emit.py::_emit_spawn_handle: Instance token/provision lookup and unload support are emitted only when _uses_spawn/_uses_instance_get is true. Spawn/instance handles are explicitly deferred and instance_accessor.rvl reproduces the divergence."]
+
+["function", "backends-java-emit-py-emit-spawn-handle-instance", "_emit_spawn_handle", 13, 13]
+
+["reason", "backends-java-emit-py-emit-the-two-missing", "backends/java/emit.py::emit: The two missing branches reject a non-object document and an unsupported IR version. compile_files always supplies a supported versioned dict; successful API output cannot enter either."]
+
+["function", "backends-java-emit-py-emit-the-two-missing", "emit", 2, 2]
+
+["reason", "backends-java-emit-py-emit-v1-remaining-branches", "backends/java/emit.py::_emit_v1: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. The successful legacy component/service path is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Also the item-322-Slice-2 durable WAL sink splice behind `_RECORD_MODE`: the oracle emits with the default `emit(ir)` and never `record=True`, so the call is unreachable from the corpus by construction, and `backends/java/test_emit_java.py::test_v1_v2_witnessed_record_defines_the_sink_it_calls` exercises it directly. The self-host emitters mirror the v3 path, so v1/v2 is declared out of every self-host slice (the `_v1|_v2` group in tools/selfhost_line_coverage.py)."]
+
+["function", "backends-java-emit-py-emit-v1-remaining-branches", "_emit_v1", 4, 4]
+
+["reason", "backends-java-emit-py-emit-v2-remaining-branches", "backends/java/emit.py::_emit_v2: Remaining branches reject a document with neither components nor services, or insert Float formatting helper text. Legacy isolate/intercept assembly is covered; Float-to-Str remains explicitly deferred. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Also the item-322-Slice-2 durable WAL sink splice behind `_RECORD_MODE`: the oracle emits with the default `emit(ir)` and never `record=True`, so the call is unreachable from the corpus by construction, and `backends/java/test_emit_java.py::test_v1_v2_witnessed_record_defines_the_sink_it_calls` exercises it directly. The self-host emitters mirror the v3 path, so v1/v2 is declared out of every self-host slice (the `_v1|_v2` group in tools/selfhost_line_coverage.py)."]
+
+["function", "backends-java-emit-py-emit-v2-remaining-branches", "_emit_v2", 4, 4]
+
+["reason", "backends-java-emit-py-emit-v3-externs-extern", "backends/java/emit.py::_emit_v3_externs: Extern method wrappers, witnessed signatures and config-schema bindings require extern declarations, explicitly deferred; strict extern_config and method_witnessed cases retain reproductions. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d))."]
+
+["function", "backends-java-emit-py-emit-v3-externs-extern", "_emit_v3_externs", 32, 32]
+
+["reason", "backends-java-emit-py-emit-v3-lifecycle-tests", "backends/java/emit.py::_emit_v3_lifecycle_tests: Lifecycle test method assembly, load/unload state and conditional REVL_TESTS invocation require in-file lifecycle tests, explicitly deferred."]
+
+["function", "backends-java-emit-py-emit-v3-lifecycle-tests", "_emit_v3_lifecycle_tests", 31, 31]
+
+["reason", "backends-java-emit-py-emit-v3-remaining-assembly", "backends/java/emit.py::_emit_v3: Remaining assembly branches reject empty typed documents or insert Result, checked-division, Float-to-Str, extern, in-file/lifecycle-test and record=True sections. These are the specifically declared runtime/extern/test or optional recording boundaries, not all v3 helpers. Plus the item-421-F6 `Secret[T]` registry emission behind `_SECRET_MODE`, which no corpus document reaches and selfhost/emit_java.rvl does not port (item-429(d)). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 458 adds one more: the `_uses_int_arith` call that pulls in the revlDivFloor/revlDivEuclid/revlMod block, on the same helper-demand boundary as the checked-division one beside it."]
+
+["function", "backends-java-emit-py-emit-v3-remaining-assembly", "_emit_v3", 17, 17]
+
+["reason", "backends-java-emit-py-emit-v3-secret-members", "backends/java/emit.py::_emit_v3_secret_members: item 421 F6, declared-shape half: the `revlSecretMembers()` method every generated record class and variant case declares, so the registry's walk can reach a declared shape's LEAVES by path. The walk cannot see these classes reflectively (`instanceof Record` is false for them), so the shape hands its members over instead. Reached only in `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d))."]
+
+["function", "backends-java-emit-py-emit-v3-secret-members", "_emit_v3_secret_members", 6, 6]
+
+["reason", "backends-java-emit-py-emit-v3-tests-test", "backends/java/emit.py::_emit_v3_tests: Test-function generation and REVL_TESTS dispatch require in-file tests, explicitly deferred; records.rvl retains a strict divergent reproduction."]
+
+["function", "backends-java-emit-py-emit-v3-tests-test", "_emit_v3_tests", 20, 20]
+
+["reason", "backends-java-emit-py-emit-v3-types-item", "backends/java/emit.py::_emit_v3_types: item 421 F6, declared-shape half: the `implements RevlSecretShape` clause and the members method appended to a record class and to each variant case. Only the `_SECRET_MODE` branches are uncovered; the type bodies themselves are reached by every corpus document that declares a type. Unported in selfhost/emit_java.rvl (item-429(d))."]
+
+["function", "backends-java-emit-py-emit-v3-types-item", "_emit_v3_types", 3, 3]
+
+["reason", "backends-java-emit-py-emit-witnessed-step-witnessed", "backends/java/emit.py::_emit_witnessed_step: Witnessed Result acquisition, error propagation, witness secrecy/redaction and inverse registration require class=witnessed externs, explicitly deferred; method_witnessed.rvl is a strict divergent reproduction."]
+
+["function", "backends-java-emit-py-emit-witnessed-step-witnessed", "_emit_witnessed_step", 21, 21]
+
+["reason", "backends-java-emit-py-empty-map-decl-type", "backends/java/emit.py::_empty_map_decl_type: Remaining branches read writer-inferred pins for an unannotated VALUE Map.empty local or use raw java.util.Map when unpinned. The port explicitly defers unannotated value-Map inference, distinct from covered host Map.new inference."]
+
+["function", "backends-java-emit-py-empty-map-decl-type", "_empty_map_decl_type", 2, 2]
+
+["reason", "backends-java-emit-py-expr-residual-successful-arms", "backends/java/emit.py::_expr: Residual successful arms are Result constructors, arrows, Float interpolation, spawn/instance access. Each is explicitly deferred. Other residual arms reject malformed/unknown expressions, bad operators, absent record fields, record_update, optional chain and Stream nodes. Opt constructors/coalesce and ordinary/empty interpolation are covered, and so, since item 429's java blind-spot closure, are the builtin/len and sized-length arms (tests/fixtures/emit_java_corpus/stdlib_builtins.rvl). Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1511 (declared compensations, java tier) adds one: the branch that sends a component crossing an extern that declares `compensate` through `RevlDeclared` from the `fn` arm. selfhost/emit_java.rvl does not port that registration and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge."]
+
+["function", "backends-java-emit-py-expr-residual-successful-arms", "_expr", 29, 29]
+
+["reason", "backends-java-emit-py-finite-float-the-only", "backends/java/emit.py::_finite_float: The only missing branch raises for a non-finite literal; successful Java output cannot contain this value."]
+
+["function", "backends-java-emit-py-finite-float-the-only", "_finite_float", 1, 1]
+
+["reason", "backends-java-emit-py-fn-name-only-invalid", "backends/java/emit.py::_fn_name: Only invalid identifier refusal remains. Valid Java-keyword escaping and underscore-only names are covered."]
+
+["function", "backends-java-emit-py-fn-name-only-invalid", "_fn_name", 1, 1]
+
+["reason", "backends-java-emit-py-guard-frame-neutral-loop", "backends/java/emit.py::_guard_frame_neutral_loop: Only the refusal for loop-scoped registration remains. Frontend loop validation prohibits frame-mutating registration inside a loop; the guard cannot return successful emission on that path."]
+
+["function", "backends-java-emit-py-guard-frame-neutral-loop", "_guard_frame_neutral_loop", 1, 1]
+
+["reason", "backends-java-emit-py-host-of-the-missing", "backends/java/emit.py::_host_of: The missing branches are RevlSpawnHandle for spawn acquisitions and Object for nonhost acquisitions. Spawn and nonhost activation bindings are explicitly deferred by the port gate."]
+
+["function", "backends-java-emit-py-host-of-the-missing", "_host_of", 3, 3]
+
+["reason", "backends-java-emit-py-ident-only-invalid-reserved", "backends/java/emit.py::_ident: Only invalid/reserved non-callable identifier raises remain. They terminate reference emission rather than produce comparable bytes."]
+
+["function", "backends-java-emit-py-ident-only-invalid-reserved", "_ident", 2, 2]
+
+["reason", "backends-java-emit-py-inline-arrow-argument-multiplicity", "backends/java/emit.py::_inline_arrow: Argument multiplicity, generated temporaries and capture substitution implement arrow beta reduction, explicitly deferred in the port header."]
+
+["function", "backends-java-emit-py-inline-arrow-argument-multiplicity", "_inline_arrow", 12, 12]
+
+["reason", "backends-java-emit-py-is-float-expr-the", "backends/java/emit.py::_is_float_expr: The missing false return requires a non-dict expression. All frontend expression nodes supplied to arithmetic/interpolation scans are dictionaries; malformed input is outside the compiled-source oracle."]
+
+["function", "backends-java-emit-py-is-float-expr-the", "_is_float_expr", 1, 1]
+
+["reason", "backends-java-emit-py-is-fn-type-nested", "backends/java/emit.py::_is_fn_type: Nested bracket scanning is entered only for function-type spellings. Function types are explicitly refused by the Java backend and covered by the separate refusal regression, not by successful CORPUS emission."]
+
+["function", "backends-java-emit-py-is-fn-type-nested", "_is_fn_type", 10, 10]
+
+["reason", "backends-java-emit-py-java-extern-config-bind", "backends/java/emit.py::_java_extern_config_bind: Runtime constant/config binding is called only from extern wrapper emission, explicitly deferred; extern_config/case.rvl reproduces it."]
+
+["function", "backends-java-emit-py-java-extern-config-bind", "_java_extern_config_bind", 5, 5]
+
+["reason", "backends-java-emit-py-java-extern-config-constants", "backends/java/emit.py::_java_extern_config_constants: Config schema discovery and constant emission traverse extern declarations, explicitly deferred, not component config (which is covered)."]
+
+["function", "backends-java-emit-py-java-extern-config-constants", "_java_extern_config_constants", 17, 17]
+
+["reason", "backends-java-emit-py-java-extern-config-schema", "backends/java/emit.py::_java_extern_config_schema: Extern-only config parsing/validation requires extern declarations, explicitly deferred and reproduced by extern_config/case.rvl."]
+
+["function", "backends-java-emit-py-java-extern-config-schema", "_java_extern_config_schema", 6, 6]
+
+["reason", "backends-java-emit-py-java-lifecycle-method-name", "backends/java/emit.py::_java_lifecycle_method_name: Test-name sanitization/hash fallback is called only for lifecycle test methods, explicitly deferred."]
+
+["function", "backends-java-emit-py-java-lifecycle-method-name", "_java_lifecycle_method_name", 11, 11]
+
+["reason", "backends-java-emit-py-java-test-method-name", "backends/java/emit.py::_java_test_method_name: Test-name sanitization/hash fallback is called only for in-file unit test methods, explicitly deferred."]
+
+["function", "backends-java-emit-py-java-test-method-name", "_java_test_method_name", 11, 11]
+
+["reason", "backends-java-emit-py-java-type-residual-legacy", "backends/java/emit.py::_java_type: Residual legacy Map generic splitting/boxing lies beyond the declared scalar v1/v2 signature slice. Null/missing type returns Object for hand-built IR; frontend signatures are typed. Modern generic boxing is covered by java_v3_type. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the `Object` fallback here, through `_param_type`. Its method now renders with its declared `long` signature."]
+
+["function", "backends-java-emit-py-java-type-residual-legacy", "_java_type", 5, 5]
+
+["reason", "backends-java-emit-py-java-v3-type-residual", "backends/java/emit.py::_java_v3_type: Residual Result boxing and undeclared host Pool Row-to-Object typing belong to the explicit Result/Pool boundaries. Unknown generic heads (user generics are monomorphized) and missing/non-string types are hand-built or invalid IR."]
+
+["function", "backends-java-emit-py-java-v3-type-residual", "_java_v3_type", 5, 5]
+
+["reason", "backends-java-emit-py-lit-residual-null-and", "backends/java/emit.py::_lit: Residual null and unsupported-value branches are outside source literals: lower.py rejects explicit null (5389/6938/11072); Opt None uses a var/constructor node. Unsupported Python values raise."]
+
+["function", "backends-java-emit-py-lit-residual-null-and", "_lit", 2, 2]
+
+["reason", "backends-java-emit-py-main-argument-parsing-file", "backends/java/emit.py::_main: Argument parsing, file/stdin JSON input and output-file handling are CLI adapter behavior; the byte oracle calls emit(ir) directly."]
+
+["function", "backends-java-emit-py-main-argument-parsing-file", "_main", 12, 12]
+
+["reason", "backends-java-emit-py-map-expr-inserts-residual", "backends/java/emit.py::_map_expr_inserts: Residual callee.field Map-write recognition is a compatibility IR shape; lower.py emits target/method for component receiver calls. Host Map writer inference through that canonical shape is covered."]
+
+["function", "backends-java-emit-py-map-expr-inserts-residual", "_map_expr_inserts", 7, 7]
+
+["reason", "backends-java-emit-py-map-insert-candidates-residual", "backends/java/emit.py::_map_insert_candidates: Residual setup recursion and local let/assign RHS scans are explicitly deferred; missing provision-service lookup is invalid typed IR because the frontend resolves provided services."]
+
+["function", "backends-java-emit-py-map-insert-candidates-residual", "_map_insert_candidates", 3, 3]
+
+["reason", "backends-java-emit-py-map-value-expr-type", "backends/java/emit.py::_map_value_expr_type: An absent function declaration can be an extern (deferred). Compatibility callee.field req calls are not lower.py's target/method shape. Missing node/env/ctx/config/record metadata, ambiguous record catches and null literals require malformed or reference-refused IR. Supported host Map scalar/list/record/ADT/req/fn/config/field inference is covered, and so is the builtin arm since item 429's java blind-spot closure (tests/fixtures/emit_java_corpus/map_inference_builtins.rvl puts one host Map behind each answer this arm can give)."]
+
+["function", "backends-java-emit-py-map-value-expr-type", "_map_value_expr_type", 22, 22]
+
+["reason", "backends-java-emit-py-metadata-lit-only-unsupported", "backends/java/emit.py::_metadata_lit: Only unsupported metadata values remain. parser.literal/record_literal admit JSON-like scalar/list metadata (including null, now covered), never arbitrary host objects; those raise rather than emit."]
+
+["function", "backends-java-emit-py-metadata-lit-only-unsupported", "_metadata_lit", 1, 1]
+
+["reason", "backends-java-emit-py-method-body-lines-render", "backends/java/emit.py::_method_body_lines.render: the provide-method step renderer reached from _method_body_lines. Its residual arms are the method steps excluded by method_step_supported (witnessed acquisition, Map-CAS let-effect, deferred/await, local let/assign and arrow binding, nested provide and unknown steps that raise) together with the issue #548 method-level control flow (if/while/for/break/continue). No byte-agreement corpus document drives a provide method through those branches, so they are reference-measured only; services_method_effects.rvl and witnessed.rvl pin the supported unbound and compensated forms. Issue #1512 moves this: the provider looked its RENAMED method up in the service table, so examples/ecosystem-consumer-js/candidates/double_tool.rvl (a service method `double`) was the one corpus document reaching the two `void` return statements here: its return type lookup failed too, so `x + x` was emitted as a statement followed by `return;`. Its method now renders with its declared `long` signature."]
+
+["function", "backends-java-emit-py-method-body-lines-render", "_method_body_lines.render", 56, 56]
+
+["reason", "backends-java-emit-py-method-body-residual-empty", "backends/java/emit.py::_method_body: Residual empty/multistep effectful-body traps and nonvoid bare-return refusal are outside the simple legacy method gate; a value expression discarded by a void method requires the nonsimple legacy effect/call path. Void bare returns and scalar/name returns are covered."]
+
+["function", "backends-java-emit-py-method-body-residual-empty", "_method_body", 4, 4]
+
+["reason", "backends-java-emit-py-module-the-main-cli", "backends/java/emit.py::<module>: The __main__ CLI entry is not invoked by the emit(ir) API oracle."]
+
+["function", "backends-java-emit-py-module-the-main-cli", "<module>", 1, 1]
+
+["reason", "backends-java-emit-py-name-uses-recursive-parameter", "backends/java/emit.py::_name_uses: Recursive parameter-use counting is only called by _inline_arrow for pinning multiply-used arguments; local-arrow beta reduction is explicitly deferred."]
+
+["function", "backends-java-emit-py-name-uses-recursive-parameter", "_name_uses", 4, 4]
+
+["reason", "backends-java-emit-py-pin-value-map-locals", "backends/java/emit.py::_pin_value_map_locals: Writer-based type inference for unannotated VALUE Map.empty locals is explicitly deferred; it is not the covered host Map.new inference."]
+
+["function", "backends-java-emit-py-pin-value-map-locals", "_pin_value_map_locals", 2, 2]
+
+["reason", "backends-java-emit-py-refuse-fault-tests-the", "backends/java/emit.py::_refuse_fault_tests: The remaining fault-test branches raise before output; fault injection/refusal parity is outside the explicitly deferred in-file test slice."]
+
+["function", "backends-java-emit-py-refuse-fault-tests-the", "_refuse_fault_tests", 2, 2]
+
+["reason", "backends-java-emit-py-refuse-holes-remaining-hole", "backends/java/emit.py::_refuse_holes: Remaining hole-position accumulation, diagnostic formatting and raising are source/IR refusal behavior, not successful byte output."]
+
+["function", "backends-java-emit-py-refuse-holes-remaining-hole", "_refuse_holes", 4, 4]
+
+["reason", "backends-java-emit-py-refuse-holes-walk-the", "backends/java/emit.py::_refuse_holes.walk: The missing true branch detects kind=hole and records its location before refusal; holes are explicitly rejected by the reference."]
+
+["function", "backends-java-emit-py-refuse-holes-walk-the", "_refuse_holes.walk", 1, 1]
+
+["reason", "backends-java-emit-py-refuse-lifecycle-tests-legacy", "backends/java/emit.py::_refuse_lifecycle_tests: Legacy v1/v2 lifecycle-test rejection cannot be entered by compiled source: lower.py assigns tests version3. In-file test emission is also explicitly deferred."]
+
+["function", "backends-java-emit-py-refuse-lifecycle-tests-legacy", "_refuse_lifecycle_tests", 2, 2]
+
+["reason", "backends-java-emit-py-refuse-missing-host-root", "backends/java/emit.py::_refuse_missing_host_root: The missing branch raises for unsupported host roots rather than emitting a stub. Supported Map and Job and explicitly deferred Pool are separate from this refusal."]
+
+["function", "backends-java-emit-py-refuse-missing-host-root", "_refuse_missing_host_root", 1, 1]
+
+["reason", "backends-java-emit-py-reject-fn-type-the", "backends/java/emit.py::_reject_fn_type: The only remaining branch raises the documented function-type refusal; a separate test asserts it. The successful-byte corpus intentionally cannot contain it."]
+
+["function", "backends-java-emit-py-reject-fn-type-the", "_reject_fn_type", 1, 1]
+
+["reason", "backends-java-emit-py-secret-config-fields-item", "backends/java/emit.py::_secret_config_fields: item 421 F6: the `Secret[T]` config-field names a plugin constructor registers at load. Returns empty outside `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d))."]
+
+["function", "backends-java-emit-py-secret-config-fields-item", "_secret_config_fields", 1, 1]
+
+["reason", "backends-java-emit-py-secret-config-mark-item", "backends/java/emit.py::_secret_config_mark: item 421 F6, config half: the `revlMarkSecret` registration inside the plugin constructors for `Secret[T]` config fields. Reached only in `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d))."]
+
+["function", "backends-java-emit-py-secret-config-mark-item", "_secret_config_mark", 1, 1]
+
+["reason", "backends-java-emit-py-secret-method-params-item", "backends/java/emit.py::_secret_method_params: item 421 F6: the provide-method parameter positions a service declared `Secret[T]`, read off the `params[i]['secret']` stamp. Returns empty outside `_SECRET_MODE`, which no java corpus document enters; unported in selfhost/emit_java.rvl (item-429(d))."]
+
+["function", "backends-java-emit-py-secret-method-params-item", "_secret_method_params", 4, 4]
+
+["reason", "backends-java-emit-py-split-generic-this-helper", "backends/java/emit.py::_split_generic: This helper is used by legacy _java_type's Map branch, beyond the explicitly scalar v1/v2 signatures. v3 generic splitting uses _split_v3_types and is covered."]
+
+["function", "backends-java-emit-py-split-generic-this-helper", "_split_generic", 11, 11]
+
+["reason", "backends-java-emit-py-subexprs-recursive-expression-child", "backends/java/emit.py::_subexprs: Recursive expression-child enumeration serves local-arrow repeatability/use counting, explicitly deferred."]
+
+["function", "backends-java-emit-py-subexprs-recursive-expression-child", "_subexprs", 9, 9]
+
+["reason", "backends-java-emit-py-uses-builtin-result-the", "backends/java/emit.py::_uses_builtin_result: The residual true return indicates Result constructor/match/type usage, explicitly deferred and retained by strict result_ctor_302.rvl."]
+
+["function", "backends-java-emit-py-uses-builtin-result-the", "_uses_builtin_result", 1, 1]
+
+["reason", "backends-java-emit-py-uses-builtin-result-walk", "backends/java/emit.py::_uses_builtin_result.walk: Residual short-circuit true branches detect Result cases/types; user variants and Opt do not require this runtime. Built-in Result is explicitly deferred."]
+
+["function", "backends-java-emit-py-uses-builtin-result-walk", "_uses_builtin_result.walk", 3, 3]
+
+["reason", "backends-java-emit-py-uses-checked-div-walk", "backends/java/emit.py::_uses_checked_div.walk: Only setting found=True for checked integer division remains; this Result-valued arithmetic/runtime is explicitly deferred, unlike covered Float division."]
+
+["function", "backends-java-emit-py-uses-checked-div-walk", "_uses_checked_div.walk", 1, 1]
+
+["reason", "backends-java-emit-py-uses-float-interp-walk", "backends/java/emit.py::_uses_float_interp.walk: Residual found short-circuit and true assignment require Float-to-Str interpolation, explicitly deferred and reproduced by floats.rvl. Float arithmetic nodes alone do not satisfy this condition."]
+
+["function", "backends-java-emit-py-uses-float-interp-walk", "_uses_float_interp.walk", 5, 5]
+
+["reason", "backends-java-emit-py-uses-instance-get-the", "backends/java/emit.py::_uses_instance_get: The scan invocation is reached only from _emit_spawn_handle(with_get=...) behind _uses_spawn. Spawn/instances are explicitly deferred and instance_accessor.rvl is a strict reproduction."]
+
+["function", "backends-java-emit-py-uses-instance-get-the", "_uses_instance_get", 1, 1]
+
+["reason", "backends-java-emit-py-uses-instance-get-walk", "backends/java/emit.py::_uses_instance_get.walk: Traversal and true detection only run on spawn/instance-get components after their feature gate; spawn/instances are explicitly deferred."]
+
+["function", "backends-java-emit-py-uses-instance-get-walk", "_uses_instance_get.walk", 8, 8]
+
+["reason", "backends-java-emit-py-uses-spawn-walk-only", "backends/java/emit.py::_uses_spawn.walk: Only the true assignment for kind=spawn remains, explicitly deferred and reproduced by instance_accessor.rvl."]
+
+["function", "backends-java-emit-py-uses-spawn-walk-only", "_uses_spawn.walk", 1, 1]
+
+["reason", "backends-java-emit-py-uses-stdlib-obsolete-scan", "backends/java/emit.py::_uses_stdlib: Obsolete scan with no callers in backends/java/emit.py: active demand selection uses _stdlib_helpers_reached. This retained definition is unreachable from emit(ir)."]
+
+["function", "backends-java-emit-py-uses-stdlib-obsolete-scan", "_uses_stdlib", 5, 5]
+
+["reason", "backends-java-emit-py-uses-stdlib-walk-nested", "backends/java/emit.py::_uses_stdlib.walk: Nested walk is reachable only from the uncalled _uses_stdlib definition; active helper selection uses _stdlib_helpers_reached instead."]
+
+["function", "backends-java-emit-py-uses-stdlib-walk-nested", "_uses_stdlib.walk", 12, 12]
+
+["reason", "backends-java-emit-py-v3-builtin-the-stdlib", "backends/java/emit.py::_v3_builtin: The stdlib dispatch is covered by tests/fixtures/emit_java_corpus/stdlib_builtins.rvl. The six residual statements are the returns of the families this tier's self-host port defers, so no agreeing corpus document can reach them: the Result-valued `checked_*` division forms, the three `revlDivFloor`/`revlDivEuclid`/`revlMod` int-arith forms, the Float `to_str` that routes through the canonical `revlFtoa`, and the unknown-method refusal, which raises and therefore cannot appear in a successful-byte corpus at all."]
+
+["function", "backends-java-emit-py-v3-builtin-the-stdlib", "_v3_builtin", 6, 6]
+
+["reason", "backends-java-emit-py-v3-call-residual-inline", "backends/java/emit.py::_v3_call: Residual inline-arrow/field/apply dispatch belongs to deferred first-class/local functions. User-case/None compatibility call branches are lowered to adt/var by lower.py, and wrong constructor arities refuse. Raw named-call fallback is not canonical free-fn (kind=fn) or req (target/method) IR."]
+
+["function", "backends-java-emit-py-v3-call-residual-inline", "_v3_call", 19, 19]
+
+["reason", "backends-java-emit-py-v3-instance-get-instance", "backends/java/emit.py::_v3_instance_get: Instance token/type lookup and provision access require instance-get, explicitly deferred and reproduced by instance_accessor.rvl."]
+
+["function", "backends-java-emit-py-v3-instance-get-instance", "_v3_instance_get", 8, 8]
+
+["reason", "backends-java-emit-py-v3-lifecycle-step-load", "backends/java/emit.py::_v3_lifecycle_step: Load/unload/advance/call/assert/no-residue lowering is invoked only by lifecycle-test emission, explicitly deferred. Unsupported step diagnostics share that boundary."]
+
+["function", "backends-java-emit-py-v3-lifecycle-step-load", "_v3_lifecycle_step", 32, 32]
+
+["reason", "backends-java-emit-py-v3-match-expr-residual", "backends/java/emit.py::_v3_match_expr: Residual Ok/Err Result switch emission is explicitly deferred. The other missing branch is the defensive nonexhaustive user-variant default; lower.py rejects nonexhaustive matches before emit."]
+
+["function", "backends-java-emit-py-v3-match-expr-residual", "_v3_match_expr", 21, 21]
+
+["reason", "backends-java-emit-py-v3-spawn-spawn-bindings", "backends/java/emit.py::_v3_spawn: Spawn bindings/requirements/config construction requires spawn expressions, explicitly deferred and reproduced by instance_accessor.rvl."]
+
+["function", "backends-java-emit-py-v3-spawn-spawn-bindings", "_v3_spawn", 18, 18]
+
+["reason", "backends-java-emit-py-v3-stmt-remaining-local", "backends/java/emit.py::_v3_stmt: Remaining local-arrow early return and let_pattern record/list/rest destructuring are explicitly deferred. The final unknown-step raise is reference refusal; ordinary pure loops/statements are covered."]
+
+["function", "backends-java-emit-py-v3-stmt-remaining-local", "_v3_stmt", 16, 16]
+
+["reason", "backends-java-emit-py-v3-var-remaining-callable", "backends/java/emit.py::_v3_var: Remaining callable-as-value and renamed arrow-capture branches belong to first-class/local arrows, explicitly deferred. Raw user-case names are frontend-canonicalized to adt; an unbound arrow value raises."]
+
+["function", "backends-java-emit-py-v3-var-remaining-callable", "_v3_var", 4, 4]
+
+["reason", "backends-java-emit-py-v3ctx-init-duplicate-variant", "backends/java/emit.py::_V3Ctx.__init__: Duplicate variant case names raise EmitError before output; build_ctx records <<AMBIG>>. This is reference refusal, not an impossible frontend declaration or an agreeing supported program."]
+
+["function", "backends-java-emit-py-v3ctx-init-duplicate-variant", "_V3Ctx.__init__", 1, 1]
+
+["reason", "backends-java-emit-py-v3ctx-next-gensym-temporary", "backends/java/emit.py::_V3Ctx.next_gensym: Temporary-name allocation is used by local-arrow capture/beta reduction and destructuring, explicitly deferred in the port header."]
+
+["function", "backends-java-emit-py-v3ctx-next-gensym-temporary", "_V3Ctx.next_gensym", 2, 2]
+
+["reason", "backends-java-emit-py-v3ctx-record-type-for", "backends/java/emit.py::_V3Ctx.record_type_for_fields: The missing branches raise on absent or ambiguous record field sets. Unique record selection is covered; successful emission cannot take these refusal branches."]
+
+["function", "backends-java-emit-py-v3ctx-record-type-for", "_V3Ctx.record_type_for_fields", 3, 3]
+
+["reason", "backends-java-emit-py-value-map-write-type", "backends/java/emit.py::_value_map_write_type: This helper only types writers for unannotated VALUE Map.empty local inference, explicitly deferred, distinct from covered host Map inference. Issue #957's `Map` subscript arm adds two statements: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py."]
+
+["function", "backends-java-emit-py-value-map-write-type", "_value_map_write_type", 6, 6]
+
+["reason", "backends-java-emit-py-witnessed-extern-for-residual", "backends/java/emit.py::_witnessed_extern_for: Residual named/target lookup of class=witnessed externs requires the explicitly deferred witnessed-extern surface; method_witnessed.rvl is a strict reproduction."]
+
+["function", "backends-java-emit-py-witnessed-extern-for-residual", "_witnessed_extern_for", 3, 3]
+
+["reason", "blocking-tier-stream-and-typed-event-runtime-item", "Blocking-tier stream and typed-event runtime (item 130), reached only by a component that holds a stream: the emitted `Stream`/`Subscription` runtime and its R1 markers (`_emit_stream_runtime`, `_r1_marker_lines`), the `subscribe` head including the `merge` fan-in (`_stream_head`), the `every … in` / `on … as` loop (`_emit_stream_iter`), the `on … as` schema-and-dedup contract runtime and the field-by-field reading of a validated item (`_emit_stream_event_runtime`, `_java_event_field`), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the predicates that decide whether a document pulls either runtime in (`_document_holds_stream`, `_body_holds_stream`, `_document_holds_stream_event`, `_body_holds_stream_event`). The corpus IS the byte-agreement corpus and `selfhost/emit_java.rvl` ports no stream lowering (nor do the go and rust ports), so a corpus document holding a stream would force a divergence; see the matching `unported` entry in selfhost_blind_spots.json. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` goes back from 2 to 4: item 130 §4.5 puts the `replay(…)` refusal beside the surviving `drain` one. The two are refused for different reasons — the window for the deterministic clock this tier does not carry, replay for the recovery surface (§4.9) that lives on py — and neither is reachable from a corpus document, because a stream-holding document cannot be one. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead."]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_body_holds_stream", 1, 1]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_body_holds_stream_event", 7, 7]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_document_holds_stream", 1, 1]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_document_holds_stream_event", 4, 4]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_emit_stream_event_runtime", 1, 1]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_emit_stream_iter", 34, 34]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_emit_stream_runtime", 1, 1]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_java_event_field", 14, 14]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_r1_marker_lines", 12, 12]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_refuse_required_stream", 1, 1]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_refuse_unlowered_stream_surface", 4, 4]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_chain", 11, 11]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_head", 4, 4]
+
+["function", "blocking-tier-stream-and-typed-event-runtime-item", "_stream_stage_arrow", 9, 9]
+
+["reason", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "Issue #1511, the java tier: an extern that declares `compensate` was registered in no position. `_reaches_declared` finds a component that crosses one, `_component_needs_frame` gives it the frame, `_declared_crossing` renders every crossing through `RevlDeclared.crossed`, and `_emit_revl_frame_runtime` appends `RevlDeclared`. selfhost/emit_java.rvl does not port it, and no emit_java corpus document declares an extern `compensate`, so a corpus document would make the byte-agreement oracle diverge; the self-host port is the work that retires this entry. The input family is backends/java/test_declared_compensate_java.py."]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_component_needs_frame", 1, 1]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_declared_crossing", 13, 13]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_emit_revl_frame_runtime", 1, 1]
+
+["function", "issue-1511-the-java-tier-an-extern-that-declares-compensate", "_reaches_declared", 7, 7]
+
+["reason", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "Issue #1512: `_param_type`'s `Object` fallback is no longer reached. The one corpus document that reached it (double_tool.rvl) did so because the provider looked its renamed method `double_` up in the service table; `_method_name` keeps the lookup on the contract name, and the frontend admits no provider method or parameter the service does not declare. `_method_name`'s extra rung for a method named with underscores alone (`_` is a Java keyword) is reached by no corpus document; backends/java/test_keyword_method_names_java.py runs `_` end to end."]
+
+["function", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "_method_name", 1, 1]
+
+["function", "issue-1512-param-type-s-object-fallback-is-no-longer-reached", "_param_type", 1, 1]
+
+["reason", "item-458-java-s-div-floor-div-euclid", "Item 458: java's `div_floor`/`div_euclid`/`mod` move from inline `Math.*` expressions to static helpers, because `Math.floorDiv` wraps at Int.MIN / -1 and `Math.abs(Long.MIN_VALUE)` is negative. `_emit_int_arith_helpers` is the block and `_uses_int_arith.walk` the demand scan; no java corpus document calls a named division, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_java.rvl ports none of this family (item-429(d)). The reference half is executed on all six tiers by tests/test_int_min_edges_cross_tier.py."]
+
+["function", "item-458-java-s-div-floor-div-euclid", "_emit_int_arith_helpers", 1, 1]
+
+["function", "item-458-java-s-div-floor-div-euclid", "_uses_int_arith.walk", 1, 1]
+
+["reason", "map-subscript-lowering-issue-957-uses-map-index", "`Map` subscript lowering (issue #957): `_uses_map_index.walk` answers whether the document reads a `Map` subscript and `_emit_map_index_helper` renders the static `revlMapIndex` it lowers to. emit_java_corpus/maps.rvl exercises the Map METHODS, not the subscript, and a document that added one would flip the byte-agreement oracle RED rather than close this gap, because selfhost/emit_java.rvl has no map-subscript arm (item-429(d)). The reference half is pinned by tests/test_cross_tier_execution.py. Porting the arm to selfhost/emit_java.rvl is the corpus work that retires this entry."]
+
+["function", "map-subscript-lowering-issue-957-uses-map-index", "_emit_map_index_helper", 1, 1]
+
+["function", "map-subscript-lowering-issue-957-uses-map-index", "_uses_map_index.walk", 1, 1]
+
+["reason", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/java/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_java_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper."]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_deferred_emissions", 8, 8]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_validated_emissions", 8, 8]

@@ -104,18 +104,19 @@ def test_wasm_now_emits_str_at_the_service_boundary():
     _emitter("wasm").emit(compile_source(STR_SERVICE))
 
 
+# The `Opt` that `??` reads comes from a pure fn, not from a service another
+# component provides: on wasm that crossing is refused (issue #1601), because
+# the provider's `Opt` cell is an address in a different module's memory. The
+# construct under test is `??` in a method body, not the service boundary.
 FOUR_COMPONENT_BODY_CONSTRUCTS = """
 type Outcome = Found(Int) | Missing
 fn double(n: Int) -> Int { return n * 2 }
-service Bus { fn maybe(n: Int) -> Opt[Int] }
+fn maybe(n: Int) -> Opt[Int] { return (n > 0) ? Some(n) : None }
 service S { fn f(x: Int) -> Int  fn g(x: Int) }
-component Env provides bus: Bus {
-  provide bus { fn maybe(n) = (n > 0) ? Some(n) : None }
-}
-component C requires bus: Bus provides s: S {
+component C provides s: S {
   provide s {
     fn f(x) {
-      let a = bus.maybe(x) ?? 0
+      let a = maybe(x) ?? 0
       let b = double(a)
       let o = Found(b)
       return match o { Found(v) => v, Missing => 0 }
