@@ -403,7 +403,7 @@ class Step:
     __slots__ = ("index", "kind", "label", "effect", "file", "lineno", "source",
                  "detail", "origin", "undo", "undone", "undone_by", "crossed",
                  "compensation", "note", "error", "scope", "undo_idempotent",
-                 "inverse_op")
+                 "inverse_op", "wal_seq")
 
     def __init__(self, index: int, kind: str, label: str, effect: Optional[str],
                  origin: dict, file=None, lineno=None, source=None,
@@ -423,6 +423,9 @@ class Step:
         self.undone_by: Optional[str] = None
         self.crossed = False          # an emission the unwind stepped over
         self.compensation: Optional[int] = None  # index of its compensation
+        # the `seq` of this step's `effect` record, once the WAL has it: what a
+        # compensation's discharge descriptor names as the emission it offsets
+        self.wal_seq: Optional[int] = None
         self.error: Optional[str] = None
         # item 250 (session branching): the recorded CAPABILITY SCOPE of a
         # boundary-crossing inverse, the axis the scope-gated fork rewind keys on
@@ -551,7 +554,31 @@ class Timeline:
 
     def _wal_append(self, step: Step) -> None:
         if self._wal is not None:
-            self._wal.append_step(step, self.component)
+            step.wal_seq = self._wal.append_step(step, self.component)["seq"]
+
+    def emission_for(self, compensation: Any, crossing: Optional[str] = None
+                     ) -> Optional[Step]:
+        """The recorded emission a compensation being registered offsets, or
+        None. First by source adjacency, the rule `record_yield` has always
+        used (the registration sits on the line after the emission); then, for
+        a compensation an extern DECLARES, whose thunk lives with the extern
+        rather than beside the call, by the crossing's name: the newest
+        emission of that extern not yet paired with a compensation. None when
+        nothing matches: a crossing the recorder never saw (an emission in
+        expression position) is left unpaired rather than paired with a
+        neighbour, which would report the neighbour as offset."""
+        file, lineno = _code_site(_unguarded(compensation))
+        if lineno:
+            adjacent = self._emission_sites.get((file, lineno - 1))
+            if adjacent is not None and adjacent.compensation is None:
+                return adjacent
+        if crossing is None:
+            return None
+        for step in reversed(self.steps):
+            if step.kind == KIND_EMISSION and step.compensation is None \
+                    and (step.detail or {}).get("key") == crossing:
+                return step
+        return None
 
     # -- recording ---------------------------------------------------------
 
@@ -642,7 +669,8 @@ class Timeline:
                                           evidence_refused=evidence_refused)
         return sink
 
-    def record_yield(self, value: Any, effect_label: Optional[str]) -> tuple:
+    def record_yield(self, value: Any, effect_label: Optional[str],
+                     emission: Optional[Step] = None) -> tuple:
         """Classify one yield out of a recorded effect generator.
 
         Returns ``(step, value_to_yield)``.  For anything with an inverse the
@@ -700,7 +728,15 @@ class Timeline:
             self._wal_append(step)
             return step, value
         else:
-            emission = self._emission_sites.get((file, lineno - 1)) if lineno else None
+            if emission is None:
+                # a runtime compensation entry already names the emission it
+                # offsets (issue #1369); an activation-body entry is yielded
+                # as the `_Compensation` object, whose source line is not the
+                # registration's, so adjacency alone never paired it
+                emission = getattr(entry, "emission_step", None)
+            if emission is None:
+                emission = (self._emission_sites.get((file, lineno - 1))
+                            if lineno else None)
             if emission is not None:
                 step = self._add(
                     KIND_COMPENSATION, f"compensate {emission.label}", effect_label,
@@ -2086,6 +2122,35 @@ def _next_seq(path: str) -> int:
     return highest + 1
 
 
+#: The IR keys whose string values are where a document was read from, not
+#: what it says. `composition_digest` reduces them to a basename, so the same
+#: composition compiled from another working directory digests the same.
+_LOCATION_KEYS = frozenset({"file", "source"})
+
+
+def _without_locations(node: Any) -> Any:
+    if isinstance(node, dict):
+        return {key: (os.path.basename(value)
+                      if key in _LOCATION_KEYS and isinstance(value, str)
+                      and value.endswith(".rvl") else _without_locations(value))
+                for key, value in node.items()}
+    if isinstance(node, (list, tuple)):
+        return [_without_locations(value) for value in node]
+    return node
+
+
+def composition_digest(ir: dict) -> str:
+    """The digest a WAL header carries for the composition that wrote it
+    (issue #1477): sha256 over the IR's canonical JSON, with each `.rvl` path
+    under a `file`/`source` key reduced to its basename. `revl recover
+    --composition FILE` compiles FILE, digests it the same way, and refuses to
+    replay the log through it unless the two agree."""
+    import hashlib  # noqa: PLC0415 - stdlib, only when a log is opened with an IR
+    canonical = json.dumps(_without_locations(ir), sort_keys=True,
+                           separators=(",", ":"), default=str)
+    return "sha256:" + hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class WriteAheadLog:
     """A durable, append-only log of committed effects and their inverse
     descriptors (roadmap item 47).
@@ -2144,9 +2209,26 @@ class WriteAheadLog:
         self._seq = _next_seq(self.path)
         self._handle = open(self.path, "a", encoding="utf-8")
         if self._handle.tell() == 0:
-            self._write({"record": "header", "walVersion": WAL_VERSION,
-                         "generation": self._generation,
-                         "guarantee": WAL_GUARANTEE})
+            header = {"record": "header", "walVersion": WAL_VERSION,
+                      "generation": self._generation,
+                      "guarantee": WAL_GUARANTEE}
+            # issue #1477: name the composition this log belongs to, so
+            # `revl recover --composition FILE` can refuse to replay the log's
+            # descriptors through a DIFFERENT composition's host bodies. Only
+            # when the log was opened with an IR; a bare log (`ir={}`) keeps
+            # the header it always had.
+            if self._ir:
+                header["composition"] = composition_digest(self._ir)
+            self._write(header)
+        elif self._ir:
+            # issue #1477: a REOPENED log (a `--watch` reload, or a later run
+            # reusing the file, #641/#642) may belong to a different
+            # composition than the one its header names. Record this opening's
+            # own digest, from the next seq on, so recover can bind each
+            # generation's records to the composition that wrote them.
+            self._write({"record": "generation", "generation": self._generation,
+                         "fromSeq": self._seq,
+                         "composition": composition_digest(self._ir)})
         return self
 
     def __enter__(self) -> "WriteAheadLog":
@@ -2232,7 +2314,8 @@ class WriteAheadLog:
             origin: Optional[dict] = None, witness: Any = None,
             idempotency: Optional[str] = None,
             undo_idempotent: bool = False,
-            register: Optional[str] = None) -> dict:
+            register: Optional[str] = None,
+            offsets: Optional[int] = None) -> dict:
         """Append the WAL discharge-descriptor for one witnessed (`transactional`)
         inverse or one `compensation` (docs/design/teardown-contract.md, "WAL
         descriptor"; owned by the witnessed-wal-recover slice on the py tier).
@@ -2263,7 +2346,12 @@ class WriteAheadLog:
         # spelling and not the other would leak on the next line.
         secret = self.secrets.crossing(method=method, key=receiver,
                                        component=receiver)
-        safe_args = confidential.redact_args(args, secret, _describe)
+        # `args=None` is a named call whose arguments could not be captured at
+        # registration without evaluating a crossing early (a compensation whose
+        # argument is itself a call runs that call only when it is owed). The
+        # record says so with `null` rather than a list that looks complete.
+        safe_args = (None if args is None
+                     else confidential.redact_args(args, secret, _describe))
         safe_witness = _describe(witness)
         record = {
             "record": "discharge-descriptor",
@@ -2281,6 +2369,12 @@ class WriteAheadLog:
             # byte-identical: only written when the author declared it.
             **({"undo_idempotent": True} if undo_idempotent else {}),
             **({"register": register} if register else {}),
+            # issue #1369: a compensation names the `seq` of the emission's
+            # `effect` record it offsets. The link lives here, not on the effect
+            # record, because that record is written AHEAD of the host body and
+            # this one only after it returns. Recovery counts the emission as
+            # offset exactly when this descriptor's seq is settled or ran.
+            **({"offsets": offsets} if offsets is not None else {}),
             # design 460 §4: the admission this inverse was registered under, when
             # one is open. Absent otherwise, so a pre-460 descriptor is byte-identical.
             **self._admit_tag(),

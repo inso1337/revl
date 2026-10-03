@@ -413,7 +413,9 @@ def _estop_outstanding(wal_path: str | None) -> dict:
     contract.md, "WAL descriptor"), and a clean commit writes a `discharge`
     record naming the seqs it settled. An E-Stop writes neither — it strands —
     so the descriptors with no discharge behind them are exactly the entries
-    still owed, and exactly what `revl recover` would replay. Counting them
+    still owed, and exactly what `revl recover` would replay. A recover that
+    replayed one writes the runtime's `aborted` record naming it, which settles
+    it too (issue #1477, `wal.settled_descriptor_seqs`). Counting them
     here re-derives the inventory from the durable log rather than trusting the
     dead process's memory."""
     if not wal_path:
@@ -421,23 +423,54 @@ def _estop_outstanding(wal_path: str | None) -> dict:
                 "note": "no WAL was named, so the outstanding entries cannot be "
                         "read off disk — pass --wal FILE, or run `revl recover "
                         "--wal FILE` against the session's log"}
-    from ..wal import WALIntegrityError, read_wal  # noqa: PLC0415
+    from ..placement_wal import PlacementIndexError, read_index  # noqa: PLC0415
+    try:
+        index = read_index(wal_path)
+    except PlacementIndexError as error:
+        return {"known": False, "note": str(error)}
+    if index is not None:
+        return _estop_outstanding_placement(wal_path, index)
+    return _estop_outstanding_wal(wal_path)
+
+
+def _estop_outstanding_placement(index_path: str, index: dict) -> dict:
+    """The outstanding entries of a `revl run --placement --wal` run: each
+    process WAL the index names, read as one session's WAL is (issue #1477).
+    Known only when every process WAL could be read."""
+    from ..placement_wal import process_wal_path  # noqa: PLC0415
+    processes, entries = [], []
+    for entry in index["processes"]:
+        one = _estop_outstanding_wal(process_wal_path(index_path, entry))
+        processes.append({"process": entry["name"], **one})
+        entries.extend({"process": entry["name"], **e}
+                       for e in one.get("entries") or [])
+    unknown = [p for p in processes if not p["known"]]
+    report = {"known": not unknown, "wal": index_path, "processes": processes,
+              "entries": entries, "count": len(entries),
+              "settled": sum(p.get("settled") or 0 for p in processes)}
+    if unknown:
+        report["note"] = "; ".join(f"process {p['process']}: {p['note']}"
+                                   for p in unknown)
+    return report
+
+
+def _estop_outstanding_wal(wal_path: str) -> dict:
+    """The outstanding entries of one WAL."""
+    from ..wal import WALIntegrityError, read_wal, settled_descriptor_seqs  # noqa: PLC0415
     try:
         wal = read_wal(wal_path)
     except (OSError, WALIntegrityError) as error:
         return {"known": False, "note": f"cannot read WAL {wal_path}: {error}"}
-    discharged: set = set()
-    descriptors: list[dict] = []
-    for record in wal.get("records") or []:
-        kind = record.get("record")
-        if kind == "discharge":
-            discharged.update(record.get("discharged") or [])
-        elif kind == "discharge-descriptor":
-            descriptors.append(record)
-    owed = [d for d in descriptors if d.get("seq") not in discharged]
+    records = wal.get("records") or []
+    # issue #1477: settled by a commit's `discharge` OR by the runtime's
+    # `aborted` record (a recover replayed it), not by `discharge` alone
+    settled = settled_descriptor_seqs(records)
+    descriptors = [r for r in records if r.get("record") == "discharge-descriptor"]
+    owed = [d for d in descriptors if d.get("seq") not in settled]
     return {
         "known": True,
         "wal": wal_path,
+        "settled": len(descriptors) - len(owed),
         "entries": [{"seq": d.get("seq"), "entry": d.get("entry"),
                      "receiver": (d.get("call") or {}).get("receiver"),
                      "method": (d.get("call") or {}).get("method"),
@@ -445,6 +478,15 @@ def _estop_outstanding(wal_path: str | None) -> dict:
                     for d in owed],
         "count": len(owed),
     }
+
+
+def _nothing_outstanding(outstanding: dict) -> str:
+    settled = outstanding.get("settled") or 0
+    if settled:
+        return (f"    (none: {settled} registered entr"
+                f"{'y was' if settled == 1 else 'ies were'} settled on the WAL, "
+                f"by a commit's discharge or a recover's replay)")
+    return "    (none on the WAL — nothing durable was registered)"
 
 
 def _render_estop(report: dict) -> str:
@@ -461,17 +503,18 @@ def _render_estop(report: dict) -> str:
     lines.append("  is still held. That is the trade the button makes.")
     outstanding = report.get("outstanding") or {}
     lines.append("")
-    if outstanding.get("known"):
+    if outstanding.get("entries") is not None:
         lines.append(f"  outstanding ({outstanding['count']}):")
         for entry in outstanding["entries"] or []:
             key = entry.get("idempotency")
+            where = f"[{entry['process']}] " if entry.get("process") else ""
             lines.append(
-                f"    seq {entry.get('seq')}  {entry.get('entry')}  "
+                f"    {where}seq {entry.get('seq')}  {entry.get('entry')}  "
                 f"{entry.get('receiver')}.{entry.get('method')}"
                 + (f"  [idempotency {key}]" if key else ""))
-        if not outstanding["entries"]:
-            lines.append("    (none on the WAL — nothing durable was registered)")
-    else:
+        if not outstanding["entries"] and outstanding.get("known"):
+            lines.append(_nothing_outstanding(outstanding))
+    if not outstanding.get("known"):
         lines.append(f"  outstanding: {outstanding.get('note', 'unknown')}")
     lines.append("")
     lines.append("  The instance is DEAD; there is no resume (item 443).")
@@ -550,10 +593,26 @@ def _run_recover(args) -> int:
         if getattr(args, "approval_policy", None):
             session.approval_policy = args.approval_policy
 
+    from ..placement_wal import PlacementIndexError, read_index  # noqa: PLC0415
     try:
-        report = recover(args.wal, session=session, snapshot=snapshot,
-                         reissue=reissue,
+        index = read_index(args.wal)
+    except PlacementIndexError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if index is not None:
+        return _recover_placement(args, index, reissue, session)
+
+    world = None
+    try:
+        # issue #1477: `--composition` binds the REAL world, the composition's
+        # own host bodies and providers, checked against the WAL header's digest.
+        if getattr(args, "composition", None):
+            world = _bind_composition(args)
+        report = recover(args.wal, world=world, session=session,
+                         snapshot=snapshot, reissue=reissue,
                          forward_admissions=getattr(args, "forward", False))
+        if world is not None:
+            report["binding"] = world.describe()
     except (RecoveryError, WALIntegrityError, OSError) as error:
         # A corrupt or unreadable WAL is a diagnostic, not a traceback: recover
         # is the tool an operator reaches for AFTER a crash, so a mid-file
@@ -561,12 +620,57 @@ def _run_recover(args) -> int:
         # print `error:` and exit non-zero, never dump a stack.
         print(f"error: {error}", file=sys.stderr)
         return 1
+    finally:
+        if world is not None:
+            world.close()
 
     if args.json:
         print(json.dumps(report, indent=2))
     else:
         print(render(report))
     return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
+
+
+def _recover_placement(args, index: dict, reissue, session) -> int:
+    """`revl recover --wal INDEX` for a `revl run --placement --wal INDEX` run
+    (issue #1477): every process WAL the index names, one verdict."""
+    from ..recover_placement import recover_index, render_placement  # noqa: PLC0415
+    from ..recovery import RecoveryError  # noqa: PLC0415
+    from ..wal import WALIntegrityError  # noqa: PLC0415
+    if session is not None:
+        print("error: --restore resumes one process's persisted generation; a "
+              "placement run has one per process. Recover the placement without "
+              "--restore.", file=sys.stderr)
+        return 1
+    try:
+        report = recover_index(
+            args.wal, index, composition=getattr(args, "composition", None),
+            config=_recover_config(args), reissue=reissue,
+            forward_admissions=getattr(args, "forward", False))
+    except (RecoveryError, WALIntegrityError, OSError) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return 1
+    if args.json:
+        print(json.dumps(report, indent=2))
+    else:
+        print(render_placement(report))
+    return _recover_exit_status(report, model_only=getattr(args, "model_only", False))
+
+
+def _recover_config(args) -> dict:
+    from ..errors import RevlError  # noqa: PLC0415
+    from ..recovery import RecoveryError  # noqa: PLC0415
+    from ..run import _load_config  # noqa: PLC0415
+    try:
+        return _load_config(getattr(args, "config", None))
+    except (RevlError, OSError) as error:
+        raise RecoveryError(f"cannot read config {args.config}: {error}") from None
+
+
+def _bind_composition(args):
+    """The real world for `revl recover --composition FILE` (issue #1477)."""
+    from ..recover_binding import bind  # noqa: PLC0415
+    return bind(list(args.composition), args.wal, config=_recover_config(args))
 
 
 #: `revl recover`'s exit status when the modelled residue is clean, the model
