@@ -177,7 +177,7 @@ pub(crate) const REFERENCE_KEYWORDS: &[&str] = &[
 /// apart from [`crate::FRONTIER_ID`]: the frontier bounds the refusals, this
 /// bounds the admissions, and a consumer caching an admission compares THIS
 /// before trusting it against a gate built from another tree.
-pub(crate) const SURFACE_ID: &str = "admission-interface:81b499363145a8f0";
+pub(crate) const SURFACE_ID: &str = "admission-interface:047f7f8a7400256e";
 
 /// The tail every certificate carries, so the two halves of the basis line
 /// cannot drift apart.

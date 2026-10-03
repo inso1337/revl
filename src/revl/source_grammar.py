@@ -21,6 +21,13 @@ union of its paths:
   `self.next()` takes its callers' guards, and a method called with an
   operator tuple (`self._bin(self._mul, ("+", "-"))`) is compiled once per
   distinct argument list, so its `self.next()` reads one of those operators;
+  likewise a method called with a constant flag (`self.stmt(in_method=False)`)
+  is compiled once per flag, with the branches the flag decides cut;
+* a value read off the cursor and tested against a constant set
+  (`choice = tok.value if tok.kind == "ident" else None`, then
+  `if choice not in ("withdraw", "result"): raise ...`) makes the read that
+  follows one of that set, as does a lookahead method with several `return`
+  branches (`_assign_ahead`: `=`, or an operator then `=`);
 * `self.<method>(...)` reads whatever that method's rule reads;
 * `if`/`elif`/`else` is a union, `while`/`for` a repetition, `return`,
   `raise`, `break` and `continue` end their path, and `try` is the union of its
@@ -28,10 +35,15 @@ union of its paths:
 * `self.at`, `self.peek`, `self.peek_ahead` and `self.err` read nothing.
 
 Conditions narrow nothing except the guard a read takes, so the grammar is an
-OVER-approximation of the parser: every document the parser accepts is in the
-grammar's language, and the grammar can accept some the parser refuses (a
-semantic check, a duplicate clause, a lookahead it does not model). That is the
-direction a constrained decoder needs. Structure that is in the method shapes
+OVER-approximation of the parser: the grammar can accept documents the parser
+refuses (a semantic check, a duplicate clause, a lookahead it does not model).
+No read is modelled as "any token" (`revl grammar --notes` reports any that
+would be). There is one deliberate exception the other way (issue #1698): the
+parser reads `a b` as two expression statements, so prose inside a function
+body (`the quick brown fox`) is a run of them. The grammar requires an
+expression statement that follows another statement to start a new line or
+follow a `;`. Every corpus document that rule refuses is one the compiler
+refuses too, which the corpus test checks. Structure that is in the method shapes
 is kept: `component C { requires k: S }` is not in the language, because
 `requires` is a keyword, the component header is the only rule that reads it,
 and an identifier never matches a keyword.
@@ -44,8 +56,12 @@ are written here as patterns and held to the lexer by the corpus test.
 THE FORMATS
 -----------
 * `lark`: llguidance's Lark dialect. Keywords are excluded from identifiers
-  with `& ~`, whitespace and `//` comments are `%ignore`d, and the grammar is
-  exact to the derivation.
+  with `& ~`. Spaces and `//` comments are `%ignore`d; a line break is the `NL`
+  lexeme, so the line rule above can be written. Its rules are lowered the way
+  the GBNF's are (below), with `NL?` where the GBNF writes whitespace. A word
+  literal is read through a rule that also offers a whole-word lexeme which
+  ends the parse, because llguidance's lexer, guided by the parser, would
+  otherwise split `componentC` into `component` and `C`.
 * `gbnf`: the GGML BNF the llama.cpp server and XGrammar read. It has no
   negation, so identifiers are built from a trie that steps around every
   keyword, and whitespace is an explicit rule between tokens. GBNF is
@@ -71,6 +87,7 @@ from __future__ import annotations
 
 import ast
 import hashlib
+import re
 import inspect
 from collections import namedtuple
 
@@ -177,11 +194,61 @@ def _position_meet(a, b):
     return a
 
 
+class _Alts(tuple):
+    """A guard that is one of several position tuples (a disjunction), for a
+    lookahead whose branches constrain different positions:
+    `_assign_ahead` is `x =` or `x <op> =`. A plain guard is one tuple, a
+    product of positions, and cannot say "position 2 is `=` only when
+    position 1 is an operator"."""
+
+
+def _alts(guard):
+    return tuple(guard) if isinstance(guard, _Alts) else (guard,)
+
+
+def _from_alts(options):
+    """A guard from alternative tuples: None when any option constrains
+    nothing (that option admits everything), plain when only one is left."""
+    options = list(dict.fromkeys(options))
+    if not options or any(o is None or all(p is None for p in o) for o in options):
+        return None
+    return options[0] if len(options) == 1 else _Alts(options)
+
+
+_EMPTY = object()
+
+
+def _position_meet_strict(a, b):
+    """`_position_meet`, but two token sets with nothing in common meet to
+    `_EMPTY` (a contradiction) instead of keeping the first."""
+    if a is None or b is None:
+        return _position_meet(a, b)
+    kinds_a = {x for x in _subs(a) if x[0] == "t"}
+    kinds_b = {x for x in _subs(b) if x[0] == "t"}
+    if (kinds_a and kinds_b and len(kinds_a) == len(_subs(a))
+            and len(kinds_b) == len(_subs(b))):
+        both = [x for x in _subs(a) if x in kinds_b]
+        return alt(*both) if both else _EMPTY
+    return _position_meet(a, b)
+
+
+def _tuple_meet_strict(a, b):
+    n = max(len(a), len(b))
+    a = a + (None,) * (n - len(a))
+    b = b + (None,) * (n - len(b))
+    out = tuple(_position_meet_strict(x, y) for x, y in zip(a, b))
+    return None if _EMPTY in out else out
+
+
 def _guard_meet(a, b):
     if a is None:
         return b
     if b is None:
         return a
+    if isinstance(a, _Alts) or isinstance(b, _Alts):
+        met = [_tuple_meet_strict(x, y) for x in _alts(a) for y in _alts(b)]
+        met = [m for m in met if m is not None]
+        return _from_alts(met) if met else a
     n = max(len(a), len(b))
     a = a + (None,) * (n - len(a))
     b = b + (None,) * (n - len(b))
@@ -189,8 +256,13 @@ def _guard_meet(a, b):
 
 
 def _guard_union(a, b):
-    """`x or y`: only the cursor position survives, and only when both name it."""
-    if a is None or b is None or a[0] is None or b[0] is None:
+    """`x or y`: only the cursor position survives, and only when both name it.
+    A disjunctive guard on either side keeps both sides whole instead."""
+    if a is None or b is None:
+        return None
+    if isinstance(a, _Alts) or isinstance(b, _Alts):
+        return _from_alts(_alts(a) + _alts(b))
+    if a[0] is None or b[0] is None:
         return None
     return (alt(a[0], b[0]),)
 
@@ -235,6 +307,10 @@ class _Compiler:
             if (isinstance(node, ast.For) and isinstance(node.iter, ast.Name)
                     and node.iter.id in params):
                 used.add(node.iter.id)
+            if isinstance(node, (ast.If, ast.IfExp)):
+                # a flag the method branches on (`stmt(in_method=...)`)
+                used.update(n.id for n in ast.walk(node.test)
+                            if isinstance(n, ast.Name) and n.id in params)
         return [p for p in params if p in used]
 
     def rule_for_call(self, method, call, env):
@@ -254,7 +330,9 @@ class _Compiler:
                     callee_env[param] = desc
         if not callee_env:
             return method
-        tag = "__".join(_desc_tag(callee_env[p]) for p in sorted(callee_env))
+        tag = "__".join(
+            f"{p.strip('_')}_{_desc_tag(callee_env[p])}" if callee_env[p][0] == "flag"
+            else _desc_tag(callee_env[p]) for p in sorted(callee_env))
         name = f"{method}__{tag}"
         self.specs.setdefault(name, (method, callee_env))
         return name
@@ -276,7 +354,7 @@ class _Compiler:
         if isinstance(test, ast.Call):
             name = _self_method(test)
             if name == "at":
-                term = self._term_from_args(test.args, ctx)
+                term = self._term_from_args(test.args, ctx, test.keywords)
                 return None if term is None else (term,)
             if name == "_is_name_tok":
                 return (alt(("t", "ident", None),
@@ -293,8 +371,8 @@ class _Compiler:
         if name in self._inline:
             return self._inline[name]
         self._inline[name] = None
-        ctx = {"peekvars": {}, "env": {}}
-        guard = None
+        ctx = {"peekvars": {}, "valuevars": {}, "env": {}}
+        branches = []         # one guard per way the method can return true
         for stmt in self.methods[name].body:
             if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Constant):
                 continue
@@ -304,9 +382,29 @@ class _Compiler:
                 if offset is not None:
                     ctx["peekvars"][stmt.targets[0].id] = offset
                 continue
+            # `if <test>: return <value>`, one early way out
+            if (isinstance(stmt, ast.If) and not stmt.orelse and len(stmt.body) == 1
+                    and isinstance(stmt.body[0], ast.Return)
+                    and stmt.body[0].value is not None):
+                value = stmt.body[0].value
+                if isinstance(value, ast.Constant) and value.value is False:
+                    continue
+                branch = self.guard_of(stmt.test, ctx)
+                if not (isinstance(value, ast.Constant) and value.value is True):
+                    branch = _guard_meet(branch, self.guard_of(value, ctx))
+                branches.append(branch)
+                continue
             if isinstance(stmt, ast.Return) and stmt.value is not None:
-                guard = self.guard_of(stmt.value, ctx)
+                value = stmt.value
+                if not (isinstance(value, ast.Constant) and value.value is False):
+                    branches.append(self.guard_of(value, ctx))
+            else:
+                branches.append(None)     # a shape this does not read
             break
+        guard = None
+        if branches and all(b is not None for b in branches):
+            guard = branches[0] if len(branches) == 1 else _from_alts(
+                [o for b in branches for o in _alts(b)])
         self._inline[name] = guard
         return guard
 
@@ -337,8 +435,38 @@ class _Compiler:
                 return index.right.value
         return None
 
+    def _value_var(self, node, ctx):
+        """`(offset, kind)` when `node` is `<tok>.value if <tok>.kind == K else
+        None`: the value of the token `offset` ahead, when it is of kind K."""
+        if not (isinstance(node, ast.IfExp) and isinstance(node.body, ast.Attribute)
+                and node.body.attr == "value"
+                and isinstance(node.orelse, ast.Constant) and node.orelse.value is None):
+            return None
+        test = node.test
+        if not (isinstance(test, ast.Compare) and len(test.ops) == 1
+                and isinstance(test.ops[0], ast.Eq)
+                and isinstance(test.left, ast.Attribute) and test.left.attr == "kind"
+                and isinstance(test.comparators[0], ast.Constant)):
+            return None
+        offset = self._peek_offset(node.body.value, ctx)
+        if offset is None or self._peek_offset(test.left.value, ctx) != offset:
+            return None
+        return offset, test.comparators[0].value
+
     def _compare_guard(self, test, ctx):
         left, op, right = test.left, test.ops[0], test.comparators[0]
+        if isinstance(left, ast.Name) and left.id in ctx.get("valuevars", {}):
+            # `choice not in ("withdraw", "result")` on a value variable
+            offset, kind = ctx["valuevars"][left.id]
+            if isinstance(op, ast.Eq) and isinstance(right, ast.Constant):
+                values = (right.value,)
+            elif isinstance(op, ast.In):
+                values = _constant_strings(right)
+            else:
+                values = None
+            if not values:
+                return None
+            return (None,) * offset + (alt(*(("t", kind, v) for v in values)),)
         if not (isinstance(left, ast.Attribute) and left.attr in ("kind", "value")):
             return None
         offset = self._peek_offset(left.value, ctx)
@@ -358,10 +486,15 @@ class _Compiler:
             term = alt(*(("v", v) for v in values))
         return (None,) * offset + (term,)
 
-    def _term_from_args(self, args, ctx):
+    def _term_from_args(self, args, ctx, keywords=()):
         if not args:
             return None
         first = args[0]
+        value = next((k.value for k in keywords if k.arg == "value"), None)
+        if (value is not None and len(args) == 1 and isinstance(first, ast.Constant)
+                and isinstance(value, ast.Constant)):
+            # `self.expect("ident", value="route")`
+            return ("t", first.value, value.value)
         if isinstance(first, ast.Name):
             desc = ctx["env"].get(first.id)
             if desc and desc[0] == "consts":
@@ -378,9 +511,27 @@ class _Compiler:
     def _read(self, ctx):
         """The token one read takes: the guard's first position, or None."""
         guard = ctx["guard"]
+        if isinstance(guard, _Alts):
+            heads = [o[0] if o else None for o in guard]
+            ctx["guard"] = _from_alts([o[1:] if len(o) > 1 else None for o in guard])
+            return None if None in heads else _settle(alt(*heads))
         term = _settle(guard[0]) if guard else None
         ctx["guard"] = guard[1:] if guard and len(guard) > 1 else None
         return term
+
+    def _not_at(self, guard, test, ctx):
+        """The guard where `test`, a `self.at(...)` of one token, is FALSE: a
+        disjunctive guard loses the options that put exactly that token at
+        the cursor. A plain guard cannot say "not" and is left as it is."""
+        if not isinstance(guard, _Alts) or not isinstance(test, ast.Call):
+            return guard
+        if _self_method(test) != "at":
+            return guard
+        term = self._term_from_args(test.args, ctx)
+        if term is None or term[0] != "t":
+            return guard
+        kept = [o for o in guard if not (o and _settle(o[0]) == term)]
+        return _from_alts(kept) if kept else guard
 
     def consume(self, node, ctx):
         """The tokens evaluating `node` reads, in evaluation order."""
@@ -404,6 +555,9 @@ class _Compiler:
                 out = seq(out, opt(part))
             return out
         if isinstance(node, ast.IfExp):
+            known = self.static_truth(node.test, ctx)
+            if known is not None:
+                return self.consume(node.body if known else node.orelse, ctx)
             pre = self.consume(node.test, ctx)
             guard = _guard_meet(ctx["guard"], self.guard_of(node.test, ctx))
             return seq(pre, alt(self.consume(node.body, dict(ctx, guard=guard)),
@@ -437,7 +591,7 @@ class _Compiler:
             return seq(pre, term)
         if name == "expect":
             self._read(ctx)
-            term = self._term_from_args(node.args, ctx)
+            term = self._term_from_args(node.args, ctx, node.keywords)
             if term is None:
                 self.note(ctx["method"], "expect() of a computed token")
                 term = ANY
@@ -485,6 +639,13 @@ class _Compiler:
             else:
                 peekvars.pop(name, None)
             ctx["peekvars"] = peekvars
+            valuevars = dict(ctx.get("valuevars", {}))
+            held = self._value_var(node.value, ctx)
+            if held is not None:
+                valuevars[name] = held
+            else:
+                valuevars.pop(name, None)
+            ctx["valuevars"] = valuevars
         # `if <test>: raise/return` leaves the cursor where <test> is false
         if isinstance(node, ast.If) and not node.orelse and _ends(node.body):
             ctx["guard"] = _guard_meet(ctx["guard"], self.negated_guard(node.test, ctx))
@@ -511,7 +672,33 @@ class _Compiler:
                     ast.Compare(test.left, [flipped()], test.comparators), ctx)
         return None
 
+    def static_truth(self, test, ctx):
+        """True or False when `test` is decided by the flags this rule was
+        specialised on (`in_method`, `not in_method and ...`), else None."""
+        env = ctx["env"]
+        if isinstance(test, ast.Name) and env.get(test.id, (None,))[0] == "flag":
+            return env[test.id][1]
+        if isinstance(test, ast.UnaryOp) and isinstance(test.op, ast.Not):
+            inner = self.static_truth(test.operand, ctx)
+            return None if inner is None else not inner
+        if isinstance(test, ast.BoolOp):
+            values = [self.static_truth(v, ctx) for v in test.values]
+            if isinstance(test.op, ast.And):
+                if False in values:
+                    return False
+                return True if all(v is True for v in values) else None
+            if True in values:
+                return True
+            return False if all(v is False for v in values) else None
+        return None
+
     def stmt(self, node, ctx):
+        if isinstance(node, ast.If):
+            known = self.static_truth(node.test, ctx)
+            if known is False:
+                return self.block(node.orelse, dict(ctx))
+            if known is True and not node.orelse:
+                pass        # the test still guards; fall through to the general case
         if isinstance(node, ast.Return):
             return Flow(self.consume(node.value, ctx), None, None, None)
         if isinstance(node, ast.Raise):
@@ -524,7 +711,8 @@ class _Compiler:
             pre = self.consume(node.test, ctx)
             guard = _guard_meet(ctx["guard"], self.guard_of(node.test, ctx))
             then = self.block(node.body, dict(ctx, guard=guard))
-            other = self.block(node.orelse, dict(ctx))
+            other = self.block(node.orelse, dict(
+                ctx, guard=self._not_at(ctx["guard"], node.test, ctx)))
             return Flow(seq(pre, alt(then.ret, other.ret)),
                         seq(pre, alt(then.fall, other.fall)),
                         seq(pre, alt(then.brk, other.brk)),
@@ -581,7 +769,7 @@ class _Compiler:
     def compile_rule(self, rule):
         method, env = self.specs.get(rule, (rule, {}))
         ctx = {"method": method, "guard": self.entries.get(rule), "peekvars": {},
-               "env": env}
+               "valuevars": {}, "env": env}
         flow = self.block(self.methods[method].body, ctx)
         out = alt(flow.ret, flow.fall)
         return out if out is not None else EPS
@@ -624,6 +812,14 @@ def _constant_strings(node):
         if all(isinstance(e, ast.Constant) and isinstance(e.value, str) for e in node.elts):
             return tuple(e.value for e in node.elts)
         return None
+    if isinstance(node, ast.Name):
+        # a module-level registry of the parser (`SLO_RESPONSES`)
+        from . import parser as _parser  # noqa: PLC0415
+        value = getattr(_parser, node.id, None)
+        if isinstance(value, (tuple, list, set, frozenset, dict)) and value and all(
+                isinstance(v, str) for v in value):
+            return tuple(sorted(value))
+        return None
     if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
             and node.value.id == "self"):
         from . import parser as _parser  # noqa: PLC0415
@@ -647,6 +843,8 @@ def _describe(arg, env):
     if (isinstance(arg, ast.Attribute) and isinstance(arg.value, ast.Name)
             and arg.value.id == "self"):
         return ("methods", (arg.attr,))
+    if isinstance(arg, ast.Constant) and isinstance(arg.value, bool):
+        return ("flag", arg.value)
     if isinstance(arg, ast.Constant) and isinstance(arg.value, str):
         return ("consts", (arg.value,))
     if (isinstance(arg, (ast.Tuple, ast.List)) and arg.elts
@@ -659,6 +857,8 @@ def _describe(arg, env):
 
 
 def _desc_tag(desc):
+    if desc[0] == "flag":
+        return "on" if desc[1] else "off"
     if desc[0] == "methods":
         return "_".join(m.strip("_") for m in desc[1])
     return "ops" + hashlib.sha256("\0".join(desc[1]).encode()).hexdigest()[:6]
@@ -687,7 +887,12 @@ def parser_methods(source: str | None = None) -> dict:
 
 
 # The rules every category starts from (`CATEGORIES` below names them).
-_STARTS = ("_parse_program", "stmt", "fn_stmt", "pure_expr", "type_")
+_STARTS = ("_parse_program", "stmt__in_method_off", "fn_stmt", "pure_expr", "type_")
+
+# A start that is a specialisation: the rule a component body reads is
+# `stmt(in_method=False)` (the parser's component loop), not `stmt` with the
+# flag unknown, which would also admit the method-only statements.
+_START_SPECS = {"stmt__in_method_off": ("stmt", {"in_method": ("flag", False)})}
 
 
 def derive(source: str | None = None):
@@ -700,6 +905,7 @@ def derive(source: str | None = None):
     tested for. A rule with any unguarded call site gets no entry guard."""
     methods = parser_methods(source)
     first = _Compiler(methods)
+    first.specs.update(_START_SPECS)
     first.reach(_STARTS)
     entries = {}
     for rule, sites in first.calls.items():
@@ -723,11 +929,84 @@ def derive(source: str | None = None):
 # the others are the slices a hole-filling decoder is constrained to.
 CATEGORIES = {
     "program": ("n", "_parse_program"),
-    "component-body": ("star", ("n", "stmt")),
-    "statements": ("star", ("n", "fn_stmt")),
+    # a statement list reads the way a block body does: `;` may separate
+    # statements and trail the last one (`_skip_semis`, as in `block`)
+    "component-body": ("seq", (("star", ("seq", (("n", "_skip_semis"),
+                                                 ("n", "stmt__in_method_off")))),
+                               ("n", "_skip_semis"))),
+    "statements": ("seq", (("star", ("seq", (("n", "_skip_semis"), ("n", "fn_stmt")))),
+                           ("n", "_skip_semis"))),
     "expression": ("n", "pure_expr"),
     "type": ("n", "type_"),
 }
+
+
+def _terminals(expr):
+    """Every ("t", kind, value) term `expr` reads directly."""
+    if expr is None:
+        return
+    if expr[0] == "t":
+        yield expr
+    elif expr[0] in ("seq", "alt"):
+        for sub in expr[1]:
+            yield from _terminals(sub)
+    elif expr[0] == "star":
+        yield from _terminals(expr[1])
+
+
+def _reach_from(rules, starts, removed=frozenset()) -> set:
+    seen: set = set()
+    todo = [s for s in starts if s not in removed]
+    while todo:
+        name = todo.pop()
+        if name in seen:
+            continue
+        seen.add(name)
+        todo.extend(n for n in nonterminals(rules.get(name)) if n not in removed)
+    return seen
+
+
+def hole_category(derived=None) -> str:
+    """The category a hole's fill belongs to, read off the derived grammar
+    (issue #1664): the narrowest category whose start rule every parse of
+    the `hole` keyword passes through.
+
+    The rules that read the `hole` token are found by that token, not by a
+    method name. A category qualifies when its start reaches every one of
+    them and removing its start from the program cuts every path to them, so
+    every hole the parser can read sits inside a parse of that category, and
+    the hole's text can be replaced by any document of it. Of the qualifying
+    categories the one whose start reaches the fewest rules wins. `program`
+    always qualifies, so it is the answer when nothing narrower does."""
+    if derived is None:
+        return _default_hole_category()
+    rules = derived[0]
+    readers = {name for name, expr in rules.items()
+               if ("t", "kw", "hole") in set(_terminals(expr))}
+    if not readers:
+        raise ValueError("the derived grammar reads no `hole` keyword")
+    program = list(nonterminals(CATEGORIES["program"]))
+    best, best_size = "program", None
+    for name, start in CATEGORIES.items():
+        starts = list(nonterminals(start))
+        reached = _reach_from(rules, starts)
+        if not readers <= reached:
+            continue
+        if readers & _reach_from(rules, program, frozenset(starts)):
+            continue
+        if best_size is None or len(reached) < best_size:
+            best, best_size = name, len(reached)
+    return best
+
+
+_HOLE_CATEGORY: list = []
+
+
+def _default_hole_category() -> str:
+    """`hole_category()` of this tree's parser, derived once per process."""
+    if not _HOLE_CATEGORY:
+        _HOLE_CATEGORY.append(hole_category(derive()))
+    return _HOLE_CATEGORY[0]
 
 
 # --------------------------------------------------------------------------
@@ -759,6 +1038,25 @@ def _literal(text: str, style: str) -> str:
     return f'"{escaped}"'
 
 
+_WORDLIKE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
+
+
+def _word_rule(text: str) -> str:
+    """The Lark rule a word literal is read through (`w_component`)."""
+    return "w_" + "".join(c if (c.islower() or c.isdigit() or c == "_")
+                          else "u" + c.lower() for c in text)
+
+
+def _lark_word(text: str, used) -> str:
+    """A word literal in Lark, read through a rule that also offers a dead-end
+    word lexeme. llguidance's lexer is guided by the parser: where no
+    identifier is allowed it lexes `componentC` as `component` then `C`. With
+    a whole-word lexeme on offer it takes the longest match, `componentC`, and
+    that path dies, as the revl lexer reads it (one identifier)."""
+    used.add(("word", text))
+    return _word_rule(text)
+
+
 def _term(term, style, used):
     """A token term in the target dialect, recording which shared rules it uses."""
     if term == ANY:
@@ -768,6 +1066,8 @@ def _term(term, style, used):
     if not isinstance(value, str):
         value = None
     if kind is None or (kind in ("kw", "ident") and value is not None):
+        if style == "lark" and _WORDLIKE.match(value):
+            return _lark_word(value, used)
         return _literal(value, style)
     if kind == "kw":
         used.add("keyword")
@@ -908,7 +1208,13 @@ def _shared(style, used):
         from . import lexer as _lexer  # noqa: PLC0415
         kws = "|".join(sorted(_lexer.KEYWORDS))
         out.append(f"IDENT: /[A-Za-z_][A-Za-z0-9_]*/ & ~/({kws})/")
-        out.append(f"keyword: {_keyword_alt(style)}")
+        out.append("keyword: " + " | ".join(
+            _lark_word(k, used) for k in sorted(_lexer.KEYWORDS)))
+        out.append("// a word literal, or a longer word that ends the parse here")
+        for word in sorted(w[1] for w in used if isinstance(w, tuple) and w[0] == "word"):
+            out.append(f"{_word_rule(word)}: {_literal(word, style)} | WORD NEVER")
+        out.append("WORD: /[A-Za-z_][A-Za-z0-9_]*/")
+        out.append(r"NEVER: /[^\s\S]/")
         for name in ("INT", "STRING"):
             out.append(f"{name}: {_LEX[name][0]}")
         # A float is a rule over three lexemes, not one lexeme: llguidance's
@@ -933,9 +1239,14 @@ def _shared(style, used):
         # The alternation is deliberately not wrapped in `( ... )+`: llguidance's
         # lexer refuses `a / b` when the ignore pattern is a repetition that can
         # begin with `/` (measured), and `%ignore` repeats anyway.
-        trivia = r"/[ \t\r\n\f]+|\/\/[^\n]*/"
-        out.append(f"TRIVIA: {trivia}")
-        out.append(f"%ignore {trivia}")
+        # A line break is not ignored: it is the `NL` lexeme, which the rules
+        # allow between any two tokens and require before an expression
+        # statement that follows another statement (issue #1698). A comment
+        # runs to the end of its line, so `NL` also reads the comments and
+        # blank lines that follow a break.
+        out.append(r"TRIVIA: /[ \t\r\n\f]+|\/\/[^\n]*/")
+        out.append(r"NL: /(\r?\n([ \t\r\f]+|\/\/[^\n]*)*)+/")
+        out.append(r"%ignore /[ \t\r\f]+|\/\/[^\n]*/")
         return out
     if style == "gbnf":
         out.extend(_gbnf_ident_rules())
@@ -949,6 +1260,7 @@ def _shared(style, used):
                    + " | ".join(_literal(s, style) for s in _symbols()))
         out.append('ws ::= ([ \\t\\r\\n] | "//" [^\\n]*)*')
         out.append('ws1 ::= ([ \\t\\r\\n] | "//" [^\\n]*)+')
+        out.append('wsnl ::= ([ \\t\\r] | "//" [^\\n]*)* "\\n" ws')
         return out
     out.append("(* IDENT: an identifier that is not a keyword; INT, FLOAT, STRING, "
                "template and host_body: the lexer's token classes *)")
@@ -1045,9 +1357,9 @@ def _lark_host_bodies():
         out.append(f"{lexeme}: /\\{{{_balanced(tv, NESTING_DEPTH)}\\}}/")
         if names:
             alts.append('"@" (' + " | ".join(_literal(n, "lark") for n in names)
-                        + f") {lexeme}")
+                        + f") NL? {lexeme}")
         else:                                   # any other backend: C-family
-            alts.append(f'"@" (IDENT | keyword) {lexeme}')
+            alts.append(f'"@" (IDENT | keyword) NL? {lexeme}')
     return ["host_body: " + " | ".join(alts)] + out
 
 
@@ -1099,6 +1411,16 @@ def _symbols():
 # token that starts with a word character, written after one that ended with
 # a word character, is preceded by `ws1` (at least one space or comment); every
 # other token by `ws`. An empty derivation ends in its context's class.
+#
+# A third class, B, is the boundary between two statements of one block. The
+# parser reads `a b` as two expression statements, so English prose inside a
+# function body (`the quick brown fox`) is a run of statements. In the GBNF,
+# a statement that follows another on the same line must be separated from it
+# by `;`: the token that opens the next statement is preceded by `wsnl`
+# (whitespace holding a line break). `;` and `}` still take plain `ws`. This
+# is narrower than the parser, which never looks at line breaks; every
+# parseable document in the tree keeps to it, and
+# tests/test_source_grammar_1661.py holds the corpus to that.
 
 _WORD = set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_")
 
@@ -1134,22 +1456,55 @@ def _token_variants(term):
     return [(_literal(text, "gbnf"), first, last)]
 
 
+_STATEMENT_RULES = ("stmt", "fn_stmt", "_fn_stmt")
+
+# Blocks whose last statement is the block's VALUE, not a statement:
+# `{ let d = n * 2  d + 1 }` is a match arm that yields `d + 1`, and real code
+# writes it on one line. The line rule does not apply inside them.
+_VALUE_BLOCKS = ("_match_block_arm",)
+
+
+def _classes_after(c, style="gbnf"):
+    """The classes a derivation started in `c` can end in: W or N after a
+    token, and B after a statement list (or after nothing, from B). Variants
+    that derive nothing are pruned. Lark has no word classes, only N and B."""
+    return ("W", "N", "B") if style == "gbnf" else ("N", "B")
+
+
+def _is_statement_list(body):
+    """Whether a repetition reads one statement per iteration: its body ends
+    in a statement rule (`stmt`, `fn_stmt`, `_fn_stmt` or a specialisation)."""
+    last = body[1][-1] if body[0] == "seq" and body[1] else body
+    options = last[1] if last[0] == "alt" else (last,)
+    return any(o[0] == "n" and o[1].split("__")[0] in _STATEMENT_RULES for o in options)
+
+
 class _GbnfLowering:
     """Builds the GBNF rules. An alternative is a tuple of items, each
     ("ref", rule) or ("raw", text); a rule is a list of alternatives. Rules
     that derive nothing are pruned at the end, with every alternative that
     refers to one."""
 
-    def __init__(self, rules):
+    def __init__(self, rules, style="gbnf", used=None):
         self.rules = rules
+        self.style = style
+        self.used = used if used is not None else set()
         self.out: dict = {}
         self.todo: list = []
         self.n = 0
         self._suffixes: dict = {}
         self._stars: dict = {}
+        # the separators before a token: GBNF writes the whitespace itself;
+        # Lark ignores spaces and comments and reads line breaks as `NL`
+        self.seps = ({"ws": "ws", "ws1": "ws1", "wsnl": "wsnl"} if style == "gbnf"
+                     else {"ws": "NL?", "ws1": "NL?", "wsnl": "NL"})
+        self.dash = "-" if style == "gbnf" else "_"
+
+    def _name(self, *parts):
+        return self.dash.join(str(p) for p in parts).lower()
 
     def variant(self, name, c, l):
-        vname = f"{_rule_name(name, 'gbnf')}-{c}{l}".lower()
+        vname = f"{_rule_name(name, self.style)}{self.dash}{c}{l}".lower()
         if vname not in self.out:
             self.out[vname] = []
             self.todo.append((vname, self.rules[name], c, l))
@@ -1162,10 +1517,19 @@ class _GbnfLowering:
         tag = e[0]
         if tag in ("t", "any"):
             alts = []
-            for rendered, first, last in _token_variants(e):
+            variants = _token_variants(e)
+            if self.style != "gbnf":
+                # Lark's lexer finds word boundaries itself: one class, N
+                variants = [(variants[0][0], "N", "N")]
+            for rendered, first, last in variants:
                 if last == l:
-                    sep = "ws1" if (c == "W" and first == "W") else "ws"
-                    alts.append((("raw", sep), ("raw", rendered)))
+                    if c == "B":
+                        sep = "ws" if rendered in ('";"', '"}"') else "wsnl"
+                    else:
+                        sep = "ws1" if (c == "W" and first == "W") else "ws"
+                    if self.style != "gbnf":
+                        rendered = _term(e, self.style, self.used)
+                    alts.append((("raw", self.seps[sep]), ("raw", rendered)))
             return alts
         if tag == "n":
             return [(("ref", self.variant(e[1], c, l)),)]
@@ -1182,13 +1546,39 @@ class _GbnfLowering:
             return [(("ref", self._star(e[1], c, l)),)]
         raise ValueError(tag)
 
+    def _base(self, vname):
+        """The derived rule a variant's name was made from."""
+        base = vname[2:].rsplit(self.dash, 1)[0]
+        return base.replace("-", "_") if self.style == "gbnf" else base
+
+    def _lower_rule(self, vname, expr, c, l):
+        """A rule's variant. A statement rule read at a boundary (class B)
+        keeps the boundary only for its expression-statement alternative, the
+        bare `pure_expr` the parser falls back to: `x = 1  y = 2` and
+        `let r = f() return 1` are real code on one line, while a second
+        expression statement on the line is how prose reads (`hello world`).
+        Its other alternatives open with a keyword or an assignment and are
+        read as after a word (W), so a word still needs a space before it."""
+        base = self._base(vname)
+        if c != "B" or expr[0] != "alt" or not any(
+                base == r or base.startswith(r + "__") for r in _STATEMENT_RULES):
+            return self.lower(expr, c, l)
+        alts = []
+        after_word = "W" if self.style == "gbnf" else "N"
+        for sub in expr[1]:
+            context = "B" if sub == ("n", "pure_expr") else after_word
+            for alt_ in self.lower(sub, context, l):
+                if alt_ not in alts:
+                    alts.append(alt_)
+        return alts
+
     def _ref_to(self, alts):
         """One item standing for `alts`: the item itself when there is a single
         one-item alternative, else a helper rule."""
         if len(alts) == 1 and len(alts[0]) == 1:
             return alts[0][0]
         self.n += 1
-        name = f"g-{self.n}"
+        name = self._name("g", self.n)
         self.out[name] = alts
         return ("ref", name)
 
@@ -1202,7 +1592,7 @@ class _GbnfLowering:
         if not rest:
             return self.lower(head, c, l)
         alts = []
-        for m in ("W", "N"):
+        for m in _classes_after(c, self.style):
             first = self.lower(head, c, m)
             if not first:
                 continue
@@ -1222,35 +1612,44 @@ class _GbnfLowering:
     def _star(self, body, c, l):
         """`(body)*` after `c` ending in `l`: four mutually recursive helpers,
         so the class threads through each repetition."""
-        key = (body, c, l)
+        statements = (_is_statement_list(body)
+                      and getattr(self, "current", None) not in _VALUE_BLOCKS)
+        key = (body, c, l, statements)
         if key in self._stars:
             return self._stars[key]
         self.n += 1
-        names = {(cc, ll): f"s-{self.n}-{cc}{ll}".lower() for cc in "WN" for ll in "WN"}
+        classes = "WNB" if self.style == "gbnf" else "NB"
+        names = {(cc, ll): self._name("s", self.n, cc + ll)
+                 for cc in classes for ll in classes}
         for (cc, ll), name in names.items():
-            self._stars[(body, cc, ll)] = name
+            self._stars[(body, cc, ll, statements)] = name
             self.out[name] = []
         for (cc, ll), name in names.items():
             alts = [()] if cc == ll else []
-            for m in ("W", "N"):
+            for m in _classes_after(cc, self.style):
+                if m == cc == "B":
+                    continue                    # an empty repetition adds nothing
                 once = self.lower(body, cc, m)
                 if once:
-                    alts.append((self._ref_to(once), ("ref", names[(m, ll)])))
+                    after = "B" if statements else m
+                    alts.append((self._ref_to(once), ("ref", names[(after, ll)])))
             self.out[name] = alts
         return self._stars[key]
 
     def run(self, start):
         root = []
-        for l in ("W", "N"):
+        for l in _classes_after("N", self.style):
             root.extend(self.lower(start, "N", l))
-        # a template's `${...}` is an expression, written after `${` (class N);
-        # the shared `template` rule refers to these two variants by name
-        self.keep = [self.variant("pure_expr", "N", "W"),
-                     self.variant("pure_expr", "N", "N")]
+        # a GBNF template's `${...}` is an expression, written after `${`
+        # (class N); the shared `template` rule refers to these two variants by
+        # name. In Lark a template is one lexeme and refers to nothing.
+        self.keep = ([self.variant("pure_expr", "N", "W"),
+                      self.variant("pure_expr", "N", "N")] if self.style == "gbnf" else [])
         while self.todo:
             vname, expr, c, l = self.todo.pop()
-            self.out[vname] = self.lower(expr, c, l)
-        self.out["root"] = [alt_ + (("raw", "ws"),) for alt_ in root]
+            self.current = self._base(vname)
+            self.out[vname] = self._lower_rule(vname, expr, c, l)
+        self.out["root"] = [alt_ + (("raw", self.seps["ws"]),) for alt_ in root]
         self._prune()
 
     def _prune(self):
@@ -1295,6 +1694,22 @@ def _render_gbnf(rules, start):
     return lines
 
 
+def _render_lark(rules, start, used):
+    """The Lark rules, lowered the way the GBNF is so a line break can be
+    required where the GBNF requires one (an expression statement after
+    another statement). Spaces and comments are `%ignore`d; a line break is
+    the `NL` lexeme, optional between any two tokens and required there."""
+    lowering = _GbnfLowering(rules, "lark", used)
+    lowering.run(start)
+    order = ["root"] + [n for n in lowering.out if n != "root"]
+    lines = []
+    for name in order:
+        alts = [" ".join(item[1] for item in alt_) if alt_ else '""'
+                for alt_ in lowering.out[name]]
+        lines.append(f"{name}: " + " | ".join(alts))
+    return lines
+
+
 HEADER = {
     "lark": "// ", "gbnf": "# ", "ebnf": "(* ",
 }
@@ -1313,6 +1728,9 @@ def render(style: str, category: str = "program", derived=None) -> str:
     if style == "gbnf":
         body = _render_gbnf(rules, start)
         start_expr = None
+    elif style == "lark":
+        body = _render_lark(rules, start, used)
+        start_expr = "root"
     else:
         body = _render_rules(rules, start, style, used)
         start_expr = _expr(start, style, used)
@@ -1322,8 +1740,8 @@ def render(style: str, category: str = "program", derived=None) -> str:
         f"{lead}revl source grammar, category `{category}`, format {style}.{tail}",
         f"{lead}GENERATED by `revl grammar` from src/revl/parser.py "
         f"(src/revl/source_grammar.py). Do not edit.{tail}",
-        f"{lead}An over-approximation of the parser: every document it accepts "
-        f"is in this language.{tail}",
+        f"{lead}An over-approximation of the parser, except that an expression "
+        f"statement after another statement starts a new line.{tail}",
         f"{lead}{len(unguarded)} parser reads are modelled as any token "
         f"(see `revl grammar --notes`).{tail}",
     ]
@@ -1374,6 +1792,9 @@ def notes_text(derived=None) -> str:
     """Where the derivation is looser than the parser, for `--notes`."""
     rules, notes, unguarded = derived if derived is not None else derive()
     lines = [f"{len(rules)} rules derived from src/revl/parser.py."]
+    if not unguarded:
+        lines.append("0 reads take any token: every read is the token class the "
+                     "parser tests for there.")
     if unguarded:
         lines.append(f"{len(unguarded)} reads take any token (the condition before "
                      f"them is not a shape the derivation reads):")

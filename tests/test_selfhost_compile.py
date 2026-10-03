@@ -553,6 +553,33 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # py list records: selfhost/emit_ts.rvl reproduces the reference bytes
         # from the reference IR, and the fully-native chain does not.
         "../emit_py_corpus/services_control_flow.rvl",
+        # issue #106: the families selfhost/emit_ts.rvl learned in one slice.
+        # The emitter half of each is byte-exact on the REFERENCE IR (asserted
+        # above for every document); the native chain is not, because
+        # selfhost/lower.rvl does not produce the IR these documents need:
+        # a routed require's header (the whole component set drops),
+        "../../../stdlib/router.rvl",
+        # an extern's host `refs` (the thunks and their imports drop),
+        "../../../stdlib/fs.rvl",
+        # the in-file `tests` section, plain and lifecycle,
+        "../../../examples/lifecycle_cache.rvl",
+        "../../../backends/go/testdata/opt_gaps_280.rvl",
+        # timers inside a lifecycle-tested document,
+        "../../../examples/async_timer.rvl",
+        "../../../backends/go/scenarios/advance.rvl",
+        # the stream surface (`subscribe`, `merge`, `every ... in`),
+        "../../../backends/go/testdata/stream_130.rvl",
+        "../emit_rust_corpus/comp_stream.rvl",
+        # the statement-block match arm, which the self-host parser has no node
+        # for (the same document is in the py list above),
+        "../emit_py_corpus/branches.rvl",
+        # and the two documents written for this slice, which combine the above.
+        "routed_timers.rvl",
+        "ref_externs.rvl",
+        # Issue #1592: an extern that declares its own `compensate`. The
+        # emitter half agrees byte for byte on the reference IR; lower.rvl
+        # does not yet lower an extern's declared `compensate` slot.
+        "extern_compensate.rvl",
     ),
     "go": (
         # issue #106: in-file `test` blocks. selfhost/emit_go.rvl reproduces the
