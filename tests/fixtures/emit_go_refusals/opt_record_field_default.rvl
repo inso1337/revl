@@ -1,0 +1,16 @@
+// `rec.field ?? d` where `field` is an `Opt[T]` field of a declared record
+// (issue #1627). In the go component world that field is the record's
+// `RevlOpt[T]` struct, neither the `*T` a read Opt is nor the `(T, bool)` a
+// call returns. The go reference REFUSES it by name; it used to render a
+// `_v != nil` test `go build` refused.
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS. The
+// line-coverage gate drives the reference over it here.
+type Box = { name: Opt[Str] }
+service S { fn wrap(k: Str) -> Box }
+service Ops { fn go(k: Str) -> Str }
+component C requires s: S provides ops: Ops {
+  provide ops {
+    fn go(k) { return s.wrap(k).name ?? "none" }
+  }
+}

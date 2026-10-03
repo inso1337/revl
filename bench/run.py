@@ -47,6 +47,26 @@ from score_raw_ts import (  # noqa: E402
     RAW_TS_VARIANT, DEFAULT_CYCLES, probe_source, render_raw_ts_summary,
 )
 
+
+def _load_by_path(name: str, rel: str):
+    """A sibling bench module, by path. A bare `import` binds whichever module
+    of that name is found first, and several basenames repeat in this tree."""
+    import importlib.util  # noqa: PLC0415
+    spec = importlib.util.spec_from_file_location(name, BENCH / rel)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+# mcp (the FRAMEWORK-BENCH-1 third host) is probe-scored the same way raw-ts is,
+# by bench/mcp_host/probe.mjs through score_mcp.py.
+score_mcp = _load_by_path("bench_score_mcp", "score_mcp.py")
+MCP_VARIANT = score_mcp.MCP_VARIANT
+
+# The variants that are generated once and scored on what they leave behind,
+# rather than compiled and retried.
+PROBED_VARIANTS = (RAW_TS_VARIANT, MCP_VARIANT)
+
 OUTPUT_REMINDER = (
     "\n\n## Task\n\n{brief}\n\nUse these service interfaces verbatim:\n\n"
     "```revl\n{services}\n```\n\n"
@@ -61,6 +81,14 @@ RAW_TS_REMINDER = (
     "plugin as `export const plugin`. No revl."
 )
 
+MCP_REMINDER = (
+    "\n\n## Task\n\n{brief}\n\nThe service interface(s), in revl notation "
+    "(expose each operation as one tool named <service>_<operation>):\n\n"
+    "```revl\n{services}\n```\n\n"
+    "Reply with exactly one fenced ```ts code block: the complete tool pack "
+    "module, exporting `install`. No revl."
+)
+
 RETRY_TEMPLATE = (
     "{task}\n\nYour previous attempt:\n\n```revl\n{code}\n```\n\n"
     "The revl compiler rejected it:\n\n```\n{error}\n```\n\n"
@@ -71,6 +99,8 @@ RETRY_TEMPLATE = (
 def load_variant_prompt(variant: str) -> str:
     if variant == RAW_TS_VARIANT:
         return (BENCH / "prompts" / "raw-ts.md").read_text()
+    if variant == MCP_VARIANT:
+        return (BENCH / "prompts" / "mcp.md").read_text()
     if variant == "v1":
         return (BENCH / "prompts" / "v1.md").read_text()
     if variant == "v2":
@@ -95,30 +125,56 @@ def extract_code(reply: str) -> str:
 COMPILER_ROOT = ROOT  # overridable via --compiler-root
 
 
+def _is_revl(name: str) -> bool:
+    return name == "revl" or name.startswith("revl.")
+
+
+# The `revl/__init__.py` the last `compile_check` graded with, for
+# `scoring_compiler`. `compile_check` puts the process's own `revl` back when
+# it returns, so `sys.modules` no longer says which one graded.
+_GRADED_BY: str | None = None
+
+
 def compile_check(code: str, name: str):
     """Returns (ok, error_message). Imports the compiler each call so a
     concurrent edit to src/revl is picked up, and an import-time breakage is
-    reported rather than crashing the run."""
+    reported rather than crashing the run.
+
+    The fresh import is scoped to this call. Every `revl` module already
+    loaded, and `sys.path`, are put back before it returns. Leaving the fresh
+    copy installed split the process in two (issue #1800): code that had
+    imported `revl` earlier kept the old `RevlError` class while every later
+    lazy import inside the compiler resolved to the new one, so
+    `except RevlError` stopped catching the compiler's own refusals."""
+    global _GRADED_BY
     src = str(COMPILER_ROOT / "src")
+    saved_path = list(sys.path)
+    saved = {m: mod for m, mod in sys.modules.items() if _is_revl(m)}
     if src in sys.path:
         sys.path.remove(src)
     sys.path.insert(0, src)
-    for mod in [m for m in list(sys.modules) if m == "revl" or m.startswith("revl.")]:
+    for mod in saved:
         del sys.modules[mod]
     try:
-        from revl import RevlError, compile_source
-    except Exception as exc:  # compiler tree mid-edit
-        return False, f"[compiler import failed] {exc}"
-    try:
-        compile_source(code, name)
-        return True, None
-    except RevlError as exc:
-        return False, str(exc)
-    except Exception as exc:
-        return False, f"[compiler crash] {type(exc).__name__}: {exc}"
+        try:
+            import revl  # noqa: PLC0415
+            from revl import RevlError, compile_source  # noqa: PLC0415
+        except Exception as exc:  # compiler tree mid-edit
+            return False, f"[compiler import failed] {exc}"
+        _GRADED_BY = getattr(revl, "__file__", None)
+        try:
+            compile_source(code, name)
+            return True, None
+        except RevlError as exc:
+            return False, str(exc)
+        except Exception as exc:
+            return False, f"[compiler crash] {type(exc).__name__}: {exc}"
+    finally:
+        for mod in [m for m in sys.modules if _is_revl(m)]:
+            del sys.modules[mod]
+        sys.modules.update(saved)
+        sys.path[:] = saved_path
 
-
-# --- runners ---------------------------------------------------------------
 
 def run_cline(system: str, prompt: str, model: str | None, provider: str | None,
               timeout: int, inline_system: bool):
@@ -290,16 +346,63 @@ def run_mock_raw_ts(spec: dict):
             "cost": 0.0, "model": "mock", "provider": "mock"}
 
 
+# The same split for the mcp host: a clean pack releases its Map from the
+# teardown it returns; a leaky one returns nothing, so the Map outlives it.
+def _mock_mcp(spec: dict) -> str:
+    try:
+        leaky = int(spec["id"][:2]) % 3 == 0
+    except ValueError:
+        leaky = False
+    tail = "" if leaky else "  return () => store.drop()\n"
+    return (
+        "import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'\n"
+        "import { z } from 'zod'\n"
+        "import { host } from './host.ts'\n\n"
+        "export function install(server: McpServer) {\n"
+        "  const store = host.Map.new()\n"
+        "  server.registerTool('svc_get', { description: 'get', "
+        "inputSchema: { key: z.string() } },\n"
+        "    async ({ key }) => ({ content: [{ type: 'text', "
+        "text: String(store.get(key) ?? '') }] }))\n"
+        f"{tail}"
+        "}\n"
+    )
+
+
+def run_mock_mcp(spec: dict):
+    return {"text": f"```ts\n{_mock_mcp(spec)}```",
+            "cost": 0.0, "model": "mock", "provider": "mock"}
+
+
 # --- orchestration ---------------------------------------------------------
 
 def run_one_raw_ts(spec: dict, system: str, run_dir: Path, args) -> dict:
     """Generate one raw Cordis plugin for `spec`, save it, and score it with the
     residue probe. Returns a single row (there is no retry loop)."""
-    task = RAW_TS_REMINDER.format(brief=spec["brief"], services=spec["services"])
+    return run_one_probed(spec, system, run_dir, args, RAW_TS_VARIANT)
+
+
+def run_one_probed(spec: dict, system: str, run_dir: Path, args,
+                   variant: str) -> dict:
+    """Generate one module for a probe-scored host, save it, score it.
+
+    raw-ts and mcp share everything but the task wording, the mock, and the
+    probe, so they share this path: one generation, no compiler retry loop,
+    scored on what the module leaves behind after N load/unload cycles.
+    """
+    reminder, mock, probe, cycles = {
+        RAW_TS_VARIANT: (RAW_TS_REMINDER, run_mock_raw_ts,
+                         lambda code, n, name: probe_source(code, cycles=n, name=name),
+                         args.raw_ts_cycles),
+        MCP_VARIANT: (MCP_REMINDER, run_mock_mcp,
+                      lambda code, n, name: score_mcp.probe_source(code, cycles=n, name=name),
+                      args.raw_ts_cycles),
+    }[variant]
+    task = reminder.format(brief=spec["brief"], services=spec["services"])
     t0 = time.time()
     try:
         if args.runner == "mock":
-            reply = run_mock_raw_ts(spec)
+            reply = mock(spec)
         elif args.runner == "local":
             reply = run_local(system, task, args.model, args.base_url,
                               args.timeout, args.max_tokens)
@@ -307,21 +410,21 @@ def run_one_raw_ts(spec: dict, system: str, run_dir: Path, args) -> dict:
             reply = run_cline(system, task, args.model, args.provider,
                               args.timeout, args.inline_system)
     except Exception as exc:
-        print(f"  !! {spec['id']}/{RAW_TS_VARIANT}: runner error: {exc}", file=sys.stderr)
-        return {"spec": spec["id"], "variant": RAW_TS_VARIANT, "summary": True,
+        print(f"  !! {spec['id']}/{variant}: runner error: {exc}", file=sys.stderr)
+        return {"spec": spec["id"], "variant": variant, "summary": True,
                 "status": "error", "leaked": True, "leaked_categories": [],
                 "error": f"[runner error] {exc}", "duration_s": round(time.time() - t0, 2)}
     dur = round(time.time() - t0, 2)
     code = extract_code(reply["text"])
-    adir = run_dir / spec["id"] / RAW_TS_VARIANT
+    adir = run_dir / spec["id"] / variant
     adir.mkdir(parents=True, exist_ok=True)
     (adir / "attempt-1.ts").write_text(code)
-    rec = probe_source(code, cycles=args.raw_ts_cycles, name=f"{run_dir.name}__{spec['id']}")
+    rec = probe(code, cycles, f"{run_dir.name}__{spec['id']}")
     flag = {"clean": "clean", "leaked": "LEAK", "error": "error"}[rec["status"]]
     extra = (" — " + ", ".join(rec["leaked_categories"])) if rec["leaked_categories"] \
         else (f" — {rec['error']}" if rec.get("error") else "")
-    print(f"  {spec['id']}/{RAW_TS_VARIANT}: {flag}{extra}")
-    return {"spec": spec["id"], "variant": RAW_TS_VARIANT, "summary": True,
+    print(f"  {spec['id']}/{variant}: {flag}{extra}")
+    return {"spec": spec["id"], "variant": variant, "summary": True,
             "model": reply.get("model"), "duration_s": dur,
             "cost": reply.get("cost"), "cost_total": reply.get("cost") or 0.0,
             "output_tokens": reply.get("output_tokens"),
@@ -358,8 +461,8 @@ def main():
                     help="score against <dir>/src/revl instead of the live tree "
                          "(e.g. a clean export of a pinned commit)")
     ap.add_argument("--raw-ts-cycles", type=int, default=DEFAULT_CYCLES,
-                    help="mount/unmount cycles for the raw-ts residue probe "
-                         f"(default {DEFAULT_CYCLES}); only used by the raw-ts variant")
+                    help="load/unload cycles for the probe-scored hosts, raw-ts "
+                         f"and mcp (default {DEFAULT_CYCLES})")
     args = ap.parse_args()
 
     if args.runner == "local" and args.model is None:
@@ -401,10 +504,11 @@ def main():
             # loop — a raw Cordis plugin always "compiles". Scored on lifecycle
             # correctness via the residue probe (score_raw_ts.py), NOT on
             # compile-rate. The revl compile-rate path below is left untouched.
-            if variant == RAW_TS_VARIANT:
-                raw = run_one_raw_ts(spec, system, run_dir, args)
+            if variant in PROBED_VARIANTS:
+                raw = run_one_probed(spec, system, run_dir, args, variant)
                 rows.append(raw)
-                raw_rows.append(raw)
+                if variant == RAW_TS_VARIANT:
+                    raw_rows.append(raw)
                 results_path.write_text("\n".join(json.dumps(r) for r in rows) + "\n")
                 continue
 
@@ -480,8 +584,10 @@ def scoring_compiler() -> str:
     """The directory `compile_check` actually imported revl from.
 
     Asked after the run, not before, so it reports what graded the corpus."""
-    mod = sys.modules.get("revl")
-    path = getattr(mod, "__file__", None) if mod else None
+    path = _GRADED_BY
+    if path is None:
+        mod = sys.modules.get("revl")
+        path = getattr(mod, "__file__", None) if mod else None
     if not path:
         return "revl was never imported"
     parent = Path(path).parent
@@ -498,7 +604,8 @@ def scoring_compiler() -> str:
 
 
 def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
-    finals = [r for r in rows if r.get("summary") and r["variant"] != RAW_TS_VARIANT]
+    finals = [r for r in rows if r.get("summary")
+              and r["variant"] not in PROBED_VARIANTS]
     lines = ["# syntax-2.0 acceptance benchmark — run summary", "",
              f"runner: `{args.runner}`" + (f" · model: `{args.model}`" if args.model else ""),
              f"max iterations: {args.max_iters}",
@@ -508,7 +615,8 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
              # checkout than the one it was pointed at and produce plausible,
              # wrong numbers. The path is printed rather than assumed.
              f"scored by: `{scoring_compiler()}`", ""]
-    revl_variants = [v for v in args.variants.split(",") if v != RAW_TS_VARIANT]
+    revl_variants = [v for v in args.variants.split(",")
+                     if v not in PROBED_VARIANTS]
     if revl_variants:
         lines += ["## revl variants — compile-gated (residue refused at compile)", "",
                   "| variant | specs | first-pass compile | green ≤ max iters | mean iters-to-green | mean tokens-to-green | cost |",
@@ -540,6 +648,12 @@ def write_summary(run_dir: Path, rows: list, raw_rows: list, args):
         lines += ["> The revl variants are compile-gated: a residue-carrying "
                   "component never reaches this corpus — the compiler refuses it. "
                   "The raw-ts column is what that gate would have caught.", ""]
+
+    mcp_rows = [r for r in rows if r.get("variant") == MCP_VARIANT]
+    if mcp_rows:
+        lines += ["", "## mcp: probe-scored (the third host)", ""]
+        lines += score_mcp.render_summary(mcp_rows, args.raw_ts_cycles)
+        lines.append("")
 
     (run_dir / "summary.md").write_text("\n".join(lines) + "\n")
 

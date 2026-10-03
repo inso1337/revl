@@ -38,6 +38,17 @@ from ..compiler import compile_files, compile_source
 from ..diagnostics import classify
 from ..errors import RevlError
 
+#: The keys of a session's admission origin, the one definition (issue #1690).
+#: An origin is an inline `source`, or a list of `files` with the text each one
+#: holds in `files_content`, plus in-memory `use` `modules`. `revl_edit` builds
+#: and copies an origin (edit.py) and a snapshot materializes and restores one
+#: (here); both read these names, so a key added to one cannot be missed by the
+#: other (tools/check_vocabulary_mirrors.py).
+ORIGIN_SOURCE = "source"
+ORIGIN_FILES = "files"
+ORIGIN_FILES_CONTENT = "files_content"
+ORIGIN_MODULES = "modules"
+
 SNAPSHOT_VERSION = 1
 
 
@@ -76,15 +87,15 @@ def _materialize(origin: dict) -> dict:
     (issue #1690).
     """
     sources: dict = {}
-    if origin.get("source") is not None:
-        sources["source"] = origin["source"]
-    if origin.get("modules"):
-        sources["modules"] = dict(origin["modules"])
-    files = origin.get("files")
+    if origin.get(ORIGIN_SOURCE) is not None:
+        sources[ORIGIN_SOURCE] = origin[ORIGIN_SOURCE]
+    if origin.get(ORIGIN_MODULES):
+        sources[ORIGIN_MODULES] = dict(origin[ORIGIN_MODULES])
+    files = origin.get(ORIGIN_FILES)
     if files:
-        sources["files"] = list(files)
-        held = origin.get("files_content") or {}
-        sources["files_content"] = {
+        sources[ORIGIN_FILES] = list(files)
+        held = origin.get(ORIGIN_FILES_CONTENT) or {}
+        sources[ORIGIN_FILES_CONTENT] = {
             path: held[path] if path in held else _read_text(path)
             for path in files}
     return sources
@@ -167,10 +178,10 @@ def snapshot(session) -> dict:
     Raises `SessionError` (from the session) when nothing is loaded or when
     the live composition has no recorded sources to reproduce it from.
     """
-    from .session import SessionError  # noqa: PLC0415 — avoid an import cycle
+    from .session import NothingLoaded, SessionError  # noqa: PLC0415 — avoid an import cycle
 
     if not session.loaded:
-        raise SessionError("nothing is loaded — snapshot needs a live composition")
+        raise NothingLoaded("nothing is loaded — snapshot needs a live composition")
     if not getattr(session, "origin", None):
         raise SessionError(
             "this composition has no recorded sources, so it cannot be "
@@ -195,21 +206,37 @@ def snapshot(session) -> dict:
 
 # ---------------------------------------------------------------- restore
 
-def _recompile(sources: dict) -> dict:
+def admitted_name(snap: dict | None) -> str:
+    """The file name a single-`source` snapshot's composition was admitted
+    under, as its manifest recorded it (an inline MCP admission compiles as
+    `<candidate>.rvl`). Re-admitting under the same name keeps an undo or a
+    restore byte for byte what ran (issue #1703); a snapshot whose manifest
+    names no single file falls back to `<snapshot>.rvl`."""
+    components = ((snap or {}).get("manifest") or {}).get("components") or []
+    names = {c.get("file") for c in components if isinstance(c, dict)}
+    if len(names) == 1:
+        name = names.pop()
+        if isinstance(name, str) and name:
+            return name
+    return "<snapshot>.rvl"
+
+
+def _recompile(sources: dict, name: str = "<snapshot>.rvl") -> dict:
     """Compile the snapshotted sources through the very entry points a live
     `revl_load` uses. This *is* the gate: parse + check + lower run here, so a
-    component the current checker rejects raises `RevlError` right here."""
-    source = sources.get("source")
-    modules = sources.get("modules")
+    component the current checker rejects raises `RevlError` right here.
+    `name` is the file a single-`source` snapshot compiles as (`admitted_name`)."""
+    source = sources.get(ORIGIN_SOURCE)
+    modules = sources.get(ORIGIN_MODULES)
     if source is not None:
-        return compile_source(source, "<snapshot>.rvl", modules=modules)
+        return compile_source(source, name, modules=modules)
 
-    files = sources.get("files")
+    files = sources.get(ORIGIN_FILES)
     if files:
         # reconstruct from the text captured at snapshot time, so restore
         # re-admits the snapshotted sources rather than trusting the disk
         virtual = {os.path.abspath(path): text
-                   for path, text in (sources.get("files_content") or {}).items()}
+                   for path, text in (sources.get(ORIGIN_FILES_CONTENT) or {}).items()}
         return compile_files(list(files), sources=virtual or None)
 
     from .session import SessionError  # noqa: PLC0415
@@ -260,16 +287,16 @@ def _origin_from(sources: dict) -> dict:
     composition can itself be snapshotted again (a round-trip stays a
     round-trip)."""
     origin: dict = {}
-    if sources.get("source") is not None:
-        origin["source"] = sources["source"]
-    if sources.get("modules"):
-        origin["modules"] = dict(sources["modules"])
-    if sources.get("files"):
-        origin["files"] = list(sources["files"])
+    if sources.get(ORIGIN_SOURCE) is not None:
+        origin[ORIGIN_SOURCE] = sources[ORIGIN_SOURCE]
+    if sources.get(ORIGIN_MODULES):
+        origin[ORIGIN_MODULES] = dict(sources[ORIGIN_MODULES])
+    if sources.get(ORIGIN_FILES):
+        origin[ORIGIN_FILES] = list(sources[ORIGIN_FILES])
         # the restored text, not the disk: what was restored is what runs, so a
         # later snapshot or revl_edit starts from it (issue #1690)
-        if sources.get("files_content"):
-            origin["files_content"] = dict(sources["files_content"])
+        if sources.get(ORIGIN_FILES_CONTENT):
+            origin[ORIGIN_FILES_CONTENT] = dict(sources[ORIGIN_FILES_CONTENT])
     return origin
 
 
@@ -337,7 +364,7 @@ def restore(session, snap: dict) -> dict:
     _refuse_policy_downgrade(session, meta)
 
     try:
-        ir = _recompile(sources)
+        ir = _recompile(sources, admitted_name(snap))
     except RevlError as error:
         # the load-bearing failure: a snapshot whose component the current
         # checker refuses does not load — it fails here, with the diagnostic

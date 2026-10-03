@@ -1,0 +1,15 @@
+// A `None` passed as a service argument in a component body (issue #1627).
+// The go component world spells an Opt VALUE as `*T` and has no value form
+// for `None` outside a `return`, the same limit `Some(x)` in a value position
+// is refused for. The go reference REFUSES it by name; it used to render the
+// bare name `None`, which `go build` refused as undefined.
+//
+// Not a byte-agreement case, so it cannot live in the tier's CORPUS. The
+// line-coverage gate drives the reference over it here.
+service S { fn echo(o: Opt[Str]) -> Str }
+service Ops { fn go(k: Str) -> Str }
+component C requires s: S provides ops: Ops {
+  provide ops {
+    fn go(k) { return s.echo(None) }
+  }
+}

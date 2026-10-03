@@ -311,6 +311,7 @@ you reach for; each verb's exact inputs and outputs are in
 | `revl_deploy` | push the running composition onto a **second host** through the ssh leg: admission-gated and approval-gated; without `apply:true` it rehearses | [deploy.md](deploy.md) |
 | `revl_resolve` | is there already an admission-compatible component to **import** instead of regenerating? | [registry.md](registry.md) |
 | `revl_audit` · `revl_tools` · `revl_grammar` | the G8 boundary, the projected tool set, the prompt-sized language surface | [mcp-reference.md](mcp-reference.md#revl_audit) |
+| `revl_idiom` | the minimal admitted example of one construct (every hole's fillSpec carries its own) | [mcp-reference.md](mcp-reference.md#revl_idiom) |
 | `revl_load` · `revl_call` · `revl_state` | boot in memory, invoke a provided operation, inspect what is loaded | [mcp-reference.md](mcp-reference.md#revl_load) |
 | `revl_knowledge` | leave a **note** on a declaration (rationale, invariant, trap, ...); notes ride on later edits of it, go stale when its code changes, and survive the session through `revl_export {with_knowledge: true}` | [mcp-reference.md](mcp-reference.md#revl_knowledge) |
 | `revl_export` | write the committed (held) source to disk, on request: disk is an export, never a side effect | [mcp-reference.md](mcp-reference.md#revl_export) |
