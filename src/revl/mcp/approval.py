@@ -39,6 +39,10 @@ from ..policy import TAINT_FOLD_ORIGINS, component_realms
 from ..query import Composition, SHARED_REALM, _channels, _walk
 from ..taint import REDACTED_SECRET
 
+# the target classes a service emission may take over (issue #1707): a target
+# whose reach is made of checked witnessed or deferred crossings.
+_RELAYABLE = frozenset({"a", "b"})
+
 # worst-class ordering: (c) > (b) > (a) > none. One prompt covers the whole call
 # or none of it — the same all-or-nothing rule admission and the operator gate
 # already use (Decision 1).
@@ -210,15 +214,16 @@ class ClassMap:
     body — from the checked reach facts. The per-call decision is then a
     dictionary lookup; nothing is compiled or re-derived on the hot path."""
 
-    def __init__(self, ir: dict) -> None:
+    def __init__(self, ir: dict, index: Composition | None = None) -> None:
+        """`index` is an already-built `query.Composition` over the SAME `ir`,
+        for a caller that holds one (`erase_report._crossings`)."""
         self.ir = ir
-        self.index = Composition(ir)
+        self.index = index if index is not None else Composition(ir)
         self._semantic = {c["name"]: _semantic(c)
                           for c in ir.get("components") or []}
-        # direct (non-transitive) classification per scope
-        self._direct: dict[str, dict] = {}
-        for sid, scope in self.index.scopes.items():
-            self._direct[sid] = self._classify_direct(scope)
+        # direct (non-transitive) classification per scope, with every
+        # relayable service emission given its target's class (issue #1707)
+        self._direct: dict[str, dict] = self._classify_relaxed()
         # class-(c) capability -> the scopes that raise it DIRECTLY. The
         # resource-scope dataflow (item 427 F2) may only bind a token whose sole
         # origin inside the reach closure is the scope the caller's args land in.
@@ -234,9 +239,7 @@ class ClassMap:
             self._reached_host[name] = self._reached_host_code(name)
         # the reach-closure fold: worst class over the scope AND every scope it
         # reaches across the service seam (Decision 1's worst-class-over-reach).
-        self._reach: dict[str, dict] = {}
-        for sid in self.index.scopes:
-            self._reach[sid] = self._fold_closure(sid)
+        self._reach: dict[str, dict] = self._fold_all(self._direct)
 
     # -- item 296 §6.3: alias token carry-over, at the fold ------------------
 
@@ -276,7 +279,11 @@ class ClassMap:
 
     # -- per-scope direct classification -----------------------------------
 
-    def _classify_direct(self, scope: dict) -> dict:
+    def _classify_direct(self, scope: dict, relayed: dict | None = None) -> dict:
+        """One scope's own crossings and class. `relayed` maps `(key, method)`
+        to the class a relayable service emission in THIS scope takes from its
+        target (`_classify_relaxed`); every other service emission is (c)."""
+        relayed = relayed or {}
         facts = scope["facts"]
         cls: str | None = None
         crossings: list[dict] = []
@@ -298,6 +305,20 @@ class ClassMap:
         # service emission is class (c) regardless of `compensate` (247), exactly
         # as `erase_report._crossings` tags it.
         for fact in facts["emissions"]:
+            relay = (fact["key"], fact["method"])
+            if relay in relayed:
+                # issue #1707: a relayable seam crossing takes its target's
+                # class. Its tokens are still reached capabilities, but they
+                # are not class-(c) ones: no grant is needed to forward a call
+                # whose own reach needs none.
+                rcls = relayed[relay]
+                cls = worse(cls, rcls)
+                caps.update(self._carried_caps(comp, fact["key"], fact["method"]))
+                crossings.append({
+                    "kind": "emission", "component": comp, "scope": scope["kind"],
+                    "key": fact["key"], "method": fact["method"],
+                    "actionClass": rcls, "compensated": False, "relay": True})
+                continue
             cls = worse(cls, "c")
             # item 296 §6.3: an `emit alias.method` crossing through a require
             # bound `carrying(...)` reaches the CANDIDATE's boundary, not the
@@ -372,6 +393,89 @@ class ClassMap:
         return {"class": cls, "crossings": crossings, "capabilities": caps,
                 "classC": class_c}
 
+    # -- the class-preserving relay (issue #1707) ----------------------------
+
+    def _relay_target(self, scope: dict, fact: dict) -> str | None:
+        """The one provide-method scope a service emission runs, when its class
+        may be read off that scope's reach; None when the emission keeps (c).
+
+        A service emission crosses no host boundary itself. It runs the target
+        operation's body in the same session, and every boundary that body
+        crosses is already in the caller's reach closure. Its fixed (c) stood in
+        for a target the fold cannot see, so it stays (c) exactly when that is
+        still true, or when the call is not a plain forward:
+
+          * `compensate`d: 247, a compensation offsets an irreversible
+            crossing, it does not make the call revertible;
+          * a routed require (item 173) dispatches among realms at run time;
+          * a require bound `carrying(...)` (item 296) is an adapter whose
+            boundary is resolved by `_carried_caps`, not by one target scope;
+          * a key the composition does not provide, or one that resolves to
+            no provide-method scope (a host-provided coeffect, a candidate
+            compiled against a manifest whose provider is not in this IR)."""
+        if fact.get("compensated"):
+            return None
+        comp = self.index.components.get(scope["component"]) or {}
+        entry = self.index.entries.get(scope["component"]) or {}
+        if fact["key"] in (entry.get("routes") or {}) or fact["key"] in (
+                comp.get("carry") or {}):
+            return None
+        target = self.index.method_scope(scope["component"], fact["key"],
+                                         fact["method"])
+        if target is None or self.index.scopes[target]["kind"] != "provide-method":
+            return None
+        return target
+
+    def _classify_relaxed(self) -> dict:
+        """Every scope's direct classification, relayable emissions relaxed to
+        their target's class, to a fixed point.
+
+        It starts from today's fold, where every service emission is (c), and
+        relaxes an emission whose target's reach-closure class is (a) or (b) to
+        that class. A target of no class keeps the emission at (c): the
+        `emission` marking on the service operation is then the only boundary
+        signal there is, and a checked witnessed or deferred crossing is what
+        lets the fold supersede it, so with none the declaration stands. Relaxing only lowers classes, so each pass relaxes at least
+        what the last one did and the loop ends within one pass per relayable
+        emission. A relay of a relay settles in two passes; a target whose
+        closure reaches any (c) never relaxes the emissions that call it, so a
+        relay that also reaches a non-witnessed crossing stays (c). With no
+        relayable emission at all this is one pass and byte-identical to the
+        fold before the change."""
+        scopes = self.index.scopes
+        targets = {}
+        for sid, scope in scopes.items():
+            for fact in scope["facts"]["emissions"]:
+                target = self._relay_target(scope, fact)
+                if target is not None:
+                    targets[(sid, fact["key"], fact["method"])] = target
+        relayed: dict = {}
+        while True:
+            direct = {sid: self._classify_direct(
+                scope, {(k, m): c for (s, k, m), c in relayed.items() if s == sid})
+                for sid, scope in scopes.items()}
+            if not targets:
+                self._relayed = relayed
+                return direct
+            reach = self._fold_all(direct)
+            nxt = {mark: reach[target]["class"]
+                   for mark, target in targets.items()
+                   if reach[target]["class"] in _RELAYABLE}
+            if nxt == relayed:
+                self._relayed = relayed
+                return direct
+            relayed = nxt
+
+    def relayed_emissions(self) -> dict:
+        """`(scope id, key, method) -> class` for every service emission this
+        map relaxed to its target's class: the one resolver for "does this
+        `emit` cross anything itself". The erase report reads it so it counts
+        a class-preserving relay the way the per-call decision does."""
+        return dict(self._relayed)
+
+    def _fold_all(self, direct: dict) -> dict:
+        return {sid: self._fold_closure(sid, direct) for sid in self.index.scopes}
+
     # -- reach-closure fold -------------------------------------------------
 
     def _reached_host_code(self, component: str) -> tuple:
@@ -409,8 +513,9 @@ class ClassMap:
                 work += sorted(called | values)
         return frozenset(externs), frozenset(fns)
 
-    def _fold_closure(self, sid: str) -> dict:
-        direct = self._direct[sid]
+    def _fold_closure(self, sid: str, by_scope: dict | None = None) -> dict:
+        by_scope = self._direct if by_scope is None else by_scope
+        direct = by_scope[sid]
         cls = direct["class"]
         crossings = list(direct["crossings"])
         caps = set(direct["capabilities"])
@@ -419,7 +524,7 @@ class ClassMap:
         scopes = {sid}
         for reached in self.index.closure(sid):
             rsid = reached["scope"]
-            rdirect = self._direct[rsid]
+            rdirect = by_scope[rsid]
             cls = worse(cls, rdirect["class"])
             crossings += rdirect["crossings"]
             caps |= rdirect["capabilities"]
