@@ -440,7 +440,12 @@ def test_the_baseline_ratchet_did_not_absorb_the_false_alarm():
     make the run green: #1372 merged normally and its work is in main."""
     entries = json.loads(BASELINE.read_text(encoding="utf-8"))["unreachable"]
     assert "1372" not in entries
-    assert len(entries) == 8, sorted(entries)
+    # The exact set, so an entry cannot be added without editing this line.
+    # #1607 is the one added since: a fast-forward merge into an open PR's
+    # branch whose work reached main inside #1557's squash, recorded as
+    # CARRIED with a measured witness rather than to quiet the run.
+    assert sorted(entries) == ["1236", "1296", "1305", "1308", "1309", "1318",
+                               "1319", "1320", "1607"], sorted(entries)
 
 
 # --------------------------------------------------------------------------
