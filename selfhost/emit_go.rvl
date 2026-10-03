@@ -3593,7 +3593,7 @@ fn is_tuple_surface(tv: Any) -> Bool {
 
 // `_Env` inside a provide method: params are bare locals, a required key is a
 // field on the method receiver.
-type CEnv = { params: List[Str], reqs: List[Str], types: Any, vt: Map[Str, Str], fr: Map[Str, Str], rq: Any, services: Any }
+type CEnv = { params: List[Str], reqs: List[Str], types: Any, vt: Map[Str, Str], fr: Map[Str, Str], rq: Any, services: Any, cfg: Map[Str, Str] }
 
 fn comp_name_ref(env: CEnv, ident: Str) -> Str {
   if (list_contains(env.params, ident)) { return safe_local(ident) }
@@ -3608,7 +3608,7 @@ fn ref_ident(n: Any) -> Str {
 
 fn with_vt(env: CEnv, name: Str, t: Str) -> CEnv {
   return { params: env.params, reqs: env.reqs, types: env.types, vt: env.vt.set(name, t),
-           fr: env.fr, rq: env.rq, services: env.services }
+           fr: env.fr, rq: env.rq, services: env.services, cfg: env.cfg }
 }
 
 // ------------------------------------------- declared records and variants
@@ -3713,6 +3713,7 @@ fn comp_infer(n: Any, env: CEnv) -> Str {
   if (k == "fn") { return map_get(env.fr, value_str(value_field(n, "name"))) }
   if (k == "builtin") { return builtin_ret_type(value_str(value_field(n, "method")), comp_infer(value_field(n, "target"), env)) }
   if (k == "format") { return "Str" }
+  if (k == "config") { return map_get(env.cfg, value_str(value_field(n, "field"))) }
   if (k == "call") {
     let target = value_field(n, "target")
     let svc = value_str(value_field(env.rq, value_str(value_field(target, "name"))))
@@ -3737,7 +3738,7 @@ fn comp_infer(n: Any, env: CEnv) -> Str {
 // costs no branch of its own.
 fn comp_expr_ok(n: Any, env: CEnv) -> Bool {
   let k = node_kind(n)
-  if (k == "name" || k == "req") { return true }
+  if (k == "name" || k == "req" || k == "config") { return true }
   if (k == "var") { return ref_ident(n) != "None" }
   if (k == "lit") { return list_contains(["str", "int", "bool", "float"], value_kind(value_field(n, "value"))) }
   if (k == "call") { return call_head_ok(n, env) && all_ok(value_list(value_field(n, "args")), env) }
@@ -3942,6 +3943,7 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
   if (k == "name") { return comp_name_ref(env, value_str(value_field(n, "id"))) }
   if (k == "var") { return comp_name_ref(env, ref_ident(n)) }
   if (k == "req") { return "revlSelf.".concat(lower_camel(value_str(value_field(n, "name")))) }
+  if (k == "config") { return "revlSelf.cfg.".concat(camel(value_str(value_field(n, "field")))) }
   if (k == "lit") { return go_literal(value_field(n, "value")) }
   if (k == "call") {
     let callee = value_field(n, "callee")
@@ -4106,7 +4108,13 @@ fn comp_doc(ir: Any) -> CDoc {
 // The `_Env` of one provide method: its params typed from the service
 // declaration (`env.var_types[pn] = ptypes.get(pn)`), and the component's
 // required keys as receiver fields.
-fn method_env(m: Any, decl: Any, rq: Any, doc: CDoc) -> CEnv {
+fn method_env(m: Any, decl: Any, c: Any, doc: CDoc) -> CEnv {
+  let rq = value_field(c, "requires")
+  // `_CONFIG_TYPES`: the declared surface type of each config field
+  var cfg: Map[Str, Str] = Map.empty()
+  for (f of value_list(value_field(c, "config"))) {
+    cfg = cfg.set(value_str(value_field(f, "name")), value_str(value_field(f, "type")))
+  }
   var ptypes: Map[Str, Str] = Map.empty()
   for (p of value_list(value_field(decl, "params"))) {
     ptypes = ptypes.set(value_str(value_field(p, "name")), value_str(value_field(p, "type")))
@@ -4119,19 +4127,19 @@ fn method_env(m: Any, decl: Any, rq: Any, doc: CDoc) -> CEnv {
     vt = vt.set(name, map_get(ptypes, name))
   }
   return { params: params, reqs: value_keys(rq), types: doc.types, vt: vt, fr: doc.fr,
-           rq: rq, services: doc.services }
+           rq: rq, services: doc.services, cfg: cfg }
 }
 
 fn component_ok(c: Any, doc: CDoc) -> Bool {
   let rq = value_field(c, "requires")
-  var ok = value_list(value_field(c, "config")).length() == 0 && value_keys(value_field(c, "routes")).length() == 0
+  var ok = value_keys(value_field(c, "routes")).length() == 0
   for (r of value_keys(rq)) { ok = ok && !value_str(value_field(rq, r)).startsWith("Stream") }
   for (s of value_list(value_field(c, "body"))) {
     ok = ok && node_step(s) == "provide"
     let table = service_methods(doc.services, value_str(value_field(s, "service")))
     for (m of value_list(value_field(s, "methods"))) {
       let decl = value_field(table, value_str(value_field(m, "name")))
-      ok = ok && provide_method_ok(m, decl, method_env(m, decl, rq, doc))
+      ok = ok && provide_method_ok(m, decl, method_env(m, decl, c, doc))
     }
   }
   return ok
@@ -4259,8 +4267,10 @@ fn emit_comp_component(c: Any, doc: CDoc) -> List[Str] {
   let reqs = value_keys(rq)
   let pv = value_keys(value_field(c, "provides"))
   let steps = value_list(value_field(c, "body"))
-  var out = [`func ${cname}() stc.Component {`, line(1, "return stc.Component{"),
-             line(2, `Name: ${go_string(value_field(c, "name"))},`)]
+  let has_config = value_list(value_field(c, "config")).length() > 0
+  var out = emit_comp_config_struct(c, cname, doc.types)
+  out = out.push(has_config ? `func ${cname}(cfg ${cname}Config) stc.Component {` : `func ${cname}() stc.Component {`)
+  out = out.push(line(1, "return stc.Component{")).push(line(2, `Name: ${go_string(value_field(c, "name"))},`))
   if (reqs.length() > 0) {
     var ks = []
     for (r of reqs) { ks = ks.push(key_var(r)) }
@@ -4278,26 +4288,51 @@ fn emit_comp_component(c: Any, doc: CDoc) -> List[Str] {
   }
   for (s of steps) {
     let pname = value_str(value_field(s, "name"))
-    var fields = ["ctx: ctx"]
+    var fields = has_config ? ["ctx: ctx", "cfg: cfg"] : ["ctx: ctx"]
     for (r of reqs) { fields = fields.push(`${lower_camel(r)}: ${lower_camel(r)}`) }
     out = out.push(line(3, `_impl${camel(pname)} := &${cname}_${pname}{${fields.join(", ")}}`))
     out = out.push(line(3, `if _, err := ctx.Provide(${key_var(pname)}, ${camel(value_str(value_field(s, "service")))}(_impl${camel(pname)})); err != nil {`))
     out = out.push(line(4, "return nil, err")).push(line(3, "}"))
   }
   for (r of reqs) { out = out.push(line(3, `_ = ${lower_camel(r)}`)) }
+  if (has_config) { out = out.push(line(3, "_ = cfg")) }
   out = out.push(line(3, "return nil, nil")).push(line(2, "},")).push(line(1, "}")).push("}").push("")
-  for (s of steps) { out = out.concat(emit_comp_provide_impl(cname, s, rq, doc)) }
+  for (s of steps) { out = out.concat(emit_comp_provide_impl(cname, s, c, doc)) }
   return out
+}
+
+// `_emit_config_struct`: the component's config struct and its defaults
+// constructor (a field with no default is left to its zero value).
+fn emit_comp_config_struct(c: Any, cname: Str, types: Any) -> List[Str] {
+  let fields = value_list(value_field(c, "config"))
+  if (fields.length() == 0) { return [] }
+  var out = [`type ${cname}Config struct {`]
+  for (f of fields) { out = out.push(line(1, `${camel(value_str(value_field(f, "name")))} ${comp_go_type(value_field(f, "type"), types)}`)) }
+  out = out.push("}").push("").push(`func Default${cname}Config() ${cname}Config {`).push(line(1, `return ${cname}Config{`))
+  for (f of fields) {
+    let dv = value_field(f, "default")
+    if (!value_is_null(dv)) {
+      out = out.push(line(2, `${camel(value_str(value_field(f, "name")))}: ${default_lit(dv, comp_go_type(value_field(f, "type"), types))},`))
+    }
+  }
+  return out.push(line(1, "}")).push("}").push("")
+}
+
+// `_default_lit`: a config default as its Go literal for the field's type.
+fn default_lit(v: Any, gt: Str) -> Str {
+  return gt == "string" ? go_string(v) : (gt == "bool" ? (value_bool(v) ? "true" : "false") : num_str(v))
 }
 
 // `_emit_provide_impl`: the impl struct (ctx plus every required handle) and
 // one method per provided operation, typed from the service declaration.
-fn emit_comp_provide_impl(cname: Str, s: Any, rq: Any, doc: CDoc) -> List[Str] {
+fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
+  let rq = value_field(c, "requires")
   let services = doc.services
   let types = doc.types
   let struct_name = `${cname}_${value_str(value_field(s, "name"))}`
   let reqs = value_keys(rq)
   var out = [`type ${struct_name} struct {`, line(1, "ctx *stc.Context")]
+  if (value_list(value_field(c, "config")).length() > 0) { out = out.push(line(1, `cfg ${cname}Config`)) }
   for (r of reqs) { out = out.push(line(1, `${lower_camel(r)} ${camel(value_str(value_field(rq, r)))}`)) }
   out = out.push("}").push("")
   let table = service_methods(services, value_str(value_field(s, "service")))
@@ -4318,7 +4353,7 @@ fn emit_comp_provide_impl(cname: Str, s: Any, rq: Any, doc: CDoc) -> List[Str] {
     var sig = `func (revlSelf *${struct_name}) ${camel(mname)}(${gp.join(", ")})`
     if (ret != "") { sig = sig.concat(" ").concat(ret) }
     out = out.push(sig.concat(" {"))
-    let env = method_env(m, decl, rq, doc)
+    let env = method_env(m, decl, c, doc)
     for (ret_step of value_list(value_field(m, "body"))) {
       let e = value_field(ret_step, "expr")
       if (value_is_null(e)) { out = out.push(line(1, "return")) }
