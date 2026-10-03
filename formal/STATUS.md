@@ -1035,8 +1035,8 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**590 .rvl files -> 461 components -> 1197 statements = 338 modeled +
-223 componentless + 29 refused at parse**, and **6505 verdicts compared
+**592 .rvl files -> 461 components -> 1197 statements = 338 modeled +
+225 componentless + 29 refused at parse**, and **6505 verdicts compared
 (338 files + 461 components + 132 provide methods + 19 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1197
 confinements + 1197 surfaces + 357 teardowns + 344 provide-clause

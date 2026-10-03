@@ -245,7 +245,7 @@ def test_unlowerable_functions_stay_off_the_interface_but_in_the_core():
         "fn box(nm: Str, a: Int) -> Opt[Person] { return Some({name: nm, age: a}) }\n")
     res = canonical.emit_component(ir, service="Mixed")
     assert res["functions"] == ["tag", "box"]        # box: Opt[Person] result ok
-    assert "$unbox" in res["core_wat"]               # variant-param helper present
+    assert "$fn.unbox" in res["core_wat"]               # variant-param helper present
     assert 'export "revl:exported/mixed#unbox"' not in res["core_wat"]
 
 

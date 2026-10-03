@@ -109,6 +109,21 @@ def _wat_string(value: str) -> str:
     return value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
 
 
+def _uid(tag: str, *parts: str) -> str:
+    """The WAT identifier for something named after source names (issue #1756).
+
+    `tag` is a fixed word of this emitter and each part is a revl identifier
+    (a provision key, a method, a component, a function, a binding), so none
+    of them contains a `.`. Joining with `.` therefore never makes two
+    different `(tag, parts)` spell the same identifier, the way joining with
+    `_` made `$req_s_x_y` out of both `s.x_y` and `s_x.y`. And no identifier
+    built here equals one of the emitter's own fixed helpers (`$alloc`,
+    `$int_add`, `$str_concat`, ...), which contain no `.`: a user `fn
+    int_add` is `$fn.int_add`.
+    """
+    return "$" + ".".join((tag,) + parts)
+
+
 # A realm label is not decoration on this tier: it is a component of the
 # capability ADDRESS. `coeffect:<realm>/<key>` is the import module a host binds
 # a provider to, and `provide:<realm>/<key>.<method>` is the export name a host
@@ -683,7 +698,7 @@ class _ComponentEmitter:
                 if return_type is not None:
                     head += f" (result {_wasm_ty(return_type)})"
                 args = "".join(f" (local.get $p{i})" for i in range(len(wtys)))
-                funcs.append(f"{head}\n    (call $route_{key}_{op}{args}))")
+                funcs.append(f"{head}\n    (call {_uid('route', key, op)}{args}))")
         return funcs
 
     def _route_helpers(self) -> list[str]:
@@ -703,17 +718,17 @@ class _ComponentEmitter:
             realms = self.routes[key].get("realms") or []
             n = len(realms)
             strategy = self.routes[key].get("strategy") or "round_robin"
-            live = f"$route_live_{key}"
+            live = _uid("route_live", key)
             if strategy == "least_loaded":
                 for i in range(n):
-                    self.globals.append((f"$route_served_{key}_{i}", "i32"))
+                    self.globals.append((_uid("route_served", key, str(i)), "i32"))
                 sel = [
-                    f"  (func $route_select_{key} (result i32)"
+                    f"  (func {_uid('route_select', key)} (result i32)"
                     f" (local $best i32) (local $bc i32) (local $c i32)",
                     "    (local.set $best (i32.const -1))",
                 ]
                 for i in range(n):
-                    served = f"$route_served_{key}_{i}"
+                    served = _uid("route_served", key, str(i))
                     sel.append(
                         f"    (if (call {live} (i32.const {i})) (then\n"
                         f"      (local.set $c (global.get {served}))\n"
@@ -723,7 +738,7 @@ class _ComponentEmitter:
                         f" (local.set $bc (local.get $c))))))")
                 sel.append("    (if (i32.eq (local.get $best) (i32.const -1)) (then (unreachable)))")
                 for i in range(n):
-                    served = f"$route_served_{key}_{i}"
+                    served = _uid("route_served", key, str(i))
                     sel.append(
                         f"    (if (i32.eq (local.get $best) (i32.const {i}))"
                         f" (then (global.set {served}"
@@ -731,10 +746,10 @@ class _ComponentEmitter:
                 sel.append("    (local.get $best))")
                 funcs.append("\n".join(sel))
             else:  # round_robin (the default when strategy is omitted)
-                cursor = f"$route_cursor_{key}"
+                cursor = _uid("route_cursor", key)
                 self.globals.append((cursor, "i32"))
                 funcs.append("\n".join([
-                    f"  (func $route_select_{key} (result i32)"
+                    f"  (func {_uid('route_select', key)} (result i32)"
                     f" (local $off i32) (local $cand i32)",
                     "    (local.set $off (i32.const 0))",
                     "    (loop $scan",
@@ -752,16 +767,16 @@ class _ComponentEmitter:
             for op in self.route_ops[key]:
                 param_wtys, result_wty = self.route_imports[(key, op)]
                 decl = " ".join(f"(param $p{i} {w})" for i, w in enumerate(param_wtys))
-                head = f"  (func $route_{key}_{op}"
+                head = f"  (func {_uid('route', key, op)}"
                 if decl:
                     head += f" {decl}"
                 if result_wty:
                     head += f" (result {result_wty})"
                 fwd_args = " ".join(f"(local.get $p{i})" for i in range(len(param_wtys)))
-                disp = f"$route_disp_{key}_{op}"
-                inner = (f"(call {disp} (call $route_select_{key}) {fwd_args})"
+                disp = _uid("route_disp", key, op)
+                inner = (f"(call {disp} (call {_uid('route_select', key)}) {fwd_args})"
                          if fwd_args else
-                         f"(call {disp} (call $route_select_{key}))")
+                         f"(call {disp} (call {_uid('route_select', key)}))")
                 funcs.append(f"{head}\n    {inner})")
         return funcs
 
@@ -881,11 +896,12 @@ class _ComponentEmitter:
                 # `op` strictly to that one realm's provider. Selection is the
                 # FIRST operand so its cursor/served side effect runs before the
                 # args, matching the single-shot select rust does per call.
-                fn = f"$route_{key}_{op}"
+                fn = _uid("route", key, op)
                 call = (f"(call {fn} {' '.join(parts)})" if parts
                         else f"(call {fn})")
                 return _E(call, return_type)
-            call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
+            call = (f"(call {_uid('req', key, op)} {' '.join(parts)})" if parts
+                    else f"(call {_uid('req', key, op)})")
             return _E(call, return_type)
         if kind == "config":
             # A template reads its own `config { }` fields through the
@@ -907,7 +923,7 @@ class _ComponentEmitter:
                     f"a Str/record/List config value would cross as a pointer into "
                     f"memory the instance does not own (use a hosted backend)")
             self.config_imports[field] = _wasm_ty(fty)
-            return _E(f"(call $config_{field})", fty)
+            return _E(f"(call {_uid('config', field)})", fty)
         if kind == "host":
             fn = node.get("fn") or ""
             if fn.startswith("Stream."):
@@ -994,7 +1010,7 @@ class _ComponentEmitter:
             args_wat.append(value.wat)
             param_wtys.append(wty)
         self.spawn_imports[target] = param_wtys
-        call = f"(call $spawn_{target} {' '.join(args_wat)})".replace("  ", " ")
+        call = f"(call {_uid('spawn', target)} {' '.join(args_wat)})".replace("  ", " ")
         # the handle is a host-frontier instance id (i32); `Instance[T]` is
         # advisory and never Int, so _wasm_ty carries it as i32.
         return _E(call, f"Instance[{target}]")
@@ -1072,9 +1088,9 @@ class _ComponentEmitter:
                 f"memory (use a hosted backend)")
         result_wty = _wasm_ty(return_type) if not _is_unit_type(return_type) else None
         self.instance_imports[(component, key, op)] = (param_wtys, result_wty)
-        # $inst_<Component>_<key>_<op> — bound to the `instance:<Component>`
+        # $inst.<Component>.<key>.<op> — bound to the `instance:<Component>`
         # `<key>.<op>` host import; the runtime resolves the handle's realm.
-        call = f"(call $inst_{component}_{key}_{op} {' '.join(parts)})".replace("  ", " ")
+        call = f"(call {_uid('inst', component, key, op)} {' '.join(parts)})".replace("  ", " ")
         return _E(call, return_type)
 
     def _scalar_operator(self, node: Any, scope: dict[str, str],
@@ -1480,7 +1496,7 @@ class _ComponentEmitter:
                     continue
                 if kind == "let-effect":
                     bind = _ident(step.get("bind"), f"{where}: bind")
-                    glob = f"$g_{bind}"
+                    glob = _uid("g", bind)
                     value = self._lower(step["acquire"], scope, {}, where)
                     if _is_unit_type(value.ty):
                         raise EmitError(
@@ -1659,7 +1675,7 @@ class _ComponentEmitter:
             f"{record_call}))"
         )
         if bind is not None:
-            glob = f"$g_{bind}"
+            glob = _uid("g", bind)
             self.globals.append((glob, "i32"))
             lines.append(f"(global.set {glob} (local.get ${tmp}))")
             scope[bind] = f"(global.get {glob})"
@@ -1930,12 +1946,12 @@ class _ComponentEmitter:
                         if name in mlocals:
                             raise EmitError(f"{mwhere}: `{name}` is already bound")
                         mlocals.append(name)
-                        mscope[name] = f"(local.get ${name})"
+                        mscope[name] = f"(local.get $l_{name})"
                         mtypes[name] = value.ty
-                        self.v3._declare_local(name, value.ty, mwhere)
+                        self.v3._declare_local(f"l_{name}", value.ty, mwhere)
                     elif name not in mlocals:
                         raise EmitError(f"{mwhere}: `{name}` is not declared")
-                    out_lines.append(f"(local.set ${name} {value.wat})")
+                    out_lines.append(f"(local.set $l_{name} {value.wat})")
                 elif mkind == "if":
                     # issue #548: control flow over the method's value
                     # computation. The arms are pure method steps, so they
@@ -2031,9 +2047,9 @@ class _ComponentEmitter:
                     if bind in mlocals:
                         raise EmitError(f"{mwhere}: `{bind}` is already bound")
                     mlocals.append(bind)
-                    mscope[bind] = f"(local.get ${bind})"
+                    mscope[bind] = f"(local.get $l_{bind})"
                     mtypes[bind] = elem_ty
-                    self.v3._declare_local(bind, elem_ty, mwhere)
+                    self.v3._declare_local(f"l_{bind}", elem_ty, mwhere)
                     element = self.v3._slot_load(
                         f"(i32.add (local.get {ptr}) "
                         f"(i32.add (i32.const {_SLOT}) "
@@ -2066,7 +2082,7 @@ class _ComponentEmitter:
                             f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))")
                         out_lines.append(f"    (br_if {brk})")
                         out_lines.append(f"    {element}")
-                        out_lines.append(f"    (local.set ${bind})")
+                        out_lines.append(f"    (local.set $l_{bind})")
                         out_lines.append(f"    (block {cntl}")
                         out_lines.extend("      " + line for line in body_lines2)
                         out_lines.append("    )")
@@ -2087,7 +2103,7 @@ class _ComponentEmitter:
                             f"    (i32.ge_s (local.get {idx}) (local.get {cnt}))")
                         out_lines.append("    (br_if 1)")
                         out_lines.append(f"    {element}")
-                        out_lines.append(f"    (local.set ${bind})")
+                        out_lines.append(f"    (local.set $l_{bind})")
                         out_lines.extend("    " + line for line in body_lines2)
                         out_lines.append(
                             f"    (local.set {idx} "
@@ -2122,11 +2138,17 @@ class _ComponentEmitter:
             # wasm requires local declarations before the body — and each one
             # now has to be declared at the width of the value it holds, which
             # is only known once the body has been lowered (`_declare_local`)
-            if mlocals:
-                header += "".join(self.v3._local_decl(name) for name in mlocals)
+            # A user binding is the local `$l_<name>`, the same spelling a v3
+            # function gives it, so no binding can take the name of a
+            # parameter (`$p_<name>`) or of an emitter scratch slot
+            # (`$for_ptr_<n>`, `$__revl_wit<n>`, ...), none of which starts
+            # with `l_` (issue #1756). A match bind already lands on `l_<name>`,
+            # so one declared both ways is declared once.
+            user_locals = [f"l_{name}" for name in mlocals]
+            header += "".join(self.v3._local_decl(name) for name in user_locals)
             # scratch slots the value engine needs (match binds + scrutinee
             # pointers, inlined-arrow params, the allocation temporary)
-            for extra in sorted(self.extra_locals):
+            for extra in sorted(self.extra_locals - set(user_locals)):
                 header += self.v3._local_decl(extra)
             if self.func_uses_v3:
                 header += f" (local ${self.v3._tmp} i32)"
@@ -2149,7 +2171,12 @@ class _ComponentEmitter:
         # the top-level `fn`s this component calls are emitted into its own
         # module, so `call $name` resolves and the component stays a single
         # self-contained artifact for the runtime to instantiate
-        fn_defs = [self.v3._emit_function(self.fn_by_name[name]) for name in self.needed_fns]
+        # A `fn` in a component module is reached by `(call $fn.<name>)` from
+        # the provide methods; nothing calls it by export, and an export would
+        # share a namespace with the module's own (`deactivate`, `memory`,
+        # `abort`, ...), so a `fn deactivate` broke the module (issue #1756).
+        fn_defs = [self.v3._emit_function(self.fn_by_name[name], export=False)
+                   for name in self.needed_fns]
         # @wasm-bodied externs this component calls, emitted as internal funcs
         extern_defs = [_emit_extern_func(self.externs[name], self.v3._check_type)
                        for name in self.needed_externs]
@@ -2240,7 +2267,7 @@ class _ComponentEmitter:
             params = " ".join(f"(param {w})" for w in param_wtys)
             result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
-            lines.append(f'  (import "{_wat_string(self._import_module(key))}" "{_wat_string(op)}" (func $req_{key}_{op}{sig}{result}))')
+            lines.append(f'  (import "{_wat_string(self._import_module(key))}" "{_wat_string(op)}" (func {_uid("req", key, op)}{sig}{result}))')
         # item 173: the routed-require ABI. Per routed key called: a `live`
         # probe (`route:<key>.live(index) -> i32`, 1 iff that one realm has an
         # ACTIVE provider — the strict, no-parent-fallback liveness the emitted
@@ -2251,14 +2278,14 @@ class _ComponentEmitter:
         # set and the Router activates without waiting on a bare provider.
         for key in sorted(self.route_ops):
             lines.append(f'  (import "route:{key}" "live" '
-                         f'(func $route_live_{key} (param i32) (result i32)))')
+                         f'(func {_uid("route_live", key)} (param i32) (result i32)))')
             for op in self.route_ops[key]:
                 param_wtys, result_wty = self.route_imports[(key, op)]
                 params = " ".join(f"(param {w})" for w in param_wtys)
                 result = f" (result {result_wty})" if result_wty else ""
                 sig = f" {params}" if params else ""
                 lines.append(f'  (import "route:{key}" "{op}" '
-                             f'(func $route_disp_{key}_{op} (param i32){sig}{result}))')
+                             f'(func {_uid("route_disp", key, op)} (param i32){sig}{result}))')
         if self._needs_record_import:
             # item 322 Slice 2: the durable-WAL framing channel. `record` takes
             # (seq, receiver_ptr, method_ptr, witness_ptr) — the runtime values
@@ -2277,11 +2304,11 @@ class _ComponentEmitter:
         # inert unless the component actually spawns/reads-config, so a
         # non-spawning program's import section is byte-identical to before.
         for field, wty in sorted(self.config_imports.items()):
-            lines.append(f'  (import "config" "{field}" (func $config_{field} (result {wty})))')
+            lines.append(f'  (import "config" "{field}" (func {_uid("config", field)} (result {wty})))')
         for target, param_wtys in sorted(self.spawn_imports.items()):
             params = " ".join(f"(param {w})" for w in param_wtys)
             sig = f" {params}" if params else ""
-            lines.append(f'  (import "spawn:{target}" "new" (func $spawn_{target}{sig} (result i32)))')
+            lines.append(f'  (import "spawn:{target}" "new" (func {_uid("spawn", target)}{sig} (result i32)))')
         if self.uses_dispose:
             lines.append('  (import "dispose" "instance" (func $dispose_instance (param i32) (result i32)))')
         # instance-accessor ABI (docs/design-v2-instances.md "Instance accessor").
@@ -2295,7 +2322,7 @@ class _ComponentEmitter:
             result = f" (result {result_wty})" if result_wty else ""
             lines.append(
                 f'  (import "instance:{component}" "{key}.{op}" '
-                f'(func $inst_{component}_{key}_{op} (param i32){sig}{result}))')
+                f'(func {_uid("inst", component, key, op)} (param i32){sig}{result}))')
         # item 289, the wasm tier's `host imports subset-of declared caps` leg:
         # every capability-bearing host import (`coeffect:<key>`, `route:<key>`)
         # names a required key. This holds BY CONSTRUCTION -- `_coeffect_op_spec`
@@ -2784,7 +2811,7 @@ def _emit_extern_func(ext: dict, check_type) -> str:
     check_type(rtype, f"extern {name}: return")
     if not _is_unit_type(rtype):
         decl.append(f"(result {_wasm_ty(rtype)})")
-    header = f"(func ${name}"
+    header = f"(func {_uid('fn', name)}"
     if decl:
         header += " " + " ".join(decl)
     return f"  {header}\n    {body or 'nop'})"
@@ -4990,7 +5017,7 @@ class _V3Emitter:
             if _is_unit_type(value.ty):
                 raise EmitError(f"{where}: void expression used as an argument")
             parts.append(value.wat)
-        parts.append(f"(call ${name})")
+        parts.append(f"(call {_uid('fn', name)})")
         return _E("\n      ".join(parts), sig["returns"])
 
     def _builtin_expr(self, node: dict, scope: _Scope, where: str,
@@ -5886,7 +5913,8 @@ class _V3Emitter:
             counter += 1
         return candidate
 
-    def _emit_function(self, fn: dict, *, test_mode: bool = False) -> str:
+    def _emit_function(self, fn: dict, *, test_mode: bool = False,
+                       export: bool = True) -> str:
         """Lower one v3 function (or, with *test_mode*, one `test` block).
 
         A test lowers as an exported zero-arg function returning Bool (i32):
@@ -5988,7 +6016,8 @@ class _V3Emitter:
             body = "nop"
         # the `$name` identifier lets one v3 function call another
         # (`call $name`); without it intra-module calls fail to resolve
-        header = f'(func ${name} (export "{name}") {" ".join(decls)}'.rstrip()
+        exported = f' (export "{name}")' if export else ""
+        header = f'(func {_uid("fn", name)}{exported} {" ".join(decls)}'.rstrip()
         return f"  {header}\n    {body})"
 
     def emit(self) -> str:
@@ -6071,7 +6100,9 @@ class _V3Emitter:
             lines.append(block)
             lines.append("")
         lines.append(")")
-        return "\n".join(lines) + "\n"
+        module = "\n".join(lines) + "\n"
+        refuse_duplicate_exports(module, {fn.get("name") for fn in self.functions})
+        return module
 
 
 def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
@@ -6426,6 +6457,41 @@ def _top_level_funcs(wat: str) -> list[tuple[str | None, str | None, str, str]]:
                     head.group(2) if head else None, text,
                     wat[block_start:cursor]))
         index = previous_end = cursor
+
+
+_EXPORT_NAME = re.compile(r'\(export "((?:[^"\\]|\\.)*)"\)')
+
+
+def refuse_duplicate_exports(wat: str, fn_names: set) -> None:
+    """Refuse a module that exports one name twice (issue #1756).
+
+    A pure `fn` is exported under its own name, which is its API on this tier,
+    so it cannot be renamed. When that name is one the module already exports
+    for itself (`memory`, or a canonical module's `cabi_realloc`), the module
+    would not validate. Refused by name, the way a `test` whose export
+    collides with a `fn` already is.
+    """
+    seen: set[str] = set()
+    for match in _EXPORT_NAME.finditer(_comments_blanked(wat)):
+        name = match.group(1)
+        if name in seen:
+            who = (f"fn `{name}`" if name in fn_names
+                   else f"the export {name!r}")
+            raise EmitError(
+                f"{who} would export wasm name {name!r}, which this module "
+                f"already exports for itself; an export is the function's name "
+                f"on this tier, so it cannot be renamed. Rename the fn")
+        seen.add(name)
+
+
+def _comments_blanked(wat: str) -> str:
+    """`wat` with each `;;` comment removed and string literals kept, in one
+    left-to-right pass, so an export name quoted in a comment is not counted."""
+    return _WAT_STRING_OR_COMMENT_ONLY.sub(
+        lambda m: m.group(0) if m.group(0).startswith('"') else "", wat)
+
+
+_WAT_STRING_OR_COMMENT_ONLY = re.compile(r'"(?:[^"\\]|\\.)*"|;;[^\n]*')
 
 
 def prune_unreachable_funcs(wat: str) -> str:

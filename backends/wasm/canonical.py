@@ -659,7 +659,7 @@ class _Canon:
 
         `fn` carries `name`/`params`/`returns` in the SAME shape whether it is a
         top-level pure `fn` or a service method. `call_symbol` names the core
-        function the wrapper delegates to: for a pure `fn` it is `$<name>` (the
+        function the wrapper delegates to: for a pure `fn` it is `$fn.<name>` (the
         default); for a service method it is the named provide-method function
         (`$__prov_<key>_<method>`), which carries the very same internal ABI a
         pure `fn` does, so exactly one wrapper shape serves both.
@@ -675,7 +675,7 @@ class _Canon:
         name = fn["name"]
         params = fn.get("params") or []
         ret = fn.get("returns")
-        callee = call_symbol or f"${name}"
+        callee = call_symbol or _emit_mod._uid("fn", name)
         export_name = f"{package}/{iface}#{_kebab_name(name)}"
 
         # flatten each param into named core params
@@ -1042,7 +1042,9 @@ def _canonical_module(core: str, canon: _Canon, exports: list[str],
     # the core emitter is what keeps `$alloc_str` (reached only from a lift
     # wrapper) and drops `$str_cp_slice` (reached from nothing) in the same
     # module -- a core-only sweep would have got both wrong.
-    return _emit_mod.prune_unreachable_funcs(_splice_canonical(core, additions))
+    module = _emit_mod.prune_unreachable_funcs(_splice_canonical(core, additions))
+    _emit_mod.refuse_duplicate_exports(module, set())
+    return module
 
 
 def _splice_canonical(core: str, additions: list[str]) -> str:

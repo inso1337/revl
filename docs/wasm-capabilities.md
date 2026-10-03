@@ -160,6 +160,30 @@ instantiation-config channel yet (a spawn *target* is the exception...)
 | `await` outside `Job.run(name)` | `` `await` on this tier supports only `Job.run(name)` `` — the runtime's async host op (A1) |
 | `match`/variants | ✅ now supported (tagged-union cells); the old "no tagged unions in core Wasm" README row is stale |
 | non-scalar config *fields* | scalar-only, same reason as the boundary |
+| a `fn` named `memory` | `` fn `memory` would export wasm name 'memory', which this module already exports for itself `` — a `fn` is exported under its own name, so it cannot be renamed; rename the fn (issue #1756) |
+
+## WAT identifiers (issue #1756)
+
+Every WAT identifier built from source names is `$<tag>.<part>.<part>`, and
+`.` is not a character of a revl name. So two different source names never
+share an identifier, and nothing built from source names equals one of the
+emitter's own fixed names (`$alloc`, `$int_add`, `$str_concat`, ...), which
+contain no `.`.
+
+| what | identifier |
+|---|---|
+| a required-service import | `$req.<key>.<op>` |
+| a user `fn` or `@wasm` extern | `$fn.<name>` (its export is still `<name>`) |
+| a routed key's dispatch, probe, selector, state | `$route.<key>.<op>`, `$route_disp.<key>.<op>`, `$route_live.<key>`, `$route_select.<key>`, `$route_served.<key>.<n>`, `$route_cursor.<key>` |
+| an instance accessor | `$inst.<Template>.<key>.<op>` |
+| a config field, a spawn target | `$config.<field>`, `$spawn.<Template>` |
+| a component binding's global | `$g.<name>` |
+| a parameter, a local | `$p_<name>`, `$l_<name>` |
+
+A hand-written `@wasm` body keeps calling the fixed helpers (`$alloc`) and
+reading its parameters as `$p_<name>`: those spellings did not change. A `fn`
+that a component calls is lowered into the component's module without an
+export, since nothing calls it by export there.
 
 ## Witnessed-effects teardown (item 243 Slice 2b)
 
