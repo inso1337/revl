@@ -123,34 +123,11 @@
     "subscribe=<true>"
   ],
   "emit_py": [
-    "async=<true>",
-    "commutative=<true>",
-    "deferred=<true>",
-    "idempotent=<true>",
     "kind=__rendered__",
     "kind=hole",
-    "kind=instance-get",
     "kind=lease-acquire",
     "kind=lease-revoke",
-    "kind=spawn",
-    "kind=stream-merge",
-    "kind=subscribe",
-    "lifecycle=<true>",
-    "pattern=list",
-    "pattern=record",
-    "stage=take",
-    "step=abort",
-    "step=advance",
-    "step=approval",
-    "step=assert_no_residue",
-    "step=await",
-    "step=call",
-    "step=let_pattern",
-    "step=load",
-    "step=stream-iter",
-    "step=unload",
-    "subscribe=<true>",
-    "validated=<true>"
+    "step=approval"
   ],
   "emit_rust": [
     "bind=_",
@@ -256,10 +233,6 @@
     "SPAWN"
   ],
   "lower_ir": [
-    "kind=hole",
-    "kind=instance-get",
-    "kind=spawn",
-    "kind=stream-merge",
-    "method=next"
+    "kind=hole"
   ]
 }

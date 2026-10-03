@@ -64,10 +64,11 @@ Slice 4 (item 206) adds three more byte-identical forms:
     #{n}`` ``_label``).
 
 Deliberately OUT (excluded from the corpus, deferred to Path B slice 5+):
-in-file ``test``/``fault_test`` and ``lifecycle test`` emission, async coloring
-(async methods / async externs' await-seed / ``await`` bodies), realm placements
-(``isolate``/``intercept``/``routes``), spawn/instances, and
-the canonical ABI. Method-body ``let-effect`` is emitted (the
+the canonical ABI. Spawn/instances, async colouring (coloured fns, async
+operations, the await-seed), destructuring ``let``, the activation-body
+``await`` step and the in-file ``test`` / ``lifecycle test`` / ``fault test``
+sections are ported since item 391. Realm placements (``isolate``/``intercept``/``routes``)
+are ported since item 391's placement slice. Method-body ``let-effect`` is emitted (the
 ``_revl_frame.acquire`` form) but NOT cross-checked this slice: the surface admits
 ``spawn`` or result-declared host acquisitions there, whose ``cexpr`` lands in
 slice 5; it rejects bound witnessed acquisitions. ``let_pattern``
@@ -161,6 +162,154 @@ CORPUS = [
     # test_a_declared_stream_replay_is_named_not_dropped below.
     "services_host.rvl",
     "services_host_stream.rvl",
+    # item 391: component shapes the port used to DROP without a marker (a
+    # divergence the host marker had been hiding). Each is ported now:
+    #   emit_py_placement.rvl - a routed require read in a provide method (the
+    #     `_revl_route_<key>` proxy, the router class, `realm_label`), plain
+    #     `isolate` placements, the commutative/idempotent service-table
+    #     flags, and method inverses that pin a reassigned `var` by value;
+    #   realm_intercept.rvl - the dict-form inject an `intercept` declares;
+    #   async_effects.rvl - the `'async': True` table flag, and awaited
+    #     effect/let-effect/emit steps in an `async def` activation body;
+    #   cas_runtime.rvl - the result-guarded `Map.cas` undo, in an activation
+    #     body and in a provide method (with a pinned capture);
+    #   erase_receipt.rvl - the compensation an emission extern declares on
+    #     itself (item 254), registered after the fire.
+    # All failed first against the port that dropped them.
+    "../emit_py_placement.rvl",
+    "../emit_ts_corpus/realm_intercept.rvl",
+    "../emit_ts_corpus/async_effects.rvl",
+    "../emit_ts_corpus/cas_runtime.rvl",
+    "../erase_receipt.rvl",
+    # item 391: the last py byte divergences in the whole-tree survey, each
+    # added FAILING FIRST against the port that diverged on it:
+    #   emit_py_builtin_shadow.rvl - a user `fn len` / `fn bytes` and the
+    #     `len_`/`sorted_` ladder. The port escaped Python keywords only, so
+    #     its `def len` rebound the builtin every emitted `.length()` calls:
+    #     `count([1, 2, 3])` answered 99 (test_builtin_shadowing_* below runs
+    #     it). It sits beside emit_py_corpus/ because selfhost/lower.rvl does
+    #     not reproduce the frontend's own renaming of these names, which
+    #     tests/test_selfhost_lower_ir.py (which globs that directory) would
+    #     report as a lower gap;
+    #   maps.rvl - the #957 `Map` subscript through `_revl_map_index`;
+    #   extern_config.rvl - a config extern's `_revl_extern_config` helper and
+    #     its `_revl_config` first local;
+    #   stdlib/fs.rvl - an extern carrying a host `ref` opens the module's
+    #     `import inspect` / `_REVL_REFS` header.
+    "../emit_py_builtin_shadow.rvl",
+    "maps.rvl",
+    "extern_config.rvl",
+    "../../../stdlib/fs.rvl",
+    # item 391: the activation-body `await` step and the in-file test sections,
+    # the two largest refused families in the whole-tree py survey (59 and 37
+    # documents refused for nothing else). Each document below failed against
+    # the port that named these instead of emitting them:
+    #   components_await.rvl - `await <expr>` plus the A1 iteration yield, in
+    #     the `async def` body it forces;
+    #   fuzz_go_e6afacd3.rvl - plain `test` blocks: the `REVL_TESTS` section;
+    #   uxprobe2_jobs.rvl - plain and lifecycle tests in one document: the
+    #     lifecycle harness, the `asyncio` import, `_REVL_IDEMPOTENT`, and the
+    #     load/call/unload/assert/`assert no residue` driver steps;
+    #   advance.rvl - a lifecycle `advance` (the clock coeffect and its import);
+    #   model_store_sqlite.rvl - a lifecycle `abort` (the session-commit owner);
+    #   uxprobe2_fault.rvl - the `REVL_FAULT_TESTS` manifest.
+    "../emit_ts_corpus/components_await.rvl",
+    "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
+    "../../../examples/uxprobe2_jobs.rvl",
+    "../../../backends/go/scenarios/advance.rvl",
+    "../../../examples/model_store_sqlite.rvl",
+    "../../../examples/uxprobe2_fault.rvl",
+    #   emit_py_test_sections.rvl - the section shapes those documents leave
+    #     out: empty test bodies, `load ... with`, a bound call through an
+    #     `idempotent` provider (the `_REVL_IDEMPOTENT` map), a fault test's
+    #     config.
+    "../emit_py_test_sections.rvl",
+    # item 391: the await-seed (item 92), the async-coloured timer (item 170)
+    # and destructuring `let` (item 179), each refused by name before:
+    #   async_colour.rvl - coloured `async def` fns awaiting each other, an
+    #     async extern, an async-typed parameter, and an awaited match arm;
+    #   async_arrow_arg.rvl - async arrows: a coroutine tail call stays the
+    #     plain lambda, a sync body goes through `_revl_as_async`;
+    #   async_module_local.rvl - an async local in a coloured fn;
+    #   services_async.rvl - `async def` provide operations awaiting async
+    #     service operations through their required keys;
+    #   async_arrow_emission.rvl - an async provide operation passing an async
+    #     arrow over a required key's emission;
+    #   async_timer.rvl - a timer body reaching an async operation: the
+    #     in-flight window, the task spawn and the cancelling inverse;
+    #   destructure.rvl, destructuring.rvl - record and list `let` patterns,
+    #     the rest binding, and the section's destructure counter.
+    "async_colour.rvl",
+    "async_arrow_arg.rvl",
+    "../emit_ts_corpus/async_module_local.rvl",
+    "../emit_ts_corpus/services_async.rvl",
+    "../emit_ts_corpus/async_arrow_emission.rvl",
+    "../../../examples/async_timer.rvl",
+    "destructure.rvl",
+    "../emit_ts_corpus/destructuring.rvl",
+    #   emit_py_async_shapes.rvl - the async shapes those leave out: the
+    #     `_revl_as_async` lift, awaited match binders (and the walrus-temp
+    #     exception), an `await` statement, an awaited host-extern emission and
+    #     an awaited match in an async operation, and an async timer that
+    #     mixes an inline sync emission with a spawned async one.
+    "../emit_py_async_shapes.rvl",
+    # item 391: instance-parametric components (docs/design-v2-instances.md),
+    # refused by name before: `spawn` plugs a child instance and returns its
+    # handle (`spawn as _revl_spawn`), `instance-get` reads a provision off the
+    # handle. spawn.rvl and instance_get.rvl are the minimal shapes,
+    # accessor.rvl reads two provisions off two handles, tenant_attenuation.rvl
+    # spawns two attenuated workers.
+    "../emit_ts_corpus/spawn.rvl",
+    "../emit_ts_corpus/instance_get.rvl",
+    "../../../backends/go/scenarios/accessor.rvl",
+    "../../../examples/tenant_attenuation.rvl",
+    # emit_py_spawn_shapes.rvl: a two-key spawn (a realm tuple of more than one
+    # entry) and an async operation emitted off a spawn handle, awaited.
+    "../emit_py_spawn_shapes.rvl",
+    # item 391: the item-130 stream surface, refused by name before at both of
+    # its boundaries (the `subscribe` acquisition and the `every ... in` loop).
+    # streams.rvl holds the policy, `buffer`/`drain`, `merge` fan-in, the
+    # derived-stage chain and a typed-event handler; stream_130.rvl and
+    # stream_event_130.rvl are the go tier's scenarios, stream.rvl the rust
+    # one, comp_stream.rvl a subscription on a required stream.
+    "streams.rvl",
+    "../../../backends/go/testdata/stream_130.rvl",
+    "../../../backends/go/testdata/stream_event_130.rvl",
+    "../../../backends/rust/scenarios/stream.rvl",
+    "../emit_rust_corpus/comp_stream.rvl",
+    # item 391: a `deferred` emission (item 245) is enqueued on the session's
+    # deferral queue, never fired at the call site; the port refused it by
+    # name at both sites before. deferred_emission_call.rvl is the tree's
+    # provide-method shape (every tier's refusal fixture holds the same code).
+    # emit_py_deferred_shapes.rvl adds the activation-body site, the item-440
+    # `keyed` and `declared` registers, and a deferred extern beside one that
+    # fires through the `extern_emit` seam.
+    "../emit_ts_refusals/deferred_emission_call.rvl",
+    "../emit_py_deferred_shapes.rvl",
+    # emit_py_deferred_register.rvl: the item-440 `keyed` and `declared`
+    # registers on the enqueue (an inline test until #1651 let the self-host
+    # gate read the `idempotent` modifier).
+    "../emit_py_deferred_register.rvl",
+    # Reference fixes followed by the port. emit_py_map_remove_nested.rvl
+    # (issue #1632): a `Map.remove` whose receiver carries a `:=` temp is
+    # evaluated through a lambda. emit_py_stream_builtin_bind.rvl (issue
+    # #1646): an `every ... in` item named after a builtin is renamed once.
+    "../emit_py_map_remove_nested.rvl",
+    "../emit_py_stream_builtin_bind.rvl",
+    # item 391: a call to a `validated` operation (item 257) goes through the
+    # validate-on-response seam over the settled response, with the module's
+    # item-513 grammar registry; the port refused it by name before.
+    # validated_emission_operation.rvl is the tree's plain shape (every tier's
+    # refusal fixture holds the same code); emit_py_validated_shapes.rvl adds a
+    # tagged-union response, a record whose wire schema is rewritten, an async
+    # operation awaited inside the seam (from an async provide method and from
+    # an activation-body `await emit`, issue #1647), the provide-method site and an
+    # uncalled validated operation that is still registered.
+    "../emit_ts_refusals/validated_emission_operation.rvl",
+    "../emit_py_validated_shapes.rvl",
+    # Reference fix followed by the port, issue #1589: a timer firing registers
+    # the compensation an emitted extern declares (`compensation_method`).
+    "../emit_py_timer_compensate.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.
@@ -577,51 +726,85 @@ def test_selfhosted_emitter_in_file_tests_pass(emitted):
         fn()
 
 
-@pytest.mark.parametrize(("path", "reference_text", "port_marker"), [
-    ("tests/fixtures/emit_ts_corpus/async_module_local.rvl", "async def run(", None),
-    ("tests/fixtures/emit_ts_corpus/services_async.rvl", "'async': True", None),
-    ("tests/fixtures/emit_ts_corpus/realm_intercept.rvl", "'inject': {'db':", None),
-    ("tests/fixtures/emit_ts_corpus/realm_isolate.rvl", "'isolate':", None),
-    ("stdlib/fs.rvl", "_REVL_REFS = {}", None),
-    ("examples/lifecycle_wasm.rvl", "REVL_TESTS = []", None),
-    ("examples/regressions/fuzz_go_6be27824.rvl", "REVL_TESTS = []", None),
-    ("backends/go/scenarios/accessor.rvl", "spawn as _revl_spawn",
-     "<<UNSUPPORTED-CEXPR:spawn>>"),
-    # advance.rvl's component-body `${…}` (`format`) and its `host` builtin
-    # `Map.new()` are both ported now (`services_interp.rvl` and
-    # `services_host.rvl` in the CORPUS above), so this document is pinned on
-    # its REMAINING deferred boundary: the lifecycle tests that drive the
-    # clock coeffect with `advance`, which the port names instead of emitting.
-    ("backends/go/scenarios/advance.rvl", "_revl_Clock.advance(",
-     "<<UNSUPPORTED-TEST:an every-timer fires on each advanced tick>>"),
-    # item 130 (issue #81): a stream document reaches this port at TWO
-    # boundaries, and the row below covered only the first. The `subscribe`
-    # acquisition is one; the `every … in` loop the reference lowers as a
-    # `while True` around `Stream.is_closed(…)` is the other, and it answers
-    # with a body-step marker of its own. Both are pinned because a ledger
-    # entry is satisfied by a port that emits the acquisition's marker and
-    # then drops the loop with nothing in its place — the section-level
-    # silence issue #1123 found, and the worst answer item 130 admits for a
-    # stream. The acquisition row reads the reference's subscribe CALL: the
-    # `Pool, Stream` import it used to read is emitted by the port too now that
-    # a component-body `Stream.source()` is ported (`services_host_stream.rvl`).
-    ("backends/go/testdata/stream_130.rvl", "Stream.subscribe(",
-     "<<UNSUPPORTED-CEXPR:subscribe>>"),
-    ("backends/go/testdata/stream_130.rvl", "Stream.is_closed(",
-     "<<UNSUPPORTED-BODYSTEP:stream-iter>>"),
-])
-def test_named_runtime_and_harness_boundaries(emitted, reference, path, reference_text, port_marker):
-    """Pin specific deferred paths, not a blanket allowance for different bytes."""
-    ir = compile_files([str(ROOT / path)])
-    expected = reference.emit(ir)
-    actual = emitted["emit_py_src"](ir)
-    assert reference_text in expected
-    assert reference_text not in actual
-    # A port marker the reference emits too witnesses nothing (item 1136).
-    reason = shared_witness_token_reason(expected, port_marker)
+# The service-wide `commutative` flag is a line of its own in the SERVICES table.
+# It is not a CORPUS document: the self-host gate refuses `commutative service`
+# ("unexpected declaration"), which the gate/reference census would report as a
+# false reject for any file under a census directory.
+COMMUTATIVE_SERVICE_SRC = """commutative service Tally {
+  commutative emission fn add(n: Int)
+  fn total() -> Int
+}
+component Books provides tally: Tally {
+  let cells = effect Map.new() undo cells.drop()
+  provide tally {
+    fn add(n) {
+      effect cells.insert("n", n) undo cells.remove("n")
+    }
+    fn total() = 0
+  }
+}
+"""
+
+
+def test_selfhosted_emitter_renders_a_commutative_service(emitted, reference, tmp_path):
+    path = tmp_path / "commutative.rvl"
+    path.write_text(COMMUTATIVE_SERVICE_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert "    'Tally': {\n        'commutative': True,\n" in want
+    assert got == want
+
+
+# The builtin-shadow guard is a VALUE property, not only a byte one: run the
+# port's module and ask for the length the user's `fn len` would hijack.
+def test_builtin_shadowing_leaves_the_emitted_length_alone(emitted):
+    ir = compile_files([str(ROOT / "tests" / "fixtures" / "emit_py_builtin_shadow.rvl")])
+    namespace: dict = {}
+    exec(compile(emitted["emit_py_src"](ir), "builtin_shadow.py", "exec"), namespace)
+    assert namespace["count"]([1, 2, 3]) == 3
+    assert namespace["len_"]([1, 2, 3]) == 99
+    assert namespace["total"]([1, 2, 3]) == 17
+
+
+# Capability-bound secrets (item 256 Slice 1) on an emission extern. Not a
+# CORPUS document: the self-host gate refuses the top-level `secret ... for`
+# declaration ("unexpected token at top level"), which the gate/reference
+# census would report as a false reject for any census-directory document.
+EXTERN_SECRETS_SRC = """secret openai_key for model.complete
+extern emission[model.complete] fn complete(p: Str) -> Str = @py { return p + openai_key[:0] }
+extern emission[model.complete] fn embed(p: Str) -> Str = @py {
+  return p
+}
+extern pure fn note(p: Str) -> Str = @py { return p }
+"""
+
+
+def test_selfhosted_emitter_binds_an_extern_secret(emitted, reference, tmp_path):
+    path = tmp_path / "secrets.rvl"
+    path.write_text(EXTERN_SECRETS_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert want.count("openai_key = _revl_secret('openai_key')") == 2
+    assert got == want
+
+
+# A `@py ref` extern with no inline body is a lazy import thunk in the
+# reference (item 396 option B). The port refuses it by name rather than emit a
+# `def ... pass` that would return None for every call.
+def test_a_py_ref_extern_is_named_not_emitted_empty(emitted, reference, tmp_path):
+    host = tmp_path / "host"
+    host.mkdir()
+    (host / "engine.py").write_text("def do_engine(x):\n    return x\n")
+    path = tmp_path / "ref.rvl"
+    path.write_text('extern pure fn engine(x: Str) -> Str\n'
+                    '    = @py ref do_engine from "host/engine.py"\n')
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert "from host.engine import do_engine as _f" in want
+    assert "<<UNSUPPORTED-EXTERN:py-ref engine>>" in got
+    assert "def engine(" not in got
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-EXTERN:py-ref engine>>")
     assert reason is None, reason
-    if port_marker is not None:
-        assert port_marker in actual
 
 
 # A `Stream.source()` that DECLARES its replay backlog (item 130 §4.5) is the
@@ -656,19 +839,81 @@ def test_a_declared_stream_replay_is_named_not_dropped(emitted, reference, tmp_p
     assert reason is None, reason
 
 
+# The consumer half of item 130 §4.5: a `subscribe` that ASKS for a backlog.
+# The reference appends a `replay=` keyword to the subscribe call; the port
+# answers a named marker rather than the bare call, which would subscribe live
+# and drop the requested backlog silently. A plain subscription of a source
+# that declares a backlog is still emitted: the refusal is the request, not the
+# source. Inline for the reason the source declaration above is: the self-host
+# gate refuses the `replay(...)` clause.
+SUBSCRIBE_REPLAY_SRC = """component Backlog {
+  let src = effect Stream.source() replay(8) undo src.close()
+  let sub = subscribe src replay(2) undo sub.close()
+}
+component Durable {
+  let src = effect Stream.source() replay(from: "orders") undo src.close()
+  let sub = subscribe src replay(from: "orders") undo sub.close()
+}
+component Live {
+  let live = effect Stream.source() replay(8) undo live.close()
+  let sub = subscribe live undo sub.close()
+}
+"""
+
+
+def test_a_subscribe_replay_request_is_named_not_dropped(emitted, reference, tmp_path):
+    path = tmp_path / "subscribe_replay.rvl"
+    path.write_text(SUBSCRIBE_REPLAY_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    for asked in ("replay={'count': 2}", "replay={'cursor': 'orders'}"):
+        assert f"Stream.subscribe(src, 'error', _revl_ctx, {asked})" in want
+        assert asked not in got
+    assert "Stream.subscribe(src, 'error', _revl_ctx)" not in got
+    assert got.count("<<UNSUPPORTED-CEXPR:subscribe>>") == 2
+    plain = "sub = Stream.subscribe(live, 'error', _revl_ctx)"
+    assert plain in want and plain in got
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:subscribe>>")
+    assert reason is None, reason
+
+
+# A `validated` operation with a `retry` budget (item 257 Slice 2). The
+# reference re-fires the completion through `_revl_validate_retry` and threads
+# the item-121 completion site through it; the port carries neither, so it
+# names the crossing rather than emitting the plain one-attempt seam, which
+# would drop the budget silently. The plain seam beside it is still emitted.
+VALIDATED_RETRY_SRC = """service Model {
+  emission validated retry 2 fn complete(h: Str) -> Str
+  emission validated fn once(h: Str) -> Str
+}
+component Agent requires model: Model {
+  emit model.complete("p")
+  emit model.once("q")
+}
+"""
+
+
+def test_a_validated_retry_budget_is_named_not_dropped(emitted, reference, tmp_path):
+    path = tmp_path / "validated_retry.rvl"
+    path.write_text(VALIDATED_RETRY_SRC)
+    ir = compile_files([str(path)])
+    want, got = reference.emit(ir), emitted["emit_py_src"](ir)
+    assert "_revl_validate_retry(lambda: _revl_ctx.model.complete('p'), 2," in want
+    assert "model.complete('p')" not in got
+    assert got.count("<<UNSUPPORTED-CEXPR:__validated__>>") == 1
+    once = "_revl_validate(_revl_ctx.model.once('q'), {'type': 'string'}, 'Agent', None, 'Model.once')"
+    assert once in want and once in got
+    reason = shared_witness_token_reason(want, "<<UNSUPPORTED-CEXPR:__validated__>>")
+    assert reason is None, reason
+
+
 # ---------------------------------------------------------------------------
-# The deferred in-file test section stays LOUD (issue #1123).
+# The in-file test sections (issue #1123, then item 391).
 #
-# The self-host emitters' safety argument is that an unported construct answers
-# with a named `<<UNSUPPORTED-...>>` marker rather than with silence: a marker is
-# visible in the emitted bytes and is pinned here, while a section the port
-# simply skips is invisible to the byte oracle (no corpus document on any tier
-# carries a test section) and is counted as mirrored by
-# tools/selfhost_coverage.py.
-#
-# In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-# every self-host slice, and all six ports used to emit NOTHING for it. Each now
-# emits one named marker per test, per section.
+# The ports used to emit NOTHING for in-file `test` / `lifecycle test` /
+# `fault test` sections, then one named marker per test. The py port now emits
+# all three sections byte-for-byte; these minimal sources keep each section's
+# smallest shape pinned beside the CORPUS documents that carry the larger ones.
 IN_FILE_TEST_SRC = 'fn f() -> Bool { return true }\ntest "probe" { assert f() }'
 
 LIFECYCLE_TEST_SRC = """service Ping { fn ping() -> Int }
@@ -692,21 +937,15 @@ fault test "probe" for P {
 }
 """
 
-@pytest.mark.parametrize("source, reference_token, port_token", [
-    pytest.param(IN_FILE_TEST_SRC, "REVL_TESTS.append(('probe', test_0))",
-                 "<<UNSUPPORTED-TEST:probe>>", id="in-file-tests"),
-    pytest.param(LIFECYCLE_TEST_SRC, "lifecycle test 'probe': assertion failed",
-                 "<<UNSUPPORTED-TEST:probe>>", id="lifecycle-tests"),
-    pytest.param(FAULT_TEST_SRC, "REVL_FAULT_TESTS = [",
-                 "<<UNSUPPORTED-FAULT-TEST:probe>>", id="fault-tests"),
+@pytest.mark.parametrize("source, reference_token", [
+    pytest.param(IN_FILE_TEST_SRC, "REVL_TESTS.append(('probe', test_0))", id="in-file-tests"),
+    pytest.param(LIFECYCLE_TEST_SRC, "lifecycle test 'probe': assertion failed", id="lifecycle-tests"),
+    pytest.param(FAULT_TEST_SRC, "REVL_FAULT_TESTS = [", id="fault-tests"),
 ])
-def test_deferred_test_sections_are_named(emitted, reference, tmp_path, source,
-                                          reference_token, port_token):
-    """These witnesses are not byte-agreement CORPUS; a port closes the reason."""
-    path = tmp_path / "boundary.rvl"
+def test_in_file_test_sections_agree(emitted, reference, tmp_path, source, reference_token):
+    path = tmp_path / "sections.rvl"
     path.write_text(source)
     ir = compile_files([str(path)])
     want, got = reference.emit(ir), emitted["emit_py_src"](ir)
     assert reference_token in want
-    assert port_token in got
-    assert got != want, "boundary is stale: move its witness into CORPUS"
+    assert got == want

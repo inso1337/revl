@@ -21,11 +21,11 @@ them. That is the cost, stated first.
 |---|---:|---:|---:|
 | go | **3** | 38 | 35 |
 | java | **0** | 59 | 59 |
-| py | **6** | 59 | 53 |
+| py | **25** | 102 | 77 |
 | rust | **2** | 40 | 38 |
 | ts | **16** | 76 | 60 |
 | wasm | **0** | 21 | 21 |
-| **total** | **27** | 293 | 266 |
+| **total** | **46** | 336 | 290 |
 
 Tiers with no residual: java, wasm.
 
@@ -38,11 +38,11 @@ Gate: `python3 tools/selfhost_coverage.py --check`
 |---|---:|---:|---:|
 | go | **49** | 11 | 1 |
 | java | **30** | 14 | 6 |
-| py | **27** | 10 | 1 |
-| rust | **20** | 7 | 14 |
+| py | **5** | 3 | 0 |
+| rust | **21** | 8 | 14 |
 | ts | **1** | 1 | 4 |
 | wasm | **46** | 11 | 4 |
-| **total** | **173** | | |
+| **total** | **152** | | |
 
 ## Dispatch arms no corpus document exercises
 
@@ -58,13 +58,13 @@ known-broken.
 | emit_go | 50 |
 | emit_wasm | 50 |
 | emit_java | 36 |
-| emit_rust | 34 |
-| emit_py | 28 |
+| emit_rust | 35 |
+| emit_py | 5 |
 | emit_ts | 5 |
 | gate_census | 5 |
-| lower_ir | 5 |
 | compile | 1 |
-| **total** | **214** |
+| lower_ir | 1 |
+| **total** | **188** |
 
 ## Where the gate is more permissive than the reference
 

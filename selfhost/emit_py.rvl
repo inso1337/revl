@@ -58,21 +58,25 @@
 //
 // ============================================================ WHAT IT DEFERS
 // Reported for a follow-on slice 5, deliberately OUT of this file:
-//   * async coloring (colored fns / async externs' await-seed / awaited call
-//     sites), realm placements (`isolate`/`intercept`/`routes`/router),
-//     spawn/instances, in-file `test`/`fault_test`/`lifecycle test` emission,
-//     and the ABI;
+//   * the ABI. A `validated` call with a `retry` budget, a possible item-259
+//     fan-out and a stream replay request (item 130 §4.5) are each REFUSED by
+//     name (item 391), never emitted as a plausible sync body. Ported since
+//     item 391: spawn and instance-get, the item-130 stream surface
+//     (`subscribe` with its stages, buffer, drain and `merge` head, the
+//     `every ... in` / `on ... as` loops), deferred emission (enqueued, with
+//     its item-440 register), the item-257 validate seam with the item-513
+//     grammar registry, realm placements (`isolate`/`intercept`/`routes` and
+//     the router), async colouring (coloured fns, async operations, the
+//     await-seed, async arrows, the async timer window), awaited
+//     activation-body effect/emit steps, the activation-body `await` step,
+//     destructuring `let` (`let_pattern`), and the in-file `test` /
+//     `lifecycle test` / `fault test` sections;
 //   * method-body `let-effect` — EMITTED (the `_revl_frame.acquire` form) but not
 //     yet cross-checked: admitted bound acquisitions use spawn or result-declared
 //     host verbs (Map/Pool), whose component runtime lowering lands in slice 5.
-//     Bound witnessed acquisition in a provide method is frontend-rejected;
-//   * `let_pattern` (record/list destructuring): still unimplemented here, but no
-//     longer a PERMANENT exclusion — item 179 replaced the reference's
-//     `__revl_destructure_{id(node)}` (a nondeterministic Python object id) with a
-//     per-`_Lines` monotonic counter in deterministic emission order, so its bytes
-//     are now reproducible and a future slice CAN port + cross-check it.
-// Exact residual conditions and reproducing inputs, including runtime streams,
-// approval/deferred/validated dispatch and full model-flow provenance, live in
+//     Bound witnessed acquisition in a provide method is frontend-rejected.
+// Exact residual conditions and reproducing inputs, including stream replay,
+// approval dispatch, validated retry and full model-flow provenance, live in
 // the Python entries of selfhost_{blind_spots,uncovered_lines}.json. These are
 // measured limitations, not a claim of whole-emitter parity.
 //
@@ -122,6 +126,15 @@ use "../stdlib/str.rvl" { trim, lstrip, last_index_of, ident_tokens, dedent }
 // hand-positioned canonical `sorted(uses)` order in the `from runtime import`
 // line — see `emit_py_src`.
 use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
+// item 513 slice 4: the `json-schema` dialect of a validated crossing's stated
+// grammar is digested over its canonical JSON, the same two primitives the
+// reference's `revl.decode_grammar` uses (`json.dumps` + `hashlib.sha256`).
+// The digest is a local pure extern rather than stdlib/crypto.rvl's `sha256`:
+// a named `use` links the whole module, and crypto.rvl carries an EMISSION
+// extern (`random_token`) that has no place in a pure emitter (since #1518 the
+// reference wraps it in the E-Stop gate, which an inert runtime stub cannot
+// apply).
+use "../stdlib/json.rvl" { json_stringify }
 
 // ------------------------------------------- NAVIGATION GAP CLOSED (item 188)
 // The ONE navigation primitive slices 1-2 could not express in pure revl was an
@@ -141,29 +154,57 @@ use "../stdlib/list.rvl" { list_contains, list_sort, list_dedup }
 // join them: identifier CASING is the same category (they mirror the reference's
 // pure string helpers `_snake` / `_pascal`, kin to `_mangle`).
 extern pure fn py_repr(v: Any) -> Str = @py { return repr(v) }
+// Lower-case hex SHA-256 of the UTF-8 bytes of `text` (`grammar_digest`).
+extern pure fn sha256_hex(text: Str) -> Str = @py {
+    import hashlib
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+}
 // A real newline. revl plain strings carry no escapes (`"\n"` is a literal
 // backslash-n, which is exactly what the emitted `assert` message wants), so the
 // line SEPARATOR is sourced here — the one place a genuine U+000A is needed.
 extern pure fn newline() -> Str = @py { return chr(10) }
 // The A3 rename (mirrors backends/python/emit.py::_mangle): a valid revl
-// identifier that is a Python keyword emits and RUNS instead of crashing.
-// A pure function of the name — declaration and use sites agree without a table
-// — and INJECTIVE, so two distinct revl identifiers never land on one Python
-// identifier. Escape a name iff the name or any name reachable from it by
-// dropping trailing `_` is a keyword, by exactly one `_`: that shifts the whole
-// `kw`/`kw_`/`kw__` ladder up a rung (`lambda` -> `lambda_`, `lambda_` ->
-// `lambda__`) and leaves every other name verbatim, so nothing collapses.
-extern pure fn mangle(name: Str) -> Str = @py {
+// identifier that is a Python keyword emits and RUNS instead of crashing, and
+// one that names a Python builtin this emitter calls BARE (`len` for
+// `.length()`, `sorted`, `bytes`, ... the reference's `_EMITTED_BUILTINS`) is
+// lifted off it, because a module-scope `def len` would rebind the `len` every
+// emitted `.length()` calls and silently change its value. A pure function of
+// the name, so declaration and use sites agree without a table, and INJECTIVE:
+// escape a name iff the name or any name reachable from it by dropping trailing
+// `_` is a keyword or such a builtin, by exactly one `_`. That shifts the whole
+// ladder up a rung (`lambda` -> `lambda_`, `lambda_` -> `lambda__`, `len` ->
+// `len_`, `len_` -> `len__`) and leaves every other name verbatim.
+//
+// `mangle_kw` is the keyword-only rung (`_mangle_kw`), for the two sites whose
+// name cannot shadow a builtin and must keep its contract spelling: a provide
+// method's `def` (dispatched by its service-contract name) and a record field
+// annotation. `mangle_type` adds the module-scope classes the emitter writes
+// itself (`Ok`/`Err`, the router's two classes) for a type-name position.
+extern pure fn mangle_with(name: Str, builtins: Bool, types: Bool) -> Str = @py {
     import keyword
+    extra = set()
+    if builtins:
+        extra |= {
+            "AttributeError", "Exception", "OverflowError", "RuntimeError", "TypeError",
+            "abs", "bool", "bytes", "callable", "dict", "float", "getattr", "globals",
+            "hasattr", "hash", "int", "isinstance", "len", "list", "max", "min",
+            "object", "ord", "range", "repr", "reversed", "set", "sorted", "str",
+            "tuple", "type",
+        }
+    if types:
+        extra |= {"Ok", "Err", "_RevlNoLiveWorker", "_RevlRouter"}
     root = name
     while root:
-        if keyword.iskeyword(root) or keyword.issoftkeyword(root):
+        if keyword.iskeyword(root) or keyword.issoftkeyword(root) or root in extra:
             return name + "_"
         if not root.endswith("_"):
             break
         root = root[:-1]
     return name
 }
+fn mangle(name: Str) -> Str { return mangle_with(name, true, false) }
+fn mangle_kw(name: Str) -> Str { return mangle_with(name, false, false) }
+fn mangle_type(name: Str) -> Str { return mangle_with(name, true, true) }
 // `_snake` / `_pascal` verbatim (backends/python/emit.py): the component's apply
 // fn name is `_<snake>_apply`, a provision class is `_<Pascal>`.
 extern pure fn snake(name: Str) -> Str = @py {
@@ -312,7 +353,7 @@ fn uses_true_division(n: Any) -> Bool {
 // string-LITERAL key is a host/`Any` property read, not a List subscript, so
 // it does not pull the helper in (#549).
 fn uses_index(n: Any) -> Bool {
-  if (node_kind(n) == "index") {
+  if (node_kind(n) == "index" && value_is_null(value_field(n, "key_type"))) {
     let idx = value_field(n, "index")
     if (!(node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str")) {
       return true
@@ -322,6 +363,30 @@ fn uses_index(n: Any) -> Bool {
     if (uses_index(c)) { return true }
   }
   return false
+}
+
+// issue #957: a `Map` subscript (an `index` node the frontend stamps with the
+// map's `key_type`) reads by KEY through `_revl_map_index`, whose miss faults
+// with the cross-tier reason. It is not a List subscript, so it never pulls in
+// `_revl_index`, whose `i < 0` guard raises a TypeError on a `Str` key.
+fn uses_map_index(n: Any) -> Bool {
+  if (node_kind(n) == "index" && !value_is_null(value_field(n, "key_type"))) { return true }
+  for (c of value_children(n)) {
+    if (uses_map_index(c)) { return true }
+  }
+  return false
+}
+
+fn map_index_block() -> List[Str] {
+  var o = []
+  o = o.push("def _revl_map_index(m, k):")
+  o = o.push(`    """A Map subscript reads by key; a MISS faults on every tier (#957)."""`)
+  o = o.push("    \"\"\"`m.lookup(k)` is the total form.\"\"\"")
+  o = o.push("    if k not in m:")
+  o = o.push(`        raise KeyError('revl: map index: no entry for key')`)
+  o = o.push("    return m[k]")
+  o = o.push("")
+  return o
 }
 
 // `_uses_i32_shl`: left shift is the one bitwise op whose result can leave the
@@ -518,6 +583,14 @@ fn render_builtin(method: Str, target: Str, args: List[Str], recv: Str) -> Str {
   if (method == "size") { return `len(${target})` }
   if (method == "keys") { return `sorted(${target})` }
   if (method == "remove") {
+    // issue #1632: Python refuses an assignment expression in a comprehension's
+    // iterable, and a receiver that is not a bare name carries one (the `_fv :=`
+    // field temp, a bounded `_bi :=`). The receiver and key are then passed as
+    // arguments, outside the comprehension; a plain receiver keeps the one-frame
+    // form.
+    if (target.indexOf(":=") >= 0) {
+      return "(lambda _revl_m, _revl_k: {kk: vv for kk, vv in _revl_m.items() if kk != _revl_k})".concat(`(${target}, ${args[0]})`)
+    }
     return "{".concat(`kk: vv for kk, vv in ${target}.items() if kk != ${args[0]}`).concat("}")
   }
   if (method == "div_trunc") {
@@ -603,14 +676,238 @@ fn arm_body_mentions(node: Any, bind: Str) -> Bool {
 // a name, so neither can shadow, clobber or share a cell, which is what makes
 // them safe where a walrus is not (item 163). A bind USED INSIDE a larger body
 // keeps its one-shot lambda.
-fn bind_payload(bind: Str, body: Str, payload: Str, node: Any) -> Str {
+// ------------------------------------------------- async colouring (item 92)
+// The reference decides every `await` while rendering, from emitter state
+// (`_PY_IN_ASYNC` / `_in_async`, `_PY_IN_ARROW` / `_in_arrow`, the document's
+// coloured fns, async externs and async service operations, and a body's
+// async-typed parameters). This port renders statelessly, so it decides the
+// same things up front: `colour` rewrites a body once, before any byte of it is
+// rendered, wrapping each call the reference would await in an `__await__`
+// node, stamping an async arrow with the shape `_py_async_arrow` picks, and
+// stamping a match whose arms reach a coroutine as `__awaited__`. The caller's
+// IR is never mutated; every rebuilt node is a fresh map or list.
+type Colour = {
+  colored: List[Str], async_ext: List[Str], async_ops: List[Str], validated_ops: List[Str],
+  reqs: Any, locals: List[Str], comp: Bool
+}
+
+// `_py_yields_coroutine`: does evaluating this node produce an awaitable?
+fn yields_co(node: Any, cx: Colour) -> Bool {
+  let k = node_kind(node)
+  if (k == "call") {
+    let tgt = value_field(node, "target")
+    if (cx.comp && node_kind(tgt) == "req") {
+      let svc = value_str(value_field(cx.reqs, value_str(value_field(tgt, "name"))))
+      if (list_contains(cx.async_ops, `${svc}.${value_str(value_field(node, "method"))}`)) { return true }
+    }
+    // a provision method called off a spawn handle (`w.<key>.<method>(...)`,
+    // item 106): the receiver is an `instance-get` carrying the service type
+    // the handle's key yields, so it suspends exactly as a `req`-target async
+    // operation does.
+    let callee = value_field(node, "callee")
+    if (node_kind(callee) == "field") {
+      let recv = value_field(callee, "target")
+      if (node_kind(recv) == "instance-get"
+          && list_contains(cx.async_ops, `${value_str(value_field(recv, "service"))}.${value_str(value_field(callee, "name"))}`)) { return true }
+    }
+    if (node_kind(callee) == "var") {
+      let nm = value_str(value_field(callee, "name"))
+      if (list_contains(cx.colored, nm) || list_contains(cx.async_ext, nm) || list_contains(cx.locals, nm)) { return true }
+    }
+  }
+  if (k == "fn") {
+    let nm = value_str(value_field(node, "name"))
+    if (list_contains(cx.colored, nm) || list_contains(cx.async_ext, nm)) { return true }
+  }
+  return false
+}
+
+// `_py_reaches_coroutine`: a coroutine anywhere in the node, except inside a
+// nested async arrow, which is a value.
+fn reaches_co(node: Any, cx: Colour) -> Bool {
+  if (node_kind(node) == "arrow" && value_bool(value_field(node, "async"))) { return false }
+  if (value_is_object(node) && yields_co(node, cx)) { return true }
+  for (c of value_children(node)) { if (reaches_co(c, cx)) { return true } }
+  return false
+}
+
+// Which calls the reference awaits in an async body (outside an arrow): in a
+// module fn, a call of a coloured fn, an async extern or an async local; in a
+// component method, any call `_py_yields_coroutine` names, and a `fn` node on a
+// coloured fn or an async extern.
+fn awaits_here(node: Any, cx: Colour) -> Bool {
+  let k = node_kind(node)
+  if (!cx.comp) {
+    if (k != "call") { return false }
+    let callee = value_field(node, "callee")
+    let nm = node_kind(callee) == "var" ? value_str(value_field(callee, "name")) : ""
+    return nm != "" && (list_contains(cx.colored, nm) || list_contains(cx.async_ext, nm) || list_contains(cx.locals, nm))
+  }
+  if (k == "call" || k == "fn") { return yields_co(node, cx) }
+  return false
+}
+
+fn colour(node: Any, cx: Colour, in_async: Bool, in_arrow: Bool) -> Any {
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(colour(item, cx, in_async, in_arrow)) }
+    return items
+  }
+  if (!value_is_object(node)) { return node }
+  let k = node_kind(node)
+  let inner_arrow = in_arrow || k == "arrow"
+  var fields: Map[Str, Any] = Map.empty()
+  for (key of value_keys(node)) { fields = fields.set(key, colour(value_field(node, key), cx, in_async, inner_arrow)) }
+  if (k == "arrow" && value_bool(value_field(node, "async"))) {
+    let body = value_field(node, "body")
+    let shape = yields_co(body, cx) ? "plain" : (reaches_co(body, cx) ? "mixed" : "wrap")
+    fields = fields.set("__async_shape__", shape)
+  }
+  // item 170: whether a component emission reaches a coroutine, which an
+  // async-coloured timer body spawns into its in-flight window instead of
+  // running inline. Read only by `timer_emit`.
+  if (cx.comp && value_str(value_field(node, "step")) == "emit" && reaches_co(value_field(node, "expr"), cx)) {
+    fields = fields.set("__reaches__", true)
+  }
+  // issue #1647: an activation-body `await emit` of a `validated` operation
+  // validates the SETTLED response, so its expression is rendered as an async
+  // context (the await lands inside the seam) and the step's own `await` is
+  // dropped (`__seam_await__`, read by `await_prefix`).
+  if (cx.comp && !in_async && value_str(value_field(node, "step")) == "emit" && value_bool(value_field(node, "async"))
+      && value_is_null(value_field(node, "approval")) && is_validated_op(value_field(node, "expr"), cx)) {
+    fields = fields.set("expr", colour(value_field(node, "expr"), cx, true, in_arrow)).set("__seam_await__", true)
+  }
+  if (k == "match" && in_async) {
+    var aw = false
+    for (arm of value_list(value_field(node, "arms"))) { if (reaches_co(value_field(arm, "body"), cx)) { aw = true } }
+    if (aw) { fields = fields.set("__awaited__", true) }
+  }
+  if (in_async && !in_arrow && awaits_here(node, cx)) { return { kind: "__await__", expr: fields } }
+  return fields
+}
+
+// The node an `__await__` wraps (or the node itself): the step-level lookups
+// (witnessed, deferred, compensated externs) read the call, not the wrapper.
+fn unwrap_await(node: Any) -> Any {
+  if (node_kind(node) == "__await__") { return value_field(node, "expr") }
+  return node
+}
+
+// The `Colour` facts for a whole document, and its async operations.
+fn doc_colour(ir: Any, reqs: Any, locals: List[Str], comp: Bool) -> Colour {
+  var colored = []
+  for (f of value_list(value_field(ir, "functions"))) {
+    if (value_bool(value_field(f, "async"))) { colored = colored.push(value_str(value_field(f, "name"))) }
+  }
+  var async_ext = []
+  for (e of value_list(value_field(ir, "externs"))) {
+    if (value_bool(value_field(e, "async"))) { async_ext = async_ext.push(value_str(value_field(e, "name"))) }
+  }
+  var ops = []
+  var validated = []
+  let services = value_field(ir, "services")
+  for (sname of value_keys(services)) {
+    let methods = value_field(value_field(services, sname), "methods")
+    for (mname of value_keys(methods)) {
+      if (value_bool(value_field(value_field(methods, mname), "async"))) { ops = ops.push(`${sname}.${mname}`) }
+      if (value_bool(value_field(value_field(methods, mname), "validated"))) { validated = validated.push(`${sname}.${mname}`) }
+    }
+  }
+  return { colored: colored, async_ext: async_ext, async_ops: ops, validated_ops: validated, reqs: reqs, locals: locals, comp: comp }
+}
+
+// A call through a required key to a `validated` operation (the colour pass's
+// view of `validated_spec`, by `Service.method`).
+fn is_validated_op(node: Any, cx: Colour) -> Bool {
+  let svc = value_str(value_field(cx.reqs, value_str(value_field(value_field(node, "target"), "name"))))
+  return node_kind(node) == "call" && node_kind(value_field(node, "target")) == "req"
+    && list_contains(cx.validated_ops, `${svc}.${value_str(value_field(node, "method"))}`)
+}
+
+// `_is_async_fn_type`: a function type whose declared return is `Async[...]`,
+// the item-92 spelling that colours a first-class callback parameter.
+fn is_async_fn_type(t: Str) -> Bool {
+  let f = split_fn_type(trim(t))
+  return f.ok && trim(f.ret).startsWith("Async[")
+}
+
+// A document with an async arrow whose body is statically sync renders it
+// through `_revl_as_async`, and the module then carries that wrapper.
+fn uses_as_async(n: Any) -> Bool {
+  if (value_str(value_field(n, "__async_shape__")) == "wrap") { return true }
+  for (c of value_children(n)) { if (uses_as_async(c)) { return true } }
+  return false
+}
+
+// Whether any body the document renders lifts a sync arrow into an async slot:
+// the same colouring the renderers see, asked once over the whole IR.
+fn ir_needs_as_async(ir: Any) -> Bool {
+  var found = false
+  for (f of value_list(value_field(ir, "functions"))) {
+    var locals = []
+    for (p of value_list(value_field(f, "params"))) {
+      if (is_async_fn_type(value_str(value_field(p, "type")))) { locals = locals.push(value_str(value_field(p, "name"))) }
+    }
+    found = found || uses_as_async(colour(value_field(f, "body"), doc_colour(ir, None, locals, false), value_bool(value_field(f, "async")), false))
+  }
+  found = found || uses_as_async(colour(value_field(ir, "tests"), doc_colour(ir, None, [], false), false, false))
+  for (c of value_list(value_field(ir, "components"))) {
+    found = found || uses_as_async(colour(value_field(c, "body"), doc_colour(ir, value_field(c, "requires"), [], true), false, false))
+  }
+  return found
+}
+
+// Whether any node under `n` is an expression of `kind` or a body step tagged
+// `kind` (a `stream-iter` loop is a step, not an expression).
+fn uses_kind(n: Any, kind: Str) -> Bool {
+  if (node_kind(n) == kind || value_str(value_field(n, "step")) == kind) { return true }
+  for (c of value_children(n)) { if (uses_kind(c, kind)) { return true } }
+  return false
+}
+
+fn has_async_timer(n: Any) -> Bool {
+  if (value_str(value_field(n, "step")) == "timer" && value_bool(value_field(n, "async"))) { return true }
+  for (c of value_children(n)) { if (has_async_timer(c)) { return true } }
+  return false
+}
+
+fn as_async_block() -> List[Str] {
+  let o = ["def _revl_as_async(_f):", "    async def _g(*_a, **_k):", "        _r = _f(*_a, **_k)",
+    "        if hasattr(_r, \"__await__\"):", "            return await _r", "        return _r", "    return _g", "", ""]
+  return o
+}
+
+// The emitter's own walrus temporaries (`_bi`, `_fv`, `_rc`, `_ov<N>`): an
+// awaited payload bound under one of these keeps the tuple spelling, since a
+// comprehension may not rebind a walrus target.
+fn walrus_temp(name: Str) -> Bool {
+  if (name == "_bi" || name == "_fv" || name == "_rc") { return true }
+  if (name.length() > 3 && name.slice(0, 3) == "_ov") {
+    var i = 3
+    while (i < name.length()) {
+      let ch = name.charAt(i)
+      if (ch < "0" || ch > "9") { return false }
+      i = i + 1
+    }
+    return true
+  }
+  return false
+}
+
+fn bind_payload(bind: Str, body: Str, payload: Str, node: Any, aw: Bool) -> Str {
   if (arm_body_is_bind(node, bind)) { return payload }
   if (!arm_body_mentions(node, bind)) { return body }
+  // An awaited arm cannot use the one-shot lambda (a sync frame): a
+  // one-element comprehension is a scope that still admits `await`.
+  if (aw) {
+    if (walrus_temp(bind)) { return `((${bind} := ${payload}), ${body})[1]` }
+    return `[${body} for ${bind} in (${payload},)][0]`
+  }
   return `(lambda ${bind}: ${body})(${payload})`
 }
 
 // `_match_expr` one arm: nested conditional inside a one-shot `lambda match: …`.
-fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
+fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   let bnode = value_field(arm, "body")
   var body = expr(bnode)
@@ -622,9 +919,9 @@ fn match_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   } else {
     if (pattern == "Some") {
       cond = `${head} is not None`
-      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode, aw) }
     } else {
-      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode, aw) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -649,7 +946,7 @@ fn match_folds(arms: List[Any]) -> Bool {
   return value_str(value_field(arms[0], "pattern")) != "_"
 }
 
-fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
+fn match_expr(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
   let folds = match_folds(arms)
   var result = ""
   var has = false
@@ -658,7 +955,7 @@ fn match_expr(scrutinee: Str, arms: List[Any]) -> Str {
     let arm = arms[i]
     var head = "match"
     if (folds && i == 0) { head = `(match := ${scrutinee})` }
-    result = match_branch(arm, result, has, head)
+    result = match_branch(arm, result, has, head, aw)
     has = true
     i -= 1
   }
@@ -730,7 +1027,17 @@ fn render_arrow(node: Any) -> Str {
     ps = ps.push(`${cm}=${cm}`)
   }
   let lp = ps.join(", ")
-  return `lambda ${lp}: ${expr(value_field(node, "body"))}`
+  return async_arrow(value_str(value_field(node, "__async_shape__")), `lambda ${lp}: ${expr(value_field(node, "body"))}`)
+}
+
+// `_py_async_arrow`'s three shapes, decided by `colour`: a tail call of an
+// async callable stays the plain lambda (its awaiting call site settles it), a
+// statically sync body is lifted through `_revl_as_async`, and a body with an
+// internal await, which the reference refuses, is named.
+fn async_arrow(shape: Str, lam: Str) -> Str {
+  if (shape == "wrap") { return `_revl_as_async(${lam})` }
+  if (shape == "mixed") { return "<<UNSUPPORTED-ARROW:async-mixed>>" }
+  return lam
 }
 
 fn render_bin(node: Any) -> Str {
@@ -832,6 +1139,10 @@ fn expr_inner(node: Any) -> Str {
   }
   if (kind == "index") {
     let idx = value_field(node, "index")
+    // A `Map` subscript reads by KEY (issue #957), never positionally.
+    if (!value_is_null(value_field(node, "key_type"))) {
+      return `_revl_map_index(${expr(value_field(node, "target"))}, ${expr(idx)})`
+    }
     // A string-LITERAL key is a host/`Any` property read (`tc["fn"]`), not a
     // List subscript — bare `[...]`. A List subscript routes through
     // `_revl_index`, which faults on a negative index (#549).
@@ -863,7 +1174,7 @@ fn expr_inner(node: Any) -> Str {
   if (kind == "maplit") { return "{}" }
   if (kind == "arrow") { return render_arrow(node) }
   if (kind == "match") {
-    return match_expr(expr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
+    return match_expr(expr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")), value_bool(value_field(node, "__awaited__")))
   }
   if (kind == "record_update") {
     return render_record_update(expr(value_field(node, "base")), value_list(value_field(node, "updates")))
@@ -892,6 +1203,13 @@ fn expr_inner(node: Any) -> Str {
 // The implicit Int -> Float coercion marker (docs/arithmetic.md): render the
 // conversion the reference makes visible, then dispatch the un-widened node.
 fn expr(node: Any) -> Str {
+  // An awaited call (see `colour`): the reference widens the SETTLED value,
+  // so a Float widen on the call wraps the whole `(await ...)`.
+  if (node_kind(node) == "__await__") {
+    let inner = value_field(node, "expr")
+    let settled = `(await ${expr_inner(inner)})`
+    return value_str(value_field(inner, "widen")) == "Float" ? `float(${settled})` : settled
+  }
   if (value_str(value_field(node, "widen")) == "Float") {
     return `float(${expr_inner(node)})`
   }
@@ -985,9 +1303,67 @@ fn emit_assert(e: Any, indent: Int) -> List[Str] {
 }
 
 // `_fn_stmt`: one fn-body step -> its emitted lines (already indented).
+// `_let_pattern_stmt`: a destructuring `let` evaluates its value once into a
+// temp, then binds each name. The temp is numbered by `number_patterns` in
+// emission order, per section (the reference's per-`_Lines` counter, item 179).
+fn let_pattern_stmt(node: Any, indent: Int) -> List[Str] {
+  let tmp = `__revl_destructure_${value_int(value_field(node, "__seq__"))}`
+  var out = [line(indent, `${tmp} = ${expr(value_field(node, "value"))}`)]
+  let pattern = value_str(value_field(node, "pattern"))
+  var names = []
+  for (n of value_list(value_field(node, "names"))) { names = names.push(value_str(n)) }
+  if (pattern == "record") {
+    // a record value is a dict: the read is `_field_read`, as `row.name` is
+    for (n of names) { out = out.push(line(indent, `${mangle(n)} = ${field_read(tmp, py_repr(n), true, false)}`)) }
+    return out
+  }
+  var mangled = []
+  for (n of names) { mangled = mangled.push(mangle(n)) }
+  let rest = value_field(node, "rest")
+  if (!value_is_null(rest)) {
+    out = out.push(line(indent, `${mangled.join(", ")}, *${mangle(value_str(rest))} = ${tmp}`))
+  } else if (mangled.length() == 1) {
+    out = out.push(line(indent, `${mangled[0]} = ${tmp}[0]`))
+  } else {
+    out = out.push(line(indent, `${mangled.join(", ")} = ${tmp}`))
+  }
+  return out
+}
+
+// Number every destructuring `let` in a section, in the order the statement
+// emitter reaches it (a pre-order walk of the IR), starting after `n`.
+type Numbered = { node: Any, next: Int }
+
+fn number_patterns(node: Any, n: Int) -> Numbered {
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    var c = n
+    for (item of value_list(node)) {
+      let r = number_patterns(item, c)
+      items = items.push(r.node)
+      c = r.next
+    }
+    return { node: items, next: c }
+  }
+  if (!value_is_object(node)) { return { node: node, next: n } }
+  var c = n
+  var fields: Map[Str, Any] = Map.empty()
+  if (value_str(value_field(node, "step")) == "let_pattern") {
+    c = c + 1
+    fields = fields.set("__seq__", c)
+  }
+  for (key of value_keys(node)) {
+    let r = number_patterns(value_field(node, key), c)
+    fields = fields.set(key, r.node)
+    c = r.next
+  }
+  return { node: fields, next: c }
+}
+
 fn fn_stmt(node: Any, indent: Int) -> List[Str] {
   let step = value_str(value_field(node, "step"))
   var out = []
+  if (step == "let_pattern") { return let_pattern_stmt(node, indent) }
   if (step == "let" || step == "assign") {
     let nm = value_str(value_field(node, "name"))
     let value = value_field(node, "value")
@@ -1093,10 +1469,10 @@ fn memo_source() -> List[Str] {
     "    return _REVL_NOMEMO", ""]
 }
 
-fn emit_memo_wrapper(name: Str, params: List[Any]) -> List[Str] {
+fn emit_memo_wrapper(name: Str, params: List[Any], is_async: Bool) -> List[Str] {
   let args = fn_params(params)
-  let inner = "_revl_uncached_".concat(name)
-  var out = [`def ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
+  let inner = (is_async ? "await " : "").concat("_revl_uncached_").concat(name)
+  var out = [`${is_async ? "async def" : "def"} ${name}(${args}):`, "    \"\"\"item 310 `cache pure`: memoized on the structural args key.\"\"\"",
     `    _revl_k = _revl_memo_key((${py_repr(name)}${if (args == "") { "" } else { ", " }}${args},))`,
     "    if _revl_k is _REVL_NOMEMO:", `        return ${inner}(${args})`,
     "    _revl_v = _REVL_MEMO.get(_revl_k, _REVL_MISS)", "    if _revl_v is _REVL_MISS:",
@@ -1105,19 +1481,30 @@ fn emit_memo_wrapper(name: Str, params: List[Any]) -> List[Str] {
 }
 
 // `_emit_functions`: each module fn as a Python `def`, blank-line separated.
-fn emit_functions(functions: List[Any]) -> List[Str] {
+fn emit_functions(source_functions: List[Any], ir: Any) -> List[Str] {
   var out = []
+  // one destructure counter for the whole functions section
+  let functions = value_list(number_patterns(source_functions, 0).node)
   for (fnode of functions) {
     let name = mangle(value_str(value_field(fnode, "name")))
     let params = fn_params(value_list(value_field(fnode, "params")))
     let memoized = is_cache_pure_fn(fnode)
     let body_name = memoized ? "_revl_uncached_".concat(name) : name
-    out = out.push(`def ${body_name}(${params}):`)
-    let body = value_list(value_field(fnode, "body"))
+    // item 92: a coloured fn is an `async def`; its body renders in an async
+    // context, with its async-typed parameters as the await-locals. An
+    // async-typed parameter is an async local of a sync fn too: the `def`
+    // never awaits it, but an arrow re-passing it is still a coroutine tail.
+    let is_async = value_bool(value_field(fnode, "async"))
+    var locals = []
+    for (p of value_list(value_field(fnode, "params"))) {
+      if (is_async_fn_type(value_str(value_field(p, "type")))) { locals = locals.push(value_str(value_field(p, "name"))) }
+    }
+    let body = value_list(colour(value_field(fnode, "body"), doc_colour(ir, None, locals, false), is_async, false))
+    out = out.push(`${is_async ? "async def" : "def"} ${body_name}(${params}):`)
     if (body.length() == 0) { out = out.push(line(1, "pass")) }
     for (s of body) { out = out.concat(fn_stmt(s, 1)) }
     out = out.push("")
-    if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")))) }
+    if (memoized) { out = out.concat(emit_memo_wrapper(name, value_list(value_field(fnode, "params")), is_async)) }
   }
   return out
 }
@@ -1166,8 +1553,65 @@ fn splitlines(s: Str) -> List[Str] {
 
 // `_emit_externs`: each extern as a Python `def`, its verbatim `@py` body
 // dedented + split into indented lines. An async extern's `async def` header is
-// reproduced faithfully; the await-seed / awaited call sites it needs are
-// DEFERRED to slice 5 (so an async extern is excluded from the cross-check).
+// reproduced faithfully, and its call sites are awaited through `colour`.
+// item 256 Slice 1: the composition secrets map and its FAIL-LOUD lookup,
+// emitted only when some emission extern carries a bound secret.
+fn secrets_block() -> List[Str] {
+  let o = ["_REVL_SECRETS = {}", "",
+    "def _revl_secret(_name):",
+    "    if _name not in _REVL_SECRETS:",
+    "        raise RuntimeError(",
+    "            \"capability-bound secret `\" + _name + \"` was not \"",
+    "            \"installed before its extern body ran; the run driver \"",
+    "            \"must resolve it at plug (item 256). No default exists \"",
+    "            \"for a secret.\")",
+    "    return _REVL_SECRETS[_name]", ""]
+  return o
+}
+
+// item 379 / 395: the composition config map for document-global config
+// externs, and the FAIL-LOUD lookup that names the extern when a required
+// field was never installed. Emitted only when some extern carries a schema.
+fn extern_config_block() -> List[Str] {
+  let o = ["_REVL_EXTERN_CONFIG = {}", "",
+    "def _revl_extern_config(_name, _required, _defaults):",
+    "    _cfg = _REVL_EXTERN_CONFIG.get(_name)",
+    "    if _cfg is None:",
+    "        if _required:",
+    "            raise RuntimeError(",
+    "                \"config extern `\" + _name + \"` called before plug-time \"",
+    "                \"configuration was installed (required config: \" +",
+    "                \", \".join(_required) + \"); configure it through the run \"",
+    "                \"driver's config seam\")",
+    "        return dict(_defaults)",
+    "    _missing = [_f for _f in _required if _f not in _cfg]",
+    "    if _missing:",
+    "        raise RuntimeError(",
+    "            \"config extern `\" + _name + \"` called before plug-time \"",
+    "            \"configuration was installed (missing required config: \" +",
+    "            \", \".join(_missing) + \")\")",
+    "    return {**_defaults, **_cfg}", ""]
+  return o
+}
+
+// A config extern's first body local: `_revl_config` resolved through the
+// fail-loud helper, from the schema's REQUIRED (non-defaulted) field names and
+// its defaults. The defaults render as the reference's dict literal.
+fn extern_config_bind(name: Str, schema: List[Any]) -> Str {
+  var required = []
+  var defaults = []
+  for (f of schema) {
+    let fname = value_str(value_field(f, "name"))
+    let dv = value_field(f, "default")
+    if (value_is_null(dv)) {
+      required = required.push(fname)
+    } else {
+      defaults = defaults.push(`${py_repr(fname)}: ${py_repr(dv)}`)
+    }
+  }
+  return `_revl_config = _revl_extern_config(${py_repr(name)}, ${py_repr(required)}, {${defaults.join(", ")}})`
+}
+
 // The extern classes whose host body crosses a boundary (issue #1504), the
 // reference's `_GATED_EXTERN_CLASSES`.
 fn gated_extern_class(cls: Str) -> Bool {
@@ -1176,6 +1620,14 @@ fn gated_extern_class(cls: Str) -> Bool {
 
 fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
   var out = []
+  var any_secret = false
+  var any_config = false
+  for (ext of externs) {
+    if (value_list(value_field(ext, "secrets")).length() > 0) { any_secret = true }
+    if (value_list(value_field(ext, "config")).length() > 0) { any_config = true }
+  }
+  if (any_secret) { out = out.concat(secrets_block()) }
+  if (any_config) { out = out.concat(extern_config_block()) }
   for (ext of externs) {
     let name = mangle(value_str(value_field(ext, "name")))
     var ps = []
@@ -1199,14 +1651,30 @@ fn emit_externs(externs: List[Any], gated: Bool) -> List[Str] {
     if (value_bool(value_field(ext, "secret_return"))) {
       out = out.push("@".concat(runtime_ref("secret_result")))
     }
-    out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
-    let body = dedent(strip_nl(value_str(value_field(value_field(ext, "bodies"), "py"))))
-    if (body != "") {
-      for (ln of splitlines(body)) { out = out.push(line(1, ln)) }
+    let py_body = value_field(value_field(ext, "bodies"), "py")
+    // item 396 option B: a `@py ref` extern with no inline body is a lazy import
+    // THUNK in the reference (host symbol imported at first call, colour
+    // asserted through `inspect`). This port does not carry the thunk, and an
+    // empty `def ... pass` would return None for every call, so it is refused
+    // by name.
+    if (value_is_null(py_body) && !value_is_null(value_field(value_field(ext, "refs"), "py"))) {
+      out = out.concat([`<<UNSUPPORTED-EXTERN:py-ref ${name}>>`, ""])
     } else {
-      out = out.push(line(1, "pass"))
+      out = out.push(`${kw} ${name}(${ps.join(", ")}):`)
+      // item 256 Slice 1: a bound secret is the FIRST body local of the
+      // emission extern it is bound to, and nowhere else.
+      let secrets = value_list(value_field(ext, "secrets"))
+      for (sn of secrets) { out = out.push(line(1, `${mangle(value_str(sn))} = _revl_secret(${py_repr(sn)})`)) }
+      let schema = value_list(value_field(ext, "config"))
+      if (schema.length() > 0) { out = out.push(line(1, extern_config_bind(name, schema))) }
+      let body = dedent(strip_nl(value_str(py_body)))
+      // `pass` only for a def with no line at all: an injected secret or
+      // config local is a statement in its own right.
+      let bare = body == "" && schema.length() == 0 && secrets.length() == 0
+      for (ln of splitlines(body)) { out = out.push(line(1, ln)) }
+      if (bare) { out = out.push(line(1, "pass")) }
+      out = out.push("")
     }
-    out = out.push("")
   }
   return out
 }
@@ -1456,11 +1924,10 @@ fn comp_names(ir: Any) -> Str {
 // Slice 4 (item 206) added the `config` cexpr, config (`ConfigSchema`), and the
 // method-body `effect`/`let-effect`/compensated-`emit` accumulator (the
 // `_revl_frame.adopt`/`.acquire` + `_label`/`_effect_N`/`_emit_N` counter, now
-// threaded through provides/methods). STILL DEFERRED to slice 5: async coloring
-// (async methods / await bodies / the
-// await-seed), realm placements (`isolate`/`intercept`/`routes`/the
-// router), spawn/instances, lifecycle TESTS (the `plug`/`set_trace`/`Clock`/
-// `asyncio` driver), and the `spawn`/`instance-get` cexpr kinds. The
+// threaded through provides/methods). Spawn/instances (the `spawn` and
+// `instance-get` cexpr kinds), async operations and the await-seed, the
+// activation-body `await` step and the lifecycle-test driver are ported (item
+// 391). The
 // component-body `${…}` template (the `format` cexpr, `_revl_fmt` + the `fmt`
 // runtime import) is ported — a fn body lowers `${…}` to `interp` instead, so
 // `format` is the component/method-body twin of the fn-body f-string concat.
@@ -1496,6 +1963,7 @@ fn runtime_ref(name: Str) -> Str {
   // `interp` f-string concat instead; only the component/method-body path
   // reaches `format`).
   if (name == "fmt") { return "_revl_fmt" }
+  if (name == "spawn") { return "_revl_spawn" }
   return name
 }
 
@@ -1531,7 +1999,7 @@ fn carrow(node: Any) -> Str {
   var ps = []
   for (p of value_list(value_field(node, "params"))) { ps = ps.push(mangle(value_str(p))) }
   let lp = ps.join(", ")
-  return `lambda ${lp}: ${cexpr(value_field(node, "body"))}`
+  return async_arrow(value_str(value_field(node, "__async_shape__")), `lambda ${lp}: ${cexpr(value_field(node, "body"))}`)
 }
 
 // component `bin`: NO arithmetic specialization (the reference difference).
@@ -1556,7 +2024,7 @@ fn cun(node: Any) -> Str {
   return `<<UNSUPPORTED-UN:${op}>>`
 }
 
-fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
+fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str, aw: Bool) -> Str {
   let pattern = value_str(value_field(arm, "pattern"))
   let bnode = value_field(arm, "body")
   var body = cexpr(bnode)
@@ -1568,9 +2036,9 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   } else {
     if (pattern == "Some") {
       cond = `${head} is not None`
-      if (bind != "") { body = bind_payload(bind, body, "match", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match", bnode, aw) }
     } else {
-      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode) }
+      if (bind != "") { body = bind_payload(bind, body, "match.value", bnode, aw) }
       cond = `isinstance(${head}, ${pattern})`
     }
   }
@@ -1580,7 +2048,7 @@ fn cmatch_branch(arm: Any, rest: Str, has_rest: Bool, head: Str) -> Str {
   return `(${body} if ${cond} else ${rest})`
 }
 
-fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
+fn cmatch(scrutinee: Str, arms: List[Any], aw: Bool) -> Str {
   let folds = match_folds(arms)
   var result = ""
   var has = false
@@ -1588,7 +2056,7 @@ fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
   while (i >= 0) {
     var head = "match"
     if (folds && i == 0) { head = `(match := ${scrutinee})` }
-    result = cmatch_branch(arms[i], result, has, head)
+    result = cmatch_branch(arms[i], result, has, head, aw)
     has = true
     i -= 1
   }
@@ -1602,6 +2070,7 @@ fn cmatch(scrutinee: Str, arms: List[Any]) -> Str {
 // The component/method-body expression dispatcher (`_ComponentEmitter._expr`).
 fn cexpr(node: Any) -> Str {
   let kind = node_kind(node)
+  if (kind == "__await__") { return `(await ${cexpr(value_field(node, "expr"))})` }
   if (kind == "do") {
     var binds = []
     for (s of value_list(value_field(node, "stmts"))) {
@@ -1626,6 +2095,13 @@ fn cexpr(node: Any) -> Str {
   // is repr'd RAW (unlike the schema declaration, which mangles it) — mirroring
   // the reference `_expr` config branch exactly.
   if (kind == "config") { return `_revl_config[${py_repr(value_field(node, "field"))}]` }
+  // item 257: the validate seam over the settled response. A `retry` budget
+  // (Slice 2) needs the item-121 completion-site analysis this port does not
+  // carry, so a retrying crossing falls through to the named marker below.
+  if (kind == "__validated__" && value_int(value_field(node, "retry")) == 0) {
+    let schema = value_field(node, "schema")
+    return `_revl_validate(${cexpr(value_field(node, "expr"))}, ${py_repr(schema)}, ${py_repr(value_str(value_field(node, "where")))}, ${ctor_map(schema)}, ${py_repr(value_str(value_field(node, "key")))})`
+  }
   if (kind == "call") {
     if (!value_is_null(value_field(node, "target"))) {
       let t = cexpr(value_field(node, "target"))
@@ -1647,6 +2123,9 @@ fn cexpr(node: Any) -> Str {
   }
   if (kind == "index") {
     let idx = value_field(node, "index")
+    if (!value_is_null(value_field(node, "key_type"))) {
+      return `_revl_map_index(${cexpr(value_field(node, "target"))}, ${cexpr(idx)})`
+    }
     if (node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str") {
       return `${cexpr(value_field(node, "target"))}[${cexpr(idx)}]`
     }
@@ -1664,7 +2143,7 @@ fn cexpr(node: Any) -> Str {
   if (kind == "list") { return clist(value_list(value_field(node, "items"))) }
   if (kind == "arrow") { return carrow(node) }
   if (kind == "match") {
-    return cmatch(cexpr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")))
+    return cmatch(cexpr(value_field(node, "scrutinee")), value_list(value_field(node, "arms")), value_bool(value_field(node, "__awaited__")))
   }
   if (kind == "builtin") {
     var args = []
@@ -1717,7 +2196,67 @@ fn cexpr(node: Any) -> Str {
     for (a of value_list(value_field(node, "args"))) { args = args.concat(", ").concat(cexpr(a)) }
     return `${runtime_ref("fmt")}(${py_repr(value_field(node, "template"))}${args})`
   }
+  // item 130: a `subscribe` without a replay request (see render_subscribe).
+  if (kind == "subscribe" && value_is_null(value_field(node, "replay"))) { return render_subscribe(node) }
+  // instance-parametric components (docs/design-v2-instances.md): `spawn`
+  // plugs a fresh child instance, each provided key isolated into its own local
+  // realm, and returns a handle; `instance-get` reads a provision off that
+  // handle through the instance's private realm.
+  if (kind == "spawn") {
+    let cfg = value_field(node, "config")
+    var parts = []
+    for (k of value_keys(cfg)) { parts = parts.push(`${py_repr(k)}: ${cexpr(value_field(cfg, k))}`) }
+    return `${runtime_ref("spawn")}(_revl_ctx, ${value_str(value_field(node, "component"))}, {${parts.join(", ")}}, ${py_tuple(value_list(value_field(node, "realms")))})`
+  }
+  if (kind == "instance-get") {
+    return `${cexpr(value_field(node, "target"))}.get(${py_repr(value_field(node, "key"))})`
+  }
   return `<<UNSUPPORTED-CEXPR:${kind}>>`
+}
+
+// item 130: `subscribe <stream>` opens a single-consumer subscription and
+// registers its bracket. The derived-stream stages, the declared buffer
+// capacity and the `block` drain window are appended only when declared, so a
+// plain subscription keeps the three-argument call. A subscribe that asks for a
+// replay backlog (item 130 §4.5) is not taken here: like a replay-declaring
+// `Stream.source()`, it falls through to the named `subscribe` marker, because
+// no corpus document can hold it to agreement while the self-host gate refuses
+// the `replay(...)` clause.
+fn render_subscribe(node: Any) -> Str {
+  let policy = value_is_null(value_field(node, "policy")) ? "error" : value_str(value_field(node, "policy"))
+  var extra = ""
+  let stages = value_list(value_field(node, "stages"))
+  if (stages.length() > 0) {
+    var rendered = []
+    for (st of stages) {
+      let name = value_str(value_field(st, "stage"))
+      rendered = rendered.push(name == "take" ? `('take', ${value_int(value_field(st, "count"))})` : `(${py_repr(name)}, ${cexpr(value_field(st, "fn"))})`)
+    }
+    extra = extra.concat(`, stages=[${rendered.join(", ")}]`)
+  }
+  if (!value_is_null(value_field(node, "buffer"))) { extra = extra.concat(`, capacity=${value_int(value_field(node, "buffer"))}`) }
+  if (!value_is_null(value_field(node, "drain"))) { extra = extra.concat(`, drain_ms=${value_int(value_field(node, "drain"))}`) }
+  return `Stream.subscribe(${stream_head(value_field(node, "stream"))}, ${py_repr(policy)}, _revl_ctx${extra})`
+}
+
+// The stream a `subscribe` acquires: a plain source, or a `merge(a, b)` fan-in,
+// itself a stream, so the head is recursive.
+fn stream_head(node: Any) -> Str {
+  if (node_kind(node) == "stream-merge") {
+    var parts = []
+    for (src of value_list(value_field(node, "sources"))) { parts = parts.push(stream_head(src)) }
+    return `Stream.merge(${parts.join(", ")})`
+  }
+  return cexpr(node)
+}
+
+// A list of strings as the repr of the Python tuple it becomes: `()`, `('a',)`,
+// `('a', 'b')`.
+fn py_tuple(items: List[Any]) -> Str {
+  var parts = []
+  for (i of items) { parts = parts.push(py_repr(i)) }
+  if (parts.length() == 1) { return `(${parts[0]},)` }
+  return `(${parts.join(", ")})`
 }
 
 // item 414 (ported per item 429(d)): the Python expression that FIRES a direct
@@ -1749,6 +2288,11 @@ fn extern_emit_fire(expr: Any) -> Str {
 // reference's "req"/"spawn" shapes keep their receiver-driven spelling.
 fn emission_fire(expr: Any) -> Str {
   if (node_kind(expr) == "fn") { return extern_emit_fire(expr) }
+  // An awaited host-extern emission: the `await` stays OUTSIDE the recording
+  // seam, exactly where the reference's `_extern_emit_fire` puts it.
+  if (node_kind(expr) == "__await__" && node_kind(value_field(expr, "expr")) == "fn") {
+    return `(await ${extern_emit_fire(value_field(expr, "expr"))})`
+  }
   return cexpr(expr)
 }
 
@@ -1807,7 +2351,7 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     // as the reference emit.py's `_method_step` does — or a raising undo escapes to
     // the cordis unwind, is logged, never recorded in `compensation_residue`, and so
     // is invisible to `revl test` and `revl run`'s no-residue proof.
-    out = out.push(line(indent + 1, `yield _revl_frame._guard(lambda: ${cexpr(value_field(step, "undo"))})`))
+    out = out.push(line(indent + 1, `yield _revl_frame._guard(${inverse_lambda(step, "undo", "")}: ${cexpr(value_field(step, "undo"))})`))
     let c = counter + 1
     let label = `${comp_name}.${provide_name}.${method_name}#${c}`
     out = out.push(line(indent, `_revl_frame.adopt(_revl_ctx.effect(${fname}, ${py_repr(label)}))`))
@@ -1819,12 +2363,18 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
     let bind = mangle(value_str(value_field(step, "bind")))
     let acq = cexpr(value_field(step, "acquire"))
     let inv = cexpr(value_field(step, "undo"))
+    let head = inverse_lambda(step, "undo", bind)
+    let undo_fn = is_map_cas(value_field(step, "acquire")) ? `${head}: (${inv} if ${bind} else None)` : `${head}: ${inv}`
     let c = counter + 1
     let label = `${comp_name}.${provide_name}.${method_name}#${c}`
-    var out = [line(indent, `${bind} = _revl_frame.acquire(${py_repr(label)}, lambda: ${acq}, lambda ${bind}: ${inv})`)]
+    var out = [line(indent, `${bind} = _revl_frame.acquire(${py_repr(label)}, lambda: ${acq}, ${undo_fn})`)]
     return { lines: out, counter: c }
   }
   if (kind == "emit") {
+    let deferred = deferred_extern(value_field(step, "expr"), externs)
+    if (!value_is_null(deferred)) {
+      return { lines: [line(indent, deferred_enqueue(value_field(step, "expr"), deferred))], counter: counter }
+    }
     if (!value_is_null(value_field(step, "compensate"))) {
       // item 247 (method-body compensate remainder) (docs/design/teardown-contract.md): a method-body
       // `emit ... compensate ...` is a first-class COMPENSATION on the
@@ -1837,12 +2387,14 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
       // commit, drained in Phase 2 after every proof inverse, guarded and
       // residue-collected. Mirrors the reference emit.py's `_method_step`.
       var out = [line(indent, emission_fire(value_field(step, "expr")))]
-      out = out.push(line(indent, `_revl_frame.compensation_method(lambda: ${cexpr(value_field(step, "compensate"))})`))
+      out = out.push(line(indent, `_revl_frame.compensation_method(${inverse_lambda(step, "compensate", "")}: ${cexpr(value_field(step, "compensate"))})`))
       return { lines: out, counter: counter }
     }
     var out = [line(indent, emission_fire(value_field(step, "expr")))]
     return { lines: out, counter: counter }
   }
+  // services 2.0 (§5): an `await` in an async provide method body.
+  if (kind == "await") { return { lines: [line(indent, `await ${cexpr(value_field(step, "expr"))}`)], counter: counter } }
   if (kind == "return") {
     if (value_is_null(value_field(step, "expr"))) { return { lines: [line(indent, "return")], counter: counter } }
     return { lines: [line(indent, `return ${cexpr(value_field(step, "expr"))}`)], counter: counter }
@@ -1932,8 +2484,11 @@ fn method_secret_params(m: Any, specs: Any) -> List[Str] {
 // `_method`: one provide-method as a Python `def` (sync only in this slice),
 // threading the shared timer/effect counter across its body steps.
 fn method_lines(m: Any, indent: Int, provide_name: Str, comp_name: Str, counter: Int, specs: Any, externs: List[Any]) -> EmitLines {
-  let name = mangle(value_str(value_field(m, "name")))
-  var head = `def ${name}(self`
+  let name = mangle_kw(value_str(value_field(m, "name")))
+  // An `async` operation lowers to an `async def`; `colour_component` already
+  // wrapped every call its body awaits.
+  let is_async = value_bool(value_field(value_field(specs, value_str(value_field(m, "name"))), "async"))
+  var head = `${is_async ? "async def" : "def"} ${name}(self`
   for (p of value_list(value_field(m, "params"))) { head = head.concat(", ").concat(mangle(value_str(p))) }
   head = head.concat("):")
   var out = []
@@ -1994,7 +2549,15 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
 
 // `_timer`: a revertible schedule — the firing closure, its handle, and the
 // yielded `.cancel()` inverse.
-fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
+// issue #1589: the compensation an emitted extern DECLARES, registered once per
+// firing after the fire. The firing closure has no generator to yield into, so
+// it goes through `compensation_method`, the provide-method form.
+fn timer_compensation(em: Any, indent: Int, externs: List[Any]) -> List[Str] {
+  let ext_comp = compensated_extern(value_field(em, "expr"), externs)
+  return value_is_null(ext_comp) ? [] : [line(indent, `_revl_frame.compensation_method(lambda: ${cexpr(value_field(ext_comp, "compensate"))})`)]
+}
+
+fn timer_emit(step: Any, indent: Int, counter: Int, externs: List[Any]) -> EmitLines {
   let mode = value_str(value_field(step, "mode"))
   var sched = "schedule_after"
   if (mode == "every") { sched = "schedule_every" }
@@ -2002,13 +2565,40 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
   let fname = `_timer_${c}`
   let handle = fname.concat("_h")
   var out = []
-  out = out.push(line(indent, `def ${fname}():`))
   let emissions = value_list(value_field(step, "body"))
-  if (emissions.length() == 0) { out = out.push(line(indent + 1, "pass")) }
-  for (em of emissions) { out = out.push(line(indent + 1, emission_fire(value_field(em, "expr")))) }
   let interval = value_int(value_field(step, "interval_ms"))
+  // item 170: a timer body coloured `async` fires into an in-flight window.
+  // Each emission that reaches a coroutine is spawned as a tracked task (a sync
+  // one in a mixed body still runs inline), and the inverse cancels the
+  // schedule and every task still in flight, so teardown leaves no orphaned
+  // async work. A sync timer keeps the plain closure and `.cancel()` inverse.
+  let is_async = value_bool(value_field(step, "async"))
+  let inflight = fname.concat("_inflight")
+  if (is_async) { out = out.push(line(indent, `${inflight} = set()`)) }
+  out = out.push(line(indent, `def ${fname}():`))
+  if (emissions.length() == 0) { out = out.push(line(indent + 1, "pass")) }
+  for (em of emissions) {
+    let rendered = emission_fire(value_field(em, "expr"))
+    if (is_async && value_bool(value_field(em, "__reaches__"))) {
+      out = out.push(line(indent + 1, `_revl_task = _revl_asyncio.ensure_future(${rendered})`))
+      out = out.push(line(indent + 1, `${inflight}.add(_revl_task)`))
+      out = out.push(line(indent + 1, `_revl_task.add_done_callback(${inflight}.discard)`))
+    } else {
+      out = out.push(line(indent + 1, rendered))
+      out = out.concat(timer_compensation(em, indent + 1, externs))
+    }
+  }
   out = out.push(line(indent, `${handle} = ${runtime_ref(sched)}(${interval}, ${fname})`))
-  out = out.push(line(indent, `yield lambda: ${handle}.cancel()`))
+  if (!is_async) {
+    out = out.push(line(indent, `yield lambda: ${handle}.cancel()`))
+    return { lines: out, counter: c }
+  }
+  let cancel = fname.concat("_cancel")
+  out = out.push(line(indent, `def ${cancel}():`))
+  out = out.push(line(indent + 1, `${handle}.cancel()`))
+  out = out.push(line(indent + 1, `for _revl_task in list(${inflight}):`))
+  out = out.push(line(indent + 2, "_revl_task.cancel()"))
+  out = out.push(line(indent, `yield ${cancel}`))
   return { lines: out, counter: c }
 }
 
@@ -2021,6 +2611,389 @@ fn witnessed_extern(expr: Any, externs: List[Any]) -> Any {
     if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "witnessed") { return ext }
   }
   return None
+}
+
+// A routed require is read through its `_revl_route_<key>` proxy, not the
+// fiber context. `cexpr` renders a `req` node without knowing which keys its
+// component routes, so a routed component's body is rewritten first: each `req`
+// on a routed key becomes the proxy's `name` node. The caller's IR is not
+// mutated; every rebuilt node is a fresh map or list.
+fn route_reqs(node: Any, keys: List[Str]) -> Any {
+  if (value_is_object(node)) {
+    if (node_kind(node) == "req" && list_contains(keys, value_str(value_field(node, "name")))) {
+      return { kind: "name", id: "_revl_route_".concat(value_str(value_field(node, "name"))) }
+    }
+    var fields: Map[Str, Any] = Map.empty()
+    for (key of value_keys(node)) { fields = fields.set(key, route_reqs(value_field(node, key), keys)) }
+    return fields
+  }
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(route_reqs(item, keys)) }
+    return items
+  }
+  return node
+}
+
+// item 257: the method spec of a call through a required key to a `validated`
+// service operation, or None. The reference's `_validated_call` fires on
+// exactly this shape, so nothing else is wrapped.
+fn validated_spec(node: Any, reqs: Any, services: Any) -> Any {
+  if (node_kind(node) != "call" || node_kind(value_field(node, "target")) != "req") { return None }
+  let svc = value_str(value_field(reqs, value_str(value_field(value_field(node, "target"), "name"))))
+  let spec = value_field(value_field(value_field(services, svc), "methods"), value_str(value_field(node, "method")))
+  return value_bool(value_field(spec, "validated")) ? spec : None
+}
+
+// The validate-on-response seam, as an up-front rewrite: each validated call is
+// wrapped in a `__validated__` node carrying what `_revl_validate` takes. The
+// wrapper goes OUTSIDE the call's `__await__`, because the reference validates
+// the SETTLED response. `where` is the component name in the activation body
+// and `<component>.<def name>` in a provide method, as the reference's `where`.
+fn mark_validated(node: Any, reqs: Any, services: Any, where: Str, under_await: Bool) -> Any {
+  if (value_is_list(node)) {
+    var items: List[Any] = []
+    for (item of value_list(node)) { items = items.push(mark_validated(item, reqs, services, where, false)) }
+    return items
+  }
+  if (!value_is_object(node)) { return node }
+  let k = node_kind(node)
+  var fields: Map[Str, Any] = Map.empty()
+  for (key of value_keys(node)) { fields = fields.set(key, mark_validated(value_field(node, key), reqs, services, where, k == "__await__")) }
+  let call = k == "__await__" ? value_field(node, "expr") : node
+  let spec = validated_spec(call, reqs, services)
+  if (value_is_null(spec) || (k == "call" && under_await)) { return fields }
+  let svc = value_str(value_field(reqs, value_str(value_field(value_field(call, "target"), "name"))))
+  let retry = value_field(spec, "retry")
+  var v: Map[Str, Any] = Map.empty()
+  v = v.set("kind", "__validated__").set("expr", fields).set("schema", value_field(spec, "response_schema"))
+  v = v.set("retry", value_is_null(retry) ? 0 : value_int(retry)).set("where", where)
+  return v.set("key", `${svc}.${value_str(value_field(call, "method"))}`)
+}
+
+// A component's steps through `mark_validated`, each provide method under its
+// own `where`.
+fn mark_component(steps: Any, reqs: Any, services: Any, comp_name: Str) -> Any {
+  var out: List[Any] = []
+  for (st of value_list(steps)) {
+    if (value_str(value_field(st, "step")) == "provide") {
+      var methods: List[Any] = []
+      for (m of value_list(value_field(st, "methods"))) {
+        let mwhere = `${comp_name}.${mangle_kw(value_str(value_field(m, "name")))}`
+        var mf: Map[Str, Any] = Map.empty()
+        for (key of value_keys(m)) { mf = mf.set(key, key == "body" ? mark_validated(value_field(m, key), reqs, services, mwhere, false) : value_field(m, key)) }
+        methods = methods.push(mf)
+      }
+      var pf: Map[Str, Any] = Map.empty()
+      for (key of value_keys(st)) { pf = pf.set(key, key == "methods" ? methods : mark_validated(value_field(st, key), reqs, services, comp_name, false)) }
+      out = out.push(pf)
+    } else {
+      out = out.push(mark_validated(st, reqs, services, comp_name, false))
+    }
+  }
+  return out
+}
+
+// `_ctor_map`: the tag -> ADT case class dict for a tagged-union response
+// schema, or `None` when the validated value is used as-is.
+fn ctor_map(schema: Any) -> Str {
+  var parts = []
+  for (arm of value_list(value_field(schema, "oneOf"))) {
+    let tag = value_field(value_field(value_field(arm, "properties"), "tag"), "const")
+    if (value_kind(tag) == "str") { parts = parts.push(`${py_repr(value_str(tag))}: ${mangle(value_str(tag))}`) }
+  }
+  return parts.length() == 0 ? "None" : `{${parts.join(", ")}}`
+}
+
+// Whether the document renders a validate seam: a call through a required key
+// to a `validated` operation in any component (body or provide method).
+fn uses_validated(node: Any, reqs: Any, services: Any) -> Bool {
+  if (!value_is_null(validated_spec(node, reqs, services))) { return true }
+  for (c of value_children(node)) { if (uses_validated(c, reqs, services)) { return true } }
+  return false
+}
+
+// item 513 slice 2: `{"Service.method": grammar}` for every validated service
+// emission in the document, registered once at module import. Each entry is
+// the IR's GBNF `response_grammar` plus the `json-schema` dialect composed from
+// the crossing's `response_schema` (slice 4).
+fn grammar_registry(services: Any) -> Any {
+  var reg: Map[Str, Any] = Map.empty()
+  for (sname of list_sort(value_keys(services))) {
+    let methods = value_field(value_field(services, sname), "methods")
+    for (mname of list_sort(value_keys(methods))) {
+      let spec = value_field(methods, mname)
+      let grammar = value_field(spec, "response_grammar")
+      if (!value_is_null(grammar)) {
+        var entry: Map[Str, Any] = Map.empty()
+        for (key of value_keys(grammar)) { entry = entry.set(key, value_field(grammar, key)) }
+        let schema = value_field(spec, "response_schema")
+        if (!value_is_null(schema)) { entry = entry.set("wire_schema", json_schema_grammar(schema)) }
+        reg = reg.set(`${sname}.${mname}`, entry)
+      }
+    }
+  }
+  return reg
+}
+
+// `json_schema_grammar_for`: the wire schema, and a digest over its canonical
+// bytes (`json.dumps(sort_keys=True, separators=(",", ":"))`). The canonical
+// form is reached by sorting keys before `json_stringify`; the reference's
+// ASCII escaping cannot differ, because a derived schema holds only revl names
+// (ASCII by the lexer) and fixed type keywords.
+fn json_schema_grammar(schema: Any) -> Any {
+  let wire = wire_json_schema(schema)
+  var g: Map[Str, Any] = Map.empty()
+  return g.set("format", "json-schema").set("schema", wire).set("digest", sha256_hex(json_stringify(sorted_keys(wire))))
+}
+
+fn sorted_keys(v: Any) -> Any {
+  if (value_is_list(v)) {
+    var items: List[Any] = []
+    for (item of value_list(v)) { items = items.push(sorted_keys(item)) }
+    return items
+  }
+  if (!value_is_object(v)) { return v }
+  var out: Map[Str, Any] = Map.empty()
+  for (key of list_sort(value_keys(v))) { out = out.set(key, sorted_keys(value_field(v, key))) }
+  return out
+}
+
+// `_wire_json_schema`: an OpenAPI `nullable` becomes an `anyOf` with `null`, an
+// object with `properties` is closed with every member required, and
+// `contentEncoding` is dropped. Keys keep their order; `required` and
+// `additionalProperties` are set the way a Python dict sets them (in place when
+// already present, appended otherwise). Every node of a derived schema is an
+// object, so the reference's non-dict guard has nothing to guard here.
+fn wire_json_schema(schema: Any) -> Any {
+  let keys = value_keys(schema)
+  if (list_contains(keys, "nullable")) {
+    var base: Map[Str, Any] = Map.empty()
+    for (key of keys) { if (key != "nullable") { base = base.set(key, value_field(schema, key)) } }
+    var null_type: Map[Str, Any] = Map.empty()
+    var any_of: Map[Str, Any] = Map.empty()
+    return value_bool(value_field(schema, "nullable")) ? any_of.set("anyOf", [wire_json_schema(base), null_type.set("type", "null")]) : wire_json_schema(base)
+  }
+  var out: Map[Str, Any] = Map.empty()
+  for (key of keys) {
+    let v = value_field(schema, key)
+    if ((key == "oneOf" || key == "anyOf" || key == "allOf") && value_is_list(v)) {
+      var arms: List[Any] = []
+      for (arm of value_list(v)) { arms = arms.push(wire_json_schema(arm)) }
+      out = out.set(key, arms)
+    } else if (key == "properties" && value_is_object(v)) {
+      var props: Map[Str, Any] = Map.empty()
+      for (name of value_keys(v)) { props = props.set(name, wire_json_schema(value_field(v, name))) }
+      out = out.set(key, props)
+    } else if ((key == "items" || key == "additionalProperties") && value_is_object(v)) {
+      out = out.set(key, wire_json_schema(v))
+    } else if (key != "contentEncoding") {
+      out = out.set(key, v)
+    }
+  }
+  let props = value_field(out, "properties")
+  if (value_is_object(props)) { out = out.set("required", value_keys(props)).set("additionalProperties", false) }
+  return out
+}
+
+fn ir_uses_routes(ir: Any) -> Bool {
+  for (c of value_list(value_field(ir, "components"))) {
+    if (value_keys(value_field(c, "routes")).length() > 0) { return true }
+  }
+  return false
+}
+
+// `_REVL_ROUTER_SRC` verbatim (item 167): the emitted realization of a routed
+// require, mirroring src/revl/run.py::_Router. It re-resolves the live
+// per-realm worker on every call, so a withdrawn worker drops out and its calls
+// go to the survivors. Emitted once per module, only when a component routes.
+fn router_source() -> List[Str] {
+  return [
+    "class _RevlNoLiveWorker(RuntimeError):",
+    "    \"\"\"Every realm a routed require fans out to has withdrawn — no live leg",
+    "    left to serve (a runtime pool exhaustion, not a link-time diagnostic).\"\"\"",
+    "",
+    "",
+    "class _RevlRouter:",
+    "    \"\"\"Emitted realization of a routed require (item 162 `routes` IR), mirroring",
+    "    src/revl/run.py::_Router. Re-resolves the live per-realm handle on every",
+    "    call, so a withdrawn worker drops out and calls go to the survivors.\"\"\"",
+    "",
+    "    def __init__(self, ctx, key, realms, strategy):",
+    "        self._root = ctx.root",
+    "        self._key = key",
+    "        self._realms = list(realms)",
+    "        self._strategy = strategy or \"round_robin\"",
+    "        self._cursor = 0",
+    "        self._served = {realm: 0 for realm in self._realms}",
+    "",
+    "    def _handle(self, realm):",
+    "        scoped = self._root.isolate(self._key, realm_label(realm, self._key))",
+    "        return scoped.reflect.get(self._key)",
+    "",
+    "    def _live(self):",
+    "        out = []",
+    "        for realm in self._realms:",
+    "            handle = self._handle(realm)",
+    "            if handle is not None:",
+    "                out.append((realm, handle))",
+    "        return out",
+    "",
+    "    def _select(self):",
+    "        live = self._live()",
+    "        if not live:",
+    "            raise _RevlNoLiveWorker(",
+    "                \"revl: router for %r has no live worker: all %d realm(s) (%s) \"",
+    "                \"have withdrawn\" % (self._key, len(self._realms),",
+    "                                    \", \".join(self._realms)))",
+    "        if self._strategy == \"least_loaded\":",
+    "            realm, handle = min(live, key=lambda rh: self._served[rh[0]])",
+    "        else:  # round_robin — next live realm in declaration order",
+    "            n = len(self._realms)",
+    "            realm = handle = None",
+    "            for offset in range(n):",
+    "                cand = self._realms[(self._cursor + offset) % n]",
+    "                match = next((rh for rh in live if rh[0] == cand), None)",
+    "                if match is not None:",
+    "                    self._cursor = (self._cursor + offset + 1) % n",
+    "                    realm, handle = match",
+    "                    break",
+    "        self._served[realm] += 1",
+    "        return realm, handle",
+    "",
+    "    def __getattr__(self, method):",
+    "        # `_`-prefixed lookups are never routed service ops — refuse them so a",
+    "        # traceable probe passes the proxy through raw.",
+    "        if method.startswith(\"_\"):",
+    "            raise AttributeError(method)",
+    "",
+    "        def call(*args):",
+    "            _realm, handle = self._select()",
+    "            return getattr(handle, method)(*args)",
+    "",
+    "        return call",
+    "",
+    "",
+    "def _revl_router(ctx, key, realms, strategy):",
+    "    return _RevlRouter(ctx, key, realms, strategy)"]
+}
+
+// `_compensated_extern` (item 254): the emission extern an `emit` step calls
+// when that extern DECLARES its own `compensate`, or None. The extern owns the
+// reversal, so the site spells no `compensate` and the port must read it off the
+// declaration; missing it would fire the emission with nothing to offset it.
+fn compensated_extern(expr: Any, externs: List[Any]) -> Any {
+  let call = unwrap_await(expr)
+  if (node_kind(call) != "fn") { return None }
+  let name = value_str(value_field(call, "name"))
+  for (ext of externs) {
+    if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "emission"
+        && !value_is_null(value_field(ext, "compensate"))) { return ext }
+  }
+  return None
+}
+
+// `_deferred_extern` (item 245): the `deferred` emission extern an `emit` step
+// calls, or None. A deferred emission is ENQUEUED on the session, never fired at
+// the call site.
+fn deferred_extern(expr: Any, externs: List[Any]) -> Any {
+  let call = unwrap_await(expr)
+  if (node_kind(call) != "fn") { return None }
+  let name = value_str(value_field(call, "name"))
+  for (ext of externs) {
+    if (value_str(value_field(ext, "name")) == name && value_str(value_field(ext, "class")) == "emission"
+        && value_bool(value_field(ext, "deferred"))) { return ext }
+  }
+  return None
+}
+
+// `_deferred_step` (item 245): the host body does NOT run here. The call goes
+// onto the session's deferral queue as a named descriptor (receiver, method,
+// captured args) plus a thunk that fires the real body at the commit's flush,
+// or never on abort. The same line serves the activation body and a provide
+// method.
+fn deferred_enqueue(expr: Any, ext: Any) -> Str {
+  let call = unwrap_await(expr)
+  let method = py_repr(value_str(value_field(call, "name")))
+  var args = []
+  for (a of value_list(value_field(call, "args"))) { args = args.push(cexpr(a)) }
+  return `_revl_frame.enqueue_deferred(${method}, ${method}, [${args.join(", ")}], lambda: ${cexpr(expr)}${deferred_register_kwargs(ext, args)})`
+}
+
+// `_deferred_register_kwargs` (item 440 §(b)): the idempotency register, and the
+// key's VALUE at this call site, ride the WAL descriptor so a fresh-process
+// re-issue repeats the key the remote first saw. Emitted only when the extern
+// declares one, so a deferred emission without it keeps its enqueue unchanged.
+fn deferred_register_kwargs(ext: Any, args: List[Str]) -> Str {
+  let register = value_field(ext, "register")
+  if (value_is_null(register)) { return "" }
+  var parts = [`register=${py_repr(value_str(register))}`]
+  // The frontend checks the key names a parameter, and every call passes one
+  // argument per parameter, so the key's position always holds an argument.
+  let key = value_str(value_field(ext, "idempotency_key"))
+  var i = 0
+  for (p of value_list(value_field(ext, "params"))) {
+    if (key != "" && value_str(value_field(p, "name")) == key) { parts = parts.push(`idempotency=${args[i]}`) }
+    i = i + 1
+  }
+  return `, ${parts.join(", ")}`
+}
+
+// `_is_map_cas` (item 397): a result-guarded acquisition. A `false` CAS did not
+// insert, so its inverse is the identity: teardown must not remove the entry
+// the winner of the race inserted.
+fn is_map_cas(acq: Any) -> Bool {
+  return node_kind(acq) == "call" && value_str(value_field(acq, "method")) == "insert_if_absent"
+}
+
+// `_inverse_lambda` / `_pins`: the header of a derived inverse's `lambda`. A
+// method-local the inverse reads and the body reassigns later is pinned BY VALUE
+// as a default argument (`<slot>_captures`, docs/closures.md), so teardown acts
+// on the value the forward step used rather than on the local's final value.
+fn inverse_lambda(step: Any, slot: Str, params: Str) -> Str {
+  var bound = []
+  if (params != "") { bound = bound.push(params) }
+  for (n of value_list(value_field(step, slot.concat("_captures")))) {
+    let m = mangle(value_str(n))
+    bound = bound.push(`${m}=${m}`)
+  }
+  if (bound.length() == 0) { return "lambda" }
+  return `lambda ${bound.join(", ")}`
+}
+
+// item 131: an activation body that suspends is an `async def` generator. The
+// reference decides it over the TOP-LEVEL steps: an `await` step, an
+// effect/let-effect/emit flagged `async`, or a `stream-iter` step. The last is
+// not ported (`body_step` answers it with its marker), so a body that holds one
+// is refused whichever `def` it opens with.
+fn body_is_async(steps: List[Any]) -> Bool {
+  for (s of steps) {
+    let k = value_str(value_field(s, "step"))
+    if (k == "await" || k == "stream-iter") { return true }
+    if ((k == "effect" || k == "let-effect" || k == "emit") && value_bool(value_field(s, "async"))) { return true }
+  }
+  return false
+}
+
+// item 259 slice 2: the reference may fire a physically contiguous run of
+// awaited `emit` steps CONCURRENTLY, from the checked plan
+// `revl.parallel.parallel_plan_steps` derives over the whole program. This port
+// has no such plan, so emitting the run sequentially could differ from what the
+// reference emits. Any two adjacent awaited top-level emits are refused by name
+// instead; that over-refuses a run the plan leaves sequential, which is the safe
+// direction.
+fn body_may_fan_out(steps: List[Any]) -> Bool {
+  var prev = false
+  for (s of steps) {
+    let now = value_str(value_field(s, "step")) == "emit" && value_bool(value_field(s, "async"))
+    if (now && prev) { return true }
+    prev = now
+  }
+  return false
+}
+
+fn await_prefix(step: Any) -> Str {
+  return value_bool(value_field(step, "async")) && !value_bool(value_field(step, "__seam_await__")) ? "await " : ""
 }
 
 fn transactional_scope_kwargs(ext: Any) -> Str {
@@ -2066,6 +3039,41 @@ fn witnessed_step(step: Any, indent: Int, ext: Any, counter: Int, method: Bool) 
   return { lines: out, counter: c }
 }
 
+// item 130 Slice 4/5: `every <x> in <sub> { ... }` and the typed-event handler
+// `on <Event> as <x> in <sub>`. The await lands, the A1 yield closes the
+// iteration, a `Closed` terminal ends the loop, and (for an event) the
+// contract built once above the loop gates each item before the body runs.
+// The item is mangled once, as every name the body reads is (issue #1646: a
+// second rename bound a builtin-named item as `len___` while the body read
+// `len__`).
+fn stream_iter(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
+  let item = mangle(value_str(value_field(step, "bind")))
+  let subject = cexpr(value_field(step, "subject"))
+  let contract = value_field(step, "event")
+  var out = []
+  var c = counter
+  var gate = ""
+  var ename = ""
+  if (!value_is_null(contract)) {
+    c = c + 1
+    gate = `_revl_event${c}`
+    ename = mangle(value_str(value_field(contract, "name")))
+    out = out.push(line(indent, `${gate} = Stream.contract(${py_repr(ename)}, ${py_repr(value_field(contract, "schema"))}, ${py_repr(mangle(value_str(value_field(contract, "key"))))}, ${value_int(value_field(contract, "window"))})`))
+  }
+  out = out.push(line(indent, "while True:"))
+  out = out.push(line(indent + 1, `${item} = await ${subject}.next()`))
+  out = out.push(line(indent + 1, "yield None  # iteration boundary (A1)"))
+  out = out.push(line(indent + 1, `if Stream.is_closed(${item}):`))
+  out = out.push(line(indent + 2, "break"))
+  if (gate != "") {
+    out = out.push(line(indent + 1, `if not ${gate}.admit(${item}, ${py_repr(`${comp_name}: on ${ename}`)}):`))
+    out = out.push(line(indent + 2, "continue"))
+  }
+  let e = emit_body_steps(value_list(value_field(step, "body")), indent + 1, comp_name, c, services, externs)
+  out = out.concat(e.lines)
+  return { lines: out.push(""), counter: e.counter }
+}
+
 fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect") {
@@ -2076,8 +3084,14 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       let e = witnessed_step(step, indent, wit, counter, false)
       return { lines: out.concat(e.lines).push(""), counter: e.counter }
     }
-    out = out.push(line(indent, `${mangle(value_str(value_field(step, "bind")))} = ${cexpr(value_field(step, "acquire"))}`))
-    out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
+    let bind = mangle(value_str(value_field(step, "bind")))
+    out = out.push(line(indent, `${bind} = ${await_prefix(step)}${cexpr(value_field(step, "acquire"))}`))
+    let inv = cexpr(value_field(step, "undo"))
+    if (is_map_cas(value_field(step, "acquire"))) {
+      out = out.push(line(indent, `yield lambda: (${inv} if ${bind} else None)`))
+    } else {
+      out = out.push(line(indent, `yield lambda: ${inv}`))
+    }
     out = out.push("")
     return { lines: out, counter: counter }
   }
@@ -2089,9 +3103,18 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       let e = witnessed_step(step, indent, wit, counter, false)
       return { lines: out.concat(e.lines).push(""), counter: e.counter }
     } else {
-      out = out.push(line(indent, cexpr(value_field(step, "acquire"))))
+      out = out.push(line(indent, `${await_prefix(step)}${cexpr(value_field(step, "acquire"))}`))
       out = out.push(line(indent, `yield lambda: ${cexpr(value_field(step, "undo"))}`))
     }
+    out = out.push("")
+    return { lines: out, counter: counter }
+  }
+  // A1: the await lands (inertia, paper §4.3.3), then the yield closes the
+  // iteration, so a divert during the await skips every later step instead of
+  // running on to the next yield.
+  if (kind == "await") {
+    var out = [line(indent, `await ${cexpr(value_field(step, "expr"))}`)]
+    out = out.push(line(indent, "yield None  # iteration boundary (A1)"))
     out = out.push("")
     return { lines: out, counter: counter }
   }
@@ -2101,7 +3124,11 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     return { lines: out, counter: counter }
   }
   if (kind == "emit") {
-    var out = [line(indent, emission_fire(value_field(step, "expr")))]
+    let deferred = deferred_extern(value_field(step, "expr"), externs)
+    if (!value_is_null(deferred)) {
+      return { lines: [line(indent, deferred_enqueue(value_field(step, "expr"), deferred)), ""], counter: counter }
+    }
+    var out = [line(indent, `${await_prefix(step)}${emission_fire(value_field(step, "expr"))}`)]
     if (!value_is_null(value_field(step, "compensate"))) {
       // item 247 (docs/design/teardown-contract.md): a compensation is a
       // first-class COMPENSATION entry on the frame's shared per-activation
@@ -2112,6 +3139,12 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
       // single-interleaved-LIFO ordering (docs/contract-errata.md TCK A5
       // respec, a5a/a5b); it is compensation, not inversion (§6.1).
       out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(step, "compensate"))})`))
+    }
+    // item 254: the reversal an emission extern declares on itself, registered
+    // as the same Phase-2 compensation a site-spelled one is.
+    let ext_comp = compensated_extern(value_field(step, "expr"), externs)
+    if (!value_is_null(ext_comp)) {
+      out = out.push(line(indent, `yield _revl_frame.compensation(lambda: ${cexpr(value_field(ext_comp, "compensate"))})`))
     }
     out = out.push("")
     return { lines: out, counter: counter }
@@ -2132,8 +3165,9 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
     out = out.push("")
     return { lines: out, counter: c }
   }
+  if (kind == "stream-iter") { return stream_iter(step, indent, comp_name, counter, services, externs) }
   if (kind == "timer") {
-    let e = timer_emit(step, indent, counter)
+    let e = timer_emit(step, indent, counter, externs)
     var out = e.lines
     out = out.push("")
     return { lines: out, counter: e.counter }
@@ -2244,7 +3278,36 @@ fn method_body_has_receiver_secret_witness(steps: List[Any], externs: List[Any])
 }
 
 // One component: the `_<snake>_apply` closure and its plugin dict.
-fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
+// The colouring of a component body: the activation body is not an async
+// context (only its flagged steps suspend), and each provide method is one
+// exactly when its service operation is `async`.
+fn colour_component(steps: Any, cx: Colour, services: Any) -> Any {
+  var out: List[Any] = []
+  for (st of value_list(steps)) {
+    if (value_str(value_field(st, "step")) == "provide") {
+      let specs = value_field(value_field(services, value_str(value_field(st, "service"))), "methods")
+      var methods: List[Any] = []
+      for (m of value_list(value_field(st, "methods"))) {
+        let is_async = value_bool(value_field(value_field(specs, value_str(value_field(m, "name"))), "async"))
+        var mf: Map[Str, Any] = Map.empty()
+        for (key of value_keys(m)) {
+          if (key == "body") { mf = mf.set(key, colour(value_field(m, key), cx, is_async, false)) } else { mf = mf.set(key, value_field(m, key)) }
+        }
+        methods = methods.push(mf)
+      }
+      var pf: Map[Str, Any] = Map.empty()
+      for (key of value_keys(st)) {
+        if (key == "methods") { pf = pf.set(key, methods) } else { pf = pf.set(key, colour(value_field(st, key), cx, false, false)) }
+      }
+      out = out.push(pf)
+    } else {
+      out = out.push(colour(st, cx, false, false))
+    }
+  }
+  return out
+}
+
+fn component_body(comp: Any, services: Any, externs: List[Any], ir: Any) -> List[Str] {
   let name = mangle(value_str(value_field(comp, "name")))
   let sn = snake(name)
   var out = []
@@ -2287,14 +3350,31 @@ fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
   }
   out = out.push(`def _${sn}_apply(_revl_ctx, _revl_config):`)
   out = out.push(line(1, `_revl_frame = _revl_Frame(_revl_ctx, ${py_repr(name)})`))
+  // item 167: one router proxy per ROUTED require, built before the body so a
+  // provide method reading the key fans each call out across the worker
+  // realms. The body reads the key through the proxy (`route_reqs`), and the
+  // key stays out of the inject gate below: it has no single-realm provider,
+  // so a fiber waiting on it would pend forever.
+  let routes = value_field(comp, "routes")
+  let routed = value_keys(routes)
+  for (key of routed) {
+    let route = value_field(routes, key)
+    out = out.push(line(1, `_revl_route_${key} = _revl_router(_revl_ctx, ${py_repr(key)}, ${py_repr(value_list(value_field(route, "realms")))}, ${py_repr(value_field(route, "strategy"))})`))
+  }
   out = out.push("")
-  out = out.push(line(1, "def _body():"))
+  // Colour first, on the IR the reference reads (a routed require is still a
+  // `req` there, so an async operation through it is awaited), then route.
+  let coloured = colour_component(value_field(comp, "body"), doc_colour(ir, value_field(comp, "requires"), [], true), services)
+  let marked = mark_component(coloured, value_field(comp, "requires"), services, name)
+  let body_steps = routed.length() > 0 ? route_reqs(marked, routed) : marked
+  out = out.push(line(1, body_is_async(value_list(body_steps)) ? "async def _body():" : "def _body():"))
   // item 247 second-pass (F1): `begin` yielded FIRST -> disposed LAST (cordis
   // LIFO), the Phase-2 post-unwind hook at the bottom of the unwind stack, so a
   // post-activation abort's activation-body offsets are drained after Phase 1
   // instead of lost. Mirrors backends/python/emit.py (byte-agreement oracle).
   out = out.push(line(2, "yield _revl_frame.begin"))
-  let e = emit_body_steps(value_list(value_field(comp, "body")), 2, name, 0, services, externs)
+  if (body_may_fan_out(value_list(body_steps))) { out = out.push(line(2, "<<UNSUPPORTED-COMPONENT:parallel-emit>>")) }
+  let e = emit_body_steps(value_list(body_steps), 2, name, 0, services, externs)
   out = out.concat(e.lines)
   out = out.push(line(2, "yield _revl_frame.drain"))
   out = out.push("")
@@ -2304,11 +3384,34 @@ fn component_body(comp: Any, services: Any, externs: List[Any]) -> List[Str] {
   out = out.push(`${name} = {`)
   out = out.push(line(1, `'name': ${py_repr(name)},`))
   var inject = []
-  for (k of value_keys(value_field(comp, "requires"))) { inject = inject.push(mangle(k)) }
-  out = out.push(line(1, `'inject': ${py_repr(inject)},`))
+  for (k of value_keys(value_field(comp, "requires"))) {
+    if (!list_contains(routed, k)) { inject = inject.push(mangle(k)) }
+  }
+  // v2 realm placements (docs/design-v2-realms.md). A component that declares
+  // `intercept` injects through the DICT form: every required key maps to its
+  // declared interceptor, or `None`, and the runtime threads the non-null ones
+  // into the fiber context's intercept chain. Without `intercept` the inject is
+  // the plain key list.
+  let icpt = value_field(comp, "intercept")
+  if (value_keys(icpt).length() > 0) {
+    var pairs = []
+    for (k of inject) { pairs = pairs.push(`${py_repr(k)}: ${py_repr(value_field(icpt, k))}`) }
+    out = out.push(line(1, `'inject': {${pairs.join(", ")}},`))
+  } else {
+    out = out.push(line(1, `'inject': ${py_repr(inject)},`))
+  }
   out = out.push(line(1, `'apply': _${sn}_apply,`))
   if (config_fields.length() > 0) {
     out = out.push(line(1, `'Config': _${upper(sn)}_CONFIG,`))
+  }
+  // `isolate`: the key -> realm placements `runtime.plug()` applies BEFORE
+  // `ctx.plugin`, since the fiber's context chain is fixed at plugin time.
+  // This key carries authority: a plugin dict without it runs every isolated
+  // key in the caller's realm, so it is emitted exactly as the reference does
+  // (the IR mapping, repr'd) whenever the component declares a placement.
+  let placed = value_field(comp, "isolate")
+  if (value_keys(placed).length() > 0) {
+    out = out.push(line(1, `'isolate': ${py_repr(placed)},`))
   }
   out = out.push("}")
   return out
@@ -2321,6 +3424,7 @@ fn emit_services_table(services: Any) -> List[Str] {
   for (sname of value_keys(services)) {
     let svc = value_field(services, sname)
     out = out.push(line(1, `${py_repr(sname)}: {`))
+    if (value_bool(value_field(svc, "commutative"))) { out = out.push(line(2, "'commutative': True,")) }
     let methods = value_field(svc, "methods")
     for (mname of value_keys(methods)) {
       let spec = value_field(methods, mname)
@@ -2329,6 +3433,12 @@ fn emit_services_table(services: Any) -> List[Str] {
       var meta = []
       meta = meta.push(`'params': ${py_repr(pnames)}`)
       meta = meta.push(`'emission': ${py_repr(value_bool(value_field(spec, "emission")))}`)
+      // The runtime dispatch flags, each emitted only when set: `async` (the
+      // op is awaited), `commutative` and `idempotent` (item 44: the driver
+      // may retry a transient failure of an idempotent emission).
+      if (value_bool(value_field(spec, "async"))) { meta = meta.push("'async': True") }
+      if (value_bool(value_field(spec, "commutative"))) { meta = meta.push("'commutative': True") }
+      if (value_bool(value_field(spec, "idempotent"))) { meta = meta.push("'idempotent': True") }
       out = out.push(line(2, `${py_repr(mname)}: {${meta.join(", ")}},`))
     }
     out = out.push(line(1, "},"))
@@ -2361,9 +3471,8 @@ fn emit_services_table(services: Any) -> List[Str] {
 // LANDED in slice 4 (item 206): externs (`_emit_externs`, the verbatim `@py`
 // body via stdlib/str.rvl::dedent + local `splitlines`), component `config`/
 // `ConfigSchema`, and method-body `effect`/`let-effect`/compensated-`emit` (the
-// `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED
-// to slice 5: in-file `test`/`fault_test`/`lifecycle test` emission, async
-// coloring, realm placements, spawn/instances, and the canonical ABI.
+// `_revl_frame.adopt`/`.acquire` accumulator + `_label` counter). STILL DEFERRED:
+// the canonical ABI.
 
 // -------------------------------------------------------------- string utils
 // `trim` / `lstrip` / `last_index_of` / `ident_tokens` now come from
@@ -2498,11 +3607,11 @@ fn typing_imports(types: Any) -> List[Str] {
 // per case, in declaration order.
 fn emit_types(types: Any) -> List[Str] {
   var all_names = []
-  for (nm of value_keys(types)) { all_names = all_names.push(mangle(nm)) }
+  for (nm of value_keys(types)) { all_names = all_names.push(mangle_type(nm)) }
   var emitted = []
   var out = []
   for (nm of value_keys(types)) {
-    let name = mangle(nm)
+    let name = mangle_type(nm)
     let spec = value_field(types, nm)
     if (value_str(value_field(spec, "kind")) == "record") {
       out = out.push(`class ${name}:`)
@@ -2511,7 +3620,7 @@ fn emit_types(types: Any) -> List[Str] {
       if (fkeys.length() == 0) { out = out.push(line(1, "pass")) }
       for (f of fkeys) {
         let ftype = value_str(value_field(fields, f))
-        out = out.push(line(1, `${mangle(f)}: ${type_ann(ftype, all_names, emitted)}`))
+        out = out.push(line(1, `${mangle_kw(f)}: ${type_ann(ftype, all_names, emitted)}`))
       }
       emitted = emitted.push(name)
     } else {
@@ -2735,14 +3844,22 @@ fn ir_uses_fmt(ir: Any) -> Bool {
 // statement containers (as `uses_fmt` does) is what makes the gate independent
 // of WHICH firing site reaches the step: an emission inside a timer body, a
 // provide method or an `if` branch is found as well, so the import can never go
-// missing for a site that renders the seam.
-fn uses_extern_emit(n: Any) -> Bool {
-  if (value_str(value_field(n, "step")) == "emit" && node_kind(value_field(n, "expr")) == "fn") { return true }
-  for (c of value_children(n)) { if (uses_extern_emit(c)) { return true } }
+// missing for a site that renders the seam. A call to a `deferred` extern is
+// not one: it is enqueued, never fired through the seam (item 245).
+fn uses_extern_emit(n: Any, deferred: List[Str]) -> Bool {
+  if (value_str(value_field(n, "step")) == "emit" && node_kind(value_field(n, "expr")) == "fn"
+      && !list_contains(deferred, value_str(value_field(value_field(n, "expr"), "name")))) { return true }
+  for (c of value_children(n)) { if (uses_extern_emit(c, deferred)) { return true } }
   return false
 }
 fn ir_uses_extern_emit(ir: Any) -> Bool {
-  return uses_extern_emit(value_field(ir, "components"))
+  var deferred = []
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "emission" && value_bool(value_field(ext, "deferred"))) {
+      deferred = deferred.push(value_str(value_field(ext, "name")))
+    }
+  }
+  return uses_extern_emit(value_field(ir, "components"), deferred)
 }
 
 // Safe pure-function templates mirror the reference's evaluation-preserving
@@ -2949,40 +4066,280 @@ fn inline_pure_fns(ir: Any) -> Any {
 // PRIVATE decls no longer leak (item 228), but the merge still flattens both
 // modules' PUBLIC decls by bare name, so the two emitter entrypoints must differ
 // (roadmap item 230 — enables the fully-native `compile.rvl`).
-// ------------------------------------------ the deferred in-file test section
-// In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-// every self-host emitter slice. The reference emits a driver section for it;
-// this port does not. Emitting NOTHING made that divergence SILENT, which is
-// the one failure mode the marker convention exists to prevent: a deferred
-// family that answers with a named `<<UNSUPPORTED-...>>` marker is loud in the
-// emitted bytes and is pinned by a boundary test, while a section the port
-// simply skips is invisible to the byte oracle (no corpus document on any tier
-// carries a test section) and is counted as mirrored by
-// tools/selfhost_coverage.py. Measured across all six self-host emitters while
-// closing issue #1123: every one of them dropped the section in silence.
-//
-// Markers, not emission: porting the drivers is the separate, larger half.
-//
-// The marker names the IR SECTION and the test's name, and deliberately does
-// NOT read the per-test lifecycle discriminant to tell a `lifecycle test` from
-// a plain one. `tools/selfhost_coverage.py` reads "this tier ports construct X"
-// straight off the boolean-flag read spelling in the self-host source, so
-// branching on that flag here would claim a port of the lifecycle-driver arm
-// this slice does not have, and would move that tier/construct pair out of the
-// ledger's `unported` baseline on the strength of a marker. A marker is a
-// refusal, not an implementation; it says only what it knows. (That scan is
-// over the raw file text, comments included, so naming the spelling in prose
-// registers it too, which is why this note does not.)
-fn deferred_test_markers(ir: Any) -> List[Str] {
-  var out = []
+// ----------------------------------------------- the in-file test sections
+// In-file `test`, `lifecycle test` and `fault test` sections (item 391). The
+// ports used to drop them in silence and then, from issue #1123, to name each
+// test with a marker. This port now emits all three byte-for-byte: the plain
+// `REVL_TESTS` functions, the lifecycle harness and async drivers, and the
+// `REVL_FAULT_TESTS` manifest.
+// `_LIFECYCLE_HARNESS` verbatim (v2.0 §7.1): the residue probes (R4 and the
+// R1 half that makes `assert no_residue` falsifiable), the settle loop, the
+// idempotence-aware `_revl_call` dispatch and the inverse-residue collector a
+// lifecycle test drives. Emitted once, before the first test, only when the
+// document has a lifecycle test.
+fn lifecycle_harness() -> List[Str] {
+  var out = [
+    "_REVL_ACQUIRE = {'new': 'drop', 'open': 'close', 'schedule': 'cancel'}",
+    "_REVL_INVERSE_RESIDUE = []",
+    "",
+    "def _revl_residue(root):",
+    "    \"\"\"R4 (docs/backend-ir.md): what the host runtime holds for a composition.\"\"\"",
+    "    return {",
+    "        \"listeners\": {n: len(cbs) for n, cbs in root.events._hooks.items() if cbs},",
+    "        \"effects\": root.fiber._disposables.length,",
+    "        \"provisions\": sorted(impl.name for impl in root.reflect.store.values()),",
+    "        \"runtimes\": root.registry.size,",
+    "    }",
+    "",
+    "",
+    "def _revl_unreleased(events):",
+    "    \"\"\"Host resources acquired during the test and never released (R1).\"\"\"",
+    "    live = {}",
+    "    for event in events:",
+    "        tag, _, verb = event.split(\" \", 1)[0].rpartition(\".\")",
+    "        if not tag:",
+    "            continue",
+    "        if verb in _REVL_ACQUIRE:",
+    "            live[tag] = verb",
+    "        elif verb in _REVL_ACQUIRE.values():",
+    "            live.pop(tag, None)",
+    "    return sorted(",
+    "        \"{} ({}() with no {}())\".format(tag, verb, _REVL_ACQUIRE[verb])",
+    "        for tag, verb in live.items()",
+    "    )",
+    "",
+    "",
+    "def _revl_no_residue(root, baseline, events, where):",
+    "    \"\"\"`assert no_residue` — R4 plus the R1 property that makes it falsifiable.\"\"\"",
+    "    now = _revl_residue(root)",
+    "    changed = [\"{}: {!r} -> {!r}\".format(k, baseline[k], now[k])",
+    "               for k in now if now[k] != baseline[k]]",
+    "    unreleased = _revl_unreleased(events)",
+    "    inverse_residue = globals().get(\"_REVL_INVERSE_RESIDUE\", [])",
+    "    if not changed and not unreleased and not inverse_residue:",
+    "        return",
+    "    detail = []",
+    "    if changed:",
+    "        detail.append(\"host runtime still holds \" + \"; \".join(changed) + \" (R4)\")",
+    "    if unreleased:",
+    "        detail.append(\"host resources never released: \" + \", \".join(unreleased) + \" (R1)\")",
+    "    if inverse_residue:",
+    "        detail.append(\"inverse failures recorded: \" + \"; \".join(",
+    "            f\"{r.get('component', '<unknown>')}.{r.get('method', '<unknown>')}: \"",
+    "            f\"{r.get('error', {}).get('type', 'error')}: \"",
+    "            f\"{r.get('error', {}).get('message', '')}\"",
+    "            for r in inverse_residue",
+    "        ) + \" (R4)\")",
+    "    raise AssertionError(where + \": residue — \" + \" | \".join(detail))",
+    "",
+    "",
+    "async def _revl_settle():",
+    "    for _ in range(20):",
+    "        await _revl_asyncio.sleep(0)",
+    "",
+    "",
+    "async def _revl_call(root, key, method, args, where):",
+    "    impl = root.get(key)",
+    "    if impl is None:",
+    "        raise AssertionError(",
+    "            \"{}: no provider for key {!r} — its component is loaded but not ACTIVE; \"",
+    "            \"a component with an unmet `requires` stays PENDING (R2)\".format(where, key))",
+    "    # delivery semantics (item 44): the driver may auto-retry a transient",
+    "    # failure iff the checked property says this emission is idempotent. A",
+    "    # non-idempotent emission gets exactly one delivery attempt.",
+    "    idempotent = method in _REVL_IDEMPOTENT.get(key, ())",
+    "    return await _revl_retry_idempotent(",
+    "        lambda: getattr(impl, method)(*args),",
+    "        idempotent=idempotent, where=where)",
+    "",
+    "",
+    "def _revl_collect_inverse_residue(fiber):",
+    "    frame = _revl_frame_for_ctx(getattr(fiber, \"ctx\", None))",
+    "    return list(getattr(frame, \"compensation_residue\", ())) if frame is not None else []"]
+  out = out.push("")
+  out = out.push("")
+  return out
+}
+
+fn has_lifecycle_test(ir: Any) -> Bool {
   for (t of value_list(value_field(ir, "tests"))) {
-    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
+    if (value_bool(value_field(t, "lifecycle"))) { return true }
   }
-  for (t of value_list(value_field(ir, "fault_tests"))) {
-    out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
+  return false
+}
+
+// `_lifecycle_uses_clock` / `_lifecycle_uses_abort`: only a lifecycle test with
+// an `advance` step drives the clock coeffect, and only one with an `abort`
+// step registers the session-commit owner, so only those import their names.
+fn lifecycle_uses_step(ir: Any, kind: Str) -> Bool {
+  for (t of value_list(value_field(ir, "tests"))) {
+    if (value_bool(value_field(t, "lifecycle"))) {
+      for (st of value_list(value_field(t, "body"))) {
+        if (value_str(value_field(st, "step")) == kind) { return true }
+      }
+    }
+  }
+  return false
+}
+
+fn test_uses_step(t: Any, kind: Str) -> Bool {
+  for (st of value_list(value_field(t, "body"))) {
+    if (value_str(value_field(st, "step")) == kind) { return true }
+  }
+  return false
+}
+
+// `_REVL_IDEMPOTENT` (item 44): {provision key: its idempotent method names},
+// the retry eligibility the lifecycle driver's `_revl_call` consults. Keys and
+// names sorted, as the reference renders them.
+fn idempotent_map_line(ir: Any) -> Str {
+  var entries = []
+  for (c of value_list(value_field(ir, "components"))) {
+    let provs = value_field(c, "provides")
+    for (key of value_keys(provs)) {
+      let methods = value_field(value_field(value_field(ir, "services"), value_str(value_field(provs, key))), "methods")
+      var idem = []
+      for (mn of value_keys(methods)) {
+        if (value_bool(value_field(value_field(methods, mn), "idempotent"))) { idem = idem.push(py_repr(mn)) }
+      }
+      if (idem.length() > 0) { entries = entries.push(`${py_repr(key)}: {${list_sort(idem).join(", ")}}`) }
+    }
+  }
+  return `_REVL_IDEMPOTENT = {${list_sort(entries).join(", ")}}`
+}
+
+// `_lifecycle_step`: one statement of a lifecycle test's async driver.
+fn lifecycle_step(st: Any, indent: Int, where: Str) -> List[Str] {
+  let kind = value_str(value_field(st, "step"))
+  if (kind == "load") {
+    let comp = mangle(value_str(value_field(st, "component")))
+    let cfg = value_field(st, "config")
+    var parts = []
+    for (k of value_keys(cfg)) { parts = parts.push(`${py_repr(k)}: ${expr(value_field(cfg, k))}`) }
+    return [line(indent, `_revl_fibers[${py_repr(comp)}] = _revl_plug(root, ${comp}, {${parts.join(", ")}})`),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "unload") {
+    let comp = mangle(value_str(value_field(st, "component")))
+    return [line(indent, `_revl_fiber = _revl_fibers.pop(${py_repr(comp)})`),
+            line(indent, "await _revl_fiber.dispose()"),
+            line(indent, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(_revl_fiber))"),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "call") {
+    var args = []
+    for (a of value_list(value_field(st, "args"))) { args = args.push(expr(a)) }
+    let call = `await _revl_call(root, ${py_repr(value_field(st, "key"))}, ${py_repr(value_field(st, "method"))}, [${args.join(", ")}], ${py_repr(where)})`
+    let bind = value_field(st, "bind")
+    let first = value_is_null(bind) ? call : `${mangle(value_str(bind))} = ${call}`
+    return [line(indent, first), line(indent, "await _revl_settle()")]
+  }
+  if (kind == "advance") {
+    return [line(indent, `_revl_Clock.advance(${value_int(value_field(st, "ms"))})`),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "abort") {
+    return [line(indent, "_revl_owner.begin_abort()   # mark frames abort, drop queue"),
+            line(indent, "for _fiber in reversed(list(_revl_fibers.values())):"),
+            line(indent + 1, "try:"),
+            line(indent + 2, "await _fiber.dispose()   # replay inverses"),
+            line(indent + 1, "except Exception:"),
+            line(indent + 2, "pass"),
+            line(indent, "_revl_fibers.clear()"),
+            line(indent, "_revl_owner.finalize_abort()"),
+            line(indent, "_revl_owner = _revl_SessionOwner()"),
+            line(indent, "_revl_set_session_owner(_revl_owner)"),
+            line(indent, "await _revl_settle()")]
+  }
+  if (kind == "assert_no_residue") {
+    return [line(indent, `_revl_no_residue(root, baseline, events, ${py_repr(where)})`)]
+  }
+  if (kind == "assert") {
+    return [line(indent, `assert ${expr(value_field(st, "expr"))}, ${py_repr(where.concat(": assertion failed"))}`)]
+  }
+  return [line(indent, `<<UNSUPPORTED-LIFECYCLE-STEP:${kind}>>`)]
+}
+
+// `_emit_lifecycle_test`: the async driver over a live composition, run with
+// `asyncio.run` and registered in REVL_TESTS like any other test.
+fn emit_lifecycle_test(t: Any, fname: Str) -> List[Str] {
+  let where = `lifecycle test ${py_repr(value_field(t, "name"))}`
+  let uses_abort = test_uses_step(t, "abort")
+  var out = [`def ${fname}():`,
+    line(1, "# cordis-py is imported here, not at module scope: a document may"),
+    line(1, "# mix pure `test` blocks with lifecycle ones, and only the latter"),
+    line(1, "# need a runtime."),
+    line(1, "from cordis import Context"),
+    "",
+    line(1, "async def _run():"),
+    line(2, "root = Context()")]
+  if (test_uses_step(t, "advance")) { out = out.push(line(2, "_revl_Clock.reset()")) }
+  out = out.concat([line(2, "events = []"), line(2, "_REVL_INVERSE_RESIDUE.clear()"), line(2, "_revl_fibers = {}")])
+  if (uses_abort) {
+    out = out.concat([line(2, "_revl_owner = _revl_SessionOwner()"), line(2, "_revl_set_session_owner(_revl_owner)")])
+  }
+  out = out.concat([line(2, "_revl_set_trace(events.append)"), line(2, "try:"), line(3, "baseline = _revl_residue(root)")])
+  let body = value_list(value_field(t, "body"))
+  if (body.length() == 0) { out = out.push(line(3, "pass")) }
+  for (st of body) { out = out.concat(lifecycle_step(st, 3, where)) }
+  out = out.concat([line(2, "finally:"), line(3, "_revl_set_trace(None)")])
+  if (uses_abort) { out = out.push(line(3, "_revl_clear_session_owner()")) }
+  out = out.concat([line(3, "for fiber in reversed(list(_revl_fibers.values())):"),
+    line(4, "try:"), line(5, "await fiber.dispose()"),
+    line(4, "except Exception:"), line(5, "pass"),
+    line(4, "finally:"), line(5, "_REVL_INVERSE_RESIDUE.extend(_revl_collect_inverse_residue(fiber))"),
+    "", line(1, "_revl_asyncio.run(_run())"), ""])
+  return out
+}
+
+// `_emit_tests`: one `test_<i>` per block, registered in `REVL_TESTS` under the
+// block's name. A plain block's body goes through the module statement
+// emitter; a lifecycle block becomes its async driver, after the harness.
+// Emitted after the externs and before the SERVICES table.
+fn emit_tests(ir: Any, source_tests: List[Any]) -> List[Str] {
+  var out = ["REVL_TESTS = []", ""]
+  // the test section has its own destructure counter
+  let tests = value_list(number_patterns(source_tests, 0).node)
+  if (has_lifecycle_test(ir)) { out = out.concat(lifecycle_harness()) }
+  var i = 0
+  for (t of tests) {
+    let fname = `test_${i}`
+    if (value_bool(value_field(t, "lifecycle"))) {
+      out = out.concat(emit_lifecycle_test(t, fname))
+    } else {
+      out = out.push(`def ${fname}():`)
+      let body = value_list(value_field(t, "body"))
+      if (body.length() == 0) { out = out.push(line(1, "pass")) }
+      for (st of value_list(colour(value_field(t, "body"), doc_colour(ir, None, [], false), false, false))) { out = out.concat(fn_stmt(st, 1)) }
+      out = out.push("")
+    }
+    out = out.push(`REVL_TESTS.append((${py_repr(value_field(t, "name"))}, ${fname}))`)
+    out = out.push("")
+    i = i + 1
   }
   return out
 }
+
+// `_emit_fault_tests`: the fault-test manifest (docs/fault-tests.md). The
+// module carries the declaration; the harness in src/revl/fault.py re-emits the
+// component with a `fail` step spliced in at the injection point.
+fn emit_fault_tests(units: List[Any]) -> List[Str] {
+  var out = ["REVL_FAULT_TESTS = ["]
+  for (u of units) {
+    let at = value_field(u, "at")
+    let entry = `{'name': ${py_repr(value_field(u, "name"))}, 'component': ${py_repr(value_field(u, "component"))}, 'step': ${py_repr(value_field(at, "step"))}, 'effect': ${py_repr(value_field(at, "effect"))}, 'assert': ${py_repr(value_list(value_field(u, "assert")))}, 'config': ${fault_config_repr(value_field(u, "config"))}}`
+    out = out.push(line(1, entry.concat(",")))
+  }
+  out = out.push("]")
+  return out
+}
+
+fn fault_config_repr(cfg: Any) -> Str {
+  var parts = []
+  for (k of value_keys(cfg)) { parts = parts.push(`${py_repr(k)}: ${py_repr(value_field(cfg, k))}`) }
+  return `{${parts.join(", ")}}`
+}
+
 
 pub fn emit_py_src(source_ir: Any) -> Str {
   let ir = inline_pure_fns(source_ir)
@@ -3047,19 +4404,72 @@ pub fn emit_py_src(source_ir: Any) -> Str {
   if (need_config) { imports = imports.push("ConfigSchema as _revl_ConfigSchema") }
   if (components.length() > 0) { imports = imports.push("Frame as _revl_Frame") }
   if (ir_uses_fmt(ir)) { imports = imports.push("fmt as _revl_fmt") }
+  if (uses_kind(value_field(ir, "components"), "spawn")) { imports = imports.push("spawn as _revl_spawn") }
   if (ir_uses_extern_emit(ir)) { imports = imports.push("extern_emit as _revl_extern_emit") }
   if (ir_uses_host_root(ir, "Job")) { imports = imports.push("Job") }
   if (ir_uses_host_root(ir, "Map")) { imports = imports.push("Map") }
   if (ir_uses_host_root(ir, "Pool")) { imports = imports.push("Pool") }
-  if (ir_uses_host_root(ir, "Stream")) { imports = imports.push("Stream") }
+  // item 130: a `subscribe` and an `every ... in` / `on ... as` loop both run
+  // through the runtime `Stream`.
+  if (ir_uses_host_root(ir, "Stream") || uses_kind(value_field(ir, "components"), "subscribe")
+      || uses_kind(value_field(ir, "components"), "stream-iter")) { imports = imports.push("Stream") }
   if (need_mark_secret) { imports = imports.push("mark_secret as _revl_mark_secret") }
+  // §7.1: the lifecycle driver loads components through the realm-aware `plug`,
+  // reads the host-builtin trace, may auto-retry an idempotent emission (item
+  // 44), and collects inverse residue off the frame. `advance` adds the clock
+  // coeffect (item 102), `abort` the session-commit owner (item 377).
+  if (has_lifecycle_test(ir)) {
+    imports = imports.concat(["plug as _revl_plug", "set_trace as _revl_set_trace",
+      "retry_idempotent as _revl_retry_idempotent", "_frame_for_ctx as _revl_frame_for_ctx"])
+    if (lifecycle_uses_step(ir, "advance")) { imports = imports.push("Clock as _revl_Clock") }
+    if (lifecycle_uses_step(ir, "abort")) {
+      imports = imports.concat(["SessionOwner as _revl_SessionOwner", "set_session_owner as _revl_set_session_owner",
+        "clear_session_owner as _revl_clear_session_owner"])
+    }
+  }
+  // item 167: the router resolves each worker realm by label.
+  if (ir_uses_routes(ir)) { imports = imports.push("realm_label") }
   if (need_after) { imports = imports.push("schedule_after as _revl_schedule_after") }
   if (need_every) { imports = imports.push("schedule_every as _revl_schedule_every") }
   if (need_secret_result) { imports = imports.push("secret_result as _revl_secret_result") }
+  // item 513 slice 2: the grammar registry, only when the document HAS a
+  // validated operation; item 257: the validate seam, only when one is called.
+  let registry = grammar_registry(value_field(ir, "services"))
+  if (value_keys(registry).length() > 0) { imports = imports.push("register_grammars as _revl_register_grammars") }
+  var validates = false
+  for (c of value_list(value_field(ir, "components"))) {
+    validates = validates || uses_validated(value_field(c, "body"), value_field(c, "requires"), value_field(ir, "services"))
+  }
+  if (validates) { imports = imports.push("validate_response as _revl_validate") }
   if (need_estop_gated) { imports = imports.push("estop_gated as _revl_estop_gated") }
   if (imports.length() > 0) {
     let sorted_imports = list_sort(list_dedup(imports))
     out = out.push("from runtime import ".concat(sorted_imports.join(", ")))
+    out = out.push("")
+  }
+  if (value_keys(registry).length() > 0) {
+    out = out.push(`_revl_register_grammars(${py_repr(registry)})`)
+    out = out.push("")
+  }
+  // item 396 option B: an extern carrying a host `ref` (on ANY tier) makes the
+  // module import `inspect` and open the resolved-symbol cache the py thunk
+  // reads, exactly where the reference writes them.
+  var any_ref = false
+  for (e of value_list(value_field(ir, "externs"))) {
+    if (value_keys(value_field(e, "refs")).length() > 0) { any_ref = true }
+  }
+  if (any_ref) {
+    out = out.push("import inspect as _inspect")
+    out = out.push("_REVL_REFS = {}")
+    out = out.push("")
+  }
+  // The lifecycle driver runs under `asyncio.run` and consults the retry map;
+  // an async-coloured timer (item 170) spawns its firing onto the running loop.
+  let async_timer = has_async_timer(value_field(ir, "components"))
+  if (has_lifecycle_test(ir) || async_timer) { out = out.push("import asyncio as _revl_asyncio") }
+  if (async_timer && !has_lifecycle_test(ir)) { out = out.push("") }
+  if (has_lifecycle_test(ir)) {
+    out = out.push(idempotent_map_line(ir))
     out = out.push("")
   }
   if (uses_bounded_int(ir)) { out = out.concat(i64_block()) }
@@ -3071,6 +4481,7 @@ pub fn emit_py_src(source_ir: Any) -> Str {
       || uses_builtin_method(ir, "codepoint_at")) {
     out = out.concat(str_at_block())
   }
+  if (uses_map_index(ir)) { out = out.concat(map_index_block()) }
   if (uses_trunc_rem(ir)) { out = out.concat(rem_block()) }
   if (uses_float_rem(ir)) { out = out.concat(float_rem_block()) }
   if (uses_builtin_method(ir, "div_trunc")) { out = out.concat(div_trunc_block()) }
@@ -3112,16 +4523,26 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     out = out.concat(emit_types(types))
   }
   let functions = value_list(value_field(ir, "functions"))
-  if (functions.length() > 0) { out = out.concat(emit_functions(functions)) }
+  if (functions.length() > 0) { out = out.concat(emit_functions(functions, ir)) }
   // Externs (slice 4): `def <name>(...)` + dedented verbatim body, gated on a
   // non-empty extern list, between the functions and the SERVICES table.
   let externs = value_list(value_field(ir, "externs"))
   if (externs.length() > 0) { out = out.concat(emit_externs(externs, components.length() > 0)) }
+  let tests = value_list(value_field(ir, "tests"))
+  if (tests.length() > 0) { out = out.concat(emit_tests(ir, tests)) }
+  let fault_tests = value_list(value_field(ir, "fault_tests"))
+  if (fault_tests.length() > 0) { out = out.concat(emit_fault_tests(fault_tests)) }
   out = out.concat(emit_services_table(value_field(ir, "services")))
   out = out.push("")
   out = out.push("")
+  if (ir_needs_as_async(ir)) { out = out.concat(as_async_block()) }
+  if (ir_uses_routes(ir)) {
+    out = out.concat(router_source())
+    out = out.push("")
+    out = out.push("")
+  }
   for (c of components) {
-    out = out.concat(component_body(c, value_field(ir, "services"), externs))
+    out = out.concat(component_body(c, value_field(ir, "services"), externs, ir))
     out = out.push("")
     out = out.push("")
   }
@@ -3131,10 +4552,6 @@ pub fn emit_py_src(source_ir: Any) -> Str {
     pairs = pairs.push(`${py_repr(nm)}: ${nm}`)
   }
   out = out.push("COMPONENTS = {".concat(pairs.join(", ")).concat("}"))
-  // The deferred in-file test section: one named marker per test instead of
-  // silence (issue #1123).
-  let test_markers = deferred_test_markers(ir)
-  if (test_markers.length() > 0) { out = out.concat(test_markers) }
   return out.join(newline()).concat(newline())
 }
 
@@ -3178,7 +4595,7 @@ test "builtin surface renders portable python" {
 
 test "empty match is the non-exhaustive throw" {
   let empty = []
-  assert match_expr("o", empty) == "((match := o), (_ for _ in ()).throw(TypeError('non-exhaustive match')))[1]"
+  assert match_expr("o", empty, false) == "((match := o), (_ for _ in ()).throw(TypeError('non-exhaustive match')))[1]"
 }
 
 test "py_type maps the surface types" {

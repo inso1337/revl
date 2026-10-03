@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+    "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -750,16 +750,35 @@
                 "documents": []
               },
               "py": {
-                "residual": 6,
-                "corpus": 59,
-                "reproduced": 53,
+                "residual": 25,
+                "corpus": 102,
+                "reproduced": 77,
                 "documents": [
+                  "../../../backends/go/scenarios/advance.rvl",
+                  "../../../backends/go/testdata/stream_130.rvl",
+                  "../../../backends/go/testdata/stream_event_130.rvl",
+                  "../../../backends/rust/scenarios/stream.rvl",
                   "../../../backends/typescript/tests/fixtures/fr1_loop.rvl",
                   "../../../backends/typescript/tests/fixtures/fr3_json_int.rvl",
+                  "../../../examples/async_timer.rvl",
+                  "../../../examples/model_store_sqlite.rvl",
+                  "../../../examples/regressions/fuzz_go_e6afacd3.rvl",
+                  "../../../examples/uxprobe2_fault.rvl",
+                  "../../../examples/uxprobe2_jobs.rvl",
                   "../../../src/revl/truc/components/cli.rvl",
+                  "../../../stdlib/fs.rvl",
+                  "../emit_py_async_shapes.rvl",
+                  "../emit_py_builtin_shadow.rvl",
+                  "../emit_py_placement.rvl",
+                  "../emit_py_stream_builtin_bind.rvl",
+                  "../emit_py_test_sections.rvl",
+                  "../emit_py_validated_shapes.rvl",
+                  "../emit_rust_corpus/comp_stream.rvl",
+                  "../emit_ts_refusals/validated_emission_operation.rvl",
                   "branches.rvl",
                   "services_control_flow.rvl",
-                  "services_host_stream.rvl"
+                  "services_host_stream.rvl",
+                  "streams.rvl"
                 ]
               },
               "rust": {
@@ -801,8 +820,8 @@
                 "documents": []
               }
             },
-            "total_residual": 27,
-            "total_corpus": 293,
+            "total_residual": 46,
+            "total_corpus": 336,
             "clean_tiers": [
               "java",
               "wasm"
@@ -957,64 +976,31 @@
                 }
               },
               "py": {
-                "unported_constructs": 27,
-                "unported_reasons": 10,
-                "blind_constructs": 1,
+                "unported_constructs": 5,
+                "unported_reasons": 3,
+                "blind_constructs": 0,
                 "reasons": {
-                  "Async stream runtime boundary: emit.py::_stream_head/_stream_iter/_ComponentEmitter._expr implement merge, subscribe policy/capacity/drain and take stages, event windows and awaited iteration. emit_py.rvl::cexpr/body_step lacks those paths. backends/go/testdata/stream_130.rvl reproduces subscribe/await; tests/test_stream_reactive.py supplies merge/stage/event inputs. Item 130 \u00a74.9 adds `subscribe=<true>`: the durable-cursor subscription registers a self-describing disposer (`sub.durable_undo()`) so `revl recover` can re-issue it, and emit.py branches on the step flag to emit it. It is on the same stream path as the rest of this entry, and tests/test_crash_recovery.py pins the reference half.": [
-                    "kind=stream-merge",
-                    "kind=subscribe",
-                    "stage=take",
-                    "step=await",
-                    "step=stream-iter",
-                    "subscribe=<true>"
-                  ],
-                  "Async-runtime planner boundary: emit.py::_group_eligible requires idempotent emissions with safe compensation; _emit_parallel_group emits await/flush/raise ordering and emit adds service metadata. emit_py.rvl::emit_services_table/body_step has sequential dispatch only. tests/test_parallel_259.py::HDR and its commutative/disjoint cases reproduce the family. Witnessed undo_idempotent registration is separately supported.": [
-                    "commutative=<true>",
-                    "idempotent=<true>"
-                  ],
                   "Capability runtime boundary: emit.py::_ComponentEmitter._expr emits frame.acquire_lease and handle.revoke; _approval_step/_emit_fire implement approval handles/crossings. The port lacks capability-frame lowering. Representative accepted inputs: tests/test_capability_leases.py::_SOURCE and tests/test_approval_typed.py. This is not ordinary effect/witnessed registration.": [
                     "kind=lease-acquire",
                     "kind=lease-revoke",
                     "step=approval"
-                  ],
-                  "Deferred delivery runtime boundary: emit.py::_deferred_step/_deferred_register_kwargs register emit_deferred with argument-position idempotency keys; emit_py.rvl::body_step/method_step issue ordinary calls. tests/test_standing_approval.py::_SOURCE declares extern emission deferred fn deliver. This is distinct from the now-ported witnessed transactional registration.": [
-                    "deferred=<true>"
-                  ],
-                  "Existing deterministic-destructuring boundary: emit.py::_let_pattern_stmt emits record bindings and exact/rest list unpacking using _Lines.next_destructure_seq. emit_py.rvl::fn_stmt has no let_pattern arm. Representative let {a} = record and let [a, ...rest] = list forms are in tests/test_v2_language.py. Item 179 removed id-based naming, not this port omission.": [
-                    "pattern=list",
-                    "pattern=record",
-                    "step=let_pattern"
-                  ],
-                  "In-file harness boundary: emit.py::_emit_tests/_emit_lifecycle_test/_lifecycle_step emit Context/clock/abort/load/unload/call/residue orchestration; emit_py.rvl::emit_py_src has no REVL_TESTS generation. examples/lifecycle_wasm.rvl and examples/durable_log.rvl reproduce omission; tests/test_lifecycle_abort.py covers abort. Named boundary tests pin the missing trailer.": [
-                    "lifecycle=<true>",
-                    "step=abort",
-                    "step=advance",
-                    "step=assert_no_residue",
-                    "step=call",
-                    "step=load",
-                    "step=unload"
                   ],
                   "Intentional refusal, not missing positive emission: emit.py::_refuse_holes rejects kind=hole before rendering. tests/test_holes.py supplies ?? source inputs. A successful byte-oracle document cannot contain an unresolved hole; adding one would incorrectly require reference emission.": [
                     "kind=hole"
                   ],
                   "Internal reference-only pseudo-node, not frontend syntax: emit.py::_RenderedBody wraps already rendered component match arms with kind=__rendered__; emit_py.rvl::cmatch_branch passes expression strings directly. emit_py_corpus/branches.rvl::block_match covers the corresponding source behavior.": [
                     "kind=__rendered__"
-                  ],
-                  "Spawn/instance runtime boundary: emit.py::_ComponentEmitter._expr calls runtime spawn and handle.get; emit_py.rvl::cexpr emits markers. backends/go/scenarios/accessor.rvl reproduces both; the spawn marker is independently pinned by test_named_runtime_and_harness_boundaries.": [
-                    "kind=instance-get",
-                    "kind=spawn"
-                  ],
-                  "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
-                    "validated=<true>"
                   ]
                 }
               },
               "rust": {
-                "unported_constructs": 20,
-                "unported_reasons": 7,
+                "unported_constructs": 21,
+                "unported_reasons": 8,
                 "blind_constructs": 14,
                 "reasons": {
+                  "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+                    "class=emission"
+                  ],
                   "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
                     "secret=<true>",
                     "secret_return=<true>"
@@ -1137,7 +1123,7 @@
                 }
               }
             },
-            "total_unported": 173
+            "total_unported": 152
           },
           "unreached-constructs": {
             "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -1147,14 +1133,14 @@
               "compile": 1,
               "emit_go": 50,
               "emit_java": 36,
-              "emit_py": 28,
-              "emit_rust": 34,
+              "emit_py": 5,
+              "emit_rust": 35,
               "emit_ts": 5,
               "emit_wasm": 50,
               "gate_census": 5,
-              "lower_ir": 5
+              "lower_ir": 1
             },
-            "total_unreached": 214
+            "total_unreached": 188
           },
           "gate-reference-divergence": {
             "source": "tools/gate_reference_census_baseline.json",
@@ -1169,13 +1155,13 @@
         "unavailable": {}
       },
       "headline": {
-        "documents_refused": 27,
-        "corpus": 293,
-        "n": 293,
+        "documents_refused": 46,
+        "corpus": 336,
+        "n": 336,
         "per_tier": {
           "go": 3,
           "java": 0,
-          "py": 6,
+          "py": 25,
           "rust": 2,
           "ts": 16,
           "wasm": 0
@@ -1187,7 +1173,7 @@
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
-      "unported_constructs": 173,
+      "unported_constructs": 152,
       "fail_open_programs": 0
     },
     "unload-paths": {
@@ -2549,11 +2535,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 27 of 293 corpus documents that the reference compiler accepts (n=293)",
+      "text": "the fully-native revl chain does not reproduce 46 of 336 corpus documents that the reference compiler accepts (n=336)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2563,7 +2549,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2573,7 +2559,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2583,7 +2569,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2593,7 +2579,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2603,7 +2589,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2613,7 +2599,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2623,7 +2609,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "33fc2c7f940faba13a033f66127b062e02eba614-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
