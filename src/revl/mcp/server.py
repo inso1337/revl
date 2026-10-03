@@ -822,12 +822,23 @@ def _tool_lease(arguments: dict) -> dict:
 
 def _origin(arguments: dict) -> dict:
     """The admission inputs of a load/swap, kept so the composition can later
-    be snapshotted for re-admission (docs/persistence.md)."""
+    be snapshotted for re-admission (docs/persistence.md).
+
+    A `files` load also records each file's text as `files_content` (issue
+    #1842). The held source is the truth and disk only an export (#1696), so
+    from here on the session edits, swaps by name and snapshots this text: a
+    change made on disk afterwards is not picked up, and a file deleted after
+    the load stops mattering. Callers take it just before the compile, so it
+    is the text that compile read."""
     origin = {}
     for key in ("source", "files", "modules"):
         value = arguments.get(key)
         if value is not None:
             origin[key] = value
+    if origin.get("files") and origin.get("source") is None:
+        held = {path: _edit._read_disk(path) for path in origin["files"]}
+        origin["files_content"] = {p: text for p, text in held.items()
+                                   if text is not None}
     return origin
 
 
@@ -860,6 +871,7 @@ def _tool_load(arguments: dict) -> dict:
     if source is None and not files and _draft.pending(SESSION) is not None \
             and not SESSION.loaded:
         return _draft.boot_held(SESSION, arguments, _boot_draft)
+    origin = _origin(arguments)
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -874,7 +886,7 @@ def _tool_load(arguments: dict) -> dict:
         if refusal is not None:
             return _refused_by_lease(refusal)
     return _boot(ir, source, modules, arguments.get("config"),
-                 bool(arguments.get("record")), _origin(arguments))
+                 bool(arguments.get("record")), origin)
 
 
 def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
@@ -994,6 +1006,7 @@ def _tool_swap(arguments: dict) -> dict:
 
     # admitted: recompile the whole composition so the swap is a full
     # generation (the same shape `revl run --watch` reloads)
+    origin = _origin(arguments)
     try:
         full = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -1006,7 +1019,7 @@ def _tool_swap(arguments: dict) -> dict:
         return rejected
     authored = _authored_host_bodies(full, source, modules)
     try:
-        state = SESSION.swap(full, origin=_origin(arguments))
+        state = SESSION.swap(full, origin=origin)
     except SessionError as error:
         return _session_error(error)
     except ApprovalRequired as exc:
@@ -1076,8 +1089,7 @@ def _swap_server_side(replacing: tuple) -> dict:
     if vs.get("source") is None and not vs.get("files"):
         return _session_error(
             "no server-side source to swap by name — there is nothing the "
-            "session can re-admit without you passing `source`/`files`",
-            next=_remedy.swap_files_next(SESSION.origin, replacing))
+            "session can re-admit without you passing `source`/`files`")
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -1292,63 +1304,11 @@ def _edit_loaded(arguments: dict, verify=None) -> dict:
             _proposal.discard(SESSION)
         return _proposal.keep(SESSION, result, arguments.get("replacing") or ())
     except _edit.EditError as error:
-        return _edit_refusal(error, arguments)
+        return _session_error(error, edited=False, swapped=False)
     except SessionError as error:
         if not SESSION.loaded:
             return _session_error(NothingLoaded(str(error)))
         return _session_error(error)
-
-
-def _edit_refusal(error, arguments: dict) -> dict:
-    """A `revl_edit` refusal. When the composition was loaded from files, so
-    there is no inline buffer to patch, the refusal carries the patch applied
-    to the file as a ready `revl_swap` (issue #1691)."""
-    if not _files_loaded_without_buffer(arguments):
-        return _session_error(error, edited=False, swapped=False)
-    try:
-        nxt = _remedy.edit_as_swap(SESSION, arguments, _swap_would_refuse)
-    except _edit.EditError as patch_error:
-        return _session_error(patch_error, edited=False, swapped=False)
-    except OSError:
-        nxt = None
-    if nxt is None:
-        return _session_error(error, edited=False, swapped=False)
-    name = os.path.basename(str(SESSION.origin["files"][0]))
-    return _session_error(
-        f"this composition was loaded from files ({name}), and revl_edit "
-        f"patches only inline source, so there is no buffer to patch. `next` "
-        f"is your patch applied to {name} as a revl_swap with inline `source`; "
-        f"after it, revl_edit patches that source directly",
-        next=nxt, edited=False, swapped=False)
-
-
-def _files_loaded_without_buffer(arguments: dict) -> bool:
-    """Whether the session lost a files-loaded composition's buffers. Since
-    issue #1690 each loaded file IS a buffer revl_edit patches, so this holds
-    only when the held working set carries neither inline source nor files."""
-    if arguments.get("target") not in (None, "source"):
-        return False
-    vs = _edit.virtual_source(SESSION)
-    return (vs.get("source") is None and not vs.get("files")
-            and bool((SESSION.origin or {}).get("files")))
-
-
-def _swap_would_refuse(arguments: dict) -> str | None:
-    """Whether `revl_swap(arguments)` would refuse before swapping: the
-    authoring gate, admission against the running composition, then the whole
-    composition on its own. None when it would not; else the first reason."""
-    gate = _authoring_refusal(arguments)
-    if gate is not None:
-        return gate["diagnostics"][0]["message"]
-    source, files, modules = _candidate_of(arguments)
-    replacing = tuple(arguments.get("replacing") or ())
-    try:
-        compile_under_authoring(source, files, modules=modules,
-                                manifest=SESSION.ir, replacing=replacing)
-        compile_under_authoring(source, files, modules=modules)
-    except RevlError as error:
-        return report(error)["diagnostics"][0]["message"]
-    return None
 
 
 def _tool_rollback(_arguments: dict) -> dict:

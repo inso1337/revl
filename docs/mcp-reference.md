@@ -81,14 +81,11 @@ ends with the same remedy in words, so the two never disagree. Remedies today:
 | Refusal | `next` |
 | ------- | ------ |
 | nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
-| `revl_edit` on a composition loaded from one file, when the session no longer holds its buffer | `revl_swap` with your patch applied to that file's text as inline `source`. `ready` only if that swap would admit. The file on disk is not changed |
-| `revl_swap` with no source, when the session no longer holds a files-loaded composition's buffers | `revl_swap` with those `files` |
-
-A files-loaded composition does not reach either of the last two in the
-ordinary course: each loaded file is a buffer, so `revl_edit` patches it and a
-name-only `revl_swap` re-admits it (issue #1690). They answer only a session
-whose held working set has lost the files.
 | a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
+
+A composition loaded from `files` is edited and swapped by name directly, and
+the server holds its text from the load on (issue #1842), so neither needs a
+remedy.
 
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and

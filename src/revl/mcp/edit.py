@@ -96,9 +96,11 @@ def virtual_source(session) -> dict:
     Two shapes. An inline composition is ``{source, modules}``. A composition
     loaded from `files` is ``{files, files_content, modules}``: one buffer per
     loaded file, keyed by the path it was loaded under (issue #1690). Its text is
-    the text the session last swapped in when an edit has run, and otherwise the
-    file as it is on disk now. Disk is never written: the edited text lives on
-    the session, and `revl_snapshot` carries it.
+    the text the session holds: read at load (issue #1842), and the text it last
+    swapped in once an edit has run. Disk is read only for an origin that holds
+    no text for a file (one restored from an older snapshot). Disk is never
+    written: the edited text lives on the session, and `revl_snapshot` carries
+    it.
     """
     draft = getattr(session, "draft", None)
     if draft is not None:
