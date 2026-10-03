@@ -1173,3 +1173,92 @@ def test_select_never_raises_on_the_real_tree():
                     "backends/go/emit.py", "weird/random_thing.xyz"):
         r = sel(changed)
         assert isinstance(r["pytest"], list)
+
+
+# --- compile reachability is per module (issue #1780) ---------------------- #
+def _tree(tmp_path, files: dict[str, str]) -> Path:
+    for rel, text in files.items():
+        path = tmp_path / rel
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    (tmp_path / "backends").mkdir(exist_ok=True)
+    return tmp_path
+
+
+def test_reachability_is_per_module_and_resolves_relative_imports(tmp_path):
+    """One reached module of a subpackage no longer puts the whole subpackage
+    on the graph, and a relative import inside a subpackage resolves against
+    THAT package. Before, `from .b import x` in `revl/sub/a.py` named a
+    top-level `b`, so `sub` was walked only as its `__init__` and `deep`
+    (reached only through `sub.b`) was missed."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "def compile_source():\n    from .sub import a\n",
+        "src/revl/sub/__init__.py": "",
+        "src/revl/sub/a.py": "from .b import x\n",
+        "src/revl/sub/b.py": "from .. import deep\nx = 1\n",
+        "src/revl/sub/unused.py": "import json\n",
+        "src/revl/deep.py": "",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    reach = at.compile_reachable(root)
+    # lazy imports are followed; importing `sub.a` executes `sub/__init__`
+    assert {"__init__", "sub.__init__", "sub.a", "sub.b", "deep"} <= reach
+    assert "sub.unused" not in reach
+
+
+def test_a_module_a_backend_imports_is_reachable(tmp_path):
+    """The compile path loads backend files by path, so their `revl.*` imports
+    are roots even though no `src/revl` module names them."""
+    root = _tree(tmp_path, {
+        "src/revl/__init__.py": "",
+        "src/revl/viahost.py": "",
+        "src/revl/alone.py": "",
+        "backends/py/emit.py": "from revl.viahost import thing\n",
+    })
+    at._REACH_CACHE.clear(), at._GRAPH_CACHE.clear()
+    reach = at.compile_reachable(root)
+    assert "viahost" in reach and "alone" not in reach
+
+
+def test_the_import_scan_matches_a_full_parse():
+    """`_import_nodes` cuts the import statements out instead of parsing whole
+    files (24 s -> about 1.5 s). On the real tree it finds every edge a full
+    `ast.parse` finds."""
+    mods = at._module_index(ROOT / "src" / "revl")
+    for name, path in mods.items():
+        text = path.read_text(encoding="utf-8")
+        full = at._module_edges(mods, name, ast.parse(text))
+        assert full <= at._module_edges(mods, name, at._import_nodes(text)), name
+
+
+def test_an_mcp_module_off_the_compile_path_selects_a_narrow_set():
+    """`revl.mcp.http_stream` is imported by no module the compile path
+    executes, so a change to it runs the tests that name it or an importer,
+    not the full suite. It was FULL because some OTHER `revl.mcp` module is
+    compile-reachable."""
+    assert "mcp.http_stream" not in at.compile_reachable(ROOT)
+    r = sel("src/revl/mcp/http_stream.py")
+    assert r["full"] is False, r["reason"]
+    assert "tests/test_mcp_http_streams.py" in r["pytest"]
+    assert "tests/test_mcp_http_transport.py" in r["pytest"]   # an importer's tests
+
+
+def test_an_mcp_module_on_the_compile_path_still_selects_full():
+    """The other direction, on a real chain: `revl.gate` (on the import chain
+    of `revl/__init__`) lazily imports `revl.mcp.session`, which imports
+    `revl.mcp.operator`, which imports `revl.mcp.server`. Each of those can run
+    while compiling, so a change to any of them is FULL."""
+    reach = at.compile_reachable(ROOT)
+    assert {"gate", "mcp.session", "mcp.operator", "mcp.server"} <= reach
+    for module in ("session", "operator", "server"):
+        r = sel(f"src/revl/mcp/{module}.py")
+        assert r["full"] is True, module
+        assert "compile-reachable" in r["reason"]
+
+
+def test_a_module_reached_only_through_a_subpackage_is_full():
+    """The unsound direction the old graph had: `revl.run` is reached only
+    through a `revl.mcp` module's relative import, which the old resolution
+    dropped, so a change to it got a narrow selection."""
+    assert "run" in at.compile_reachable(ROOT)
+    assert sel("src/revl/run.py")["full"] is True
