@@ -144,6 +144,12 @@ CORPUS = [
     # answered `<<UNSUPPORTED-METHODSTEP:if>>` three times over and dropped
     # every route the document declares.
     "services_control_flow.rvl",
+    # a VALUE-position emission in a provide-method body (`return emit f(x)`,
+    # `let r = emit f(x)`, a reassignment, and one in each `if` arm). The
+    # marker leaves no trace on the IR node, so both emitters read the extern's
+    # class and fire an `emission` extern through `_revl_extern_emit`. Added
+    # FAILING FIRST: both rendered a bare call the recorder never saw.
+    "services_value_emission.rvl",
     # a `${…}` template in a provide-method body: the COMPONENT-path `format`
     # node (a fn body lowers `${…}` to `interp` instead), emitted as
     # `_revl_fmt('<template>', args)` with `fmt as _revl_fmt` pulled into the

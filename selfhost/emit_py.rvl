@@ -2333,10 +2333,45 @@ fn setup_step(step: Any, indent: Int) -> List[Str] {
 // `let-effect` (the spawn form — its `spawn` acquire cexpr lands in slice 5, so
 // it is implemented but not yet cross-checked), saga `emit ... compensate`,
 // plain `emit`, and `return`. (`await` stays slice 5.)
+// A value-position emission in a provide-method body (`return emit f(x)`,
+// `let r = emit f(x)`): the `emit` marker leaves no trace on the IR node, so the
+// extern's class is what says the call crosses, and it fires through the
+// recording seam (`extern_emit_fire`) exactly as an `emit` step does. Mirrors
+// the reference's `_is_value_emission` (whose further deferred-extern guard is
+// part of the deferred-delivery boundary this port does not carry at all).
+fn is_value_emission(node: Any, externs: List[Any]) -> Bool {
+  if (node_kind(node) != "fn") { return false }
+  let name = value_str(value_field(node, "name"))
+  for (ext of externs) {
+    if (value_str(value_field(ext, "name")) == name) {
+      return value_str(value_field(ext, "class")) == "emission"
+    }
+  }
+  return false
+}
+
+// True when an emission-class extern call sits anywhere under `node`.
+fn reaches_value_emission(node: Any, externs: List[Any]) -> Bool {
+  if (is_value_emission(node, externs)) { return true }
+  for (c of value_children(node)) { if (reaches_value_emission(c, externs)) { return true } }
+  return false
+}
+
+// `cexpr` for a provide-method VALUE position. The reference routes a value
+// emission wherever it sits in the method body; this port routes it when it is
+// the whole value (`return emit f(x)`, `let r = emit f(x)`), and a value
+// emission NESTED inside a larger expression renders a loud UNSUPPORTED marker
+// rather than a bare call the WAL would never see.
+fn method_value(node: Any, externs: List[Any]) -> Str {
+  if (is_value_emission(node, externs)) { return extern_emit_fire(node) }
+  if (reaches_value_emission(node, externs)) { return "<<UNSUPPORTED-NESTED-VALUE-EMISSION>>" }
+  return cexpr(node)
+}
+
 fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "let" || kind == "assign") {
-    var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${cexpr(value_field(step, "value"))}`)]
+    var out = [line(indent, `${mangle(value_str(value_field(step, "name")))} = ${method_value(value_field(step, "value"), externs)}`)]
     return { lines: out, counter: counter }
   }
   if (kind == "effect") {
@@ -2397,7 +2432,7 @@ fn method_step(step: Any, indent: Int, provide_name: Str, method_name: Str, comp
   if (kind == "await") { return { lines: [line(indent, `await ${cexpr(value_field(step, "expr"))}`)], counter: counter } }
   if (kind == "return") {
     if (value_is_null(value_field(step, "expr"))) { return { lines: [line(indent, "return")], counter: counter } }
-    return { lines: [line(indent, `return ${cexpr(value_field(step, "expr"))}`)], counter: counter }
+    return { lines: [line(indent, `return ${method_value(value_field(step, "expr"), externs)}`)], counter: counter }
   }
   if (kind == "break") { return { lines: [line(indent, "break")], counter: counter } }
   if (kind == "continue") { return { lines: [line(indent, "continue")], counter: counter } }
@@ -2435,17 +2470,17 @@ fn method_block(steps: List[Any], indent: Int, provide_name: Str, method_name: S
 fn method_control(step: Any, indent: Int, provide_name: Str, method_name: Str, comp_name: Str, counter: Int, externs: List[Any]) -> EmitLines {
   let kind = value_str(value_field(step, "step"))
   if (kind == "while") {
-    var out = [line(indent, `while ${cexpr(value_field(step, "cond"))}:`)]
+    var out = [line(indent, `while ${method_value(value_field(step, "cond"), externs)}:`)]
     let b = method_block(value_list(value_field(step, "body")), indent + 1, provide_name, method_name, comp_name, counter, externs)
     return { lines: out.concat(b.lines), counter: b.counter }
   }
   if (kind == "for") {
     let binder = mangle(value_str(value_field(step, "bind")))
-    var out = [line(indent, `for ${binder} in ${cexpr(value_field(step, "iterable"))}:`)]
+    var out = [line(indent, `for ${binder} in ${method_value(value_field(step, "iterable"), externs)}:`)]
     let b = method_block(value_list(value_field(step, "body")), indent + 1, provide_name, method_name, comp_name, counter, externs)
     return { lines: out.concat(b.lines), counter: b.counter }
   }
-  var out = [line(indent, `if ${cexpr(value_field(step, "cond"))}:`)]
+  var out = [line(indent, `if ${method_value(value_field(step, "cond"), externs)}:`)]
   let t = method_block(value_list(value_field(step, "then")), indent + 1, provide_name, method_name, comp_name, counter, externs)
   out = out.concat(t.lines)
   var c = t.counter
@@ -3859,7 +3894,24 @@ fn ir_uses_extern_emit(ir: Any) -> Bool {
       deferred = deferred.push(value_str(value_field(ext, "name")))
     }
   }
-  return uses_extern_emit(value_field(ir, "components"), deferred)
+  let components = value_field(ir, "components")
+  return uses_extern_emit(components, deferred) || uses_value_emission(components, value_list(value_field(ir, "externs")), deferred)
+}
+
+// A provide method's `return emit f(x)` / `let r = emit f(x)` fires through the
+// seam too (`method_value`), so it pulls in the same import: a step whose
+// `expr` (a `return`) or `value` (a `let`/assignment) is a value emission. A
+// deferred emission never fires through the seam (the reference's
+// `_route_value_emissions` excludes the deferred table), so it pulls nothing.
+fn uses_value_emission(n: Any, externs: List[Any], deferred: List[Str]) -> Bool {
+  if (seam_value_emission(value_field(n, "expr"), externs, deferred)
+      || seam_value_emission(value_field(n, "value"), externs, deferred)) { return true }
+  for (c of value_children(n)) { if (uses_value_emission(c, externs, deferred)) { return true } }
+  return false
+}
+
+fn seam_value_emission(node: Any, externs: List[Any], deferred: List[Str]) -> Bool {
+  return is_value_emission(node, externs) && !list_contains(deferred, value_str(value_field(node, "name")))
 }
 
 // Safe pure-function templates mirror the reference's evaluation-preserving

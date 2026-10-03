@@ -1666,6 +1666,8 @@
 
 ["tests/fixtures/emit_py_corpus/services_timers.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_corpus/services_value_emission.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_py_corpus/shadowing_near_misses.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/streams.rvl", "agree-admit"]
