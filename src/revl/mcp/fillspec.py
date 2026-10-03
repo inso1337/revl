@@ -283,14 +283,17 @@ UNTRUSTED_EXTERNS = (
     "new host code cannot be written by this author")
 
 
-def _extern_write(ext: dict) -> str:
+def _extern_write(ext: dict, position: str = "pure") -> str:
+    """How a call of `ext` is written at a hole in `position`. In the
+    acquisition slot of an `effect` the hole already follows `effect`, so the
+    fill is the bare call: `effect effect open()` does not parse (#1846)."""
     args = ", ".join(f"<{p['name']}: {p['type']}>"
                      for p in ext.get("params", []))
     call = f"{ext['name']}({args})"
     cls = ext.get("class")
     if cls == "emission":
         return f"emit {call}"
-    if cls in ("acquire", "witnessed"):
+    if cls in ("acquire", "witnessed") and position != "effect-acquire":
         return f"effect {call}"
     return call
 
@@ -309,7 +312,7 @@ def _externs(externs: list, calls: list[dict], position: str,
     declared = []
     for ext in externs or []:
         cls = ext.get("class")
-        write = _extern_write(ext)
+        write = _extern_write(ext, position)
         if untrusted:
             here = False
         elif cls == "pure":
@@ -333,9 +336,11 @@ def _externs(externs: list, calls: list[dict], position: str,
     }
 
 
-#: A literal of each primitive, for `fillable.producers`.
+#: A literal of each primitive, for `fillable.producers`. `Unit` has none:
+#: revl has no unit expression (`()` does not parse), so a `Unit` hole is
+#: filled by a call that returns nothing (#1846).
 _LITERALS = {"Str": '"..."', "Int": "0", "Int32": "0", "Float": "0.0",
-             "F64": "0.0", "Num": "0", "Bool": "false", "Unit": "()"}
+             "F64": "0.0", "Num": "0", "Bool": "false"}
 
 
 def _type_head(t: str) -> str:
@@ -343,8 +348,11 @@ def _type_head(t: str) -> str:
 
 
 def _returns_of(signature: str | None) -> str | None:
-    if not signature or "->" not in signature:
+    """A rendered signature's return type; one with no `->` returns `Unit`."""
+    if not signature:
         return None
+    if "->" not in signature:
+        return "Unit"
     return signature.rsplit("->", 1)[1].strip()
 
 
@@ -820,12 +828,23 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                 acquire_scope = {**setup_scope, "@position": "effect-acquire"}
                 _collect_exprs(stmt.get("acquire"), services, functions,
                                acquire_scope, pure, collected)
+                # the inverse names the acquired value, so its own binding is
+                # in scope there (`let c = effect open() undo close(c)`), and
+                # in every setup position after the statement
+                bound = stmt.get("bind")
+                callables = {**{e["name"]: e for e in externs}, **functions}
+                acquired = _expr_type(stmt.get("acquire"), services, callables,
+                                      setup_scope)
                 undo_scope = {**setup_scope, "@position": "effect-undo"}
+                if bound:
+                    undo_scope[bound] = acquired
                 _collect_exprs(stmt.get("undo"), services, functions,
                                undo_scope, pure, collected)
                 rest = {k: v for k, v in stmt.items() if k not in ("acquire", "undo")}
                 _collect_exprs(rest, services, functions, dict(setup_scope),
                                pure, collected)
+                if bound:
+                    setup_scope[bound] = acquired
             else:
                 _collect_exprs(stmt, services, functions, dict(setup_scope),
                                pure, collected)
