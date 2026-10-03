@@ -1,0 +1,7 @@
+Here is the code:
+
+```revl
+service Cache { fn get(key: Str) -> Str }
+```
+
+That's it.

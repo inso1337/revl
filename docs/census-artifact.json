@@ -5434,8 +5434,8 @@
    },
    "report_inputs": {
     "crates/revl-gate/Cargo.toml": "de0fdc92fd47facfe7b962a233722285724deddca3f2a8495dd427008ff9f25c",
-    "crates/revl-gate/src/admission.rs": "518e5bf7e46b6dd16be65320c39326b725149b19643e22d1391a01b8be1a3eb1",
-    "crates/revl-gate/src/frontier.rs": "3fd3ed98276b34dd785e901cc8c0a523665fcefa760d7f896d8e60961073d0d5",
+    "crates/revl-gate/src/admission.rs": "a1a0121b0a8e585626209ace432f2b1049bef2bd6e229ac1504b4b6ee1620140",
+    "crates/revl-gate/src/frontier.rs": "e3829207c99caf77242d8b726c7263dcf4a7768a0d0a58fc4eafdc74eef8ba6a",
     "crates/revl-gate/src/ir.rs": "0d171beeb651561811e855308c62554f44fbfca7a64bb3030abf0a3f20f9793b",
     "crates/revl-gate/src/lib.rs": "e9c5ddb7d29b757a7e08df675ae54fbaa637a7e952c3421c0ca6934016a13869",
     "crates/revl-gate/src/selfhost.rs": "2aa630125ab2df6ff95ef7bef436be4333848e6846a7b148d64d8e472441780f",
