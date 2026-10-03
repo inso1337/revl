@@ -341,13 +341,16 @@ def _apply_symbol(vs: dict, edit: dict) -> tuple[tuple[str, str], str, dict]:
     by name (issue #1714). The symbol may be qualified as `<buffer>:Name`."""
     from . import symbols  # noqa: PLC0415
 
-    if not isinstance(edit.get("replacement"), str):
+    removing = edit.get("remove") is True
+    if not removing and not isinstance(edit.get("replacement"), str):
         raise EditError("a symbol edit needs `replacement`, the declaration's "
-                        "new text")
+                        "new text, or `remove: true`")
     symbol = edit["symbol"]
     if edit.get("target") and ":" not in str(symbol):
         symbol = f"{edit['target']}:{symbol}"
     try:
+        if removing:
+            return symbols.remove(vs, symbol)
         return symbols.replace(vs, symbol, edit["replacement"])
     except symbols.SymbolError as error:
         raise EditError(str(error)) from None
@@ -522,7 +525,7 @@ def _origin_from(vs: dict) -> dict:
 
 # ---------------------------------------------------------------- the verb
 
-def apply_edit(session, arguments: dict) -> dict:
+def apply_edit(session, arguments: dict, verify=None) -> dict:
     """Patch the server-side source of the running composition, then re-admit.
 
     Returns the admission verdict / open holes / diagnostic — never the whole
@@ -619,6 +622,12 @@ def apply_edit(session, arguments: dict) -> dict:
     quarantined = _srv._quarantine.gate_swap(session, gate_arguments)
     if quarantined is not None:  # required quarantine: not proved, not swapped
         return {**quarantined, "edited": False, "applied": applied}
+    # a caller's extra verification (revl_change's gauntlet, issue #1695): it
+    # runs on the exact candidate, after every gate, before anything swaps
+    refused = verify(gate_arguments) if verify is not None else None
+    if refused is not None:
+        return {**refused, "edited": False, "swapped": False, "applied": applied,
+                "touched": _touched(before, vs)}
 
     state = session.swap(ir, origin=_origin_from(vs))
     session.draft = None  # committed; re-derives from the new running source

@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 56 verbs below, one section each.
+The advertised list is exactly the 57 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -74,6 +74,7 @@ the current interpreter (issue #1692).
 | `revl_call` | no | no | `key`, `method` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` (source) |
+| `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | `symbol` (source) |
 | `revl_gauntlet` | yes | no | - (source) |
 | `revl_quarantine` | yes | no | - (source) |
@@ -362,6 +363,44 @@ symbols: `{symbol, kind, buffer, change}` with `change` one of `added`,
   inline source or the one loaded file, a loaded file's path, or an in-memory
   module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
   `config` to load first.
+
+### `revl_change`
+
+Make one change in ONE call (issue #1695). An agent names the intent; the
+server runs the loop an agent used to orchestrate itself (in a benchmark, eight
+calls for one change, five of them `revl_check` polls):
+
+1. **load**, when nothing is loaded and `files`/`source` are given. A
+   candidate with holes opens a draft, as `revl_load` does;
+2. **plan**: for a withdrawal, the cascade of components that would lose a
+   provider (`revl_query_withdraw`'s answer), reported whatever happens next;
+3. **apply** the change to a working copy of the server-side source, so
+   nothing about the running composition has changed yet;
+4. **verify**: admission against the running composition, the lease and
+   quarantine gates, and with `gauntlet: true` the gauntlet's isolated boot
+   and unload of the exact candidate;
+5. **commit** (a hot swap, or the boot of a draft whose last hole it filled)
+   only if every step passed.
+
+Each intent is carried out as `revl_edit` edits, so the path jail, the trust
+rule for edited files, the gates and drafts behave exactly as for `revl_edit`:
+
+| intent | does |
+|---|---|
+| `{edit: {target?, edits}}` | `revl_edit`'s own patch |
+| `{replace: {component, source}}` | replaces one declaration by name with its whole new text |
+| `{withdraw: "Name"}` | removes the component (and the comment above it) and withdraws it. Refused from the plan when the cascade is not empty |
+| `{withdraw: {component, cascade: true}}` | withdraws the component and its whole cascade together |
+
+The answer carries `committed`, `verified` (`admission`, and `gauntlet` when
+asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
+`orphanedKeys`), the `touched` symbols, and `components`: every component the
+change touched, each with `added` / `changed` / `removed`, plus `would lose a
+provider` for a refused cascade. A change that fails verification commits
+nothing, and the running composition is unchanged.
+
+- Inputs: one of `edit` / `replace` / `withdraw`; `gauntlet`; with nothing
+  loaded, `files` / `source` / `modules` / `config`.
 
 ### `revl_source`
 

@@ -53,6 +53,9 @@ TOOL_VERB = {
     "revl_load": "load",
     "revl_swap": "swap",
     "revl_edit": "edit",
+    # issue #1695: an intent carried out as revl_edit edits, under the same
+    # authority (its self-load half answers to `load` inside the handler)
+    "revl_change": "edit",
     "revl_unload": "unload",
     "revl_restore": "restore",
     "revl_snapshot": "snapshot",
