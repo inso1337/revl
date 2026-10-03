@@ -23,6 +23,7 @@ never be swallowed into a neighbour's span and then overwritten by an edit.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from ..errors import RevlError
@@ -365,6 +366,92 @@ def _replace_member(buffer, text: str, found: Nested, replacement: str):
         raise SymbolError(str(error)) from None
     return buffer, new_text, {"form": "symbol", "symbol": found.path,
                               "kind": found.member.kind, "line": found.first}
+
+
+# ---------------------------------------------------------------- body only
+
+#: A body line that starts one of these is a statement, so the body is a block.
+_STATEMENT_START = re.compile(r"(let|var|return)\b")
+
+
+def canonical(fragment: str) -> str:
+    """`fragment` as `revl fmt` would write it (issue #1700): an agent may send
+    terse text and the server stores the canonical form. A fragment the
+    formatter cannot read is returned unchanged, so the compile reports the
+    real error."""
+    from ..formatter import FormatError, format_source  # noqa: PLC0415
+    try:
+        return format_source(fragment, "<edit>")
+    except (FormatError, RevlError):
+        return fragment
+
+
+def fn_header(text: str) -> str | None:
+    """The header of a fn or method declaration (`fn name(params) -> T`, up to
+    but not including its `=` or `{`), or None when `text` does not start with
+    one. Brackets and string literals are skipped, so a default value or an
+    arrow return type cannot end the header early."""
+    start = text.find("fn ")
+    if start < 0 or text[:start].strip():
+        return None
+    paren = text.find("(", start)
+    if paren < 0:
+        return None
+    depth, i, quote = 0, paren, None
+    while i < len(text):
+        ch = text[i]
+        if quote:
+            if ch == "\\":
+                i += 1
+            elif ch == quote:
+                quote = None
+        elif ch in "\"'":
+            quote = ch
+        elif ch in "([":
+            depth += 1
+        elif ch in ")]":
+            depth -= 1
+        elif depth == 0 and ch in "={" and not text.startswith("=>", i):
+            return text[:i].rstrip()
+        i += 1
+    return None
+
+
+def _framed(header: str, body: str) -> str:
+    """The declaration `header` gets with `body`: `= expr` for an expression, a
+    block for statements (a line that starts with let, var or return)."""
+    lines = body.strip("\n").split("\n")
+    if any(_STATEMENT_START.match(line.strip()) for line in lines):
+        inner = "\n".join(("  " + line) if line.strip() else line for line in lines)
+        return f"{header} {{\n{inner}\n}}\n"
+    return f"{header} = {body.strip()}\n"
+
+
+def replace_body(vs: dict, symbol: str, body: str) -> tuple[tuple[str, str], str, dict]:
+    """Replace only the BODY of a method or fn (issue #1700): the server keeps
+    the declared header (name, parameters, return type), so the agent writes the
+    decision and not the frame. The rest is `replace`'s own path, including the
+    proof that only that member changed."""
+    buffer, text, decl, found = locate(vs, symbol)
+    lines = text.split("\n")
+    if found is not None:
+        kind, name = found.member.kind, found.path
+        own = "\n".join(lines[found.first - 1:found.last]).strip()
+    else:
+        kind, name = decl.kind, decl.name
+        own = isolate(text, decl, buffer[1]).strip()
+    header = fn_header(own) if kind in ("method", "fn") else None
+    if header is None:
+        raise SymbolError(
+            f"`body` replaces the body of a method or fn, and `{name}` is a "
+            f"{kind}; send its whole text as `replacement` instead")
+    new_body = canonical(body).rstrip("\n")
+    replacement = _framed(header, new_body)
+    buffer, new_text, echo = replace(vs, symbol, replacement)
+    echo = {**echo, "form": "body", "header": header}
+    if new_body != body.strip("\n"):
+        echo["canonical"] = new_body
+    return buffer, new_text, echo
 
 
 def remove(vs: dict, symbol: str) -> tuple[tuple[str, str], str, dict]:

@@ -367,11 +367,14 @@ def _apply_append(vs: dict, edit: dict, target) -> tuple[tuple[str, str], str, d
             f"by name ({{replace: {{component, source}}}} in revl_change, or "
             f"{{symbol, replacement}} in revl_edit)")
     text = _get_text(vs, buffer)
-    body = added if added.endswith("\n") else added + "\n"
+    stored = symbols.canonical(added)     # issue #1700: stored as revl fmt writes it
+    body = stored if stored.endswith("\n") else stored + "\n"
     joint = "" if not text or text.endswith("\n\n") else \
         ("\n" if text.endswith("\n") else "\n\n")
-    return buffer, text + joint + body, {
-        "form": "append", "declared": [d.name for d in new_decls]}
+    echo = {"form": "append", "declared": [d.name for d in new_decls]}
+    if stored.strip() != added.strip():
+        echo["canonical"] = stored.rstrip("\n")
+    return buffer, text + joint + body, echo
 
 
 def _apply_symbol(vs: dict, edit: dict) -> tuple[tuple[str, str], str, dict]:
@@ -380,16 +383,27 @@ def _apply_symbol(vs: dict, edit: dict) -> tuple[tuple[str, str], str, dict]:
     from . import symbols  # noqa: PLC0415
 
     removing = edit.get("remove") is True
-    if not removing and not isinstance(edit.get("replacement"), str):
-        raise EditError("a symbol edit needs `replacement`, the declaration's "
-                        "new text, or `remove: true`")
+    body = edit.get("body")
+    if not removing and not isinstance(edit.get("replacement"), str) \
+            and not isinstance(body, str):
+        raise EditError("a symbol edit needs `replacement` (the declaration's "
+                        "new text), `body` (a method's or fn's new body only), "
+                        "or `remove: true`")
     symbol = edit["symbol"]
     if edit.get("target") and ":" not in str(symbol):
         symbol = f"{edit['target']}:{symbol}"
     try:
         if removing:
             return symbols.remove(vs, symbol)
-        return symbols.replace(vs, symbol, edit["replacement"])
+        if isinstance(body, str):
+            return symbols.replace_body(vs, symbol, body)
+        # issue #1700: terse text is accepted and stored as `revl fmt` writes it
+        sent = edit["replacement"]
+        stored = symbols.canonical(sent)
+        buffer, text, echo = symbols.replace(vs, symbol, stored)
+        if stored.strip() != sent.strip():
+            echo = {**echo, "canonical": stored.rstrip("\n")}
+        return buffer, text, echo
     except symbols.SymbolError as error:
         raise EditError(str(error)) from None
 
