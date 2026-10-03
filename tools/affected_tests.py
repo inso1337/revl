@@ -105,6 +105,10 @@ BENCH_DEPENDENT_TESTS = (
     "tests/test_framework_bench.py",
     "tests/test_inprocess_gate.py",
     "tests/test_inprocess_gate_rust.py",
+    # Issue #1829: the bare-name guard walks every importable `.py` in the
+    # repository, `bench/` included (five `bench/**/run.py` files are why it
+    # exists), so a new or renamed bench module can change its verdict.
+    "tests/test_load_by_path_is_the_only_by_path_loader.py",
     "tests/test_mcp_edit.py",
     "tests/test_mcp_ship.py",
     # Issue #1461: loads `bench/run.py` by path and checks that the bench
