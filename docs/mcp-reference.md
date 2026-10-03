@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 55 verbs below, one section each.
+The server has exactly the 56 verbs below, one section each. By default `tools/list` advertises the 12 core verbs and `revl_verbs` returns the rest; see "Find a verb".
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -199,9 +199,35 @@ A successful response is never rewritten.
 | `revl_live_query` | yes | no | `verb` |
 | `revl_history_emitted_between` | yes | no | `from`, `to` |
 | `revl_history_lifetime` | yes | no | `component` |
+| `revl_verbs` | yes | no | - |
 <!-- docgen:mcp-verbs end -->
 
 ---
+
+## Find a verb
+
+`tools/list` advertises the core tier by default (issue #1697): the authoring
+loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
+`revl_query_withdraw`, `revl_check`, `revl_admit`, `revl_plan` before a swap,
+and `revl_explain` for a diagnostic code), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
+`revl_verbs`. That is about a quarter of the full list's schema size, which
+matters on every cold start. Every verb `initialize` names is in the core tier,
+and a test holds the two together. Every other verb is still served and callable by
+name. A client that wants the whole list up front starts the server with
+`revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1`. The core tier is
+`CORE` in `src/revl/mcp/disclosure.py`.
+
+### `revl_verbs`
+
+The discovery verb. With no arguments it returns every verb grouped by topic
+(`author`, `session`, `approve`, `grade`, `replay`, `query`, the sections of
+this page), one sentence each and no schemas, plus the names `tools/list`
+currently shows. With `topic` it returns the exact schemas of that topic's
+verbs; with `names` it returns those verbs' exact schemas. The schemas are
+the same objects the full list carries under `--all-tools`. An unknown topic or
+name is refused with `next` set to the no-argument call.
+
+- Inputs: `topic` (one of the six); `names` (verb names). Both optional.
 
 ## Author and admit
 

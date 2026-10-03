@@ -259,17 +259,26 @@ def block_mcp_verbs(current: str) -> str:
     return "\n".join(out)
 
 
+def _core_tier() -> list:
+    from revl.mcp.disclosure import core
+    return core(mcp_tools())
+
+
 def block_mcp_count(current: str) -> str:
-    n = len(mcp_tools())
-    return (f"The advertised list is exactly the {n} verbs below, one section each.")
+    n, core = len(mcp_tools()), len(_core_tier())
+    return (f"The server has exactly the {n} verbs below, one section each. By "
+            f"default `tools/list` advertises the {core} core verbs and "
+            f"`revl_verbs` returns the rest; see \"Find a verb\".")
 
 
 def block_agents_mcp_count(current: str) -> str:
-    n = len(mcp_tools())
+    n, core = len(mcp_tools()), len(_core_tier())
     return (
-        f"The complete advertised verb set is {n} verbs, from\n"
-        "`src/revl/mcp/server.py` and `query_tools.py`. It is grouped below by what\n"
-        "you reach for; each verb's exact inputs and outputs are in\n"
+        f"The complete verb set is {n} verbs, from\n"
+        "`src/revl/mcp/server.py` and `query_tools.py`. `tools/list` shows the\n"
+        f"{core} core verbs by default; call `revl_verbs` for any other verb's\n"
+        "schema, or call it by name. It is grouped below by what you reach for;\n"
+        "each verb's exact inputs and outputs are in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 
@@ -279,9 +288,10 @@ def block_authoring_mcp_count(current: str) -> str:
     drifted (issue #939): the page still claimed the authoring verbs were
     CLI-only after item 345 exposed them over MCP, and its total lagged the
     registry. Generating it ties the page to `TOOLS` like the other two."""
-    n = len(mcp_tools())
+    n, core = len(mcp_tools()), len(_core_tier())
     return (
-        f"`revl mcp serve` advertises {n} verbs in total; the full list is in\n"
+        f"`revl mcp serve` serves {n} verbs in total and lists {core} of them\n"
+        "by default (`revl_verbs` finds the rest); the full list is in\n"
         "[mcp-reference.md](mcp-reference.md)."
     )
 
