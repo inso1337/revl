@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+    "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -616,7 +616,7 @@
       "kind": "third-party tool host, pinned version",
       "version": "1.30.0",
       "ecosystem": "npm",
-      "prompt": null,
+      "prompt": "bench/prompts/mcp.md",
       "authored_by": "third party (not this repository)",
       "scored_on": "residue",
       "columns": [
@@ -624,7 +624,7 @@
         "injection-escape",
         "tokens-to-green"
       ],
-      "runnable": false,
+      "runnable": true,
       "selection_criteria": [
         "Has a plugin or tool registration lifecycle with an unload path. A framework with no",
         "unload cannot fail the residue column honestly: it would score maximally badly by",
@@ -683,14 +683,42 @@
         "report: of six popular agent frameworks, none publishes a way to retire a",
         "registered tool."
       ],
-      "blocked_on": [
-        "Running it needs an MCP host harness that registers a tool per brief, calls",
-        "remove(), and hands the result to a residue probe, plus a pinned-model",
-        "generation pass over the 30 briefs in MCP form. Neither exists, so every",
-        "framework cell is not-run rather than a number. Naming a host is not running",
-        "one and the report distinguishes the two."
+      "evidence": "bench/results/framework-bench/unload-survey.json",
+      "variant": "mcp",
+      "harness": {
+        "probe": "bench/mcp_host/probe.mjs",
+        "scorer": "bench/score_mcp.py",
+        "pinned_by": "bench/mcp_host/package-lock.json",
+        "what": [
+          "bench/mcp_host/probe.mjs builds one McpServer at the pinned version, connects",
+          "a Client to it over the SDK's in-memory transport, and installs and unloads",
+          "the generated pack N times on that one server. It reads four categories,",
+          "each from something public: registry (what the Client can list), resources",
+          "(host.Pool / host.Map / host.Job handles still open, the same set the",
+          "TypeScript backend's no-residue check reads), listeners (on process), and",
+          "timers (created and neither fired nor cleared). A category leaks when its",
+          "final value differs from the baseline taken before the first install."
+        ],
+        "unload_convention": [
+          "Unload is remove() on every registration handle the pack obtained while",
+          "install ran, which is the framework's own per-registration retirement, and",
+          "then the function install returned, if it returned one. The SDK has no",
+          "per-registration teardown callback, so without that return convention a",
+          "careful pack would have nowhere to release what it acquired and the host",
+          "would score maximally badly by construction. The convention is stated in",
+          "the prompt, so the model is told the unload protocol exactly as the raw-ts",
+          "prompt tells it Cordis's.",
+          "The SDK also refuses to register a capability once a transport is",
+          "connected, so the probe opens tools, resources and prompts before",
+          "connecting, through one registration of each that it removes again. That",
+          "is what any host that loads packs while serving has to do."
+        ]
+      },
+      "not_yet_run": [
+        "The harness runs and is tested; no pinned-model generation for this host is",
+        "committed. The report's three-host row says exactly what that run needs."
       ],
-      "evidence": "bench/results/framework-bench/unload-survey.json"
+      "prompt_authored_by": "this repository"
     },
     {
       "id": "revl",
@@ -1011,10 +1039,13 @@
                 }
               },
               "rust": {
-                "unported_constructs": 20,
-                "unported_reasons": 7,
+                "unported_constructs": 21,
+                "unported_reasons": 8,
                 "blind_constructs": 14,
                 "reasons": {
+                  "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+                    "class=emission"
+                  ],
                   "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
                     "secret=<true>",
                     "secret_return=<true>"
@@ -1137,7 +1168,7 @@
                 }
               }
             },
-            "total_unported": 173
+            "total_unported": 174
           },
           "unreached-constructs": {
             "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -1148,13 +1179,13 @@
               "emit_go": 50,
               "emit_java": 36,
               "emit_py": 28,
-              "emit_rust": 34,
+              "emit_rust": 35,
               "emit_ts": 5,
               "emit_wasm": 50,
               "gate_census": 5,
               "lower_ir": 5
             },
-            "total_unreached": 214
+            "total_unreached": 215
           },
           "gate-reference-divergence": {
             "source": "tools/gate_reference_census_baseline.json",
@@ -1187,7 +1218,7 @@
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
-      "unported_constructs": 173,
+      "unported_constructs": 174,
       "fail_open_programs": 0
     },
     "unload-paths": {
@@ -1929,6 +1960,10 @@
       "runner": "python3 bench/admission_latency.py",
       "existing_artifact": "bench/results/admission-latency.md",
       "note": "a committed measurement exists and was taken on a different machine and Python; it is pointed at rather than copied into this cell, because a latency number is machine-bound and copying one into a differently headed table is how a number loses its conditions"
+    },
+    "three-host": {
+      "status": "not-run",
+      "blocked_on": "no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day"
     }
   },
   "briefs": [
@@ -2553,7 +2588,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2563,7 +2598,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2573,7 +2608,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2583,7 +2618,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2593,7 +2628,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2603,7 +2638,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2613,7 +2648,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2623,24 +2658,13 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "74c9094472f15bd2ce35b0801fa258f309366a7a",
+        "compiler_commit": "59194fd5eb82687a22d23cf6d603f7696cb8ffb7",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
     }
   ],
   "remaining_gates": [
-    {
-      "gate": "the third host",
-      "what": "named and justified as `@modelcontextprotocol/sdk` 1.30.0, not yet run",
-      "why": [
-        "Running it needs an MCP host harness that registers a tool per brief, calls",
-        "remove(), and hands the result to a residue probe, plus a pinned-model",
-        "generation pass over the 30 briefs in MCP form. Neither exists, so every",
-        "framework cell is not-run rather than a number. Naming a host is not running",
-        "one and the report distinguishes the two."
-      ]
-    },
     {
       "gate": "column: tokens-to-green",
       "what": "not measured in this report",
@@ -2654,7 +2678,7 @@
     {
       "gate": "a pinned-model run across all three hosts",
       "what": "the pinned model produced injection-escape; every other cell is a re-score of a corpus another model generated, or not run",
-      "why": "the raw-ts and framework hosts have not been generated with the pinned model"
+      "why": "no corpus from one model across all three hosts is committed. It is one command, `python3 bench/run.py --runner local --base-url http://127.0.0.1:11434/v1 --model <the pinned tag> --variants v2,raw-ts,mcp --timeout 3600 --label <label>`, then `python3 bench/framework_bench.py --three-host-from <label> --write`. It needs the pinned weights on a local endpoint that nothing else is using, `npm ci` in backends/typescript and in bench/mcp_host, and time: up to five generations per spec (three revl attempts, one per probed host) at roughly nine minutes each for this model on a contended machine, so a five-spec pilot is hours and all thirty specs is most of a day"
     },
     {
       "gate": "independent reproduction",

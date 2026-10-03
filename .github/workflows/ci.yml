@@ -1313,6 +1313,13 @@ jobs:
       # demo is invoked in `backend-python`, which is exactly why that one never
       # rotted. No env gate and no optional toolchain: this step always executes.
       - run: cd backends/typescript && node demo.ts
+      # issue #1267: the benchmark's third host. `bench/mcp_host` pins
+      # @modelcontextprotocol/sdk by its lockfile, and its probe reads host
+      # resources through `backends/typescript/runtime.ts`, so this is the one
+      # job where both installs exist. `npm test` is the probe's self-check: a
+      # clean pack and one pack per leak category, each of which must leak
+      # exactly its own category.
+      - run: cd bench/mcp_host && npm ci && npm test
       # the ROOT, not a named file — naming files is what let the six above rot
       # unseen. Measured at ~2s for 42 tests, 0 skips with node present.
       - run: pytest backends/typescript/ -q
