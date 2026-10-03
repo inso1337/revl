@@ -17531,9 +17531,7 @@ fn cir_expr(e: Expr, sc: List[Bind], hostSc: List[Str], cx: CCtx) -> IrRes {
     FloatLit(v) => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
     BoolLit(v)  => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(v).concat("}")),
     StrLit(v)   => mk_irres(true, "{\"kind\": \"lit\", \"value\": ".concat(jstr(v)).concat("}")),
-    Var(n)      => scope_has(sc, n)
-      ? mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
-      : mk_irres(false, ""),
+    Var(n)      => cir_var(n, sc),
     Bin(b)      => cir_bin(b, sc, hostSc, cx),
     Un(u)       => cir_un(u, sc, hostSc, cx),
     If(f)       => cir_if_expr(f, sc, hostSc, cx),
@@ -17739,6 +17737,19 @@ fn cir_call(tg: Expr, args: List[Expr], sc: List[Bind], hostSc: List[Str], cx: C
   }
 }
 
+// A bare name in a component position. A scoped name is a `name` node. Out of
+// scope, the reference (`_lower_component_pure_expr`'s ExprVar arm) answers a
+// name in `callables`, which holds `_BUILTIN_CONSTRUCTORS`, with a `var` node:
+// `None` is the one constructor that is a value on its own, so it is lowered
+// here, and every other unscoped name still refuses (issue #1818).
+fn cir_var(n: Str, sc: List[Bind]) -> IrRes {
+  if (scope_has(sc, n)) {
+    return mk_irres(true, "{\"kind\": \"name\", \"id\": ".concat(jstr(n)).concat("}"))
+  }
+  if (n == "None") { return mk_irres(true, "{\"kind\": \"var\", \"name\": \"None\"}") }
+  return mk_irres(false, "")
+}
+
 // A tagged-ADT construction in a component position (`Started(n)`), the same
 // node `lir_adt` writes on the module-fn path.
 fn cir_adt(adt: Str, case_: Str, args: List[Expr], sc: List[Bind],
@@ -17754,12 +17765,19 @@ fn cir_adt(adt: Str, case_: Str, args: List[Expr], sc: List[Bind],
 // an `Async[T]` parameter slot: the reference fills omitted trailing defaults
 // and coerces an arrow into an async slot, and both are no-ops exactly when
 // every parameter is supplied and none is async. An `Opt`/`Result` constructor
-// head is NOT a module call and is refused here rather than lowered to a `fn`
-// node naming something no tier defines; a TAGGED case is routed to `cir_adt`
-// by `cir_call` before it reaches this function, and the guard below stays as
-// the fail-closed answer for any other caller.
+// head is NOT a module call and never becomes a `fn` node naming something no
+// tier defines. `Some(x)` is the reference's `_BUILTIN_CONSTRUCTORS` arm, a
+// `call` node whose callee is the constructor's `var` (issue #1818); a TAGGED
+// case (`Ok`/`Err`) is routed to `cir_adt` by `cir_call` before it reaches this
+// function, and the guard below stays as the fail-closed answer for any other
+// caller.
 fn cir_fncall(nm: Str, args: List[Expr], sc: List[Bind], hostSc: List[Str],
               cx: CCtx) -> IrRes {
+  if (nm == "Some" && args.length() == 1) {
+    let sa = cir_args(args, 0, sc, hostSc, cx, "")
+    if (!sa.ok) { return mk_irres(false, "") }
+    return mk_irres(true, "{\"kind\": \"call\", \"callee\": {\"kind\": \"var\", \"name\": \"Some\"}, \"args\": [".concat(sa.js).concat("]}"))
+  }
   if (nm == "Some" || nm == "None" || nm == "Ok" || nm == "Err") {
     return mk_irres(false, "")
   }

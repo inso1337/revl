@@ -20223,7 +20223,7 @@ fn cir_expr(e: Expr, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     Expr::FloatLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&v)).revl_concat("}")),
     Expr::BoolLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&v)).revl_concat("}")),
     Expr::StrLit(v) => mk_irres(true, (String::from("{\"kind\": \"lit\", \"value\": ").revl_concat(&jstr(&v))).revl_concat("}")),
-    Expr::Var(n) => if scope_has(&sc, &n) { mk_irres(true, (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(&n))).revl_concat("}")) } else { mk_irres(false, String::from("")) },
+    Expr::Var(n) => cir_var(&n, &sc),
     Expr::Bin(b) => { let b = *b; cir_bin(b, sc.clone(), hostSc.clone(), cx.clone()) },
     Expr::Un(u) => { let u = *u; cir_un(u.clone(), sc.clone(), hostSc.clone(), cx.clone()) },
     Expr::If(f) => { let f = *f; cir_if_expr(f.clone(), sc.clone(), hostSc.clone(), cx.clone()) },
@@ -20376,6 +20376,16 @@ fn cir_call(tg: Expr, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: C
 };
 }
 
+fn cir_var(n: &str, sc: &[Bind]) -> IrRes {
+    if scope_has(sc, n) {
+        return mk_irres(true, (String::from("{\"kind\": \"name\", \"id\": ").revl_concat(&jstr(n))).revl_concat("}"));
+    }
+    if (n == "None") {
+        return mk_irres(true, String::from("{\"kind\": \"var\", \"name\": \"None\"}"));
+    }
+    return mk_irres(false, String::from(""));
+}
+
 fn cir_adt(adt: &str, case_: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
     let a = cir_args(args.clone(), 0i64, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
     if (!a.ok) {
@@ -20385,6 +20395,13 @@ fn cir_adt(adt: &str, case_: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<S
 }
 
 fn cir_fncall(nm: &str, args: Vec<Expr>, sc: Vec<Bind>, hostSc: Vec<String>, cx: CCtx) -> IrRes {
+    if ((nm == "Some") && (args.revl_length() == 1i64)) {
+        let sa = cir_args(args.clone(), 0i64, sc.clone(), hostSc.clone(), cx.clone(), String::from(""));
+        if (!sa.ok) {
+            return mk_irres(false, String::from(""));
+        }
+        return mk_irres(true, (String::from("{\"kind\": \"call\", \"callee\": {\"kind\": \"var\", \"name\": \"Some\"}, \"args\": [").revl_concat(&sa.js)).revl_concat("]}"));
+    }
     if ((((nm == "Some") || (nm == "None")) || (nm == "Ok")) || (nm == "Err")) {
         return mk_irres(false, String::from(""));
     }

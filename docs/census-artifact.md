@@ -14,9 +14,9 @@ same corpus and classifies every disagreement. Agreement means the same
 TAG and the same MESSAGE, not merely the same verdict.
 
 Distinct programs: **1037**. Programs run: **1043**.
-Checker version: `GATE-CENSUS-1+6feced95a60e`.
+Checker version: `GATE-CENSUS-1+7db5c6d30e30`.
 Engine: `selfhost`.
-Run: `census-selfhost-62ab764b122d`.
+Run: `census-selfhost-0c19c8cbd591`.
 
 The two numbers differ because 6 case ids reach
 the corpus twice, from two entries that spell the same
@@ -191,7 +191,7 @@ and minutes rather than seconds.
 - tracked buckets agree: **yes**
 - crate `false-admission` members: **0**
 - recorded at checker version: `GATE-CENSUS-1+6feced95a60e`
-- current for this run: **yes**
+- current for this run: **NO, stale: it lifts no claim**
 
 What it does not establish: The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.
 
@@ -222,8 +222,8 @@ below are the values you should get.
 |---|---|
 | distinct programs, 1037 | distinct case ids from `load_corpus` in `tools/gate_reference_census.py` |
 | programs run, 1043 | the length of the same list, repeats included |
-| run `census-selfhost-62ab764b122d` | sha256 over every `(case id, source)` the run read, ids repo-relative |
-| checker version `GATE-CENSUS-1+6feced95a60e` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
+| run `census-selfhost-0c19c8cbd591` | sha256 over every `(case id, source)` the run read, ids repo-relative |
+| checker version `GATE-CENSUS-1+7db5c6d30e30` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
 | `src/revl@sha256:eb399b5f334c` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
 | every bucket count | `tools/gate_reference_census.py --json out.json` |
 | the false-admit allowance | `tools/gate_reference_census_baseline.json`, which is in the tree |

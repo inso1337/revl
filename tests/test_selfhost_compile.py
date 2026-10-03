@@ -610,9 +610,10 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # no residual: the fully-native chain reproduces the whole java corpus.
     ),
     "rust": (
-        # component edge shapes; the host-root and realm-placement documents
-        # left this list when lower.rvl grew those two surfaces.
-        "component_edges.rvl",
+        # (`component_edges.rvl` left this list with issue #1818: its provide
+        # methods return `Some(...)`, which dropped the whole component body.
+        # The host-root and realm-placement documents left it earlier, when
+        # lower.rvl grew those two surfaces.)
         # issue 1153's two component documents. Neither was an EMITTER residual:
         # the rust byte oracle in tests/test_selfhost_emit_rust.py holds both
         # byte-exact when it is handed the REFERENCE IR (host runtime and all),
@@ -629,11 +630,8 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # rather than skipped, so the day lower.rvl grows that surface this list
         # shrinks instead of quietly keeping a waiver nobody rereads.
         "comp_stream.rvl",
-        # item 391: the bridge marshalling document. Emitter-exact from the
-        # reference IR; the native IR producer drops the whole component body
-        # when a provide method's body is a bare `None` (`fn weight(name) =
-        # None`), so the native chain emits the component with no provision.
-        "bridge_types.rvl",
+        # (`bridge_types.rvl`, item 391's bridge marshalling document, left with
+        # issue #1818 too: `fn weight(name) = None` dropped the component body.)
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

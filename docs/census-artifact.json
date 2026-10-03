@@ -3115,7 +3115,7 @@
    ],
    [
     "selfhost/lower.rvl",
-    "24d8fc4c217fc04129dc8d48a2ced04b6d965928610438c95eea998e486841f7",
+    "f89b2b4139093cc9ea0af692f5ecd466c239a4aa7c75e5752047595d98fc9313",
     "frontier-declined"
    ],
    [
@@ -5336,13 +5336,13 @@
   ],
   "cases_note": "One row per program run, in run order: case id, sha256 of the source bytes, bucket. `tools/census_artifact.py --verify` re-runs the census and compares these rows one by one, so a published verdict is checkable on its own and not only as part of a bucket count.",
   "checker_sources": {
-   "selfhost/lower.rvl": "24d8fc4c217fc04129dc8d48a2ced04b6d965928610438c95eea998e486841f7",
+   "selfhost/lower.rvl": "f89b2b4139093cc9ea0af692f5ecd466c239a4aa7c75e5752047595d98fc9313",
    "tests/test_gate_reference_census.py": "db49e785415076e632e8fb070ce5a12a3964e98ff5a0c234ed322d06b5d695a0",
    "tools/build_gate_crate.py": "9c1947aed30321deba81b5b749149a3549281e094c3d585e3c4c47f1c7ef3d13",
    "tools/corpus_provenance.py": "a98efd43d77d634328bb36a233c8f77ddb6c44f316bfab38da8a1cb2c73ef9bd",
    "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
   },
-  "checker_version": "GATE-CENSUS-1+6feced95a60e",
+  "checker_version": "GATE-CENSUS-1+7db5c6d30e30",
   "compiler_tree_digest": "src/revl@sha256:eb399b5f334c",
   "compiler_tree_digest_note": "EVAL-REPORT-1 names this field `compiler_commit`. It is not a commit. It is a sha256 over the src/revl/**/*.py modules the census run opened, listed in `pins.reference`, which is narrower than a commit (a commit that touched no module the run reads does not move it) and recomputable by anyone with a checkout.",
   "corpus_dirs": [
@@ -5448,11 +5448,11 @@
    },
    "report_inputs": {
     "crates/revl-gate/Cargo.toml": "de0fdc92fd47facfe7b962a233722285724deddca3f2a8495dd427008ff9f25c",
-    "crates/revl-gate/src/admission.rs": "b2e9bc8712dd0e3e86ebe9c76e96219eeb1c51ac65f10d40ec279154d09f01f8",
-    "crates/revl-gate/src/frontier.rs": "897579952ec737b6ff83b1beafd7b193a9b731b5b516f4e43b7913abaac9c1b4",
+    "crates/revl-gate/src/admission.rs": "7676720e7280808a3962e0481a617a1632294c9edff39914d8e6f48ca968e6fc",
+    "crates/revl-gate/src/frontier.rs": "9e1daf8f1a52f8912a8e02cccbf49ca2d17ff1ca60143940ed9abf734f050483",
     "crates/revl-gate/src/ir.rs": "0d171beeb651561811e855308c62554f44fbfca7a64bb3030abf0a3f20f9793b",
     "crates/revl-gate/src/lib.rs": "e9c5ddb7d29b757a7e08df675ae54fbaa637a7e952c3421c0ca6934016a13869",
-    "crates/revl-gate/src/selfhost.rs": "6e5bbd0dacbdf5b6695edaa97c0b11ce4cfd254e857063224a23c7f356adbb71",
+    "crates/revl-gate/src/selfhost.rs": "cc19382a0370d61b7fec6a7fdbd998f5f95f0d5899ef30ff29825a1ebc26480a",
     "crates/revl-gate/src/session.rs": "98470ddaf7803dd69da9e6c8c6750fc23956906d6529d5de5514ad0e02da6455",
     "crates/revl-gate/src/symbols.rs": "698969ee2ea20647b73a6b758da946a29658f1c72b1553153d50551b94becbec",
     "tests/fixtures/census_crate_reproduction.json": "d488c1db5f25417065c1725705b5891bdca419bb7f0ae3676dd113fb3a8c7cfb",
@@ -5575,16 +5575,16 @@
    "by": "tools/gate_reference_census.py --engine crate",
    "crate_false_admissions": [],
    "crate_tracked_buckets": {},
-   "current_checker_version": "GATE-CENSUS-1+6feced95a60e",
+   "current_checker_version": "GATE-CENSUS-1+7db5c6d30e30",
    "does_not_establish": "The crate is BUILT from selfhost/lower.rvl by tools/build_gate_crate.py, so it is not a second specification: it is the same rvl source through a different emitter, toolchain and runtime. What this reproduction rules out is the fast engine's python mirror of the native guards being wrong. The independence that carries the census is the OTHER axis, src/revl against selfhost/, and it is in the measurement rather than in this reproduction.",
-   "is_current": true,
+   "is_current": false,
    "n": 1035,
    "recorded_at_checker_version": "GATE-CENSUS-1+6feced95a60e",
    "recorded_in": "tests/fixtures/census_crate_reproduction.json",
    "tracked_buckets_agree": true,
    "what": "the committed crates/revl-gate, built by cargo and asked through a standalone consumer, over the same corpus"
   },
-  "run": "census-selfhost-62ab764b122d",
+  "run": "census-selfhost-0c19c8cbd591",
   "schema": "GATE-CENSUS-1",
   "tracked_bucket_prefixes": [
    "false-admission",
@@ -5600,29 +5600,27 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-62ab764b122d"
+    "run": "census-selfhost-0c19c8cbd591"
    },
    "public": true,
-   "rung": "demonstrated",
+   "rung": "measured",
    "text": "Over 1037 distinct programs (1043 runs; 6 case ids appear more than once and are named in the report), the gate issued no admission the reference refuses: the `false-admission` bucket is empty, and it is in NEVER_BASELINED, so `--record` cannot write one into the baseline and `--check` fails on any member however the baseline reads."
   },
   {
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-62ab764b122d"
+    "run": "census-selfhost-0c19c8cbd591"
    },
    "public": true,
-   "rung": "demonstrated",
+   "rung": "measured",
    "text": "The gate's standing false-admit allowance is empty: this run measured no `false-admit` member, and tools/gate_reference_census_baseline.json records none. The allowance is capped by name in tests/test_gate_reference_census.py, and `--check` fails in both directions, so it can only shrink in a diff somebody reads."
   },
   {
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-62ab764b122d"
+    "run": "census-selfhost-0c19c8cbd591"
    },
    "public": true,
    "rung": "measured",
@@ -5632,7 +5630,7 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-62ab764b122d"
+    "run": "census-selfhost-0c19c8cbd591"
    },
    "public": true,
    "rung": "measured",
@@ -5641,7 +5639,7 @@
  ],
  "generator": {
   "name": "selfhost/lower.rvl admit_src behind crates/revl-gate",
-  "run": "census-selfhost-62ab764b122d",
+  "run": "census-selfhost-0c19c8cbd591",
   "tool": "tools/gate_reference_census.py --engine selfhost"
  },
  "grader": {
