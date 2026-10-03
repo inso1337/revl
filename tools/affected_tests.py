@@ -86,6 +86,9 @@ BENCH_DEPENDENT_TESTS = (
     # mapping, so a bench change must re-run it.
     "tests/test_affected_tests.py",
     "tests/test_admission_latency.py",
+    # Issue #1800: drives bench/rescore.py's and bench/run.py's compiler
+    # loaders and checks they leave one `revl` in the process.
+    "tests/test_bench_compiler_reload_keeps_one_revl.py",
     # Issue #1702: checks the blast-radius task set, its expected states, its
     # TypeScript renderings and its scorer, all under bench/blast_radius/.
     "tests/test_blast_radius_bench.py",
