@@ -51,7 +51,9 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    obligation: `crossing.required` is always false, so do not spend effort
    deciding whether a hole "is an emission position". If the fill needs a
    crossing, `crossing.calls` lists the ones allowed there, already written
-   as `emit db.put(<k: Str>, <v: Str>)`. Fill one hole against its spec, re-check,
+   as `emit db.put(<k: Str>, <v: Str>)`. If it needs host code, `externs`
+   says where the declaration goes (the top level of the file, never at the
+   hole) and whether you may write one at all: an untrusted author may not. Fill one hole against its spec, re-check,
    repeat. This is the step that turns generate-whole/refuse/regenerate into
    scaffold/fill/fill: most wrong answers become unrepresentable before they
    are written.

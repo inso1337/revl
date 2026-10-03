@@ -23,8 +23,8 @@
         },
         "py": {
           "residual": 25,
-          "corpus": 101,
-          "reproduced": 76,
+          "corpus": 102,
+          "reproduced": 77,
           "documents": [
             "../../../backends/go/scenarios/advance.rvl",
             "../../../backends/go/testdata/stream_130.rvl",
@@ -81,7 +81,7 @@
         }
       },
       "total_residual": 34,
-      "total_corpus": 320,
+      "total_corpus": 321,
       "clean_tiers": [
         "java",
         "wasm"
@@ -93,10 +93,13 @@
       "means": "constructs the reference emitter implements and the self-host port does not",
       "tiers": {
         "go": {
-          "unported_constructs": 48,
-          "unported_reasons": 10,
+          "unported_constructs": 49,
+          "unported_reasons": 11,
           "blind_constructs": 1,
           "reasons": {
+            "Issues #1511 and #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit` (a `ctx.Effect` compensation entry), a provide-method `emit` and every value position of a provide method (`registerMethodCompensation`, through `revlDeclared` for a `let`, a `return`, an argument or a nested operand), and a timer firing. It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/extern_compensate/exec_test.go.": [
+              "class=emission"
+            ],
             "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
               "kind=bool",
               "kind=fn",
@@ -406,7 +409,7 @@
           }
         }
       },
-      "total_unported": 165
+      "total_unported": 166
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -414,7 +417,7 @@
       "means": "dispatch arms an oracle's reference implementation can take that no corpus document exhibits; an unexercised path, not a refusal",
       "oracles": {
         "compile": 1,
-        "emit_go": 49,
+        "emit_go": 50,
         "emit_java": 36,
         "emit_py": 5,
         "emit_rust": 34,
@@ -423,7 +426,7 @@
         "gate_census": 5,
         "lower_ir": 1
       },
-      "total_unreached": 201
+      "total_unreached": 202
     },
     "gate-reference-divergence": {
       "source": "tools/gate_reference_census_baseline.json",

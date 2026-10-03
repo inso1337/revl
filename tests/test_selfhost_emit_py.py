@@ -307,6 +307,9 @@ CORPUS = [
     # uncalled validated operation that is still registered.
     "../emit_ts_refusals/validated_emission_operation.rvl",
     "../emit_py_validated_shapes.rvl",
+    # Reference fix followed by the port, issue #1589: a timer firing registers
+    # the compensation an emitted extern declares (`compensation_method`).
+    "../emit_py_timer_compensate.rvl",
     # module-level declaration surface (slice 3, item 192)
     "types.rvl",       # `_emit_types`: record shape + variant classes, forward-ref quoting, gated `typing` import, `_py_type` (incl fn types)
     # docs/design/457 slice T1: the wellformed DECLARED-TYPE shapes, all legal.

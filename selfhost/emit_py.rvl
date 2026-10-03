@@ -2549,7 +2549,15 @@ fn provide_lines(step: Any, indent: Int, comp_name: Str, counter: Int, services:
 
 // `_timer`: a revertible schedule — the firing closure, its handle, and the
 // yielded `.cancel()` inverse.
-fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
+// issue #1589: the compensation an emitted extern DECLARES, registered once per
+// firing after the fire. The firing closure has no generator to yield into, so
+// it goes through `compensation_method`, the provide-method form.
+fn timer_compensation(em: Any, indent: Int, externs: List[Any]) -> List[Str] {
+  let ext_comp = compensated_extern(value_field(em, "expr"), externs)
+  return value_is_null(ext_comp) ? [] : [line(indent, `_revl_frame.compensation_method(lambda: ${cexpr(value_field(ext_comp, "compensate"))})`)]
+}
+
+fn timer_emit(step: Any, indent: Int, counter: Int, externs: List[Any]) -> EmitLines {
   let mode = value_str(value_field(step, "mode"))
   var sched = "schedule_after"
   if (mode == "every") { sched = "schedule_every" }
@@ -2577,6 +2585,7 @@ fn timer_emit(step: Any, indent: Int, counter: Int) -> EmitLines {
       out = out.push(line(indent + 1, `_revl_task.add_done_callback(${inflight}.discard)`))
     } else {
       out = out.push(line(indent + 1, rendered))
+      out = out.concat(timer_compensation(em, indent + 1, externs))
     }
   }
   out = out.push(line(indent, `${handle} = ${runtime_ref(sched)}(${interval}, ${fname})`))
@@ -3158,7 +3167,7 @@ fn body_step(step: Any, indent: Int, comp_name: Str, counter: Int, services: Any
   }
   if (kind == "stream-iter") { return stream_iter(step, indent, comp_name, counter, services, externs) }
   if (kind == "timer") {
-    let e = timer_emit(step, indent, counter)
+    let e = timer_emit(step, indent, counter, externs)
     var out = e.lines
     out = out.push("")
     return { lines: out, counter: e.counter }
