@@ -6,14 +6,30 @@
     "ShippingDesk injects `notify`, which nothing provides",
     "kept components that cannot link: ['ShippingDesk']"
   ],
-  "touched": ["MailRelay", "Notifier"],
+  "touched": [
+    "MailRelay",
+    "Notifier"
+  ],
   "touchedBeyondCascade": [],
-  "missedCascade": ["ShippingDesk"],
+  "missedCascade": [
+    "ShippingDesk"
+  ],
   "turns": 4,
   "tokensWritten": 610,
   "gate": {
+    "reversibilityRate": null,
+    "autoApprovedWithProof": null,
     "promptsPerSession": null,
-    "percentAutoApprovedWithProof": null,
-    "notInRevlState": ["reversibilityRate", "preflightCoverage", "violationsCaughtBeforeExecution", "residueAfterAbort"]
+    "preflightCoverage": null,
+    "violationsCaughtBeforeExecution": null,
+    "residueAfterAbort": null,
+    "notInRevlState": [
+      "reversibilityRate",
+      "autoApprovedWithProof",
+      "promptsPerSession",
+      "preflightCoverage",
+      "violationsCaughtBeforeExecution",
+      "residueAfterAbort"
+    ]
   }
 }

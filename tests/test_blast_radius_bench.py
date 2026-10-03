@@ -113,7 +113,10 @@ def test_there_are_hand_scored_examples_for_both_arms():
 
 
 def test_an_unreported_gate_axis_is_null_not_zero():
-    axes = B.gate_axes({"ok": True, "loaded": True})
+    axes = B.gate_axes({"ok": True, "loaded": True, "loopAxes": {
+        "reversibilityRate": {"numerator": 1, "denominator": 2, "value": 0.5}}})
+    assert axes["reversibilityRate"] == {"numerator": 1, "denominator": 2, "value": 0.5}
     assert axes["promptsPerSession"] is None
-    assert axes["percentAutoApprovedWithProof"] is None
-    assert "reversibilityRate" in axes["notInRevlState"]
+    assert "promptsPerSession" in axes["notInRevlState"]
+    assert "reversibilityRate" not in axes["notInRevlState"]
+    assert B.gate_axes(None)["notInRevlState"] == list(B.STATE_AXES)
