@@ -12,7 +12,7 @@ before any adapter is built:
    picked one, so it is refused.
 2. **The role's residence.** A role declared `on_device` may only be bound to
    an endpoint whose residence is `on_device` (`config.endpoint_residence`: an
-   OpenAI-compatible server on a loopback host). This is what makes the
+   OpenAI-compatible or Ollama server on a loopback host). This is what makes the
    compile-time confidentiality ceiling true at run time: `model_route` refuses
    a `confidential` arm that names an `off_device` role, and this refuses the
    `on_device` role being served from off the device.
@@ -74,6 +74,10 @@ class ModelOp:
     returns: str | None
     validated: bool
     is_async: bool
+    #: the IR's `response_grammar` for a `validated` operation (item 513)
+    grammar: dict | None = None
+    #: the IR's `response_schema` for a `validated` operation (item 257)
+    response_schema: dict | None = None
 
     @property
     def crossing(self) -> str:
@@ -174,6 +178,8 @@ def model_operations(ir, roles) -> tuple:
                 returns=spec.get("returns"),
                 validated=bool(spec.get("validated")),
                 is_async=bool(spec.get("async")),
+                grammar=spec.get("response_grammar"),
+                response_schema=spec.get("response_schema"),
             ))
     return tuple(ops)
 
@@ -235,7 +241,7 @@ def check_bindings(placement: Placement, config: ProviderConfig,
                 f"an on_device role is the placement the program relies on to "
                 f"keep a prompt on this machine; serving it from off the "
                 f"device would make the compile-time placement false. Bind it "
-                f"to an OpenAI-compatible server on a loopback address "
+                f"to an OpenAI-compatible or Ollama server on a loopback address "
                 f"(127.0.0.1, ::1, localhost). See {DOC}", name))
         reach = _reach_refusal(role, binding)
         if reach is not None:

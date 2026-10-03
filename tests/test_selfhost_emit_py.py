@@ -485,6 +485,8 @@ def test_witnessed_effects_register_each_success_once(emitted, monkeypatch):
 
     runtime = types.ModuleType("runtime")
     runtime.Frame = Frame
+    # issue #1504: a witnessed extern carries the E-Stop gate; no halt here
+    runtime.estop_gated = lambda name: (lambda fn: fn)
     monkeypatch.setitem(sys.modules, "runtime", runtime)
     ns = {}
     exec(compile(source, "witnessed_emitted.py", "exec"), ns)

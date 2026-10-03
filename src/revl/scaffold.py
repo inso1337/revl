@@ -273,7 +273,8 @@ def build_skeleton(spec: Spec) -> str:
     return "\n".join(lines)
 
 
-def scaffold_document(spec: Spec, filename: str = "scaffold.rvl") -> dict:
+def scaffold_document(spec: Spec, filename: str = "scaffold.rvl",
+                      untrusted: bool = False) -> dict:
     """Compile the skeleton and return it with its obligations and fill specs.
 
     The obligations carry the same `fillSpec` per hole that `revl_check` adds
@@ -289,7 +290,7 @@ def scaffold_document(spec: Spec, filename: str = "scaffold.rvl") -> dict:
         "source": source,
         "holeCount": len(holes),
         "admissible": not holes,
-        "obligations": enrich(ir),
+        "obligations": enrich(ir, untrusted=untrusted),
     }
 
 

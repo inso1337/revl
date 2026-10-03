@@ -67,6 +67,32 @@ process.on('unhandledRejection', fatal)
 const spec = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'))
 name = spec.name ?? 'proc'
 
+// issue #1621: the `--once` runner hands this process a per-run token as the
+// first line of stdin, and the four proof lines (UP, NO-RESIDUE, RESIDUE-LEFT,
+// DOWN) carry it, so a program's own output cannot forge them. Read here,
+// before the composition module is imported (so before any host code runs),
+// into a binding of this module that the emitted module cannot import. The
+// spec carries only the flag: it is a file the program could read.
+function readProofToken(): string {
+  const bytes: number[] = []
+  const one = Buffer.alloc(1)
+  for (;;) {
+    let n = 0
+    try {
+      n = fs.readSync(0, one, 0, 1, null)
+    } catch (error: any) {
+      if (error?.code === 'EAGAIN') continue
+      break
+    }
+    if (n === 0 || one[0] === 0x0a) break
+    bytes.push(one[0])
+  }
+  return Buffer.from(bytes).toString('utf8').trim()
+}
+const proofName: string = spec.proofOnStdin === true
+  ? `${name}#${readProofToken()}`
+  : name
+
 // item 396 option B: a `@ts ref` thunk resolves its host module at call time
 // through `globalThis.__REVL_REF_ROOT__` joined with the recorded relative path
 // (so the emitted artifact carries no machine path). Set it BEFORE the module is
@@ -308,12 +334,12 @@ async function teardown(): Promise<void> {
     log('residue', 'provisions', `${now.serviceImpls.length} service(s) provided`)
     try {
       assertNoResidue(ctx, baseline)
-      console.log(`[${name}] NO-RESIDUE — the composition left nothing behind`)
+      console.log(`[${proofName}] NO-RESIDUE — the composition left nothing behind`)
     } catch (error) {
-      console.log(`[${name}] RESIDUE-LEFT — ${String(error).split('\n')[0]}`)
+      console.log(`[${proofName}] RESIDUE-LEFT — ${String(error).split('\n')[0]}`)
     }
   }
-  console.log(`[${name}] DOWN`)
+  console.log(`[${proofName}] DOWN`)
   process.exit(0)
 }
 
@@ -340,7 +366,7 @@ async function teardown(): Promise<void> {
 process.on('SIGTERM', teardown)
 process.on('SIGINT', teardown)
 
-console.log(`[${name}] UP`)
+console.log(`[${proofName}] UP`)
 
 if (once) {
   await teardown()

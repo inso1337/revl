@@ -22,6 +22,12 @@ from __future__ import annotations
 
 from .completion import Completion, CompletionRequest
 
+#: The `provider` value a binding names to use this wire format, and the
+#: fields it accepts beyond the common ones. `revl.providers.config` builds
+#: its closed vocabulary from these, so the format list is declared once.
+PROVIDER = "openai-compatible"
+FIELDS = frozenset()
+
 #: Reasoning-channel keys, in the order they are read.
 REASONING_KEYS = ("reasoning", "reasoning_content")
 
@@ -46,10 +52,18 @@ def build(binding, request: CompletionRequest, credential: str | None):
         body["top_p"] = request.top_p
     if request.seed is not None:
         body["seed"] = request.seed
+    structured = request.structured
+    if structured is not None and structured.dialect == "json-schema":
+        body["response_format"] = {"type": "json_schema", "json_schema": {
+            "name": "revl_response", "schema": structured.artifact,
+            "strict": True}}
+    elif structured is not None and structured.dialect == "gbnf":
+        # llama.cpp's server reads a GBNF grammar from this field
+        body["grammar"] = structured.artifact
     return binding.base_url + "/chat/completions", headers, body
 
 
-def parse(raw: dict) -> Completion:
+def parse(raw: dict, request: CompletionRequest | None = None) -> Completion:
     choice = raw["choices"][0]
     message = choice["message"]
     text = message.get("content") or ""

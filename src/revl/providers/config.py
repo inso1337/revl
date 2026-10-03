@@ -18,6 +18,17 @@ section 5). This module reads that configuration.
 
 JSON, or TOML with the same shape (`[roles.local]`).
 
+A role bound to `provider = "ollama"` is LOADED and UNLOADED by revl (roadmap
+item 515, slice S2): its `devices` table names, per device of the placement's
+host, the load options that put the model on that device, and the provision
+loads it on the one device the model schedule chose (`revl.providers.provision`).
+
+    [roles.small]
+    provider = "ollama"
+    base_url = "http://127.0.0.1:11434"
+    model = "qwen3:0.6b"
+    devices = { cpu0 = { num_gpu = 0 }, gpu0 = {} }
+
 WHAT IS REFUSED HERE, AND WHY
 -----------------------------
 Everything unknown is refused rather than ignored, because a field that is
@@ -34,7 +45,7 @@ silently dropped is a setting the operator believes is in force.
   (`?key=...`) are both refused: a URL is printed in errors and logs, and a key
   inside one would travel with it.
 * **An `on_device` claim the endpoint contradicts.** Only an OpenAI-compatible
-  endpoint on a loopback address can be `on_device`. A hosted API is always
+  or Ollama endpoint on a loopback address can be `on_device`. A hosted API is always
   `off_device`, whatever its `base_url` says, and a non-loopback host is
   always `off_device`. The operator may DOWNGRADE a loopback endpoint to
   `off_device` (a local proxy that forwards to a cloud API); the reverse is
@@ -52,8 +63,21 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from . import wire_anthropic, wire_gemini, wire_ollama, wire_openai
+from .structured import MODES as STRUCTURED_MODES
+
+#: `{provider: wire module}`, in the order a refusal lists them. Each wire
+#: module names its own `PROVIDER` and `FIELDS`, so this is the one place the
+#: closed vocabulary of formats is assembled; `PROVIDERS`, the per-provider
+#: field table and the adapter's dispatch all read it.
+WIRES = {w.PROVIDER: w for w in (wire_openai, wire_anthropic, wire_gemini,
+                                 wire_ollama)}
+
 #: The wire formats this package speaks. CLOSED, so a typo is a refusal.
-PROVIDERS = ("openai-compatible", "anthropic", "gemini")
+PROVIDERS = tuple(WIRES)
+
+#: The providers whose endpoint may be on this device (a loopback server).
+LOCAL_PROVIDERS = ("openai-compatible", "ollama")
 
 #: Gemini's two front doors.
 GEMINI_APIS = ("google-ai", "vertex")
@@ -62,13 +86,9 @@ RESIDENCES = ("on_device", "off_device")
 
 _COMMON_FIELDS = frozenset({
     "provider", "model", "base_url", "api_key_env", "max_tokens",
-    "temperature", "timeout", "residence", "reaches",
+    "temperature", "timeout", "residence", "reaches", "structured_output",
 })
-_PROVIDER_FIELDS = {
-    "openai-compatible": frozenset(),
-    "anthropic": frozenset({"anthropic_version"}),
-    "gemini": frozenset({"api", "project", "location"}),
-}
+_PROVIDER_FIELDS = {provider: wire.FIELDS for provider, wire in WIRES.items()}
 
 #: Field names that can only mean "the credential itself". Refused by name.
 _CREDENTIAL_FIELDS = frozenset({
@@ -118,10 +138,33 @@ class Binding:
     project: str | None = None
     location: str | None = None
     anthropic_version: str = DEFAULT_ANTHROPIC_VERSION
+    #: `ollama` only: `((device name, ((option, value), ...)), ...)`, the load
+    #: options per device the provision may load this role on. Empty for
+    #: every other provider, whose endpoint manages its own residency.
+    devices: tuple = ()
+    #: how a `validated` crossing's grammar is attached (issue #1462);
+    #: `revl.providers.structured.MODES` lists the values per provider
+    structured_output: str = ""
 
     @property
     def endpoint(self) -> str:
         return self.base_url
+
+    @property
+    def managed(self) -> bool:
+        """Whether revl loads and unloads this role's model (slice S2)."""
+        return self.provider == "ollama"
+
+    def device_names(self) -> tuple:
+        return tuple(name for name, _ in self.devices)
+
+    def device_options(self, device: str) -> dict | None:
+        """The load options for `device`, or None when the binding does not
+        name it (and so cannot load the model there)."""
+        for name, options in self.devices:
+            if name == device:
+                return dict(options)
+        return None
 
 
 @dataclass(frozen=True)
@@ -151,12 +194,13 @@ def endpoint_residence(provider: str, base_url: str) -> str:
     """Where a call to this endpoint runs, as far as revl can tell from the
     configuration alone.
 
-    `on_device` only for an OpenAI-compatible server on a loopback host. The
+    `on_device` only for an OpenAI-compatible or Ollama server on a loopback
+    host. The
     Anthropic and Gemini wire formats are hosted APIs, so they are
     `off_device` even when `base_url` points at a loopback proxy: the proxy's
     upstream is the provider, and the prompt leaves the device through it.
     """
-    if provider != "openai-compatible":
+    if provider not in LOCAL_PROVIDERS:
         return "off_device"
     return "on_device" if is_loopback(urlsplit(base_url).hostname) \
         else "off_device"
@@ -260,6 +304,10 @@ def _binding(role: str, entry, source: str) -> Binding:
 
     base = entry.get("base_url")
     if base is None:
+        if provider == "ollama":
+            raise _refuse(where, "`base_url` is required for an Ollama server "
+                                 "(its root, for example "
+                                 "http://127.0.0.1:11434)")
         if provider == "openai-compatible":
             raise _refuse(where, "`base_url` is required for an "
                                  "OpenAI-compatible endpoint (for example "
@@ -277,12 +325,18 @@ def _binding(role: str, entry, source: str) -> Binding:
         raise _refuse(where, f"`residence` must be one of "
                              f"{', '.join(RESIDENCES)}")
     if residence == "on_device" and derived == "off_device":
-        reason = ("a hosted API" if provider != "openai-compatible"
+        reason = ("a hosted API" if provider not in LOCAL_PROVIDERS
                   else "not on a loopback address")
         raise _refuse(where, f"`residence` says on_device, but {base} is "
                              f"{reason}, so a prompt sent there leaves the "
                              f"device. The residence of an endpoint can be "
                              f"narrowed by configuration, never widened")
+
+    structured = entry.get("structured_output",
+                           STRUCTURED_MODES[provider][0])
+    if structured not in STRUCTURED_MODES[provider]:
+        raise _refuse(where, f"`structured_output` for {provider} must be one "
+                             f"of {', '.join(STRUCTURED_MODES[provider])}")
 
     reaches = entry.get("reaches", [])
     if not isinstance(reaches, list) or not all(
@@ -302,7 +356,43 @@ def _binding(role: str, entry, source: str) -> Binding:
         project=project, location=location,
         anthropic_version=entry.get("anthropic_version",
                                     DEFAULT_ANTHROPIC_VERSION),
+        devices=(_devices(where, entry.get("devices"))
+                 if provider == "ollama" else ()),
+        structured_output=structured,
     )
+
+
+def _devices(where: str, table) -> tuple:
+    """An `ollama` binding's `devices`: a non-empty table of device name to
+    load options. Refused rather than defaulted: a binding with no device
+    table has no device it can be loaded on, and loading it where the server
+    likes is the "any free device" answer the model schedule exists to
+    refuse."""
+    allowed = wire_ollama.DEVICE_OPTIONS
+    if not isinstance(table, dict) or not table:
+        raise _refuse(where, "`devices` is required for provider ollama: a "
+                             "table of the placement's device names (for "
+                             "example `cpu0`, `gpu0`) to the load options that "
+                             "put the model on each. revl loads the model only "
+                             "on the device the model schedule chose, so a "
+                             "binding with no devices can be loaded nowhere")
+    out = []
+    for name, options in table.items():
+        if not isinstance(name, str) or not _ENV_NAME.match(name):
+            raise _refuse(where, "a `devices` name must be a device name of "
+                                 "the placement (letters, digits and `_`)")
+        if not isinstance(options, dict):
+            raise _refuse(where, f"`devices.{name}` must be a table of load "
+                                 f"options ({', '.join(allowed)})")
+        unknown = sorted(set(options) - set(allowed))
+        if unknown:
+            raise _refuse(where, f"`devices.{name}` has unknown option(s) "
+                                 f"{', '.join(unknown)}; the load options are "
+                                 f"{', '.join(allowed)}")
+        for option, value in options.items():
+            _number(where, f"devices.{name}.{option}", value, int, 0)
+        out.append((name, tuple(sorted(options.items()))))
+    return tuple(out)
 
 
 def parse_config(data, source: str = "<config>") -> ProviderConfig:
