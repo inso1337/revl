@@ -4327,6 +4327,22 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
       return render_expr(value_field(s0, "expr"), ctx)
     }
   }
+  return pure_stmts(steps, ctx, method_param_names(method)).join(" ")
+}
+
+fn method_param_names(method: Any) -> List[Str] {
+  var out: List[Str] = []
+  for (p of value_list(value_field(method, "params"))) { out = out.push(value_str(p)) }
+  return out
+}
+
+// `_rust_render_pure_stmts` (issue #548): a PURE provide-method step list as
+// Rust statement strings: bindings, assignments, `return`, and the control-flow
+// forms whose bodies are themselves pure. Shared by the pure-method path and
+// the effectful one, where a top-level `if`/`while`/`for` sits beside the
+// `emit`/`effect` steps. A `let` shadows an outer capture for the rest of its
+// list; an arm renders in a copy of the scope, so its bindings stay inside it.
+fn pure_stmts(steps: List[Any], ctx: Ctx, params: List[Str]) -> List[Str] {
   var parts = []
   var c = ctx
   for (step of steps) {
@@ -4339,20 +4355,60 @@ fn pure_method_statements(method: Any, ctx: Ctx) -> Str {
       parts = parts.push(`let ${mut}${mangle(nm)} = ${render_expr(value_field(step, "value"), cshadow)};`)
       c = cshadow
     } else {
-      if (kind == "assign") {
-        parts = parts.push(`${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`)
-      } else {
-        if (kind == "return") {
-          let e = value_field(step, "expr")
-          if (value_is_null(e)) { parts = parts.push("return;") }
-          else { parts = parts.push(`return ${render_expr(e, c)};`) }
-        } else {
-          parts = parts.push(`<<DEFER-method-step:${kind}>>`)
-        }
-      }
+      parts = parts.push(pure_stmt(step, kind, c, params))
     }
   }
-  return parts.join(" ")
+  return parts
+}
+
+// The scope an emission inside an arm renders its call in: each method param
+// cloned, so the call does not move a value the rest of the body reads.
+fn params_cloned(rn: Map[Str, Str], params: List[Str]) -> Map[Str, Str] {
+  var out = rn
+  for (p of params) { out = out.set(p, `${p}.clone()`) }
+  return out
+}
+
+fn pure_stmt(step: Any, kind: Str, c: Ctx, params: List[Str]) -> Str {
+  if (kind == "assign") {
+    return `${mangle(value_str(value_field(step, "name")))} = ${render_expr(value_field(step, "value"), c)};`
+  }
+  if (kind == "return") {
+    let e = value_field(step, "expr")
+    if (value_is_null(e)) { return "return;" }
+    return `return ${render_expr(e, c)};`
+  }
+  if (kind == "if") {
+    let cond = render_expr(value_field(step, "cond"), c)
+    let then = pure_stmts(value_list(value_field(step, "then")), c, params).join(" ")
+    var out = `if ${cond} { ${then} }`
+    let els = value_list(value_field(step, "else"))
+    if (els.length() > 0) { out = out.concat(` else { ${pure_stmts(els, c, params).join(" ")} }`) }
+    return out
+  }
+  if (kind == "while") {
+    let cond = render_expr(value_field(step, "cond"), c)
+    return `while ${cond} { ${pure_stmts(value_list(value_field(step, "body")), c, params).join(" ")} }`
+  }
+  if (kind == "for") {
+    // `.iter().cloned()` yields owned elements without moving the iterable (a
+    // param or `self` field may be read again).
+    let bind = value_str(value_field(step, "bind"))
+    let inner = set_rn(c, c.rn.set(bind, mangle(bind)))
+    let iterable = render_expr(value_field(step, "iterable"), c)
+    let body = pure_stmts(value_list(value_field(step, "body")), inner, params).join(" ")
+    return `for ${mangle(bind)} in ${iterable}.iter().cloned() { ${body} }`
+  }
+  if (kind == "emit") {
+    // item 458 / issue #721: a bare `emit` inside an arm registers nothing, so
+    // it renders as the effectful renderer's bare emit, the method params
+    // cloned into the call. A conditional `emit ... compensate` is refused at
+    // lowering and never reaches here.
+    return `let _ = ${render_expr(value_field(step, "expr"), set_rn(c, params_cloned(c.rn, params)))};`
+  }
+  if (kind == "break") { return "break;" }
+  if (kind == "continue") { return "continue;" }
+  return `<<DEFER-method-step:${kind}>>`
 }
 
 // ------------------------------------------------------------ config (item 218)
@@ -4773,23 +4829,39 @@ fn emit_req_bindings(reqs: Any, indent: Int) -> List[Str] {
 }
 
 // -------------------------------------------- effectful method body (item 218)
+// `_iter_method_steps`: every step of a provide-method body, descending the
+// `if`/`while`/`for` arms issue #548 admits, so a bare `emit` inside an arm
+// (item 458) makes the method effectful.
+fn iter_method_steps(steps: List[Any]) -> List[Any] {
+  var out: List[Any] = []
+  for (step of steps) {
+    out = out.push(step)
+    let k = value_str(value_field(step, "step"))
+    if (k == "if") {
+      out = out.concat(iter_method_steps(value_list(value_field(step, "then"))))
+      out = out.concat(iter_method_steps(value_list(value_field(step, "else"))))
+    }
+    if (k == "while" || k == "for") { out = out.concat(iter_method_steps(value_list(value_field(step, "body")))) }
+  }
+  return out
+}
+
 fn component_has_effectful_methods(comp: Any) -> Bool {
   for (step of value_list(value_field(comp, "body"))) {
     if (value_str(value_field(step, "step")) == "provide") {
       for (method of value_list(value_field(step, "methods"))) {
-        for (bs of value_list(value_field(method, "body"))) {
-          let k = value_str(value_field(bs, "step"))
-          if (k == "effect" || k == "emit") { return true }
-        }
+        if (method_has_effectful_steps(method)) { return true }
       }
     }
   }
   return false
 }
+// `_RUST_EFFECTFUL_STEPS`: `effect`, `emit` and the method-body host CAS
+// `let-effect` (item 397).
 fn method_has_effectful_steps(method: Any) -> Bool {
-  for (bs of value_list(value_field(method, "body"))) {
+  for (bs of iter_method_steps(value_list(value_field(method, "body")))) {
     let k = value_str(value_field(bs, "step"))
-    if (k == "effect" || k == "emit") { return true }
+    if (k == "effect" || k == "emit" || k == "let-effect") { return true }
   }
   return false
 }
@@ -4937,7 +5009,13 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
         } else {
-          out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
+          if (kind == "if" || kind == "while" || kind == "for" || kind == "break" || kind == "continue") {
+            // issue #548: a top-level control-flow step beside the effect/emit
+            // steps; its arms are pure, so the shared pure renderer writes it.
+            for (ln of pure_stmts([step], c, method_param_names(method))) { out = out.push(`${pad}${ln}`) }
+          } else {
+            out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
+          }
         }
       }
     }

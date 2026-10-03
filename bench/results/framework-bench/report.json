@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+    "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -763,12 +763,13 @@
                 ]
               },
               "rust": {
-                "residual": 2,
-                "corpus": 43,
+                "residual": 3,
+                "corpus": 44,
                 "reproduced": 41,
                 "documents": [
                   "by_value_reuse.rvl",
-                  "comp_stream.rvl"
+                  "comp_stream.rvl",
+                  "method_control_flow.rvl"
                 ]
               },
               "ts": {
@@ -801,8 +802,8 @@
                 "documents": []
               }
             },
-            "total_residual": 27,
-            "total_corpus": 296,
+            "total_residual": 28,
+            "total_corpus": 297,
             "clean_tiers": [
               "java",
               "wasm"
@@ -1166,14 +1167,14 @@
         "unavailable": {}
       },
       "headline": {
-        "documents_refused": 27,
-        "corpus": 296,
-        "n": 296,
+        "documents_refused": 28,
+        "corpus": 297,
+        "n": 297,
         "per_tier": {
           "go": 3,
           "java": 0,
           "py": 6,
-          "rust": 2,
+          "rust": 3,
           "ts": 16,
           "wasm": 0
         },
@@ -2546,11 +2547,11 @@
   ],
   "claims": [
     {
-      "text": "the fully-native revl chain does not reproduce 27 of 296 corpus documents that the reference compiler accepts (n=296)",
+      "text": "the fully-native revl chain does not reproduce 28 of 297 corpus documents that the reference compiler accepts (n=297)",
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2560,7 +2561,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2570,7 +2571,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2580,7 +2581,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2590,7 +2591,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2600,7 +2601,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2610,7 +2611,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2620,7 +2621,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "782e16552fabee3858301dfab2c4b39ebe2472ab",
+        "compiler_commit": "fe18b0cca950b8d28d2b299cb4f87a2c7b8e7613",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }

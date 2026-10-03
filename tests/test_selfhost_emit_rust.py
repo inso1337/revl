@@ -286,6 +286,10 @@ CORPUS = [
                              #   list element, branch tail, `let`, iterable),
                              #   the field and constructor clones, the moving
                              #   iterable, and the inference behind them
+    "method_control_flow.rvl",  # item 391: control flow in a provide method
+                             #   (issue #548): `if`/`else`, `while` + `break`,
+                             #   `for` + `continue`, a guard beside an emit, and
+                             #   an emit inside an arm (item 458)
     "teardown_compensate.rvl",  # item 391: the per-activation teardown
                              #   accumulator: `RevlTeardown` opened first and
                              #   committed last, an activation `emit ...

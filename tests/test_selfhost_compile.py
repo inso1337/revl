@@ -637,6 +637,12 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         # call to a `let`-bound arrow (`i = bump(i) + 1`), so it writes the `+`
         # without the reference's `"operands": "Int"` annotation.
         "by_value_reuse.rvl",
+        # item 391: the provide-method control-flow document. Emitter-exact from
+        # the reference IR; the native IR producer drops the whole component
+        # `body` of a component whose provide method holds a control-flow step,
+        # because `cir_method_stmts` in selfhost/lower.rvl has no
+        # `if`/`while`/`for` arm.
+        "method_control_flow.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

@@ -52,7 +52,7 @@
       "go": 2541,
       "java": 986,
       "py": 669,
-      "rust": 1125,
+      "rust": 1089,
       "ts": 285,
       "wasm": 1558
     },
@@ -60,7 +60,7 @@
       "go": 103,
       "java": 175,
       "py": 103,
-      "rust": 276,
+      "rust": 274,
       "ts": 94,
       "wasm": 63
     }
@@ -996,7 +996,7 @@
           "_emit_v3": 7,
           "emit": 3
         },
-        "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers the witnessed half rather than emitting a partial transaction. The compensation half is ported since item 391 and held to byte agreement by emit_rust_corpus/teardown_compensate.rvl, which reaches `_emit_teardown_begin`, `_emit_teardown_commit`, `_emit_compensation_registration` and `_emit_activation_compensation` in full, 6 more of `_method_body_lines`'s statements and 1 more each of `_body_has_compensation`'s and `_method_bodies_have_compensation`'s. What is left of those is the witnessed half, the extern-declared compensation (issue #1592) and the component-`if` walk, which no document can reach because a component `if` is a guard that holds only `fail` (G6).": {
+        "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers the witnessed half rather than emitting a partial transaction. The compensation half is ported since item 391 and held to byte agreement by emit_rust_corpus/teardown_compensate.rvl, which reaches `_emit_teardown_begin`, `_emit_teardown_commit`, `_emit_compensation_registration` and `_emit_activation_compensation` in full, 6 more of `_method_body_lines`'s statements and 1 more each of `_body_has_compensation`'s and `_method_bodies_have_compensation`'s. What is left of those is the witnessed half, the extern-declared compensation (issue #1592) and the component-`if` walk, which no document can reach because a component `if` is a guard that holds only `fail` (G6). emit_rust_corpus/method_control_flow.rvl (item 391) reaches 5 more of `_method_body_lines`'s statements, 35 -> 30: the top-level control-flow arm (issue #548).": {
           "_body_has_compensation": 2,
           "_body_has_witnessed": 2,
           "_dedup_colour_erased_poly_externs": 11,
@@ -1007,7 +1007,7 @@
           "_emit_witnessed_step": 26,
           "_method_bodies_have_compensation": 1,
           "_method_bodies_have_witnessed": 1,
-          "_method_body_lines": 35,
+          "_method_body_lines": 30,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
@@ -1017,9 +1017,8 @@
         "backends/rust/emit.py::_borrow_list_arg: item 437d borrow of a read-only list parameter into a `&[T]` slot. The already-lowered-slice pass-through and the plain `&`/`&(..)` lends are covered; the residual statement is the List-index place-borrow arm (`&xs[i]` via _v3_strip_index_clone), which no byte-agreement corpus document passes into a borrowed `&[T]` argument, the same shape left uncovered on _v3_strip_index_clone itself.": {
           "_borrow_list_arg": 1
         },
-        "backends/rust/emit.py::_rust_render_pure_stmts: issue #548 renders a pure provide-method step list (bindings, assignment, return, and if/while/for/break/continue whose arms are themselves pure), and item 458 / issue #721 added its `emit` arm (a BARE conditional crossing inside an `if`/`else` arm, rendered exactly as the effectful renderer's own bare-emit arm: `let _ = <call>;` with the method params cloned into the call). No byte-agreement corpus document drives a provide method through control flow at all, so these statement forms are reference-measured only; the identical fn-grammar shapes are covered. Reaching them from the corpus needs the self-host `emit_rust.rvl` provide-method renderer to mirror the same arms first, or the two tiers diverge on the document that reaches them (the item-429 trap) - tracked as remaining work on item 458. `_iter_method_steps` is the shared walk those arms need: it descends the `if`/`while`/`for` bodies issue #548 admits so the effectful-method scans see a crossing nested in an arm instead of taking the pure path over it.": {
-          "_iter_method_steps": 3,
-          "_rust_render_pure_stmts": 29
+        "backends/rust/emit.py::_rust_render_pure_stmts: issue #548 renders a pure provide-method step list (bindings, assignment, return, and if/while/for/break/continue whose arms are themselves pure), and item 458 / issue #721 added its `emit` arm. selfhost/emit_rust.rvl mirrors it since item 391 (`pure_stmts`, with `iter_method_steps` for `_iter_method_steps`), held to byte agreement by emit_rust_corpus/method_control_flow.rvl, which reaches `_iter_method_steps` in full and every arm but one: the final `raise` for a step kind the lowering never puts in a pure method body.": {
+          "_rust_render_pure_stmts": 1
         },
         "backends/rust/emit.py::_v3_strip_index_clone: item 437d read-only clone elision for a List index read. The bare index place (xs[i].clone() to xs[i]) is covered; the residual is the field-off-index shape (xs[i].f.clone() to xs[i].f) in a read-only slot, reached by no corpus document.": {
           "_v3_strip_index_clone": 1
@@ -1857,17 +1856,17 @@
           "result_to_json": 1,
           "rstrip": 5
         },
-        "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered.": {
+        "Component construction and provide-method alternatives: these statements detect deferred host binds/effectful bodies, select construction/config paths, manage method-local rename and undo-clone maps, reject unsupported provide steps, and handle formatting-line boundaries. Valid scalar config, service metadata, pure let/assign/return bodies and free-function calls are covered. Item 391 (issue #548 in the port): `pure_method_statements` is reached in full, `method_body_lines` 5 -> 4, and `pure_stmt`'s fallback marker for a step kind the lowering never puts in a pure method body is the reference's own unreached `raise`.": {
           "config_default_lit": 1,
           "emit_component": 1,
           "emit_component_new": 1,
           "has_extra_linebreak": 1,
           "is_extra_linebreak": 3,
-          "method_body_lines": 5,
+          "method_body_lines": 4,
           "mname": 1,
           "provide_let_type": 1,
           "provide_methods": 1,
-          "pure_method_statements": 2,
+          "pure_stmt": 1,
           "strip_spaces": 1
         },
         "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {

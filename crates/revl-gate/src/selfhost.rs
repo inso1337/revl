@@ -5649,8 +5649,20 @@ fn pure_method_statements(method: Value, ctx_: Ctx__m1) -> String {
             return render_expr(value_field(s0.clone(), String::from("expr")), ctx_.clone());
         }
     }
+    return pure_stmts(steps.clone(), ctx_.clone(), method_param_names(method.clone())).revl_join(" ");
+}
+
+fn method_param_names(method: Value) -> Vec<String> {
+    let mut out: Vec<String> = vec![];
+    for p in value_list(value_field(method.clone(), String::from("params"))) {
+        out.push(value_str(p.clone()));
+    }
+    return out;
+}
+
+fn pure_stmts(steps: Vec<Value>, ctx_: Ctx__m1, params: Vec<String>) -> Vec<String> {
     let mut parts: Vec<String> = vec![];
-    let mut c = ctx_.clone();
+    let mut c = ctx_;
     for step in steps {
         let kind = value_str(value_field(step.clone(), String::from("step")));
         if (kind == "let") {
@@ -5663,23 +5675,62 @@ fn pure_method_statements(method: Value, ctx_: Ctx__m1) -> String {
             parts.push(format!("let {}{} = {};", mut_, mangle(nm.clone()), render_expr(value_field(step.clone(), String::from("value")), cshadow.clone())));
             c = cshadow.clone();
         } else {
-            if (kind == "assign") {
-                parts.push(format!("{} = {};", mangle(value_str(value_field(step.clone(), String::from("name")))), render_expr(value_field(step.clone(), String::from("value")), c.clone())));
-            } else {
-                if (kind == "return") {
-                    let e = value_field(step.clone(), String::from("expr"));
-                    if value_is_null(e.clone()) {
-                        parts.push(String::from("return;"));
-                    } else {
-                        parts.push(format!("return {};", render_expr(e.clone(), c.clone())));
-                    }
-                } else {
-                    parts.push(format!("<<DEFER-method-step:{}>>", kind));
-                }
-            }
+            parts.push(pure_stmt(step.clone(), &kind, c.clone(), params.clone()));
         }
     }
-    return parts.revl_join(" ");
+    return parts;
+}
+
+fn params_cloned(rn: std::collections::HashMap<String, String>, params: Vec<String>) -> std::collections::HashMap<String, String> {
+    let mut out = rn;
+    for p in params {
+        out.insert(p.clone(), format!("{}.clone()", p));
+    }
+    return out;
+}
+
+fn pure_stmt(step: Value, kind: &str, c: Ctx__m1, params: Vec<String>) -> String {
+    if (kind == "assign") {
+        return format!("{} = {};", mangle(value_str(value_field(step.clone(), String::from("name")))), render_expr(value_field(step.clone(), String::from("value")), c.clone()));
+    }
+    if (kind == "return") {
+        let e = value_field(step.clone(), String::from("expr"));
+        if value_is_null(e.clone()) {
+            return String::from("return;");
+        }
+        return format!("return {};", render_expr(e.clone(), c.clone()));
+    }
+    if (kind == "if") {
+        let cond = render_expr(value_field(step.clone(), String::from("cond")), c.clone());
+        let then = pure_stmts(value_list(value_field(step.clone(), String::from("then"))), c.clone(), params.clone()).revl_join(" ");
+        let mut out = format!("if {} {{ {} }}", cond, then);
+        let els = value_list(value_field(step.clone(), String::from("else")));
+        if (els.revl_length() > 0i64) {
+            out.push_str(&(format!(" else {{ {} }}", pure_stmts(els.clone(), c.clone(), params.clone()).revl_join(" "))));
+        }
+        return out;
+    }
+    if (kind == "while") {
+        let cond = render_expr(value_field(step.clone(), String::from("cond")), c.clone());
+        return format!("while {} {{ {} }}", cond, pure_stmts(value_list(value_field(step.clone(), String::from("body"))), c.clone(), params.clone()).revl_join(" "));
+    }
+    if (kind == "for") {
+        let bind = value_str(value_field(step.clone(), String::from("bind")));
+        let inner = set_rn(c.clone(), { let mut c = c.rn.clone(); c.insert(bind.clone(), mangle(bind.clone())); c });
+        let iterable = render_expr(value_field(step.clone(), String::from("iterable")), c.clone());
+        let body = pure_stmts(value_list(value_field(step.clone(), String::from("body"))), inner.clone(), params.clone()).revl_join(" ");
+        return format!("for {} in {}.iter().cloned() {{ {} }}", mangle(bind.clone()), iterable, body);
+    }
+    if (kind == "emit") {
+        return format!("let _ = {};", render_expr(value_field(step.clone(), String::from("expr")), set_rn(c.clone(), params_cloned(c.rn.clone(), params.clone()))));
+    }
+    if (kind == "break") {
+        return String::from("break;");
+    }
+    if (kind == "continue") {
+        return String::from("continue;");
+    }
+    return format!("<<DEFER-method-step:{}>>", kind);
 }
 
 fn binds(comp: Value) -> Vec<String> {
@@ -6157,15 +6208,28 @@ fn emit_req_bindings(reqs: Value, indent: i64) -> Vec<String> {
     return out;
 }
 
+fn iter_method_steps(steps: Vec<Value>) -> Vec<Value> {
+    let mut out: Vec<Value> = vec![];
+    for step in steps {
+        out.push(step.clone());
+        let k = value_str(value_field(step.clone(), String::from("step")));
+        if (k == "if") {
+            out.extend((iter_method_steps(value_list(value_field(step.clone(), String::from("then"))))).iter().cloned());
+            out.extend((iter_method_steps(value_list(value_field(step.clone(), String::from("else"))))).iter().cloned());
+        }
+        if ((k == "while") || (k == "for")) {
+            out.extend((iter_method_steps(value_list(value_field(step.clone(), String::from("body"))))).iter().cloned());
+        }
+    }
+    return out;
+}
+
 fn component_has_effectful_methods(comp: Value) -> bool {
     for step in value_list(value_field(comp.clone(), String::from("body"))) {
         if (value_str(value_field(step.clone(), String::from("step"))) == "provide") {
             for method in value_list(value_field(step.clone(), String::from("methods"))) {
-                for bs in value_list(value_field(method.clone(), String::from("body"))) {
-                    let k = value_str(value_field(bs.clone(), String::from("step")));
-                    if ((k == "effect") || (k == "emit")) {
-                        return true;
-                    }
+                if method_has_effectful_steps(method.clone()) {
+                    return true;
                 }
             }
         }
@@ -6174,9 +6238,9 @@ fn component_has_effectful_methods(comp: Value) -> bool {
 }
 
 fn method_has_effectful_steps(method: Value) -> bool {
-    for bs in value_list(value_field(method.clone(), String::from("body"))) {
+    for bs in iter_method_steps(value_list(value_field(method.clone(), String::from("body")))) {
         let k = value_str(value_field(bs.clone(), String::from("step")));
-        if ((k == "effect") || (k == "emit")) {
+        if (((k == "effect") || (k == "emit")) || (k == "let-effect")) {
             return true;
         }
     }
@@ -6358,7 +6422,13 @@ fn method_body_lines(comp: Value, method: Value, services: Value, ctx_: Ctx__m1,
                         c = set_vt(c.clone(), nm.clone(), inferred.clone());
                     }
                 } else {
-                    out.push(format!("{}<<DEFER-method-step:{}>>", pad, kind));
+                    if (((((kind == "if") || (kind == "while")) || (kind == "for")) || (kind == "break")) || (kind == "continue")) {
+                        for ln in pure_stmts(vec![step.clone()], c.clone(), method_param_names(method.clone())) {
+                            out.push(format!("{}{}", pad, ln));
+                        }
+                    } else {
+                        out.push(format!("{}<<DEFER-method-step:{}>>", pad, kind));
+                    }
                 }
             }
         }

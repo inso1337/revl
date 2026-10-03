@@ -35,12 +35,13 @@
           ]
         },
         "rust": {
-          "residual": 2,
-          "corpus": 43,
+          "residual": 3,
+          "corpus": 44,
           "reproduced": 41,
           "documents": [
             "by_value_reuse.rvl",
-            "comp_stream.rvl"
+            "comp_stream.rvl",
+            "method_control_flow.rvl"
           ]
         },
         "ts": {
@@ -73,8 +74,8 @@
           "documents": []
         }
       },
-      "total_residual": 27,
-      "total_corpus": 296,
+      "total_residual": 28,
+      "total_corpus": 297,
       "clean_tiers": [
         "java",
         "wasm"
