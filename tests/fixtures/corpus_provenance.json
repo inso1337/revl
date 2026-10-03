@@ -727,6 +727,7 @@
    "tests/fixtures/emit_go_corpus/blob_probes.rvl",
    "tests/fixtures/emit_go_corpus/builder_literal.rvl",
    "tests/fixtures/emit_go_corpus/calls.rvl",
+   "tests/fixtures/emit_go_corpus/comp_provide_builtins.rvl",
    "tests/fixtures/emit_go_corpus/comp_provide_pure.rvl",
    "tests/fixtures/emit_go_corpus/comp_provide_records.rvl",
    "tests/fixtures/emit_go_corpus/control.rvl",

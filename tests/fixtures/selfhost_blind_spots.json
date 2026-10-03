@@ -27,7 +27,6 @@
       ],
       "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support. Issue #106: a v3 provide method's own body does spell `name` and `fn` (a parameter, a module fn call), and the combined slice ports and reaches both, so they left this list.": [
         "kind=bool",
-        "kind=format",
         "kind=int",
         "kind=str"
       ],

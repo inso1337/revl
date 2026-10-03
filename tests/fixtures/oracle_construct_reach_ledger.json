@@ -41,7 +41,6 @@
     "has_config=<true>",
     "kind=bool",
     "kind=config",
-    "kind=format",
     "kind=hole",
     "kind=host",
     "kind=instance-get",

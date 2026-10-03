@@ -3387,19 +3387,26 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
                                  functions.concat(externs), strings_alias, emitted_functions.reserved)
   let marked_lines = emitted_functions.lines.concat(emitted_tests.lines)
   var used_stdlib = has_text(marked_lines, stdlib_mark())
+  var comp_strconv = false
+  var comp_ovf32 = false
   var fnlines = []
   for (l of marked_lines) { fnlines = fnlines.push(strip_marks(l)) }
   var body = type_lines.concat(ext.lines).concat(fnlines)
   if (combined) {
-    let comp_lines = emit_comp_section(ir)
-    // `_COMP_NEEDS_STDLIB`: a provide method's `.length` renders through the
-    // stdlib helpers, which pull the same preamble and imports in.
-    if (has_text(comp_lines, "revlStrLen(") || has_text(comp_lines, "revlListLen(")) { used_stdlib = true }
+    let marked_comp = emit_comp_section(ir)
+    // `_COMP_NEEDS_STDLIB`: a provide method's builtin or `.length` renders
+    // through the stdlib helpers and carries the mark; `_COMP_NEEDS_STRCONV`
+    // and `_COMP_NEEDS_OVERFLOW32` follow from the helpers it rendered.
+    if (has_text(marked_comp, stdlib_mark())) { used_stdlib = true }
+    var comp_lines = []
+    for (l of marked_comp) { comp_lines = comp_lines.push(strip_marks(l)) }
+    comp_strconv = has_text(comp_lines, "strconv.Format")
+    comp_ovf32 = has_text(comp_lines, "revlToI32(")
     body = body.concat(comp_lines)
   }
   let rendered = fnlines.join(newline())
   let uses_fmt = rendered.indexOf("fmt.Sprintf(") >= 0
-  let uses_strconv = rendered.indexOf("strconv.Format") >= 0
+  let uses_strconv = rendered.indexOf("strconv.Format") >= 0 || comp_strconv
   let uses_strings = emitted_functions.uses_strings || emitted_tests.uses_strings
   let uses_float_rem = rendered.indexOf("math.Mod(") >= 0
   let uses_float_lit = rendered.indexOf("revlF(") >= 0
@@ -3408,7 +3415,7 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
   let uses_ftoa = rendered.indexOf("revlFtoa(") >= 0
   let uses_parse_int = rendered.indexOf("revlParseInt(") >= 0
   let uses_int_arith = text_has_any(rendered, ["revlDivTrunc(", "revlDivFloor(", "revlDivEuclid(", "revlMod("])
-  let uses_ovf32 = flags.ovf32 || rendered.indexOf("revlToI32(") >= 0
+  let uses_ovf32 = flags.ovf32 || rendered.indexOf("revlToI32(") >= 0 || comp_ovf32
   let sections = [types, value_field(ir, "functions"), value_field(ir, "externs"), value_field(ir, "tests")]
   var used_map = false
   var used_opt = uses_parse_int
@@ -3503,7 +3510,8 @@ fn emit_module(ir: Any, combined: Bool) -> Str {
 // typed-core tier above and the live stc-go components below. This slice
 // ports the documents whose components only `provide` single-`return` methods
 // over the component expression renderer (declared records and variants,
-// field reads and a variant `match` included), with or without `requires`,
+// field reads, a variant `match`, the stdlib builtins and `${..}`
+// interpolation included), with or without `requires`,
 // `isolate` and `intercept`. Anything past it keeps the
 // `<<UNSUPPORTED-COMPONENT:..>>` markers (`combined_ok` decides).
 
@@ -3527,12 +3535,9 @@ fn safe_local(name: Str) -> Str {
 
 // `_lower_camel`: `camel` (the `_camel` extern above) with the first char lowered.
 fn lower_first(s: Str) -> Str {
-  if (s == "") { return s }
-  let c = s.charCodeAt(0)
-  if (c >= 65 && c <= 90) {
-    return "abcdefghijklmnopqrstuvwxyz".charAt(c - 65).concat(s.slice(1, s.length()))
-  }
-  return s
+  let c = s == "" ? 0 : s.charCodeAt(0)
+  let upper = c >= 65 && c <= 90
+  return upper ? "abcdefghijklmnopqrstuvwxyz".charAt(c - 65).concat(s.slice(1, s.length())) : s
 }
 
 fn lower_camel(name: Str) -> Str { return lower_first(camel(name)) }
@@ -3542,10 +3547,8 @@ fn key_var(name: Str) -> Str { return "_key".concat(camel(name)) }
 // the pure tier's `go_type`, an Opt is a `*T` pointer and an undeclared name
 // is camel-cased rather than kept.
 fn comp_go_type(tv: Any, types: Any) -> Str {
-  let raw = value_str(tv)
-  if (raw == "") { return "" }
-  let t = trim(raw)
-  if (t == "Unit") { return "" }
+  let t = trim(value_str(tv))
+  if (t == "" || t == "Unit") { return "" }
   if (t == "Str") { return "string" }
   if (t == "Int") { return "int64" }
   if (t == "Int32") { return "int32" }
@@ -3566,8 +3569,7 @@ fn comp_go_type(tv: Any, types: Any) -> Str {
     while (i < np - 1) { ps = ps.push(comp_go_type(ft[i], types)); i = i + 1 }
     return rstrip(`func(${ps.join(", ")}) ${comp_go_return(erase_async(ft[np - 1]), types)}`)
   }
-  if (!value_is_null(value_field(types, t))) { return v3_ident(t) }
-  return camel(t)
+  return value_is_null(value_field(types, t)) ? camel(t) : v3_ident(t)
 }
 
 // `_go_return`: the RETURN-position spelling. Opt[T] -> `(T, bool)` and
@@ -3601,8 +3603,7 @@ fn comp_name_ref(env: CEnv, ident: Str) -> Str {
 
 fn ref_ident(n: Any) -> Str {
   let a = value_str(value_field(n, "name"))
-  if (a != "") { return a }
-  return value_str(value_field(n, "id"))
+  return a != "" ? a : value_str(value_field(n, "id"))
 }
 
 fn with_vt(env: CEnv, name: Str, t: Str) -> CEnv {
@@ -3630,8 +3631,7 @@ fn comp_record_for_fields(types: Any, fields: List[Str]) -> Str {
       }
     }
   }
-  if (count != 1) { return "" }
-  return found
+  return count == 1 ? found : ""
 }
 
 fn record_field_names(n: Any) -> List[Str] {
@@ -3711,6 +3711,8 @@ fn comp_infer(n: Any, env: CEnv) -> Str {
     return t != "" ? t : case_variant_of(env.types, "", value_str(value_field(n, "case")))
   }
   if (k == "fn") { return map_get(env.fr, value_str(value_field(n, "name"))) }
+  if (k == "builtin") { return builtin_ret_type(value_str(value_field(n, "method")), comp_infer(value_field(n, "target"), env)) }
+  if (k == "format") { return "Str" }
   if (k == "call") {
     let target = value_field(n, "target")
     let svc = value_str(value_field(env.rq, value_str(value_field(target, "name"))))
@@ -3764,7 +3766,114 @@ fn comp_expr_ok(n: Any, env: CEnv) -> Bool {
       || decl_kind(env.types, comp_infer(target, env)) == "record"
     return shape_ok && comp_expr_ok(target, env)
   }
+  if (k == "builtin") {
+    let recv = comp_infer(value_field(n, "target"), env)
+    return comp_builtin_ok(value_str(value_field(n, "method")), recv)
+      && comp_expr_ok(value_field(n, "target"), env) && all_ok(value_list(value_field(n, "args")), env)
+  }
+  if (k == "format") { return all_ok(value_list(value_field(n, "args")), env) }
   return k == "match" && comp_match_ok(n, env)
+}
+
+// `_comp_builtin` for the methods this slice ports. A Map method, `Str.to_int`
+// (the Opt-returning parse) and the division forms are outside it.
+fn comp_builtin_ok(method: Str, recv: Str) -> Bool {
+  let ported = ["length", "push", "concat", "slice", "indexOf", "split", "join", "repeat", "charAt",
+                "charCodeAt", "codepoint_at", "startsWith", "endsWith", "to_int", "to_int32", "to_str"]
+  return list_contains(ported, method) && !(method == "to_int" && recv == "Str")
+}
+
+// `_comp_builtin(method, recv, target, args)`: the revl* helper, `strings`
+// probe or `strconv` rendering for one stdlib call. A Str receiver picks the
+// Str helper where the List one shares the method name. Every builtin pulls
+// the stdlib preamble in (`_COMP_NEEDS_STDLIB`), so the text carries the mark
+// `emit_module` reads.
+fn comp_builtin(method: Str, recv: Str, target: Str, args: List[Str]) -> Str {
+  let kind = recv == "Str" ? "Str" : "List"
+  let a0 = args.length() > 0 ? args[0] : ""
+  let a1 = args.length() > 1 ? args[1] : ""
+  let one = ["concat", "indexOf"]
+  var text = ""
+  if (method == "length") { text = `revl${kind}Len(${target})` }
+  if (list_contains(one, method)) { text = `revl${kind}${upper_first(method)}(${target}, ${a0})` }
+  if (method == "slice") { text = `revl${kind}Slice(${target}, ${a0}, ${a1})` }
+  if (method == "push") { text = `revlListPush(${target}, ${a0})` }
+  if (method == "join") { text = `revlJoin(${target}, ${a0})` }
+  let str_helpers = ["split", "repeat", "charAt", "charCodeAt", "codepoint_at"]
+  let str_names = ["revlStrSplit", "revlStrRepeat", "revlStrCharAt", "revlStrCharCodeAt", "revlStrCharCodeAt"]
+  var i = 0
+  while (i < str_helpers.length()) {
+    if (str_helpers[i] == method) { text = `${str_names[i]}(${target}, ${a0})` }
+    i = i + 1
+  }
+  if (method == "startsWith") { text = `strings.HasPrefix(${target}, ${a0})` }
+  if (method == "endsWith") { text = `strings.HasSuffix(${target}, ${a0})` }
+  if (method == "to_int") { text = `int64(${target})` }
+  if (method == "to_int32") { text = `revlToI32(${target})` }
+  // an Int32 receiver is the reference's own guard; the checker admits
+  // `to_str` on Int and Float only
+  if (method == "to_str") {
+    text = recv == "Float" ? `strconv.FormatFloat(${target}, 'g', -1, 64)`
+      : (recv == "Int32" ? `strconv.FormatInt(int64(${target}), 10)` : `strconv.FormatInt(${target}, 10)`)
+  }
+  return marked(text)
+}
+
+fn is_ascii_digit(ch: Str) -> Bool {
+  let c = ch == "" ? 0 : ch.charCodeAt(0)
+  return c >= 48 && c <= 57
+}
+
+// `_format(template, args, arg_types)`: a `$N` template as a Go string. With
+// every operand's surface type known it is a `+` chain of string pieces (a Str
+// as is, an Int or Int32 through `strconv.FormatInt`, a Bool through
+// `strconv.FormatBool`); otherwise `fmt.Sprintf` with `%v`. The k-th
+// placeholder takes the k-th argument, whatever its digits say.
+fn comp_format(n: Any, env: CEnv) -> Str {
+  let template = value_str(value_field(n, "template"))
+  var args = []
+  var types = []
+  for (a of value_list(value_field(n, "args"))) {
+    args = args.push(comp_expr(a, env, ""))
+    types = types.push(comp_infer(a, env))
+  }
+  var out = ""
+  var pieces = []
+  var text = ""
+  var used = 0
+  var typed = true
+  var i = 0
+  let len = template.length()
+  while (i < len) {
+    let c = template.charAt(i)
+    if (c == "$" && i + 1 < len && is_ascii_digit(template.charAt(i + 1))) {
+      var j = i + 1
+      while (j < len && is_ascii_digit(template.charAt(j))) { j = j + 1 }
+      out = out.concat("%v")
+      i = j
+      let at = used < types.length() ? types[used] : ""
+      let arg = used < args.length() ? args[used] : ""
+      typed = typed && used < args.length() && list_contains(["Str", "Int", "Int32", "Bool"], at)
+      if (used < args.length() && text != "") {
+        pieces = pieces.push(go_string(text))
+        text = ""
+      }
+      if (at == "Str") { pieces = pieces.push(arg) }
+      if (at == "Int") { pieces = pieces.push(`strconv.FormatInt(${arg}, 10)`) }
+      if (at == "Int32") { pieces = pieces.push(`strconv.FormatInt(int64(${arg}), 10)`) }
+      if (at == "Bool") { pieces = pieces.push(`strconv.FormatBool(${arg})`) }
+      used = used + 1
+    } else {
+      out = out.concat(c == "%" ? "%%" : c)
+      text = text.concat(c)
+      i = i + 1
+    }
+  }
+  if (text != "") { pieces = pieces.push(go_string(text)) }
+  let fmt_str = go_string(out)
+  if (args.length() == 0) { return `fmt.Sprintf(${fmt_str})` }
+  if (typed && used == args.length()) { return pieces.length() == 1 ? pieces[0] : `(${pieces.join(" + ")})` }
+  return `fmt.Sprintf(${fmt_str}, ${args.join(", ")})`
 }
 
 // The callee or receiver of a call. A built-in Opt/Result constructor as a
@@ -3822,12 +3931,10 @@ fn comp_args(n: Any, env: CEnv) -> Str {
 // The `if`/`match` result type: the expected surface's Go spelling when there
 // is one, else the first of `candidates` that has one, else `any`.
 fn result_go_type(expected: Str, candidates: List[Any], env: CEnv) -> Str {
-  if (expected != "") { return comp_go_type(expected, env.types) }
-  for (c of candidates) {
-    let gt = comp_go_type(comp_infer(c, env), env.types)
-    if (gt != "") { return gt }
-  }
-  return "any"
+  var gt = ""
+  for (c of candidates) { if (gt == "") { gt = comp_go_type(comp_infer(c, env), env.types) } }
+  if (expected != "") { gt = comp_go_type(expected, env.types) }
+  return gt == "" && expected == "" ? "any" : gt
 }
 
 fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
@@ -3896,12 +4003,20 @@ fn comp_expr_bare(n: Any, env: CEnv, expected: Str) -> Str {
     if (case_payload(env.types, adt, value_str(value_field(n, "case"))) == "") { return `${struct_name}{}` }
     return `${struct_name}{Value: ${comp_args(n, env)}}`
   }
+  if (k == "builtin") {
+    let target_node = value_field(n, "target")
+    var args = []
+    for (a of value_list(value_field(n, "args"))) { args = args.push(comp_expr(a, env, "")) }
+    return comp_builtin(value_str(value_field(n, "method")), comp_infer(target_node, env),
+                        comp_expr(target_node, env, ""), args)
+  }
+  if (k == "format") { return comp_format(n, env) }
   if (k == "field") {
     let target_node = value_field(n, "target")
     var target = comp_expr(target_node, env, "")
     if (value_str(value_field(n, "name")) == "length") {
-      if (comp_infer(target_node, env) == "Str") { return `revlStrLen(${target})` }
-      return `revlListLen(${target})`
+      if (comp_infer(target_node, env) == "Str") { return marked(`revlStrLen(${target})`) }
+      return marked(`revlListLen(${target})`)
     }
     if (!list_contains(["name", "var", "call", "host", "instance-get", "index", "field"], node_kind(target_node))) {
       target = `(${target})`
@@ -3922,12 +4037,9 @@ fn comp_match(n: Any, env: CEnv, expected: Str) -> Str {
   let arms = value_list(value_field(n, "arms"))
   var bodies = []
   for (arm of arms) { bodies = bodies.push(value_field(arm, "body")) }
-  var exp_t = ""
-  if (expected != "") { exp_t = comp_go_type(expected, env.types) }
-  if (exp_t == "") {
-    for (b of bodies) { if (exp_t == "") { exp_t = comp_go_type(comp_infer(b, env), env.types) } }
-  }
-  if (exp_t == "") { exp_t = "any" }
+  var exp_t = expected != "" ? comp_go_type(expected, env.types) : ""
+  for (b of bodies) { if (exp_t == "") { exp_t = comp_go_type(comp_infer(b, env), env.types) } }
+  exp_t = exp_t == "" ? "any" : exp_t
   let scrutinee = comp_expr(scrut_node, env, st)
   var lines = [`func() ${exp_t} {`, line(1, `switch _m := ${scrutinee}.(type) {`)]
   var has_wild = false

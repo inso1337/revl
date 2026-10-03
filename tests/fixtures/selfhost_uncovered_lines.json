@@ -49,7 +49,7 @@
   ],
   "_budget": {
     "reference": {
-      "go": 2036,
+      "go": 1935,
       "java": 986,
       "py": 669,
       "rust": 1230,
@@ -57,7 +57,7 @@
       "wasm": 1250
     },
     "selfhost": {
-      "go": 122,
+      "go": 114,
       "java": 175,
       "py": 103,
       "rust": 286,
@@ -99,20 +99,18 @@
           "_witnessed_extern": 5,
           "_witnessed_result_types": 5
         },
-        "Component/method expression renderer and tuple-return convention, reached from _emit_component_step/_emit_method_body, not the pure _go_v3_expr renderer. This includes legacy name/fn/format literals and component Opt/Result spreading; the selfhost module port excludes that live ABI, not the corresponding pure literals or user ADTs. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1321 adds two statements to `_comp_infer`: the `fn` arm that reads a top-level fn/extern's declared return type off `_FN_RET`, so a receiver-typed builtin (`firsts(xs).length()`) can tell a Str receiver from a List one instead of guessing. It sits on the same deferred component/method path. Three later changes land on this same deferred component/method path. Issue #1347 adds three statements to `_comp_builtin`: the `to_int32` arm that flags the checked narrow `revlToI32`, which the pure typed-core path already carried, so a method body calling it no longer falls through to the unknown-method arm and the conformance matrix stops reading that as a go tier limit. Issue #1356 adds nine to `_comp_infer`: a `call` arm that reads a required service method's declared return type off the document's service table, and a `config` arm that reads a config field's declared surface type, both registries being populated only by `_emit_component`. Issue #1376 adds five more to `_comp_infer` and six to `_emit_return`: the `??` arm answers `T` rather than the left operand's `Opt[T]`, and a ternary in RETURN position over the tuple convention has no single-expression Go form, so it spreads into an `if` statement and each branch takes the ordinary return lowering. Issue #106: the go corpus carries the v3 combined path's first self-host slice now (tests/fixtures/emit_go_corpus/comp_provide_pure.rvl and four provide-only component documents), which runs part of this; the counts are lowered in place. Issue #106: the combined slice's realm-placement documents (`isolate`, `intercept`) reach the realm interner and the child load context. Issue #106, second slice: the combined path's record, variant, field and `match` documents (comp_provide_records.rvl and four tree documents) run more of this; the counts are lowered in place.": {
-          "_comp_builtin": 64,
+        "Component/method expression renderer and tuple-return convention, reached from _emit_component_step/_emit_method_body, not the pure _go_v3_expr renderer. This includes legacy name/fn/format literals and component Opt/Result spreading; the selfhost module port excludes that live ABI, not the corresponding pure literals or user ADTs. Item 130 §4.5 adds one statement: the `replay(…)` refusal on a `Stream.source()` declaration this tier does not lower. Issue #1321 adds two statements to `_comp_infer`: the `fn` arm that reads a top-level fn/extern's declared return type off `_FN_RET`, so a receiver-typed builtin (`firsts(xs).length()`) can tell a Str receiver from a List one instead of guessing. It sits on the same deferred component/method path. Three later changes land on this same deferred component/method path. Issue #1347 adds three statements to `_comp_builtin`: the `to_int32` arm that flags the checked narrow `revlToI32`, which the pure typed-core path already carried, so a method body calling it no longer falls through to the unknown-method arm and the conformance matrix stops reading that as a go tier limit. Issue #1356 adds nine to `_comp_infer`: a `call` arm that reads a required service method's declared return type off the document's service table, and a `config` arm that reads a config field's declared surface type, both registries being populated only by `_emit_component`. Issue #1376 adds five more to `_comp_infer` and six to `_emit_return`: the `??` arm answers `T` rather than the left operand's `Opt[T]`, and a ternary in RETURN position over the tuple convention has no single-expression Go form, so it spreads into an `if` statement and each branch takes the ordinary return lowering. Issue #106: the go corpus carries the v3 combined path's first self-host slice now (tests/fixtures/emit_go_corpus/comp_provide_pure.rvl and four provide-only component documents), which runs part of this; the counts are lowered in place. Issue #106: the combined slice's realm-placement documents (`isolate`, `intercept`) reach the realm interner and the child load context. Issue #106, second slice: the combined path's record, variant, field and `match` documents (comp_provide_records.rvl and four tree documents) run more of this; the counts are lowered in place. Issue #106, third slice: the combined path's builtin and interpolation documents (comp_provide_builtins.rvl and two tree documents) run more of this; the counts are lowered in place.": {
+          "_comp_builtin": 24,
           "_comp_checked_div_expr": 9,
-          "_comp_infer": 23,
+          "_comp_infer": 21,
           "_construction_case": 4,
           "_emit_return": 21,
-          "_expr": 66,
-          "_format": 50,
-          "_format.flush_text": 4,
+          "_expr": 60,
+          "_format": 2,
           "_go_comp_match": 3,
           "_go_comp_match_tuple": 72,
           "_go_literal": 1,
           "_go_type": 1,
-          "_go_widen_int": 1,
           "_go_zero": 10,
           "_v3_case_payload": 1,
           "_v3_comp_construct": 3,
@@ -292,7 +290,7 @@
           "_timer_has_compensate": 1
         }
       },
-      "uncovered_statements": 2036
+      "uncovered_statements": 1935
     },
     "java": {
       "statements": 2793,
@@ -1511,25 +1509,19 @@
         "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
           "fill_erased": 1
         },
-        "Issue #106, the v3 combined path (`_emit_v3_combined`), first and second slices. The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok`, `comp_expr_bare` and `ref_ident`, a `var` reference and an `id`-only node (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `comp_expr`, the `widen` marker, which the frontend does not set in a provide body (issue #1838); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `comp_go_type`, the `Unit` and undeclared-name spellings; in `comp_record_for_fields`, a record literal whose field set matches no or several declared records; in `case_variant_of`, a case resolved through the layout because neither the node nor the scrutinee names its variant; in `comp_infer`, a `match` whose type is inferred (both emitters render Go that does not build there, issue #1834); in `result_go_type` and `comp_match`, a ternary or match whose type neither the context nor any arm gives (`any`, which does not build either); in `lower_first`, an empty or non-uppercase input; in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the config-carrying component in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected).": {
+        "Issue #106, the v3 combined path (`_emit_v3_combined`), first three slices. The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok` and `comp_expr_bare`, a `var` reference (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `comp_expr`, the `widen` marker, which the frontend does not set in a provide body (issue #1838); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `case_variant_of`, a case resolved through the layout because neither the node nor the scrutinee names its variant; in `comp_infer`, a `match` whose type is inferred (both emitters render Go that does not build there, issue #1834); in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the config-carrying component in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected).": {
           "call_head_ok": 1,
           "case_variant_of": 1,
           "comp_expr": 1,
           "comp_expr_bare": 4,
           "comp_expr_ok": 1,
-          "comp_go_type": 2,
           "comp_infer": 1,
-          "comp_match": 1,
           "comp_name_ref": 1,
-          "comp_record_for_fields": 1,
           "emit_module": 1,
-          "lower_first": 2,
-          "meta_literal": 1,
-          "ref_ident": 1,
-          "result_go_type": 1
+          "meta_literal": 1
         }
       },
-      "uncovered_statements": 122
+      "uncovered_statements": 114
     },
     "java": {
       "statements": 2209,

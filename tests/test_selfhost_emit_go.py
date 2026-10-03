@@ -156,6 +156,10 @@ CORPUS = [
     "../../../examples/v3_step_scheduler.rvl",
     "../emit_java_corpus/stdlib_builtins.rvl",
     "../../../src/revl/truc/components/cli.rvl",
+    # ... and the stdlib builtins and `${..}` interpolation in provide bodies
+    "comp_provide_builtins.rvl",
+    "../../../bench/codegen/java/cases/interp_format/case.rvl",
+    "../emit_ts_corpus/services_composite_provide.rvl",
 ]
 
 # The combined-path documents, which import stc-go and are built against it.
