@@ -34,6 +34,8 @@ pytestmark = pytest.mark.skipif(
            "runtime — install it with `sh backends/python/setup.sh`")
 
 BODY = "create_note mints the id from the row count, so ids are not reused"
+# a literal that occurs once in notes.rvl, inside NotesHttp.get_note
+GET_NOTE_MISS = 'Err(not_found_error("no note with that id"))'
 
 
 def _call(tool: str, arguments: dict) -> dict:
@@ -78,57 +80,28 @@ def _notes_about(symbol: str) -> list:
 
 # ------------------------------------------------ a note survives the session
 
-# The edits that land use a small composition: notes.rvl cannot be hot-swapped
-# on this branch (its NotesConsole stays PENDING; issue #1751, fixed by #1753).
-CLOCK = ("service Clock { fn now() -> Int\n"
-         "                fn zone() -> Str }\n"
-         "\n"
-         "// A fixed clock for tests.\n"
-         "component FixedClock provides clock: Clock {\n"
-         "  provide clock {\n"
-         "    fn now() = 7\n"
-         "\n"
-         "    fn zone() = \"UTC\"\n"
-         "  }\n"
-         "}\n")
-
-
-@pytest.fixture
-def clock(tmp_path, monkeypatch):
-    root = tmp_path / "clock"
-    root.mkdir()
-    path = root / "clock.rvl"
-    path.write_text(CLOCK, encoding="utf-8")
-    monkeypatch.chdir(root)
-    old = server_mod.AUTHORING
-    server_mod.set_authoring_trust(roots=(str(root),))
-    try:
-        yield path
-    finally:
-        _unload()
-        server_mod.AUTHORING = old
-
-
-def test_a_note_added_on_an_edit_is_served_to_a_fresh_session(clock):
-    _load(clock)
+def test_a_note_added_on_an_edit_is_served_to_a_fresh_session(app):
+    _load(app)
     changed = _call("revl_change", {"commit": True, "edit": {"edits": [
-        {"anchor": "fn now() = 7", "replacement": "fn now() = 8"}]},
+        {"anchor": GET_NOTE_MISS, "replacement": GET_NOTE_MISS.replace(
+            "no note with that id", "no such note")}]},
         "notes": [{"kind": "rationale", "body": BODY,
                    "evidence": [{"kind": "issue", "ref": "#1754"}]}]})
     assert changed["committed"] is True, changed
     recorded = changed["notesRecorded"]
-    assert recorded == [{"id": recorded[0]["id"], "symbol": "FixedClock.clock.now"}]
+    assert recorded == [{"id": recorded[0]["id"],
+                         "symbol": "NotesHttp.notes_api.get_note"}]
     exported = _call("revl_export", {"with_knowledge": True})
     assert exported["ok"] is True, exported
-    sidecar = sorted((clock.parent / ".revl" / "knowledge").iterdir())
+    sidecar = sorted((app.parent / ".revl" / "knowledge").iterdir())
     assert [p.name for p in sidecar] == [f"{recorded[0]['id']}.json"]
     _unload()
 
-    _load(clock)                                 # a fresh session, same composition
-    served = _notes_about("FixedClock.now")
+    _load(app)                                   # a fresh session, same composition
+    served = _notes_about("NotesHttp.get_note")
     assert [n["id"] for n in served] == [recorded[0]["id"]]
     assert served[0]["body"] == BODY and served[0]["status"] == "live"
-    assert _call("revl_call", {"key": "clock", "method": "now"})["result"] == 8
+    assert '"no such note"' in app.read_text(encoding="utf-8")   # exported too
 
 
 # ------------------------------------------------ the round trip
@@ -221,14 +194,15 @@ def test_evidence_and_bodies_are_bounded(app):
     assert acting["ok"] is False and "read-only" in acting["diagnostics"][0]["message"]
 
 
-def test_a_note_goes_stale_when_its_anchor_changes_and_confirm_restores_it(clock):
-    _load(clock)
-    note_id = _call("revl_knowledge", {"op": "add", "symbol": "FixedClock.now",
-                                       "kind": "invariant", "body": "now is fixed",
+def test_a_note_goes_stale_when_its_anchor_changes_and_confirm_restores_it(app):
+    _load(app)
+    note_id = _call("revl_knowledge", {"op": "add", "symbol": "NotesHttp.get_note",
+                                       "kind": "invariant", "body": "a miss is a 404",
                                        "evidence": [{"kind": "issue",
                                                      "ref": "#1"}]})["note"]["id"]
     edited = _call("revl_change", {"commit": True, "edit": {"edits": [
-        {"anchor": "fn now() = 7", "replacement": "fn now() = 9"}]}})
+        {"anchor": GET_NOTE_MISS, "replacement": GET_NOTE_MISS.replace(
+            "no note with that id", "no such note")}]}})
     assert edited["committed"] is True, edited
     stale = {n["id"]: n for n in edited["knowledge"]["notes"]}
     assert stale[note_id]["status"] == "stale"
