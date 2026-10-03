@@ -294,6 +294,63 @@ def test_listen_is_authenticated_first_and_acknowledged_first(serving):
         stream.close()
 
 
+# ------------------------------------------- above FD_SETSIZE (issue #1716)
+#
+# `select()` refuses a descriptor at or above 1024, and `peer_closed` used to
+# read that refusal as "the client left", so a process holding that many files
+# closed every listen stream at its first quiet poll. The full CI suite holds
+# more than 1024 by the time it reaches this file, which is how four of the
+# proxy tests below went red there and stayed green alone. These two need no
+# runtime, so they run in every job.
+
+@pytest.fixture
+def above_fd_setsize():
+    """Hold enough descriptors open that the next socket's fd is above 1024."""
+    import os
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    want = 1200
+    if soft < want:
+        if hard != resource.RLIM_INFINITY and hard < want:
+            pytest.skip(f"RLIMIT_NOFILE hard limit {hard} is below {want}")
+        resource.setrlimit(resource.RLIMIT_NOFILE, (want, hard))
+    held = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+    try:
+        yield
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+
+def test_an_open_peer_above_fd_setsize_is_not_read_as_closed(above_fd_setsize):
+    from revl.mcp.http_stream import peer_closed
+
+    near, far = socket.socketpair()
+    try:
+        assert near.fileno() >= 1024, near.fileno()
+        assert peer_closed(near) is False, "an open, quiet peer read as closed"
+        far.sendall(b"x")
+        assert peer_closed(near) is False, "pending data is not a close"
+        far.close()
+        near.recv(1)
+        assert peer_closed(near) is True, "a closed peer must still be seen"
+    finally:
+        near.close()
+
+
+def test_a_listen_stream_above_fd_setsize_stays_open(serving, above_fd_setsize):
+    transport, port = serving()
+    stream = _listen(port, "alice", {"toolsListChanged": True}, rid="F1")
+    try:
+        assert _acked(stream, "F1") == {}
+        # several quiet polls (`poll_s` is 0.25s): the stream must not end
+        assert stream.drain(quiet=1.0) == []
+    finally:
+        stream.close()
+
+
 def test_listen_filter_accept_and_limits_are_checked(serving):
     transport, port = serving()
     bad = _listen(port, "alice", {"toolsListChanged": "yes"})
