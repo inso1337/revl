@@ -1,0 +1,17 @@
+{
+  "task": "commerce-drift-orders-summary",
+  "arm": "revl",
+  "final": "drift-revl-attempt.rvl",
+  "turns": 7,
+  "tokensWritten": 1840,
+  "revlState": {
+    "ok": true,
+    "loaded": true,
+    "approval": {
+      "policy": "auto-approve-unless-irreversible",
+      "approvals": {"silent": 3, "atCommit": 0, "prompted": 1},
+      "percentAutoApproved": 75.0,
+      "promptsPerSession": 1
+    }
+  }
+}
