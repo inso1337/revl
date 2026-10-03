@@ -51,6 +51,10 @@ The experiment prescribed by [docs/syntax-2.0.md §10](../docs/syntax-2.0.md):
   (`tools/residue-probe/`) and reports the leak set. Free — the probe calls no
   model. Imported by `run.py` to score fresh generations, and runnable
   standalone to re-score a committed corpus.
+- `blast_radius/`: the compositional blast-radius benchmark (issue #1702).
+  Tasks over 20+-component compositions with compiler-checked ground truth,
+  TypeScript renderings, and a scorer. No model runs. See
+  [its section](#the-blast-radius-benchmark-issue-1702).
 - `decode_grammar_probe.py` — item 513's measurement: does a real provider
   honour the decoding grammar revl states
   (`docs/design/542-grammar-constrained-decoding.md`, §11)? Runs one prompt set
@@ -274,6 +278,60 @@ framework is named but not run, the raw-ts and framework hosts have not been
 generated with the pinned model, every claim stands at the `measured` rung
 because nobody outside this repository has reproduced it, and nothing is
 published outside this repository.
+
+## The blast-radius benchmark (issue #1702)
+
+`bench/blast_radius/` measures compositional change: a change in a graph of
+20+ components where being correct means knowing exactly what breaks. It
+defines tasks and scores finished attempts. It runs no model.
+
+- `compositions/`: `commerce.rvl` (23 components) and `tenants.rvl` (21
+  components, two tenants in two realms). Both cross irreversible boundaries
+  (`send_mail`, `ledger_write`).
+- `tasks.json`: 10 tasks. Kinds are `withdraw`, `interface` (a service loses
+  an operation), `try-and-revert` (answer a question by trying a change and
+  undoing it) and `no-change` (the correct change is none). Each records its
+  ground-truth `cascade`, the components a correct change must touch, and, for
+  a question, the `answer`.
+- `expected/`: the final state a correct solution reaches for each change task.
+- `ts/`: the ts emitter's rendering of each composition, for the same task
+  given to an agent working in TypeScript. `typecheck.mjs` type-checks them
+  (needs `npm ci` in `backends/typescript`).
+- `scored/`: hand-scored attempts, one per arm, that the scorer must reproduce.
+
+```sh
+python3 bench/blast_radius/blast_radius.py --check        # ground truth vs the compiler
+python3 bench/blast_radius/blast_radius.py --render-ts    # rewrite ts/
+python3 bench/blast_radius/blast_radius.py --score SUBMISSION.json
+node bench/blast_radius/typecheck.mjs
+```
+
+The ground truth is not maintained by hand. `--check` recomputes each cascade
+from the query the task names (`revl_query_withdraw`, `revl_query_drift`,
+`revl_query_emitters`) and fails on any difference. It also checks that each
+expected state compiles and touches exactly the cascade, and that `ts/` is
+what the emitter produces now. `tests/test_blast_radius_bench.py` runs the
+same checks. `backends/typescript/test_blast_radius_ts.py` runs the type-check
+in the typescript CI job.
+
+A submission names the task, the arm (`revl` or `typescript`), the final
+state file, the answer for a question task, `turns`, `tokensWritten`, and
+optionally the session's last `revl_state` result. The score reports:
+
+- `correct`: whether the final state is right. For a withdrawal, exactly the
+  withdrawn component and its cascade are gone and every survivor is
+  unchanged. For an interface change, the operation is gone and the
+  composition still compiles (TypeScript arm: every injected key still has a
+  provider). For a question, the composition is unchanged and the answer is
+  right.
+- `touched`, `touchedBeyondCascade` and `missedCascade`.
+- `turns` and `tokensWritten`, as submitted.
+- `gate`: the approval-gate axes read from `revl_state`. Today it carries
+  `promptsPerSession` and `percentAutoApproved` (as
+  `percentAutoApprovedWithProof`), and only when an approval policy is
+  configured. Reversibility rate, preflight coverage, violations caught before
+  execution and residue after an abort are not in `revl_state`, so the score
+  lists them under `notInRevlState` instead of reporting a number.
 
 ## Re-scoring without spending anything
 
