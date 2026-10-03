@@ -11,6 +11,10 @@ that depends on a binder it does not decide: an arrow parameter (decided at
 the application). A provide method's own service-typed parameter is decided
 since issue #1682.
 
+A `match` arm written as a statement block lowers to a `do` node, which had no
+type, so a block-arm receiver was not a service at all (issue #1729). The node
+is typed by its tail now, read with the arm's own `let`s in scope.
+
 The provider upper bound reads a crossing through such a receiver at the op's
 declared scope (issue #1508): `ok_upper_bound_*` fits a covering bound and
 `g4_upper_bound_*` does not.
@@ -29,7 +33,7 @@ from revl.errors import RevlError
 
 ROOT = Path(__file__).resolve().parents[1]
 CORPUS = ROOT / "tests" / "fixtures" / "service_receiver_expressions"
-SHAPES = ("if", "match", "record", "list")
+SHAPES = ("if", "match", "match_block", "record", "list")
 
 MARKER = "call to emission `charge` must be marked `emit` (G4)"
 APPROVAL = ("crossing capability `production.payment` requires approval, but "
@@ -52,7 +56,8 @@ def test_the_corpus_is_three_documents_per_shape_two_controls_and_the_bound():
                   + [f"ok_{s}_approved" for s in SHAPES]
                   + ["ok_if_no_approval", "ok_arrow_param_expression_unapplied",
                      "g4_upper_bound_if_inline", "g4_upper_bound_if_local",
-                     "ok_upper_bound_if_inline", "ok_upper_bound_if_local"])
+                     "ok_upper_bound_if_inline", "ok_upper_bound_if_local",
+                     "g4_match_block_tail_local_unmarked"])
     assert sorted(p.stem for p in CORPUS.glob("*.rvl")) == want
 
 
@@ -107,3 +112,10 @@ def test_a_step_through_the_receiver_is_read_at_the_ops_scope(stem):
     assert (err.code, err.message) == ("G4", (
         "`Till.go` is declared `emission[audit.log]`, but this implementation "
         "emits through `production.payment` (reaching `Pay.charge`)"))
+
+
+def test_a_block_arm_whose_tail_is_its_own_let_is_the_same_crossing():
+    """Issue #1729: the block arm binds the provision to a `let` of its own and
+    yields it. The tail is typed with the arm's `let`s in scope."""
+    err = _refusal("g4_match_block_tail_local_unmarked")
+    assert (err.code, err.message) == ("G4", MARKER)

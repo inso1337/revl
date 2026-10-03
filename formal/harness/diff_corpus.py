@@ -128,6 +128,7 @@ from revl.parser import (
     EmitExpr,
     EmitStmt,
     ExprArrow,
+    ExprBlockArm,
     ExprCall,
     ExprField,
     ExprIf,
@@ -138,6 +139,7 @@ from revl.parser import (
     ExprVar,
     IsolateStmt,
     LetEffect,
+    LetStmt,
     Parser,
     ProvideStmt,
     RouteStmt,
@@ -738,6 +740,15 @@ def _value_provision(value, handles: dict, aliases: dict):
         then = _value_provision(value.then, handles, aliases)
         return then if then is not None and then == _value_provision(
             value.otherwise, handles, aliases) else None
+    if isinstance(value, ExprBlockArm):
+        # a statement-block match arm (issue #1729): its value is its tail,
+        # read with the arm's own `let`s in scope, as `infer_ir` types the
+        # `do` node the checker lowers it to
+        inner = dict(aliases)
+        for st in value.stmts:
+            if isinstance(st, LetStmt):
+                _note_value_aliases(st.name, st.value, handles, inner)
+        return _value_provision(value.tail, handles, inner)
     if isinstance(value, ExprMatch):
         arms = [_value_provision(arm[-1], handles, aliases) for arm in value.arms]
         return arms[0] if arms and arms[0] is not None \

@@ -26489,3 +26489,29 @@ component C provides s: S {
 }""")
   assert v == "G6|`x` is already bound in `go`"
 }
+
+test "an unmarked crossing through a block arm's value is refused" {
+  let v = admit_src("""extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }
+service Pay { emission[production.payment] fn charge(cents: Int) -> Int }
+service Till { emission fn go(n: Int) -> Int }
+component Worker provides pay: Pay {
+  provide pay { fn charge(cents) = 1 }
+}
+component Register provides till: Till {
+  provide till {
+    fn go(n: Int) {
+      let w = effect spawn Worker with { } undo w.dispose()
+      let o = Some(n)
+      let x = (match o {
+        Some(v) => {
+          let z = v
+          w.pay
+        },
+        None => w.pay
+      }).charge(n)
+      return x
+    }
+  }
+}""")
+  assert v == "G4|call to emission `charge` must be marked `emit` (G4)"
+}
