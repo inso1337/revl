@@ -3835,8 +3835,38 @@ def main() -> int:
     return 1 if (mismatches or fatal) else 0
 
 
+def census_json() -> int:
+    """`--census-json`: the oracle census, as one JSON object on stdout.
+
+    This is the source `revl.cert` reads for the component certificate's
+    oracle requirement (issue #1768). The census used to be read back out of
+    the counts this harness rendered into `formal/STATUS.md`; the block no
+    longer stores counts that move with the corpus, so the certificate asks
+    the run that computes them. Reference side only, like `--write-status`:
+    `verdicts_compared` is every verdict the differential compares, and the
+    agreement half is the gate's (`make formal` fails on any mismatch)."""
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+    import warnings  # noqa: PLC0415
+
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter("ignore")
+        tsv, _facts, census = export()
+        if not tsv:
+            print("nothing extracted: no oracle census", file=sys.stderr)
+            return 1
+        ref = reference_from_tsv(tsv)
+    json.dump({"files": census["files"], "components": census["components"],
+               "statements": census["statements"],
+               "verdicts_compared": ref.total()}, sys.stdout, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
 if __name__ == "__main__":
     _argv = sys.argv[1:]
+    if "--census-json" in _argv:
+        sys.exit(census_json())
     if "--write-ledger" in _argv:
         sys.exit(write_status(ledger=True))
     sys.exit(write_status() if "--write-status" in _argv else main())
