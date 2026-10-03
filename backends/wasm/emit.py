@@ -6407,6 +6407,23 @@ def _dedup_colour_erased_poly_externs(ir: dict) -> dict:
 
 _UNSWEEPABLE = ("ref.func", "call_indirect", "\n  (table", "\n  (elem",
                 "\n  (start")
+# Only an instruction token counts, never a name. A service method named
+# `call_indirect` is the export `"provide:s.call_indirect"` and the import
+# `$req_s_call_indirect`, and a `fn call_indirect` is `$call_indirect`; each
+# used to match the token above and switch the sweep off for the whole module
+# (issue #1512). The check reads the module with every string literal, `;;`
+# comment and `$` identifier blanked, in one left-to-right pass, so a quote
+# inside a comment and a `;;` inside a string are each read as what they are.
+_WAT_NAME_OR_COMMENT = re.compile(
+    r'"(?:[^"\\]|\\.)*"|;;[^\n]*|\$[0-9A-Za-z!#$%&\'*+\-./:<=>?@\\^_`|~]+')
+
+
+def _code_of(wat: str) -> str:
+    """`wat` with every string literal, line comment and `$` identifier blanked."""
+    return _WAT_NAME_OR_COMMENT.sub(
+        lambda m: {'"': '""', "$": "$"}.get(m.group(0)[0], ""), wat)
+
+
 _FUNC_HEAD = re.compile(r'^\s*\(func\s+(?:(\$[\w:.#$-]+)\s*)?(?:\(export\s+"([^"]+)"\))?')
 _CALL_EDGE = re.compile(r"\(call\s+(\$[\w:.#$-]+)")
 
@@ -6475,7 +6492,8 @@ def prune_unreachable_funcs(wat: str) -> str:
     emitter that grows indirect calls degrades to the old always-everything
     prelude instead of to a broken module.
     """
-    if any(token in wat for token in _UNSWEEPABLE):
+    code = _code_of(wat)
+    if any(token in code for token in _UNSWEEPABLE):
         return wat
     funcs = _top_level_funcs(wat)
     body_of = {name: text for name, _e, text, _b in funcs if name}
