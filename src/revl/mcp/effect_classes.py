@@ -2,11 +2,10 @@
 (issue #1707, D1 in docs/harness-gate-guide.md).
 
 The approval policy reads one fact per call: the worst class over the call's
-whole reach (`approval.ClassMap`). A class-(a) `witnessed` op auto-approves,
-and the same op factored behind a helper reaches the witnessed extern through
-a service emission, so it becomes class (c) and prompts on every call. Nothing
-said so: the verbs that compile, admit, edit and swap answered with the same
-summary either way.
+whole reach (`approval.ClassMap`). A class-(a) `witnessed` op auto-approves;
+factor it behind a helper that also reaches a non-witnessed crossing and it
+becomes class (c), prompting on every call. Nothing said so: the verbs that
+compile, admit, edit and swap answered with the same summary either way.
 
 This module turns the class map into two things a response carries:
 
