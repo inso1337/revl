@@ -306,6 +306,7 @@ def _run_mcp(args) -> int:
     from ..mcp.server import serve
 
     if args.mcp_command == "serve":
+        _announce_or_reexec_runtime(args)
         # authoring trust: the operator's answer to "may the agent driving this
         # server author host code, and what filesystem may it name?". Default
         # closed; the server refuses an agent-authored `extern`/host block and
@@ -902,3 +903,18 @@ def _run_sourcemap(args: argparse.Namespace) -> int:
     else:
         print(text)
     return 0
+
+
+def _announce_or_reexec_runtime(args) -> None:
+    """Issue #1692: never serve with the runtime verbs silently dead. Without
+    cordis, re-execute under the repository's runtime venv when it has it
+    (this does not return), or else say on stderr which verbs are unavailable;
+    the server refuses those verbs by name (`mcp/runtime_gate.py`)."""
+    from ..mcp import runtime_gate as _gate  # noqa: PLC0415 — lazy
+
+    target = _gate.reexec_target()
+    if target is not None:
+        _gate.reexec(target, getattr(args, "raw_argv", None) or sys.argv[1:])
+    if not _gate.cordis_importable():
+        print(f"revl mcp serve: {_gate.announcement()}", file=sys.stderr,
+              flush=True)

@@ -112,21 +112,37 @@ at runtime or in the harness can move a call between classes.
 
 | class | derivation | policy posture | what the harness sees |
 |---|---|---|---|
-| (a) revertible | every crossing is a `witnessed` extern with its registered inverse (243) | auto-approve silently | the call returns; no ticket, no prompt |
-| (b) deferrable | every non-(a) crossing is a `deferred` emission (245) | auto-approve; enumerate at commit | the call returns; the crossing appears in the commit manifest's `summary` |
+| (a) revertible | every crossing is a `witnessed` extern with its registered inverse (243), or a relay to an operation whose own reach is (a) | auto-approve silently | the call returns; no ticket, no prompt |
+| (b) deferrable | every non-(a) crossing is a `deferred` emission (245), or a relay to an operation whose own reach is (b) | auto-approve; enumerate at commit | the call returns; the crossing appears in the commit manifest's `summary` |
 | (c) immediate | any emission crossing that is neither (a `compensate` does not change this, 247) | prompt per call | `revl_call` returns `approvalRequired` with a ticket; nothing fired |
 
 A call's class is the worst class over every crossing its checked reach
 includes: one prompt covers the whole call or none of it.
 
-Because the class is the worst over the WHOLE reach, an indirection does not
-preserve it. A class-(a) `witnessed` op is 0-prompt, but an `emission fn` that
-merely forwards to it reaches an emission crossing and is class-(c), one prompt
-per call (D1). So a witnessed call factored behind any relay, wrapper, or helper
-emission silently loses the auto-approve guarantee: the natural refactor is not
-class-preserving, and there is no warning at the call site. To keep a witnessed
-op's (a) guarantee, keep the crossing direct. A relay over it is a deliberate
-escalation to (c), not a free abstraction.
+Because the class is the worst over the WHOLE reach, a relay's class is the
+worst over what it relays (D1, issue #1707). A service emission
+(`emit key.method(...)`) crosses no host boundary itself: it runs the target
+operation's body in the same session, and the fold already reads that body's
+crossings through the reach closure. So an `emission fn` that forwards to a
+class-(a) `witnessed` op is class (a) too, 0-prompt, and so is a relay of a
+relay. Factoring witnessed calls behind a helper keeps the auto-approve
+guarantee, and the helper's inverse is the inner inverses replayed in reverse
+order of firing: each witnessed effect registers its own inverse as it fires,
+so `revl_abort` undoes a relay exactly as it undoes the direct calls.
+
+A relay stays class (c) when:
+
+- it also reaches any non-witnessed emission (the worst rule is unchanged);
+- the forwarding emission is `compensate`d (a compensation offsets an
+  irreversible crossing, it does not make one revertible, 247);
+- its target is not provided inside the composition (a host-provided or
+  missing key), or is reached through a routed require or a `carrying(...)`
+  adapter, so no single target scope can be read;
+- its target crosses no checked boundary at all: the `emission` marking on the
+  service operation is then the only boundary signal, so it stands.
+
+Before #1707 every service emission was class (c) on its own, so any relay over
+a witnessed op prompted on every call and nothing said so.
 
 The three classes
 map onto three externs:
