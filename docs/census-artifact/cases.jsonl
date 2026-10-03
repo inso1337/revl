@@ -1470,6 +1470,10 @@
 
 ["tests/fixtures/emit_go_refusals/fault_test_section.rvl", "agree-admit"]
 
+["tests/fixtures/emit_go_refusals/opt_none_argument.rvl", "agree-admit"]
+
+["tests/fixtures/emit_go_refusals/opt_record_field_default.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_go_refusals/record_update.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_go_refusals/validated_emission_operation.rvl", "agree-admit"]

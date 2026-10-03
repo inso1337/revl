@@ -522,7 +522,13 @@ router and every dispatcher look it up by that string. So no tier renames it
 where a caller can see it. On ts a keyword is a legal property name, and the
 method keeps its contract name at the interface, the definition and every call
 (`s.delete(x)`, issue #1512). On py the `def` is renamed (`class_`) and the
-provided class carries the contract name as an alias (issue #1474).
+provided class carries the contract name as an alias (issue #1474). On wasm
+nothing is renamed: a method name is only ever the import field
+`(import "coeffect:<key>" "<op>" ...)`, the export string `"provide:<key>.<op>"`
+and the `$req_<key>_<op>` identifier, none of which a WAT keyword can reach.
+All 124 reserved words the frontend admits (WAT, Python, JavaScript and the
+emitter's own helper names) cross on the live cordis-wasm runtime
+(`backends/wasm/test_keyword_method_names_wasm.py`, issue #1512).
 
 ## A5 — compensation accompanies an emission
 
