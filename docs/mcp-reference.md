@@ -63,6 +63,22 @@ that admits, so an agent gets rule + call-chain + fix in one response, never a
 second round-trip. A rejected candidate never deploys: the compile runs before
 the transition, so the running system keeps serving.
 
+**Verbs that need the cordis-py runtime.** Every verb under "Drive a live
+session" and the record/replay and halt verbs act on a live composition, and
+only `revl_load` can boot one, which needs `cordis`. If the server's interpreter
+cannot import it, `revl mcp serve` first looks for the repository's runtime venv
+(`backends/python/.venv`, built by `backends/python/setup.sh`). If that venv can
+import cordis, the server re-executes under it and says so on stderr. Otherwise
+it starts, names the unavailable verbs on stderr and in the `initialize`
+instructions, and each of those verbs answers with
+`{"ok": false, "refused": true, "unavailable": "cordis-py runtime", "next": ...}`,
+`next` being the fix. A few verbs keep working with less: `revl_ship` cannot
+`apply`, `revl_gauntlet` and `revl_quarantine` skip their substrate battery,
+and the history verbs answer only from an inline `timeline`/`trace`. The lists
+live in `src/revl/mcp/runtime_gate.py`, and `revl doctor` reports which case
+applies (the `mcp server runtime` line). Set `REVL_MCP_NO_REEXEC=1` to stay on
+the current interpreter (issue #1692).
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
