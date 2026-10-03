@@ -368,6 +368,7 @@ model, the third is ergonomic sugar:
 
 | form | shape | for |
 |---|---|---|
+| method body | `{method: "<key>.<op>", body: "<body>"}` | write only a provide method's body; the server keeps its signature, or writes it from the service declaration when the method is new (issue #1700) |
 | hole fill | `{hole: <line>, expr: "<fill>"}` | fill the typed hole on that line — pairs with `revl_check`'s `fillSpec`, which reports each open hole's `line` and expected type |
 | text range | `{range: [start, end], replacement: "<text>"}` | replace the half-open character span `[start, end)` — the precise, general edit |
 | anchor | `{anchor: "<literal>", replacement: "<text>"}` | replace a literal snippet with no offset arithmetic — the ergonomic common case |
@@ -398,6 +399,13 @@ fills that hole by the very line the fillSpec reported, and then it admits and
 swaps. Deltas accumulate across the calls; nothing is resent. An edit that fails
 to compile or admit advances nothing — the working buffer stays at its last good
 state, so a refused patch never leaves a broken draft behind.
+
+**Terse in, canonical out.** The edited buffer, and any inline source given to
+`revl_check`, `revl_load` or `revl_swap`, is stored in the canonical layout
+`revl fmt` computes, under the same IR-equivalence gate, and the answer carries
+a digest of it rather than the text. An agent writes no indentation and need
+not read back what it sent. The accepted forms and the measurement are in
+[mcp-reference.md](mcp-reference.md#terse-in-canonical-out).
 
 **Swap by name.** The same server-side source backs an additive extension to
 `revl_swap`: called with *no* inline `source`/`files`/`modules`, it re-admits

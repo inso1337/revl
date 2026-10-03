@@ -69,7 +69,7 @@ import re
 from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
-from . import fillspec
+from . import canonical, fillspec
 from .authoring_loop import blast_radius
 
 _WORD_HOLE = re.compile(r"\bhole\b")
@@ -200,11 +200,19 @@ def _match_string(text: str, pos: int, hi: int) -> int:
     raise EditError("unterminated string in the hole's message")
 
 
-def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
+def _apply_one(text: str, edit: dict, modules: dict | None = None) -> tuple[str, dict]:
     """Apply one patch to `text`, returning the new text and an echo of what it
     did (never the whole buffer — deltas, not documents, on the way back too)."""
     if not isinstance(edit, dict):
         raise EditError(f"each edit must be an object, got {type(edit).__name__}")
+
+    if "method" in edit:
+        # issue #1700: the agent writes the body, the server keeps (or, for a
+        # method the provide block does not have yet, writes) the frame
+        try:
+            return canonical.method_body_edit(text, edit, modules)
+        except canonical.BodyEditError as error:
+            raise EditError(str(error)) from None
 
     if "hole" in edit:
         if "expr" not in edit:
@@ -250,18 +258,19 @@ def _apply_one(text: str, edit: dict) -> tuple[str, dict]:
             "replaced": text[start:end], "replacement": replacement}
 
     raise EditError(
-        "each edit must carry one of `hole`, `anchor` or `range` "
+        "each edit must carry one of `method`, `hole`, `anchor` or `range` "
         f"(got keys: {', '.join(sorted(edit)) or 'none'})")
 
 
-def _apply_edits(text: str, edits: list) -> tuple[str, list[dict]]:
+def _apply_edits(text: str, edits: list,
+                 modules: dict | None = None) -> tuple[str, list[dict]]:
     """Apply every edit in order. Ranges refer to offsets in the text *as each
     edit sees it*, so an agent that sends offset-based edits should order them
     from the end of the buffer backwards; `hole`/`anchor` forms are position
     independent."""
     applied: list[dict] = []
     for edit in edits:
-        text, echo = _apply_one(text, edit)
+        text, echo = _apply_one(text, edit, modules)
         applied.append(echo)
     return text, applied
 
@@ -299,6 +308,16 @@ def _origin_from(vs: dict) -> dict:
 # ---------------------------------------------------------------- the verb
 
 def apply_edit(session, arguments: dict) -> dict:
+    """`_apply_edit`, its result carrying the report on the canonical text the
+    edited buffer was stored as (issue #1700)."""
+    box: dict = {}
+    result = _apply_edit(session, arguments, box)
+    if box.get("canonical") is not None and isinstance(result, dict):
+        result["canonical"] = box["canonical"]
+    return result
+
+
+def _apply_edit(session, arguments: dict, box: dict) -> dict:
     """Patch the server-side source of the running composition, then re-admit.
 
     Returns the admission verdict / open holes / diagnostic — never the whole
@@ -320,8 +339,14 @@ def apply_edit(session, arguments: dict) -> dict:
     # Work on a copy: nothing about the session changes until an edit compiles.
     vs = copy.deepcopy(virtual_source(session))
     buffer = _resolve_buffer(vs, arguments.get("target") or arguments.get("component"))
-    new_text, applied = _apply_edits(_get_text(vs, buffer), edits)
-    _set_text(vs, buffer, new_text)
+    new_text, applied = _apply_edits(_get_text(vs, buffer), edits,
+                                     vs.get("modules"))
+    # issue #1700: the edited buffer is stored in canonical layout, so a terse
+    # body or fill costs the agent no indentation. Line-preserving, so a later
+    # hole edit's line is still the line the fillSpec named.
+    canon = canonical.canonicalise(new_text)
+    box["canonical"] = canon.report(with_text=bool(arguments.get("returnCanonical")))
+    _set_text(vs, buffer, canon.text)
 
     replacing = tuple(arguments.get("replacing") or ())
 

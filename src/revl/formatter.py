@@ -82,6 +82,11 @@ _CLOSERS = {")", "]", "}"}
 class _Piece:
     kind: str
     text: str
+    # the half-open character span the piece was scanned from, so a caller
+    # can address source text by token (`revl.mcp.canonical` finds a provide
+    # method's body this way) without a second scanner
+    start: int = 0
+    end: int = 0
 
 
 class FormatError(RevlError):
@@ -109,6 +114,8 @@ def _scan(source: str, filename: str) -> list[_Piece]:
     pieces: list[_Piece] = []
     i, n = 0, len(source)
     while i < n:
+        mark = len(pieces)
+        at = i
         c = source[i]
         if c == "\n":
             pieces.append(_Piece(_NEWLINE, "\n"))
@@ -163,6 +170,8 @@ def _scan(source: str, filename: str) -> list[_Piece]:
         else:
             line = source.count("\n", 0, i) + 1
             raise FormatError(filename, line, f"unexpected character {c!r}")
+        for piece in pieces[mark:]:
+            piece.start, piece.end = at, i
     return pieces
 
 

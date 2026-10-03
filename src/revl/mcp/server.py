@@ -75,6 +75,7 @@ from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import fillspec
+from . import canonical as _canonical
 from . import edit as _edit
 from . import leases as _leases
 from . import operator as _operator
@@ -781,6 +782,15 @@ def _tool_lease(arguments: dict) -> dict:
     return payload
 
 
+def _with_canonical(result: dict, canon: dict | None) -> dict:
+    """A verb's result carrying the report on the canonical text it stored
+    or compiled (issue #1700): the digest, whether the server rewrote the
+    agent's layout, and the text only on `returnCanonical`."""
+    if canon is not None and isinstance(result, dict):
+        result["canonical"] = canon
+    return result
+
+
 def _origin(arguments: dict) -> dict:
     """The admission inputs of a load/swap, kept so the composition can later
     be snapshotted for re-admission (docs/persistence.md)."""
@@ -817,6 +827,7 @@ def _tool_load(arguments: dict) -> dict:
     Under a policy that enforces leases, a load that would boot a component
     under a name another operator leases is refused, as a swap replacing it is
     (`leases.FENCED` says why a cold load is fenced too)."""
+    arguments, canon = _canonical.canonical_arguments(arguments)
     if not SESSION.loaded:   # a load over a running composition is refused below
         refusal = _leases.check(SESSION, "load", arguments)
         if refusal is not None:
@@ -837,7 +848,7 @@ def _tool_load(arguments: dict) -> dict:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, **_summary(ir), **state}
+    return _with_canonical({"ok": True, **_summary(ir), **state}, canon)
 
 
 def _tool_call(arguments: dict) -> dict:
@@ -873,6 +884,7 @@ def _tool_swap(arguments: dict) -> dict:
     """
     if not SESSION.loaded:
         return _session_error("nothing is loaded — call revl_load first")
+    arguments, canon = _canonical.canonical_arguments(arguments)
     replacing = tuple(arguments.get("replacing") or ())
 
     # component leases (item 61): under a policy that enforces leases, refuse a
@@ -935,7 +947,8 @@ def _tool_swap(arguments: dict) -> dict:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+    return _with_canonical({"ok": True, "admitted": True, "swapped": True,
+                            **_summary(full), **state}, canon)
 
 
 def _swap_server_side(replacing: tuple) -> dict:
@@ -1763,6 +1776,10 @@ def _tool_history_lifetime(arguments: dict) -> dict:
 
 
 def _tool_check(arguments: dict) -> dict:
+    # issue #1700: terse source in, canonical layout out. The formatter is
+    # line-preserving, so every line a diagnostic or a fillSpec names is the
+    # line the agent wrote.
+    arguments, canon = _canonical.canonical_arguments(arguments)
     try:
         ir = _compile(*_candidate_of(arguments))
     except RevlError as error:
@@ -1770,7 +1787,7 @@ def _tool_check(arguments: dict) -> dict:
         # issue #1704: every guarantee in the same answer, not only the one
         # that refused, so the self-check is one call
         rejected["selfCheck"] = _authoring_loop.self_check(rejected["diagnostics"])
-        return rejected
+        return _with_canonical(rejected, canon)
     # `holes` is the agent's own remaining work on this draft: every
     # placeholder it wrote that still has a type and no implementation
     # (docs/holes.md). `ok: true` with a non-empty `holes` means "checked,
@@ -1782,9 +1799,10 @@ def _tool_check(arguments: dict) -> dict:
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
-    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": holes,
-            "selfCheck": _authoring_loop.self_check(None, holes)}
+    return _with_canonical({"ok": True, **_summary(ir),
+                            "boundary": _boundary_of(ir), "holes": holes,
+                            "selfCheck": _authoring_loop.self_check(None, holes)},
+                           canon)
 
 
 def _untrusted_author() -> bool:
@@ -2236,6 +2254,14 @@ def _tool_explain(arguments: dict) -> dict:
     return explain(code)
 
 
+# issue #1700: the verbs that canonicalise inline source also take this
+_RETURN_CANONICAL = {
+    "returnCanonical": {"type": "boolean",
+                        "description": "also return the canonical text the server "
+                                       "stored (default: only its digest, so you "
+                                       "need not read back what you wrote)"},
+}
+
 _SOURCE_INPUT = {
     "source": {"type": "string",
                "description": "inline .rvl source (use this for a generated component; "
@@ -2261,7 +2287,8 @@ TOOLS = [
                        "or structured diagnostics (code, guarantee, expected/actual, "
                        "fix hint) on rejection. A draft with holes compiles; it is "
                        "refused at admission until every hole is filled.",
-        "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
+        "inputSchema": {"type": "object",
+                        "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
     },
@@ -2447,7 +2474,7 @@ TOOLS = [
                        "keys and the lifecycle trace.",
         "inputSchema": {
             "type": "object",
-            "properties": {**_SOURCE_INPUT,
+            "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "config": {"type": "object",
                                       "description": "per-component config tables"},
                            "record": {"type": "boolean",
@@ -2490,7 +2517,7 @@ TOOLS = [
                        "generation, need not re-serialize the whole file.",
         "inputSchema": {
             "type": "object",
-            "properties": {**_SOURCE_INPUT,
+            "properties": {**_SOURCE_INPUT, **_RETURN_CANONICAL,
                            "replacing": {"type": "array", "items": {"type": "string"},
                                          "description": "components withdrawn in this swap"}},
         },
@@ -2507,7 +2534,10 @@ TOOLS = [
                        "whole composition to change one line (revl_swap's cost, which "
                        "scales with the running system), send a small structured patch "
                        "against a named buffer the server already holds. Each edit is "
-                       "one of: {hole, expr} (fill the typed hole on that source line — "
+                       "one of: {method, body} (write only the body of a provide "
+                       "method, `key.op`; the server keeps its signature, or writes it "
+                       "from the service declaration when the method is new); "
+                       "{hole, expr} (fill the typed hole on that source line — "
                        "pairs with revl_check's fillSpec, which reports each hole's "
                        "line); {range: [start, end], replacement} (replace a character "
                        "span); or {anchor, replacement} (replace a literal snippet, no "
@@ -2527,6 +2557,16 @@ TOOLS = [
                     "items": {
                         "type": "object",
                         "properties": {
+                            "method": {"type": "string",
+                                       "description": "`<key>.<op>` (or "
+                                                      "`<Component>.<key>.<op>`): the "
+                                                      "provide method whose body this "
+                                                      "edit writes"},
+                            "body": {"type": "string",
+                                     "description": "the body (with `method`): an "
+                                                    "expression, `= <expr>`, or a "
+                                                    "`{ ... }` block; layout is free, "
+                                                    "the server canonicalises it"},
                             "hole": {"type": "integer",
                                      "description": "1-based source line of the typed "
                                                     "hole to fill (from a fillSpec)"},
@@ -2550,6 +2590,7 @@ TOOLS = [
                 "target": {"type": "string",
                            "description": "which server-side buffer to edit: omit for the "
                                           "main inline source, or name an in-memory module"},
+                **_RETURN_CANONICAL,
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
             },

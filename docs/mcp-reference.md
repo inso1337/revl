@@ -173,7 +173,12 @@ guarantee:
 - `note`: why a draft with holes is not admissible, or why rows are
   `unchecked`.
 
-- Inputs: `source` / `files` / `modules`.
+Inline source may be written in any layout the parser reads. The server
+canonicalises it (see [Terse in, canonical out](#terse-in-canonical-out)), and
+both answers carry `canonical`: `digest`, `changed`, and `source` only when
+asked.
+
+- Inputs: `source` / `files` / `modules`; `returnCanonical`.
 
 ### `revl_admit`
 
@@ -338,7 +343,8 @@ states, provided keys, and the lifecycle trace.
 - Inputs: `source` / `files` / `modules`; `config` (per-component config
   tables); `record` (record the effect accumulator so the composition can be
   stepped backwards - must be set at load, recording is installed before
-  activation).
+  activation); `returnCanonical`. Inline source is held in canonical layout
+  and the answer carries `canonical`, as `revl_check`'s does.
 
 ### `revl_call`
 
@@ -375,13 +381,16 @@ candidate leaves the running system untouched; this is the acting half of
 the source the server already holds - so an agent that edited server-side with
 `revl_edit` need not re-serialize the whole file.
 
-- Inputs: `source` / `files` / `modules` (all optional); `replacing`.
+- Inputs: `source` / `files` / `modules` (all optional); `replacing`;
+  `returnCanonical`. Inline source is held in canonical layout and the answer
+  carries `canonical`.
 
 ### `revl_edit`
 
 Patch the SERVER-SIDE source of the running composition and re-admit - deltas,
-not documents. Each edit is one of: `{hole, expr}` (fill the typed hole on that
-source line, pairs with `revl_check`'s fill spec), `{range: [start, end],
+not documents. Each edit is one of: `{method, body}` (write only a provide
+method's body; the server writes the frame, see below), `{hole, expr}` (fill
+the typed hole on that source line, pairs with `revl_check`'s fill spec), `{range: [start, end],
 replacement}` (replace a character span), or `{anchor, replacement}` (replace a
 literal snippet, no offsets). Re-admission runs the SAME gate as `revl_swap`: a
 patch that breaks a guarantee is refused with its diagnostic and the running
@@ -400,9 +409,56 @@ the edit arrives:
   component carries `added: true` and an empty cascade.
 - `breaks`: the total across the touched components.
 
-- Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
-  replacement}` / `{anchor, replacement, count?}`); `target` (which server-side
-  buffer to edit, omit for the main inline source); `replacing`.
+The edited buffer is stored in canonical layout, and the answer carries
+`canonical` (`digest`, `changed`, `source` only when asked).
+
+- Inputs: `edits` (array, required - each `{method, body}` / `{hole, expr}` /
+  `{range, replacement}` / `{anchor, replacement, count?}`); `target` (which
+  server-side buffer to edit, omit for the main inline source); `replacing`;
+  `returnCanonical`.
+
+### Terse in, canonical out
+
+Issue #1700. Output tokens cost more than input tokens and take wall time to
+decode, and indentation and layout are not decisions. So `revl_check`,
+`revl_load`, `revl_swap` and `revl_edit` (hole fills included) accept inline
+source in any layout the parser reads. The server runs the `revl fmt`
+formatter on it, under the same IR-equivalence gate `revl_fmt` runs, and holds
+the canonical text. A rewrite the gate refuses, or a text the formatter cannot
+scan, is kept as written (`canonical.kept` says why), so canonicalising never
+changes what is admitted.
+
+The answer names the stored text by `canonical.digest` (`sha256:` and 16 hex
+digits) instead of returning it. Pass `returnCanonical: true` to get the text
+as `canonical.source`. The formatter is line-preserving: it re-indents and
+respaces, and never moves a token to another line, so every line a diagnostic
+or a `fillSpec` reports is a line of the text you sent. Character offsets are
+not preserved. After a call reports `changed: true`, address later edits by
+`method`, by `hole` line, or by an `anchor` that does not depend on spacing,
+not by `range`.
+
+The minimal accepted forms:
+
+- **Layout.** Any indentation, none at all, and any spacing between tokens
+  except the one space that separates two adjacent words. A whole component on
+  one line is accepted. Line breaks are kept where you put them.
+- **A body, not a method.** `{method: "<key>.<op>", body: "<body>"}` writes only
+  the body of the provide method `op` under `provide <key>`. The body is an
+  expression (`n + 1`, stored as `= n + 1`), an expression with its `=`, or a
+  `{ ... }` block. When the provide block already has the method, its signature
+  is kept and only the body is replaced (`frame: "kept"`). When it does not,
+  the server writes `fn <op>(<params>)` from the service's declared operation
+  and puts the body in it (`frame: "written"`, with the `signature` it wrote).
+  When two components provide the same key, name the component:
+  `<Component>.<key>.<op>`.
+
+Measured with the bench's token proxy (`bench/tokens.py`), the arguments an
+agent writes to change one method body of a four-method component: 132 tokens
+to resend the file, 34 for an `anchor` edit, 26 for a `method` edit.
+tests/test_mcp_terse_canonical_1700.py pins these numbers. That proxy counts
+a whitespace run as one token, so it puts the layout saving of writing the
+same file tersely at 115 against 117 tokens. A real tokenizer that splits
+indentation runs would count more, which the proxy does not measure.
 
 ### `revl_unload`
 
