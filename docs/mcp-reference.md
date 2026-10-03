@@ -82,6 +82,22 @@ left behind. It is named `sessionState` because several verbs already return a
 top-level `state` (fiber states). A refusal that changed nothing returns the
 same footer as the call before it.
 
+**A repeated refusal is never the same twice.** The server remembers the last
+refused call, by verb and a digest of its arguments (key order does not
+matter). When the very next call is that same call and it is refused again,
+the refusal changes (issue #1694):
+
+- its first diagnostic reads `attempt N of this same call, refused again for
+  the same reason: <the reason>. The session now: <the footer in words>`;
+- it carries `"repeat": {"attempt": N, "bound": 3}`, and keeps its `next` call;
+- from attempt 3 on, it leads with a diagnostic of code `REPEATED_REFUSAL`,
+  which says that sending the call unchanged will be refused again and to send
+  `next` instead (or, with no `next`, to change the arguments or the state the
+  refusal names).
+
+Different arguments, a different verb, or a call that succeeds resets the count.
+A successful response is never rewritten.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->

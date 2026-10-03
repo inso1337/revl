@@ -94,6 +94,7 @@ from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from .schema import tools_from_ir
 from . import ambient as _ambient
 from . import remedy as _remedy
+from . import repeat as _repeat
 from .session import NothingLoaded, Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
@@ -3866,8 +3867,11 @@ def handle(message: dict) -> dict | None:
             if decision.gated and decision.allowed:
                 _stamp_authority(payload, decision)
         # issue #1693: every response, success or refusal, says what the
-        # session holds now
-        payload = _ambient.stamp(payload, SESSION)
+        # session holds now; issue #1694: a refusal of the same call as the
+        # refusal just before it says so instead of repeating byte for byte
+        state = _ambient.footer(SESSION)
+        payload = _repeat.observe(name, arguments, payload, state)
+        payload = _ambient.stamp(payload, state)
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),

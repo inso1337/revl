@@ -40,10 +40,23 @@ def footer(session) -> dict:
             "draft": draft is not None}
 
 
-def stamp(payload: dict, session) -> dict:
-    """`payload` with the footer, as a new dict (a handler's payload may be a
-    value it keeps)."""
-    return {**payload, KEY: footer(session)}
+def stamp(payload: dict, state: dict) -> dict:
+    """`payload` with the footer `state`, as a new dict (a handler's payload
+    may be a value it keeps)."""
+    return {**payload, KEY: state}
+
+
+def render(state: dict) -> str:
+    """The session footer in words."""
+    if not state.get("loaded"):
+        return "nothing is loaded"
+    names = ", ".join(state.get("components") or []) or "no components"
+    text = f"generation {state.get('generation')} is running ({names})"
+    if state.get("draft"):
+        text += ", with a draft edit that has open holes pending"
+    elif state.get("dirty"):
+        text += ", and the working source differs from what is running"
+    return text
 
 
 def _components(ir: dict | None) -> list:
