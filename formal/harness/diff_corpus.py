@@ -1423,6 +1423,58 @@ def approval_rows(rel: str, comp, ctx: _ApprovalCtx, svc_objs: dict,
     return rows
 
 
+# ------------------------ three declaration rules (issue #1809)
+#
+# Prelude ordering (`isolate`, `intercept`, `handoff`, a `realms(...)` route
+# and a model route precede every action), intercept target (an `intercept`
+# names a required key, not a provision) and method in service (a named
+# operation is one its service declares, A6). The model states each
+# (`RevL.Prelude`); the exporter carries `PS` (the activation body as
+# preludes and actions), `IT` (intercept targets) and `MC` (the operations a
+# component names).
+
+#: The statement kinds the checker's activation loop treats as preludes.
+PRELUDE_KINDS = ("IsolateStmt", "InterceptStmt", "HandoffStmt", "RouteStmt",
+                 "ModelRouteStmt")
+
+#: The uncoded refusals these rows decide, matched by message.
+PRELUDE_MESSAGE = "must precede every effect, emit, await, and provide"
+INTERCEPT_MESSAGE = "`intercept` applies to required keys only"
+#: The A6 refusal the `MS` row decides (A6 also covers arity and signature).
+METHOD_MESSAGE = "is not a method of service"
+
+
+def prelude_rows(rel: str, comp, op_calls: list, svc_of_key: dict) -> list[str]:
+    """The `PS`, `IT` and `MC` rows of one component. `op_calls` are the
+    (service, operation) crossings the component's statements resolve."""
+    rows: list[str] = []
+    for ord_, stmt in enumerate(comp.body):
+        kind = "prelude" if type(stmt).__name__ in PRELUDE_KINDS else "action"
+        rows.append("\t".join(["PS", rel, comp.name, str(ord_), kind]))
+        if type(stmt).__name__ == "InterceptStmt":
+            rows.append("\t".join(["IT", rel, comp.name, stmt.key]))
+    ops = list(op_calls)
+    for stmt in comp.body:
+        if isinstance(stmt, ProvideStmt):
+            svc = svc_of_key.get(stmt.key)
+            if svc is not None:
+                ops.extend((svc, pm.name) for pm in stmt.methods)
+    for svc, meth in sorted(set(ops)):
+        rows.append("\t".join(["MC", rel, comp.name, svc, meth]))
+    return rows
+
+
+def prelude_ok(steps: list[str]) -> bool:
+    """The reference's prelude rule: no prelude after the first action."""
+    seen_action = False
+    for kind in steps:
+        if kind == "action":
+            seen_action = True
+        elif seen_action:
+            return False
+    return True
+
+
 # ------------------------------------------ async colour (issue #1808)
 #
 # The checker's A1 rules (`lower._admit_effect_async`, `_admit_emit_async`,
@@ -2629,6 +2681,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             kinds: list[str] = []
             terms: list[tuple[int, str, list[str], list[str]]] = []
             head_roots: set[str] = set()
+            head_calls: list[tuple[str, str]] = []
 
             def _term_heads(node: object, ctx: str = "plain") -> list[str]:
                 found: list[tuple[str, str, str]] = []
@@ -2692,6 +2745,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             def _record(local_calls: list[tuple[str, str, str]]) -> bool:
                 saw_raw = False
                 head_roots.update(root for root, _chain, _ctx in local_calls)
+                head_calls.extend((root, chain) for root, chain, _c in local_calls)
                 for root, chain, ctx in local_calls:
                     res = _resolve_emission(root, chain, require_map, handles,
                                             psvc, aliases)
@@ -2748,6 +2802,15 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         for inner in pm.body:
                             classify_stmt(inner)
             tsv.extend(f"T\t{rel}\t{c.name}\t{k}" for k in kinds)
+            # declaration-rule facts (PS/IT/MC, issue #1809)
+            op_calls = []
+            for root, chain in head_calls:
+                res = _resolve_emission(root, chain, require_map, handles,
+                                        psvc, aliases)
+                if res is not None and res[0] in services \
+                        and "." not in res[1] and "[]" not in res[1]:
+                    op_calls.append(res)
+            tsv.extend(prelude_rows(rel, c, op_calls, psvc.get(c.name, {})))
             # async-colour facts (AS/AG, issue #1808)
             tsv.extend(async_rows(rel, c, _AsyncCtx(
                 require_map, handles, psvc, aliases), svc_objs, psvc))
@@ -3688,6 +3751,40 @@ def approval_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE read for each component's declaration rules: (steps,
+#: intercept targets, provides, operations). Read by `prelude_coverage`.
+_PRELUDE_ROWS: dict = {}
+
+
+def prelude_coverage(ref) -> list[str]:
+    """The non-vacuity ratchet for the `PL`, `IC` and `MS` rows (issue
+    #1809). Each must be exercised on both sides: a prelude before an action
+    admitted and one after refused; an intercept of a requirement admitted
+    and one of a provision refused; a declared operation admitted and an
+    undeclared one refused. Returns findings, treated as gate failures."""
+    def find(rows: dict, want: str, test) -> object:
+        return next((k for k in sorted(rows) if rows[k] == want
+                     and test(_PRELUDE_ROWS.get(k))), None)
+
+    has_steps = lambda x: x is not None and "prelude" in x[0] and "action" in x[0]  # noqa: E731
+    has_targets = lambda x: x is not None and bool(x[1])  # noqa: E731
+    has_calls = lambda x: x is not None and bool(x[3])  # noqa: E731
+    witnesses = {
+        "an admitted prelude before an action": find(ref.preludes, "ok", has_steps),
+        "a refused prelude after an action": find(ref.preludes, "fail", has_steps),
+        "an admitted intercept of a requirement": find(ref.intercepts, "ok", has_targets),
+        "a refused intercept of a provision": find(ref.intercepts, "fail", has_targets),
+        "an admitted declared operation": find(ref.methods, "ok", has_calls),
+        "a refused undeclared operation": find(ref.methods, "fail", has_calls),
+    }
+    findings = [f"declaration-rule coverage: NO witness of {k} — the row would "
+                "agree vacuously" for k, w in witnesses.items() if w is None]
+    if not findings:
+        print(f"declaration-rule coverage: {len(_PRELUDE_ROWS)} components, "
+              "each rule admitted and refused at least once")
+    return findings
+
+
 #: What the REFERENCE decided for each A1 site: (admitted, kind, reaches).
 #: Filled by `reference_from_tsv`, read by `async_coverage`.
 _ASYNC_ROWS: dict = {}
@@ -3834,7 +3931,9 @@ class Verdicts(NamedTuple):
     `bindings` BU rows (G6 binding uniqueness: no binding reuses a name in
     view, issue #1812), `access` G1 rows (G1 declared access: every access
     root is a declared requirement, issue #1807), `async_sites` A1 rows and
-    `async_sigs` A1S rows (A1 async colour, issue #1808)."""
+    `async_sigs` A1S rows (A1 async colour, issue #1808), and `preludes`
+    PL, `intercepts` IC and `methods` MS rows (prelude ordering, intercept
+    target and method in service, issue #1809)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -3855,6 +3954,9 @@ class Verdicts(NamedTuple):
     access: dict[tuple[str, str], str]
     async_sites: dict[tuple[str, str, str], str]
     async_sigs: dict[tuple[str, str, str], str]
+    preludes: dict[tuple[str, str], str]
+    intercepts: dict[tuple[str, str], str]
+    methods: dict[tuple[str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -3866,7 +3968,8 @@ class Verdicts(NamedTuple):
                 + len(self.a2) + len(self.deferred)
                 + len(self.approvals) + len(self.bindings)
                 + len(self.access) + len(self.async_sites)
-                + len(self.async_sigs))
+                + len(self.async_sigs) + len(self.preludes)
+                + len(self.intercepts) + len(self.methods))
 
 
 
@@ -3898,6 +4001,9 @@ def parse_verdicts(text: str) -> Verdicts:
     access: dict[tuple[str, str], str] = {}
     async_sites: dict[tuple[str, str, str], str] = {}
     async_sigs: dict[tuple[str, str, str], str] = {}
+    preludes: dict[tuple[str, str], str] = {}
+    intercepts: dict[tuple[str, str], str] = {}
+    methods: dict[tuple[str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -3981,6 +4087,10 @@ def parse_verdicts(text: str) -> Verdicts:
             # A1 signature colour: (file, comp, key.method) -> ok|fail.
             async_sigs[(parts[1], parts[2], parts[3])] = \
                 parts[4].split("=", 1)[1]
+        elif parts[0] in ("PL", "IC", "MS") and len(parts) == 4:
+            # the three declaration rules: (file, comp) -> ok|fail.
+            {"PL": preludes, "IC": intercepts, "MS": methods}[parts[0]][
+                (parts[1], parts[2])] = parts[3].split("=", 1)[1]
         elif parts[0] == "G1" and len(parts) == 4:
             # G1 declared access: (file, comp) -> ok|fail.
             access[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
@@ -3993,7 +4103,7 @@ def parse_verdicts(text: str) -> Verdicts:
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
                     a2, deferred, approvals, bindings, access,
-                    async_sites, async_sigs)
+                    async_sites, async_sigs, preludes, intercepts, methods)
 
 
 
@@ -4420,6 +4530,9 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     access: dict[tuple[str, str], str] = {}
     async_sites: dict[tuple[str, str, str], str] = {}
     async_sigs: dict[tuple[str, str, str], str] = {}
+    preludes: dict[tuple[str, str], str] = {}
+    intercepts: dict[tuple[str, str], str] = {}
+    methods: dict[tuple[str, str], str] = {}
     for key, tokens in crossing_tokens.items():
         needed = tokens & required_by_file.get(key[0], set())
         edge = crossing_edge.get(key)
@@ -4481,11 +4594,41 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         elif r and r[0] == "AG" and len(r) == 6:
             async_sigs[(r[1], r[2], r[3])] = "ok" if r[4] == r[5] else "fail"
 
+    # PL / IC / MS verdicts (issue #1809), recomputed from the PS, IT, MC, M
+    # and B rows.
+    steps_by: dict[tuple[str, str], list[tuple[int, str]]] = {}
+    targets_by: dict[tuple[str, str], set[str]] = {}
+    calls_by: dict[tuple[str, str], set[tuple[str, str]]] = {}
+    for r in rows:
+        if r and r[0] == "PS" and len(r) == 5:
+            steps_by.setdefault((r[1], r[2]), []).append((int(r[3]), r[4]))
+        elif r and r[0] == "IT" and len(r) == 4:
+            targets_by.setdefault((r[1], r[2]), set()).add(r[3])
+        elif r and r[0] == "MC" and len(r) == 5:
+            calls_by.setdefault((r[1], r[2]), set()).add((r[3], r[4]))
+    table_by: dict[str, set[tuple[str, str]]] = {}
+    for r in brows:
+        table_by.setdefault(r[1], set()).add((r[2], r[3]))
+    _PRELUDE_ROWS.clear()
+    for r in mrows:
+        key = (r[1], r[2])
+        requires = {x for x in r[3].split(",") if x}
+        provides = {x for x in r[4].split(",") if x}
+        steps = [k for _o, k in sorted(steps_by.get(key, []))]
+        preludes[key] = "ok" if prelude_ok(steps) else "fail"
+        bad_targets = {t for t in targets_by.get(key, set())
+                       if t in provides and t not in requires}
+        intercepts[key] = "fail" if bad_targets else "ok"
+        unknown = calls_by.get(key, set()) - table_by.get(r[1], set())
+        methods[key] = "fail" if unknown else "ok"
+        _PRELUDE_ROWS[key] = (steps, targets_by.get(key, set()), provides,
+                              calls_by.get(key, set()))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
 
                     recoveries, confinements, g8surface, g5reg, a9,
                     configs, a2, deferred, approvals, bindings, access,
-                    async_sites, async_sigs)
+                    async_sites, async_sigs, preludes, intercepts, methods)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -4605,7 +4748,8 @@ def a9_coverage() -> list[str]:
 # genuine fragment gap has `out-of-fragment*` to land in, which is the bucket
 # that says "the model has no fact here" rather than "the model disagrees".
 FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
-                 "missed-G6", "missed-A1", "missed-A9", "missed-A2",
+                 "missed-G6", "missed-A1", "missed-A6", "missed-A9",
+                 "missed-A2", "missed-prelude", "missed-intercept",
                  "formal-strict", "formal-found-other")
 
 
@@ -4761,6 +4905,9 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # The G1 row is declared access (issue #1807), checker-visible both ways.
         g1_fail = any(x == "fail" for k, x in v.access.items() if k[0] == rel)
         # The A1 rows are async colour (issue #1808): checker-visible both ways.
+        pl_fail = any(x == "fail" for k, x in v.preludes.items() if k[0] == rel)
+        ic_fail = any(x == "fail" for k, x in v.intercepts.items() if k[0] == rel)
+        ms_fail = any(x == "fail" for k, x in v.methods.items() if k[0] == rel)
         a1_fail = any(x == "fail" for k, x in v.async_sites.items()
                       if k[0] == rel) or any(
             x == "fail" for k, x in v.async_sigs.items() if k[0] == rel)
@@ -4777,7 +4924,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         df_fail = v.deferred.get(rel, "ok") == "fail"
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
-            and not df_fail and not bu_fail and not g1_fail and not a1_fail
+            and not df_fail and not bu_fail and not g1_fail and not a1_fail \
+            and not pl_fail and not ic_fail and not ms_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -4847,6 +4995,15 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         elif code == "REVL" and A1_SIGNATURE_MESSAGE in checker_message(rel):
             # The uncoded signature-colour refusal, decided by the `A1S` row.
             record("agree-A1" if a1_fail else "missed-A1", rel)
+        elif code == "A6" and METHOD_MESSAGE in checker_message(rel):
+            # Method in service (issue #1809), the call-site half of A6.
+            record("agree-A6" if ms_fail else "missed-A6", rel)
+        elif code == "REVL" and PRELUDE_MESSAGE in checker_message(rel):
+            # Prelude ordering (issue #1809), an uncoded refusal.
+            record("agree-prelude" if pl_fail else "missed-prelude", rel)
+        elif code == "REVL" and INTERCEPT_MESSAGE in checker_message(rel):
+            # Intercept target (issue #1809), an uncoded refusal.
+            record("agree-intercept" if ic_fail else "missed-intercept", rel)
         elif code == "G1":
             # Declared access (issue #1807): the `G1` row decides
             # `RevL.G1Access` over the component's access roots, so a G1
@@ -5133,6 +5290,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         f"{len(ref.access)} access components",
         f"{len(ref.async_sites)} async sites",
         f"{len(ref.async_sigs)} async signatures",
+        f"{len(ref.preludes)} x 3 declaration-rule components",
     ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
@@ -5309,7 +5467,10 @@ def main() -> int:
             ("binding", ref.bindings, formal.bindings),
             ("access", ref.access, formal.access),
             ("async_site", ref.async_sites, formal.async_sites),
-            ("async_sig", ref.async_sigs, formal.async_sigs)):
+            ("async_sig", ref.async_sigs, formal.async_sigs),
+            ("prelude", ref.preludes, formal.preludes),
+            ("intercept", ref.intercepts, formal.intercepts),
+            ("method", ref.methods, formal.methods)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -5336,7 +5497,8 @@ def main() -> int:
         f"{len(ref.bindings)} binding scopes + "
         f"{len(ref.access)} access components + "
         f"{len(ref.async_sites)} async sites + "
-        f"{len(ref.async_sigs)} async signatures) — "
+        f"{len(ref.async_sigs)} async signatures + "
+        f"{len(ref.preludes)} x 3 declaration-rule components) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -5354,6 +5516,7 @@ def main() -> int:
     mismatches.extend(binding_coverage())
     mismatches.extend(access_coverage())
     mismatches.extend(async_coverage())
+    mismatches.extend(prelude_coverage(ref))
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

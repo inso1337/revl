@@ -13,6 +13,7 @@ import RevL.Theorems.G4_ApprovalFloor
 import RevL.Theorems.G6_BindingUnique
 import RevL.Theorems.G1_KeyAccess
 import RevL.Theorems.A1_AsyncColour
+import RevL.Theorems.Prelude_InterceptMethod
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -55,7 +56,12 @@ proved model itself**, not from a private restatement of it (roadmap item
     site's kind and heads, the file's async names (the `AN` rows) and its
     `fn` call graph (the `FN` rows); `asyncRowB_iff` PROVES it equals
     `RevL.A1Async.SiteOK`, and `A1S … sig=` is `RevL.A1Async.sigB`
-    (`sigRowB_iff`) over one provide method's two colours (issue #1808).
+    (`sigRowB_iff`) over one provide method's two colours (issue #1808);
+  * `PL … prelude=`, `IC … intercept=` and `MS … method=` are
+    `RevL.Prelude.preludeB`, `interceptB` and `methodB` over the `PS`
+    steps, the `IT` targets against the `M` row, and the `MC` operations
+    against the file's `B` table; `preludeRowB_iff`, `interceptRowB_iff`
+    and `methodRowB_iff` PROVE each is its rule (issue #1809).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -194,6 +200,14 @@ Fact rows in (tab-separated, one fact per line):
                                              a provide method's colour as its
                                              service declares it and as it is
                                              written (`async`/`sync`)
+  PS <file> <comp> <ord> <prelude|action>    one activation-body statement
+                                             as the prelude rule sees it
+  IT <file> <comp> <key>                     an `intercept` target
+  MC <file> <comp> <svc> <meth>              a service operation the
+                                             component names: a crossing
+                                             through a requirement, a handle
+                                             or an alias, or a provide-block
+                                             implementation (issue #1809)
   GA <file> <comp> <root>                    one ACCESS root: a call head's
                                              root that is no binding, module
                                              callable, import, host family or
@@ -300,6 +314,12 @@ Verdict rows out:
   A1S <file> <comp> <key.method> <sig=ok|fail>     A1, a provide method's
                                                    colour is its service's:
                                                    `RevL.A1Async.sigB`
+  PL <file> <comp> <prelude=ok|fail>               prelude ordering:
+                                                   `RevL.Prelude.preludeB`
+  IC <file> <comp> <intercept=ok|fail>             intercept target:
+                                                   `RevL.Prelude.interceptB`
+  MS <file> <comp> <method=ok|fail>                method in service:
+                                                   `RevL.Prelude.methodB`
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -1913,6 +1933,74 @@ theorem sigRowB_iff (declared impl : Bool) :
 
 end AsyncColour
 
+/-! ## Deciding the three declaration rules (issue #1809)
+
+`PS` rows are the activation body's statements in order, as preludes and
+actions; `IT` rows are `intercept` targets; `MC` rows are the service
+operations a component names. The verdicts are `RevL.Prelude.preludeB`,
+`interceptB` and `methodB`, each with a bridge. -/
+
+section PreludeRules
+
+structure PSRow where
+  path : String
+  comp : String
+  ord : Nat
+  kind : String
+
+structure ITRow where
+  path : String
+  comp : String
+  key : String
+
+structure MCRow where
+  path : String
+  comp : String
+  svc : String
+  meth : String
+
+def parsePS (f : List String) : Option PSRow :=
+  match f with
+  | ["PS", path, comp, ord, kind] => ord.toNat?.map fun o => ⟨path, comp, o, kind⟩
+  | _ => none
+
+def parseIT (f : List String) : Option ITRow :=
+  match f with
+  | ["IT", path, comp, key] => some ⟨path, comp, key⟩
+  | _ => none
+
+def parseMC (f : List String) : Option MCRow :=
+  match f with
+  | ["MC", path, comp, svc, meth] => some ⟨path, comp, svc, meth⟩
+  | _ => none
+
+def parsePreludeStep : String → Option RevL.Prelude.Step
+  | "prelude" => some .prelude
+  | "action" => some .action
+  | _ => none
+
+def preludeRowB (steps : List RevL.Prelude.Step) : Bool := RevL.Prelude.preludeB steps
+
+theorem preludeRowB_iff (steps : List RevL.Prelude.Step) :
+    preludeRowB steps = true ↔ RevL.Prelude.PreludeOK steps :=
+  RevL.Prelude.preludeB_iff steps
+
+def interceptRowB (provides requires targets : List String) : Bool :=
+  RevL.Prelude.interceptB provides requires targets
+
+theorem interceptRowB_iff (provides requires targets : List String) :
+    interceptRowB provides requires targets = true ↔
+      RevL.Prelude.InterceptOK provides requires targets :=
+  RevL.Prelude.interceptB_iff provides requires targets
+
+def methodRowB (table calls : List RevL.Prelude.Op) : Bool := RevL.Prelude.methodB table calls
+
+theorem methodRowB_iff (table calls : List RevL.Prelude.Op) :
+    methodRowB table calls = true ↔ RevL.Prelude.MethodOK table calls :=
+  RevL.Prelude.methodB_iff table calls
+
+end PreludeRules
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1970,6 +2058,9 @@ def main (args : List String) : IO UInt32 := do
     let anrows := fields.filterMap parseAN
     let asrows := fields.filterMap parseAS
     let agrows := fields.filterMap parseAG
+    let psrows := fields.filterMap parsePS
+    let itrows := fields.filterMap parseIT
+    let mcrows := fields.filterMap parseMC
     let aerows := fields.filterMap parseAE
     -- An edge with no crossing, or two edges on one crossing, is a malformed
     -- export: refuse it rather than read one of them.
@@ -2036,6 +2127,10 @@ def main (args : List String) : IO UInt32 := do
         s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\n"
     -- A `DR` row whose scope or position the model has no constructor for
     -- would drop a reach silently and move the verdict: refuse instead.
+    let unknownPS := psrows.filter (fun r => (parsePreludeStep r.kind).isNone)
+    if !unknownPS.isEmpty then
+      IO.eprintln s!"oracle: PS rows of unknown step kind: {unknownPS.map (·.path)}"
+      return 1
     let unknownAS := asrows.filter (fun r => (parseSiteKind r.kind).isNone)
     if !unknownAS.isEmpty then
       IO.eprintln s!"oracle: AS rows of unknown site kind: {unknownAS.map (·.path)}"
@@ -2237,6 +2332,23 @@ def main (args : List String) : IO UInt32 := do
         let sv := if sigRowB (r.declared == "async") (r.impl == "async")
           then "ok" else "fail"
         out := out ++ s!"A1S\t{p}\t{r.comp}\t{r.meth}\tsig={sv}\n"
+      -- PL / IC / MS verdicts (issue #1809), one each per component.
+      let table : List RevL.Prelude.Op :=
+        (brows.filter (fun r => r.path == p)).map (fun r => (r.svc, r.meth))
+      let pps := psrows.filter (fun r => r.path == p)
+      let pit := itrows.filter (fun r => r.path == p)
+      let pmc := mcrows.filter (fun r => r.path == p)
+      for m in fm do
+        let steps := ((pps.filter (fun r => r.comp == m.name)).mergeSort
+          (fun a b => a.ord <= b.ord)).filterMap (fun r => parsePreludeStep r.kind)
+        let plv := if preludeRowB steps then "ok" else "fail"
+        out := out ++ s!"PL\t{p}\t{m.name}\tprelude={plv}\n"
+        let targets := (pit.filter (fun r => r.comp == m.name)).map (·.key)
+        let icv := if interceptRowB m.provides m.requires targets then "ok" else "fail"
+        out := out ++ s!"IC\t{p}\t{m.name}\tintercept={icv}\n"
+        let calls := (pmc.filter (fun r => r.comp == m.name)).map (fun r => (r.svc, r.meth))
+        let msv := if methodRowB table calls then "ok" else "fail"
+        out := out ++ s!"MS\t{p}\t{m.name}\tmethod={msv}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -2302,3 +2414,6 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.accessRowB_iff
 #print axioms RevLOracle.asyncRowB_iff
 #print axioms RevLOracle.sigRowB_iff
+#print axioms RevLOracle.preludeRowB_iff
+#print axioms RevLOracle.interceptRowB_iff
+#print axioms RevLOracle.methodRowB_iff

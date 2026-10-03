@@ -395,3 +395,16 @@ import RevL
 #print axioms RevL.A1Async.sigB_iff
 #print axioms RevL.A1Async.fixtures_decided
 #print axioms RevL.A1Async.a1_not_vacuous
+-- Issue #1809: three declaration rules. Prelude ordering (preludes precede
+-- every action), intercept target (a requirement, not a provision) and
+-- method in service (A6 call-site half); decided by the oracle's `PL`, `IC`
+-- and `MS` rows.
+#print axioms RevL.Prelude.preludeB_iff
+#print axioms RevL.Prelude.prelude_after_action_refused
+#print axioms RevL.Prelude.preludes_first_admitted
+#print axioms RevL.Prelude.interceptB_iff
+#print axioms RevL.Prelude.intercept_provision_refused
+#print axioms RevL.Prelude.methodB_iff
+#print axioms RevL.Prelude.undeclared_method_refused
+#print axioms RevL.Prelude.fixtures_decided
+#print axioms RevL.Prelude.prelude_rules_not_vacuous

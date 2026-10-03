@@ -267,3 +267,12 @@ RevL.A1Async.await_pairing_exact	instance	RevL.A1Async.a1_not_vacuous	open_conn 
 RevL.A1Async.sigB_iff	instance	RevL.A1Async.fixtures_decided	sigB is false on a sync implementation of an async declaration and true when the colours agree
 RevL.A1Async.fixtures_decided	concrete	-	the undo, effect, sync-method, emit and signature shapes of the A1 fixtures decided both ways
 RevL.A1Async.a1_not_vacuous	concrete	-	the reach through a fn, the awaited acquisition admitted, its unawaited twin and the suspending undo refused, the synchronous undo admitted
+RevL.Prelude.preludeB_iff	instance	RevL.Prelude.prelude_rules_not_vacuous,RevL.Prelude.fixtures_decided	preludeB is false on an action then a prelude and true on a prelude then an action, so the printed PL verdict is mutation-sensitive
+RevL.Prelude.prelude_after_action_refused	necessity	RevL.Prelude.prelude_rules_not_vacuous	a prelude after an action is refused; the prelude-first order is admitted, so the refusal is not universal
+RevL.Prelude.preludes_first_admitted	instance	RevL.Prelude.prelude_rules_not_vacuous	[prelude, action] is admitted, the n = 1 instance
+RevL.Prelude.interceptB_iff	instance	RevL.Prelude.prelude_rules_not_vacuous,RevL.Prelude.fixtures_decided	interceptB is false on an intercept of the provision kv and true when kv is required instead
+RevL.Prelude.intercept_provision_refused	necessity	RevL.Prelude.prelude_rules_not_vacuous	intercepting a pure provision is refused; intercepting a requirement is admitted
+RevL.Prelude.methodB_iff	instance	RevL.Prelude.prelude_rules_not_vacuous,RevL.Prelude.fixtures_decided	methodB is false on Database.execute and true on Database.query against a query-only table
+RevL.Prelude.undeclared_method_refused	necessity	RevL.Prelude.prelude_rules_not_vacuous	an undeclared operation is refused; a declared one is admitted
+RevL.Prelude.fixtures_decided	concrete	-	the three corpus shapes refused and their twins admitted
+RevL.Prelude.prelude_rules_not_vacuous	concrete	-	each rule refuses its corpus shape and admits the twin

@@ -59,7 +59,7 @@ no oracle row is checked against the *paper*, not against `src/revl`.
 | **A2** no acquisition after a provision | full over the ordered activation body | 14 | **yes** (317 A2 rows, 1 agree-A2) | the body is a step list (`acquire` / `provide` / `other` — the checker's four refused forms, the `provide` block, and everything else) and `RevL.A2.a2B` is `lower._dispatch_action`'s fold verbatim, bridged to the declarative rule by `a2B_iff`. The content is over G7's stack: with a `bracket` per release and per withdrawal, `proof_pass_is_withdrawals_then_releases` proves that under A2 `RevL.Semantics.phase1` runs every withdrawal before every release under every settling verdict, and `fixture_opens_the_window` proves the fixture's shape runs a release first. The oracle folds the same rule over the exported `AQ` body steps on both sides; `a2_coverage` fails the gate unless the corpus carries an admitted body with both a provision and an acquisition and the refused shape. **Not modelled**: entries a provide-method body registers at call time (the G7 corpus's `method` seam), and whether the runtime withdraws a provision as a bracket at all — the theorem takes the LIFO premise the rule rests on and shows A2 is exactly the ordering condition under it |
 | **A3** host-safe identifiers | **none** | 0 | no | lexical, checked by extraction rather than by a theorem shape. **Out of scope by kind** |
 | **A5** compensation accompanies an emission | **none** | 0 | no | G7 *models* the `compensation` entry kind and proves how it is disposed, but **nothing states that an emission must register one**. **Unbuilt work**, and the nearest thing to a surprise on this map |
-| **A6** provide-methods match the service signature | **none** | 0 | partial | the oracle's P row is a *capability bound* check, not the signature match, and `methodBoundOK` is a private restatement. **Unbuilt work** |
+| **A6** provide-methods match the service signature | partial: the call-site half | 4 | **yes** for the call-site half (one MS row per component; 1 agree-A6) | since issue #1809 `RevL.Prelude.MethodOK` decides that every operation a component names (a crossing or a provide-block implementation) is declared by its service. The signature match itself (arity, parameter and return types) is not modelled: the oracle's P row is a *capability bound* check, and `methodBoundOK` is a private restatement. **Unbuilt work** |
 | **A8** mid-body failure reverts and contains | full over the WAL model | 18 | **yes** (1620 O rows) | the row WRITES each scenario's records as a real JSON-Lines WAL and runs `src/revl/recovery.py` over it, diffing recover's own verdict, the set it actually applied to the `World`, and its reported residue against the model's `outcome` / `replayed` / `reported`. It found the legacy-`effect` family's item-309 fence branch missing from `RevL.Lemmas.dispose` (see below). Crash cuts covered: fence-to-apply, abort-then-crash, the approved-to-discharged window. **Not covered and not claimed**: a crash between a witnessed mutation and its record (the reference logs the descriptor *after* the forward extern returns), the roll-forward `flush-residue` surface, cascading abort, escrow. Durability is a floor, not a theorem |
 | **A9** provide key declared in `provides`, both directions | full over the installed blocks and routes | 16 | **yes** (one A9 row per component that declares or installs anything; the generated census below carries the count) | the installed `provide k { … }` block keys and the `isolate k in realms(...)` routed keys are modelled beside the L0 `LComponent` (`RevL.A9.Installed`, no L0 edit); `A9OK` is `BlocksDeclared` (every block key is in the clause, issue 1167) AND `DeclaredInstalled` (every clause key has a block or a route, issue #1172 / PR #1184). `installed_block_is_slot` is the bridge to G2/G3: under A9 every block answers a `(key, realm)` slot of the universe `LinkOK` reasons over; `undeclared_block_is_no_slot` and `declared_uninstalled_refused` are the two fixtures' shapes, `unrouted_needs_a_block` the converse as stated for an ordinary provider, `routed_installs_without_block` the exemption (`stdlib/router.rvl`'s `RoundRobin`). The oracle exports the blocks as `PB` facts and the routes as `PR` facts (the `C` row reads the clause, not the body) and decides `a9B` per component that declares or installs anything; `a9_coverage` fails the gate unless the corpus carries an admitted provider, both refused shapes (`examples/rejections/a9_provide_key_not_declared.rvl`, `examples/rejections/a9_provides_without_block.rvl`, both `agree-A9`; `missed-A9` is FATAL) and the routed shape admitted (`tests/formal_corpus/a9_routes_installs_key.rvl`). The double install ("provision `k` is installed twice", uncoded) is `NoDoubleInstall`, proved distinct from A9 and not under the row: no corpus file installs twice and the refusal carries no code. **Not modelled**: the checker's skip of the converse for a body that recovered past a refused statement (item 386), which can only land in `formal-found-other`; and the route's realm legs, elided from the V row (see the fidelity limits) |
 | **T1/T2/T3** typing, `Opt[T]`, holes | **none** | 0 | no | the type checker is outside the guarantee backbone. **Out of scope by kind** |
@@ -82,12 +82,12 @@ Three summary readings of that map:
   and not a text: G7 drives `backends/python/runtime.py` over an
   enumerated teardown corpus, and A8/R4 drive `src/revl/recovery.py` over
   an enumerated WAL corpus.
-- **Four guarantee codes have no theorem at all** (A3, A5, A6, T1-T3).
+- **Three guarantee codes have no theorem at all** (A3, A5, T1-T3).
   Of those, A5 is the one worth naming twice: G7 proves how a
   `compensation` entry is disposed without anything proving one has to
-  exist. A9 left this list in issue 1167, A2 in issue 1166 and A1's
-  async-colour rules in issue #1808: each rule is now a theorem and a
-  differential row.
+  exist. A9 left this list in issue 1167, A2 in issue 1166, A1's
+  async-colour rules in issue #1808 and A6's call-site half in issue
+  #1809: each rule is now a theorem and a differential row.
 - **One row is UNPROVED by construction** (G9 path coverage) and says so
   in the table, rather than being absent.
 
@@ -345,6 +345,15 @@ Three summary readings of that map:
 | `RevL.A1Async.sigB_iff` | A1 async colour — the signature | **proved** | `propext` | the printed `A1S` verdict is exactly "the implementation's colour is the declaration's" |
 | `RevL.A1Async.fixtures_decided` | A1 async colour — the corpus shapes | **proved** | `propext` | the undo, effect, sync-method, emit and signature shapes of the A1 fixtures, decided both ways |
 | `RevL.A1Async.a1_not_vacuous` | A1 async colour — non-vacuity | **proved** | `propext, Quot.sound` | the reach goes through a `fn`, the awaited acquisition is admitted and its unawaited twin refused, a suspending `undo` refused and a synchronous one admitted |
+| `RevL.Prelude.preludeB_iff` | prelude ordering — the bridge (issue #1809) | **proved** | `propext, Quot.sound` | the printed `PL` verdict is exactly "no prelude after the first action" |
+| `RevL.Prelude.prelude_after_action_refused` | prelude ordering — the refusal | **proved** | none | an `isolate`/`intercept`/`handoff`/route after an action is refused |
+| `RevL.Prelude.preludes_first_admitted` | prelude ordering — admission | **proved** | `propext, Quot.sound` | any number of leading preludes before actions is admitted |
+| `RevL.Prelude.interceptB_iff` | intercept target — the bridge | **proved** | `propext, Quot.sound` | the printed `IC` verdict is exactly "no intercept of a provision that is not required" |
+| `RevL.Prelude.intercept_provision_refused` | intercept target — the refusal | **proved** | none | an intercept of a pure provision is refused |
+| `RevL.Prelude.methodB_iff` | A6 method in service — the bridge | **proved** | `propext, Quot.sound` | the printed `MS` verdict is exactly "every named operation is declared by its service" |
+| `RevL.Prelude.undeclared_method_refused` | A6 method in service — the refusal | **proved** | none | one undeclared operation refuses the component |
+| `RevL.Prelude.fixtures_decided` | the three declaration rules — the corpus shapes | **proved** | none | `v2_isolate_after_effect`, `v2_intercept_on_provision` and `a6_method_not_in_service` refused, their twins admitted |
+| `RevL.Prelude.prelude_rules_not_vacuous` | the three declaration rules — non-vacuity | **proved** | `propext, Quot.sound` | each rule refuses its corpus shape and admits the twin |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -999,6 +1008,24 @@ Verdicts:
   `async_coverage` fails the gate unless every rule (awaited, unawaited,
   sync method, teardown) is both admitted and refused somewhere in the
   corpus.
+- **PL / IC / MS rows (per component, three declaration rules, issue
+  #1809)**: `RevL.Prelude.preludeB` over the activation body's statements
+  in order as preludes (`isolate`, `intercept`, `handoff`, a `realms(...)`
+  route, a model route) and actions (`PS`); `interceptB` over the
+  `intercept` targets (`IT`) against the `M` row's provides and requires;
+  and `methodB` over the service operations the component names (`MC`: a
+  crossing through a requirement, a spawn handle or an alias, and every
+  provide-block implementation) against the file's `B` table. Each has a
+  proved bridge (`preludeRowB_iff`, `interceptRowB_iff`,
+  `methodRowB_iff`), and the reference recomputes all three. The two
+  prelude and intercept refusals are uncoded and matched by message,
+  filing under `agree-prelude` / `agree-intercept` or the fatal
+  `missed-prelude` / `missed-intercept`; the A6 call-site refusal files
+  under `agree-A6` or the fatal `missed-A6` (A6's arity and signature
+  halves are not this row). Blinding the three printed verdicts was seen
+  to produce 3 mismatches and one fatal `missed-*` each.
+  `prelude_coverage` fails the gate unless each rule is admitted and
+  refused somewhere in the corpus.
 
 ### The G7 row, and what it is evidence of
 
@@ -1172,14 +1199,14 @@ printed 1. Nothing compared the two, in either direction.
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
 **697 .rvl files -> 635 components -> 1559 statements = 445 modeled +
-223 componentless + 29 refused at parse**, and **12121 verdicts compared
+223 componentless + 29 refused at parse**, and **14026 verdicts compared
 (445 files + 635 components + 224 provide methods + 38 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1559
 confinements + 1559 surfaces + 423 teardowns + 503 provide-clause
 components + 83 config fields + 635 A2 bodies + 445 deferred-position
 files + 56 approval crossings + 899 binding scopes + 635 access
-components + 1423 async sites + 643 async signatures), 12121 agree, 0
-mismatches**.
+components + 1423 async sites + 643 async signatures + 635 x 3
+declaration-rule components), 14026 agree, 0 mismatches**.
 
 Checker alignment over the 445 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
@@ -1204,6 +1231,7 @@ layer.
 | --- | --- | --- |
 | `agree-A1` | 9 | informational |
 | `agree-A2` | 1 | informational |
+| `agree-A6` | 1 | informational |
 | `agree-A9` | 2 | informational |
 | `agree-G1` | 21 | informational |
 | `agree-G2` | 2 | informational |
@@ -1212,17 +1240,22 @@ layer.
 | `agree-G5` | 12 | informational |
 | `agree-G6` | 1 | informational |
 | `agree-accept` | 225 | informational |
+| `agree-intercept` | 1 | informational |
+| `agree-prelude` | 1 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A1` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
+| `missed-A6` | 0 | **FATAL** |
 | `missed-A9` | 0 | **FATAL** |
 | `missed-G1` | 0 | **FATAL** |
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
 | `missed-G6` | 0 | **FATAL** |
-| `out-of-fragment` | 40 | informational |
+| `missed-intercept` | 0 | **FATAL** |
+| `missed-prelude` | 0 | **FATAL** |
+| `out-of-fragment` | 37 | informational |
 | `out-of-fragment-G5` | 0 | ratcheted |
 | `out-of-fragment-G6` | 0 | ratcheted |
 
