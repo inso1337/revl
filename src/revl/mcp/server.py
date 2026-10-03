@@ -1782,9 +1782,14 @@ def _tool_check(arguments: dict) -> dict:
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
-    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": holes,
-            "selfCheck": _authoring_loop.self_check(None, holes)}
+    result = {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
+              "holes": holes,
+              "selfCheck": _authoring_loop.self_check(None, holes)}
+    blocked = fillspec.unfillable(holes)
+    if blocked:
+        # flagged, not handed out: holes this author can never fill
+        result["unfillable"] = blocked
+    return result
 
 
 def _untrusted_author() -> bool:
