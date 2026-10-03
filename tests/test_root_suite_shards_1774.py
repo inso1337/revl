@@ -58,12 +58,19 @@ def test_a_file_without_a_weight_still_gets_a_shard():
 def test_the_recorded_weights_balance_the_full_suite():
     """Balance is a cost claim, not a safety one: a stale weight can only make
     the shards uneven. Measured weights keep the heaviest shard within 20% of
-    the mean."""
+    the mean, or, when one file alone outweighs that (a file is never split,
+    and tests/test_selfhost_lower.py measured 1520s of 3969s in CI run
+    37131968223), within 5% of that file: the other shards then share the rest
+    and the heaviest is the file's own shard."""
     weights = _shard.load_weights()
     assert len(weights) > 500, "shard_weights.json is missing or nearly empty"
-    loads = _shard.loads(_root_files(), weights, SHARDS)
+    files = _root_files()
+    loads = _shard.loads(files, weights, SHARDS)
     mean = sum(loads) / SHARDS
-    assert max(loads) <= 1.2 * mean, [round(x) for x in loads]
+    heaviest = max(weights.get(f, 0.0) for f in files)
+    assert max(loads) <= max(1.2 * mean, 1.05 * heaviest), [round(x) for x in loads]
+    rest = sorted(loads)[:-1]
+    assert max(rest) <= 1.2 * (sum(rest) / len(rest)), [round(x) for x in loads]
 
 
 def test_a_malformed_spec_is_refused():
