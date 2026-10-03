@@ -316,6 +316,10 @@ class Proxy:
         self.ir: dict | None = None
         self._last: dict | None = None
         self._pending_meta: dict | None = None
+        # where client-bound notifications go instead of stdout: the HTTP
+        # transport's event hub (`http_stream.EventHub.route`), which decides
+        # which caller's stream may carry each one
+        self.sink = None
         upstream.on_notification = self._relay
 
     @property
@@ -534,6 +538,15 @@ class Proxy:
             return _payload_result(self.server._session_error(self.refused[name]))
         if not isinstance(arguments, dict):
             return _error_result("`arguments` must be an object")
+        # item 55: a proxied tool is a call on the proxied composition, so it
+        # answers to the operator profile's `call` verb, like `revl_call`. With
+        # no profile bound this is ungated (stdio without --operator-profile).
+        from . import operator as _operator  # noqa: PLC0415
+
+        decision = _operator.decide(self.session, "revl_call",
+                                    {"key": KEY, "method": tool["op"]})
+        if decision.gated and not decision.allowed:
+            return _payload_result(self.server._refused_by_operator(decision))
         self._last = None
         self._pending_meta = meta
         try:
@@ -626,9 +639,35 @@ class Proxy:
         self._send(message)
 
     def _send(self, message: dict) -> None:
+        sink = self.sink
+        if sink is not None:
+            sink(message)
+            return
         with self._out_lock:
             self.stdout.write(json.dumps(message) + "\n")
             self.stdout.flush()
+
+    def describe(self, requested: str | None = None) -> dict:
+        """The `initialize` result. Pure: it reads the proxy and touches neither
+        the session nor the upstream, so the HTTP transport may read it without
+        the dispatch lock (`server/discover`, `subscriptions/listen`)."""
+        capabilities = {"tools": {"listChanged": True}}
+        for passthrough in ("resources", "prompts", "logging", "completions"):
+            if passthrough in self.upstream_capabilities:
+                capabilities[passthrough] = self.upstream_capabilities[passthrough]
+        name = self.upstream_info.get("name") or "the upstream server"
+        return {
+            "protocolVersion": requested if requested in _KNOWN_PROTOCOLS
+            else PROTOCOL_VERSION,
+            "capabilities": capabilities,
+            "serverInfo": {"name": "revl-mcp-proxy", "version": "2.0"},
+            "instructions": (
+                f"Every tool of {name} is gated by revl. A call to a tool "
+                "revl cannot show to be safe returns `approvalRequired` with a ticket "
+                "instead of running: relay the ticket to a human, who answers "
+                "it with revl_approve. revl_proxy_verdicts lists each tool's "
+                "class and why."),
+        }
 
     def handle(self, message: dict) -> dict | None:
         """One client JSON-RPC message -> one response (None for a notification)."""
@@ -643,24 +682,7 @@ class Proxy:
         request_id = message.get("id")
         params = message.get("params") or {}
         if method == "initialize":
-            requested = params.get("protocolVersion")
-            capabilities = {"tools": {"listChanged": True}}
-            for passthrough in ("resources", "prompts", "logging", "completions"):
-                if passthrough in self.upstream_capabilities:
-                    capabilities[passthrough] = self.upstream_capabilities[passthrough]
-            name = self.upstream_info.get("name") or "the upstream server"
-            result = {
-                "protocolVersion": requested if requested in _KNOWN_PROTOCOLS
-                else PROTOCOL_VERSION,
-                "capabilities": capabilities,
-                "serverInfo": {"name": "revl-mcp-proxy", "version": "2.0"},
-                "instructions": (
-                    f"Every tool of {name} is gated by revl. A call to a tool "
-                    "revl cannot show to be safe returns `approvalRequired` with a ticket "
-                    "instead of running: relay the ticket to a human, who answers "
-                    "it with revl_approve. revl_proxy_verdicts lists each tool's "
-                    "class and why."),
-            }
+            result = self.describe(params.get("protocolVersion"))
         elif method == "tools/list":
             result = {"tools": self._advertised()}
         elif method == "tools/call":
@@ -704,7 +726,9 @@ class Proxy:
         except (SessionError, ApprovalRequired):
             pass
 
-    def serve(self, stdin=None) -> int:
+    def serve(self, stdin=None, before=None) -> int:
+        """The stdio loop. `before` is `server.serve`'s: None to go on, or a
+        reason to refuse the message (the live operator profile)."""
         stdin = stdin or sys.stdin
         for line in stdin:
             line = line.strip()
@@ -717,6 +741,11 @@ class Proxy:
                 continue
             if not isinstance(message, dict):
                 self._send(_error(None, -32600, "invalid request"))
+                continue
+            refusal = before(message) if before is not None else None
+            if refusal is not None:
+                if message.get("id") is not None:
+                    self._send(_error(message["id"], -32603, refusal))
                 continue
             response = self.handle(message)
             if response is not None:
@@ -778,14 +807,30 @@ def _error_result(message: str) -> dict:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
+class _Discard:
+    """The proxy's stdout under HTTP, where nothing is written to stdout: the
+    transport routes every client-bound notification through `Proxy.sink`
+    instead (docs/mcp-http-transport.md)."""
+
+    def write(self, _text: str) -> int:
+        return 0
+
+    def flush(self) -> None:
+        pass
+
+
 def run(command: list[str], *, undo: dict | None = None,
         trust_read_only: bool = False, timeout: float = 120.0,
-        stdin=None, stdout=None, stderr=None) -> int:
-    """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin."""
+        stdin=None, stdout=None, stderr=None, http: dict | None = None,
+        live=None) -> int:
+    """`revl mcp proxy -- COMMAND...`: serve until the client closes stdin, or,
+    with `http` (`{"exposure", "auth", and "profile_path" or "registry"}`),
+    until interrupted. `live` is the stdio loop's per-message hook
+    (`live_profile.StdioBinding`)."""
     stderr = stderr or sys.stderr
     upstream = Upstream(command, timeout=timeout)
     proxy = Proxy(upstream, undo=undo, trust_read_only=trust_read_only,
-                  stdout=stdout)
+                  stdout=_Discard() if http is not None else stdout)
     proxy.activate()
     try:
         upstream.start()
@@ -806,7 +851,24 @@ def run(command: list[str], *, undo: dict | None = None,
         for excluded in proxy.excluded:
             print(f"revl mcp proxy: not proxied: tool #{excluded['index']} "
                   f"{excluded['name']!r}: {excluded['excludedBecause']}", file=stderr)
-        code = proxy.serve(stdin)
+        if http is not None:
+            from .http_transport import HttpTransport, ProxyDispatcher, TransportError  # noqa: PLC0415
+
+            try:
+                transport = HttpTransport(ProxyDispatcher(proxy),
+                                          registry=http.get("registry"),
+                                          profile_path=http.get("profile_path"),
+                                          profile_settle_ms=http.get("profile_settle_ms",
+                                                                     1000),
+                                          exposure=http["exposure"],
+                                          auth=http.get("auth", "bearer"),
+                                          server_module=proxy.server)
+            except TransportError as error:
+                print(f"error: {error}", file=stderr)
+                return 1
+            code = transport.serve_forever(stderr=stderr)
+        else:
+            code = proxy.serve(stdin, before=live)
         _abort_at_exit(proxy, stderr)
         return code
     finally:
@@ -829,6 +891,6 @@ def _abort_at_exit(proxy: Proxy, stderr) -> None:
         print(f"revl mcp proxy: could not abort the uncommitted session at exit: "
               f"{error}", file=stderr)
         return
-    print(f"revl mcp proxy: the client left without committing; aborted, "
+    print(f"revl mcp proxy: the session ended without a commit; aborted, "
           f"replayed {len(result.get('replayed') or [])} declared undo(s), "
           f"residue-free: {bool(result.get('noResidue'))}", file=stderr)

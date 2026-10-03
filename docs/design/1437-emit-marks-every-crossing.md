@@ -229,6 +229,27 @@ refuses it under G5, outside the gate's slice; the gate now refuses the
 unmarked host emission in its `undo` slot, as it already did for the `req`
 carrier. The direction is the fail-closed one.
 
+## The self-host checker
+
+`selfhost/checker.rvl` follows both rules (issue #1613), with the reference's
+text:
+
+- **The marker.** The host-extern carrier is held to it in every setup
+  position, where it used to be held only inside an `emit` head's arguments.
+  A `witnessed` extern is exempt, and so is an `undo` slot. The reference
+  refuses an emission in an `undo` slot under G5, which this checker does not
+  port, so it raises no objection there rather than a G4 the reference does
+  not raise.
+- **The floor.** It now also covers the `emit` value form (`let r = emit …`,
+  `return emit …`, a shorthand body, an `emit` inside an expression) and a
+  marked helper's reach, and the required set is keyed by capability token.
+
+Measured on the checker census over this branch with the checker's earlier
+marker port merged in (663 programs): agree-refuse 41 to 73, no-objection
+211 to 181, msg-mismatch/semantic 3 to 1. No document the reference admits
+is refused. The 24 block-nesting documents above are among the 32 that
+moved, and the census test no longer holds them undecided by name.
+
 ## The compensate slot and spawn-handle crossings
 
 Two carriers the floor did not see, decided by the product owner after the
