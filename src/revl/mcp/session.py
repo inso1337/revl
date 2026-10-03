@@ -51,6 +51,18 @@ class SessionError(RuntimeError):
         self.code = code
 
 
+def _note_spend(spends: list | None, entry: dict, use: int, ticket: dict) -> None:
+    """Remember one per-call spend so `Session.call` can write its
+    `approval-emission` once the crossing returns (issue #1781)."""
+    if spends is None:
+        return
+    capability = entry.get("capability") or ",".join(
+        ticket.get("classCCapabilities") or ticket.get("capabilities") or [])
+    spends.append({"requestId": entry["requestId"], "use": use,
+                   "capability": capability,
+                   "component": ticket.get("component")})
+
+
 class ApprovalRefused(SessionError):
     """A class-(c) crossing whose pending ticket an operator answered NO
     (`revl_revoke` with the ticket `hash`, issue #1553). Raised once, on the
@@ -364,6 +376,8 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # so restoring it would hand a failed load a fresh budget every time.
     "_tickets", "_ticket_rounds", "_ticket_refusals", "_ledger", "_grants",
     "_grants_consumed",
+    # issue #1781: the per-id spend index rides with the spends it numbers
+    "_spend_uses",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
     # The agent-loop axes (issue #1738). They count what the session did,
@@ -670,6 +684,12 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #1781: how many times each approval `requestId` has been spent
+        # in this session. Every `approval-consumed` and `approval-emission`
+        # record the session writes carries `use`, the 1-based index from here,
+        # so `(requestId, use)` names one spend of a multi-use grant. Never reset
+        # while the session lives, so an index never repeats for an id.
+        self._spend_uses: dict = {}
         # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
         # may be written into the durable, cross-session approval WAL when a
         # crossing is approved. "withheld" (the DEFAULT) records it as UNRECORDED
@@ -4939,7 +4959,9 @@ class Session:
         # `decision` records which authority the miss consumed, so the stored entry
         # binds to THAT grant/approval (not any that could have covered).
         decision: dict | None = {} if cache_active else None
-        self._approval_decide_call(key, method, args, record=decision)
+        spends: list = []
+        self._approval_decide_call(key, method, args, record=decision,
+                                   spends=spends)
         # issue #1738: the call is decided and about to cross, so it counts
         # toward the loop axes now, policy or not.
         self._loop_axes.record_call(self._loop_call_class(key, method))
@@ -4973,6 +4995,10 @@ class Session:
             runtime_mod.clear_session_owner()
             if self.recorder is not None:
                 self.recorder.activation_origin()
+        # issue #1781: the crossing returned, so each spend that authorized it
+        # gets its emission record (a raise above leaves the spend unmatched)
+        if spends:
+            self._record_spend_emissions(spends)
         # item 330: a per-turn source admitted through the in-language crossing
         # DURING this call was queued (the loop was busy); wire it now the call
         # has returned and the loop is free — the turn's keys become callable and
@@ -5422,15 +5448,37 @@ class Session:
             return True
         return False
 
-    def _consume_approval(self, entry: dict) -> None:
+    def _consume_approval(self, entry: dict) -> int:
         """Spend the token durably BEFORE the crossing fires (Decision 3,
         consume-before-fire). A crash between the spend and the fire leaves
         consumed-but-unfired: fail-closed, a fresh approval is demanded."""
         entry["consumed"] = True
+        use = self._next_spend_use(entry["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(entry["requestId"])
+            wal.record_approval_consumed(entry["requestId"], use=use)
         self._mint_admission_receipt(entry)
+        return use
+
+    def _next_spend_use(self, request_id: str) -> int:
+        """The 1-based index of the spend about to be recorded for `request_id`
+        (issue #1781)."""
+        use = self._spend_uses.get(request_id, 0) + 1
+        self._spend_uses[request_id] = use
+        return use
+
+    def _record_spend_emissions(self, spends: list) -> None:
+        """After the crossing a per-call spend authorized has returned, write
+        one `approval-emission` per spend, naming the same `requestId` and `use`
+        as its `approval-consumed` (issue #1781). Not called when the call
+        raised: that spend stays unmatched on the record, which reads as owed
+        or ambiguous, never as fired."""
+        wal = self._approval_wal()
+        if wal is None:
+            return
+        for spend in spends:
+            wal.record_approval_emission(spend["requestId"], spend["capability"],
+                                         spend["component"], use=spend["use"])
 
     # -- item 204: the two-phase spend the activation gate walks under --------
     #
@@ -5544,8 +5592,9 @@ class Session:
             elif release["kind"] == "auto":
                 self._auto_consumed += 1
                 self._persist_auto_spend(record)
+            use = self._next_spend_use(record["requestId"])
             if wal is not None:
-                wal.record_approval_consumed(record["requestId"])
+                wal.record_approval_consumed(record["requestId"], use=use)
             if release["kind"] == "approval":
                 # item 471 Slice 2: the activation gate's two-phase spend is a
                 # spend, so it mints the admission receipt too. Without this the
@@ -5568,7 +5617,8 @@ class Session:
             owner.approvals[bucket] += 1
 
     def _approval_decide_call(self, key: str, method: str, args,
-                              record: dict | None = None) -> None:
+                              record: dict | None = None,
+                              spends: list | None = None) -> None:
         """The per-call decision (Decision 2). Off -> return immediately (byte-
         identical). class none/(a)/(b) -> proceed and count. class (c) -> consume
         a standing approval and proceed, else mint a ticket, count the prompt, and
@@ -5621,7 +5671,8 @@ class Session:
             raise ApprovalRefused(ticket, refusal)
         standing = self._find_standing_approval(ticket)
         if standing is not None:
-            self._consume_approval(standing)   # durable spend before the fire
+            use = self._consume_approval(standing)   # durable spend before fire
+            _note_spend(spends, standing, use, ticket)
             if record is not None:
                 record["scope"] = ("approval", standing["requestId"])
                 record["approvalExpiresAt"] = standing.get("expiresAt")
@@ -5633,7 +5684,8 @@ class Session:
         grants = self._find_standing_grant(ticket)
         if grants is not None:
             for g in grants:                   # every class-(c) cap is covered
-                self._consume_grant(g)         # durable spend before the fire
+                use = self._consume_grant(g)   # durable spend before the fire
+                _note_spend(spends, g, use, ticket)
             if record is not None:
                 record["scope"] = ("grants", [g["requestId"] for g in grants])
             return
@@ -5644,7 +5696,8 @@ class Session:
         # distiller only selected it.
         auto = self._find_auto_approve(ticket)
         if auto is not None:
-            self._consume_auto_rule(auto)      # durable spend before the fire
+            use = self._consume_auto_rule(auto)   # durable spend before fire
+            _note_spend(spends, auto, use, ticket)
             if record is not None:
                 record["scope"] = ("auto", auto["requestId"])
             return
@@ -7485,7 +7538,7 @@ class Session:
             return None
         return grants
 
-    def _consume_grant(self, grant: dict) -> None:
+    def _consume_grant(self, grant: dict) -> int:
         """Spend one use of a standing grant durably BEFORE the crossing fires
         (Decision 3, consume-before-fire — the Slice-2 WAL ordering still
         applies). Decrements `remainingUses`; a grant whose uses hit zero is
@@ -7498,9 +7551,11 @@ class Session:
             if grant["remainingUses"] <= 0:
                 grant["consumed"] = True
         self._grants_consumed += 1
+        use = self._next_spend_use(grant["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(grant["requestId"])
+            wal.record_approval_consumed(grant["requestId"], use=use)
+        return use
 
     # -- item 251 Slice 2: distilled AutoApproveRule enforcement -------------
 
@@ -7721,7 +7776,7 @@ class Session:
                 return entry
         return None
 
-    def _consume_auto_rule(self, entry: dict) -> None:
+    def _consume_auto_rule(self, entry: dict) -> int:
         """Spend one use of a distilled rule durably BEFORE the crossing fires
         (consume-before-fire, reusing the 344 WAL ordering). A `uses`-bounded rule
         decrements `remainingUses` and marks `consumed` at zero, so an applied rule
@@ -7744,9 +7799,11 @@ class Session:
                 entry["consumed"] = True
         self._persist_auto_spend(entry)
         self._auto_consumed += 1
+        use = self._next_spend_use(entry["requestId"])
         wal = self._approval_wal()
         if wal is not None:
-            wal.record_approval_consumed(entry["requestId"])
+            wal.record_approval_consumed(entry["requestId"], use=use)
+        return use
 
     def mint_standing_grant(self, *, ticket_hash: str | None = None,
                             capability: str | None = None,
