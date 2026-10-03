@@ -399,6 +399,41 @@ swaps. Deltas accumulate across the calls; nothing is resent. An edit that fails
 to compile or admit advances nothing — the working buffer stays at its last good
 state, so a refused patch never leaves a broken draft behind.
 
+**Files-loaded compositions.** A composition loaded with `revl_load {files}`
+is just as editable (issue #1690). Each loaded file is a buffer named by the
+path it was loaded under, and `target` picks one; with a single file it can be
+omitted. An edit may carry its own `target`, so one call can change several
+files at once, which is what a change across a `use` needs: the new function in
+the library and the import that names it land together or not at all. The
+compile reads every edited file from the session before the disk, so that
+import resolves to the edited text. Nothing is written to disk. What swapped in
+is what the session holds: the next edit starts from it, `revl_snapshot`
+returns it, and `revl_swap` with no source re-admits it.
+
+```
+revl_load  {files: ["svc.rvl", "lib.rvl", "main.rvl"]}
+revl_edit  {edits: [{target: "lib.rvl", anchor: "}\n",
+                     replacement: "}\npub fn label2() -> Str { return \"v2\" }\n"},
+                    {target: "main.rvl", anchor: "{ label }",
+                     replacement: "{ label, label2 }"},
+                    {target: "main.rvl", anchor: "= label()",
+                     replacement: "= label2()"}]}        -> admitted, swapped
+```
+
+Edited file text arrived over the transport, so it is not the operator's own
+file any more: a compile with any edited file runs under the authoring profile,
+exactly as `revl_swap {files, modules}` does. A host extern an edit adds is
+refused. So is any edit, under the default untrusted authoring, to a
+composition whose files declare host externs of their own; such a composition
+is changed on disk by the operator, then swapped.
+
+With nothing loaded, `revl_edit` also takes `files` (or `source`, `modules`,
+`config`) and loads them through `revl_load` itself before it edits, so an agent
+never has to learn that the edit needs a load first. The load answers to the
+load gates (the operator's `load` grant, a lease on a cold load). With a
+composition already loaded, `files`/`source` are refused rather than silently
+reloading over it.
+
 **Swap by name.** The same server-side source backs an additive extension to
 `revl_swap`: called with *no* inline `source`/`files`/`modules`, it re-admits
 the source the session already holds (what `revl_edit` left, or the running

@@ -939,11 +939,10 @@ def _tool_swap(arguments: dict) -> dict:
 def _swap_server_side(replacing: tuple) -> dict:
     """Swap the source the session already holds — no inline source resent."""
     vs = _edit.virtual_source(SESSION)
-    if vs.get("source") is None:
+    if vs.get("source") is None and not vs.get("files"):
         return _session_error(
-            "no server-side source to swap by name — this composition was not "
-            "loaded from inline source, so there is nothing the session can "
-            "re-admit without you passing `source`/`files`")
+            "no server-side source to swap by name — there is nothing the "
+            "session can re-admit without you passing `source`/`files`")
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -971,7 +970,35 @@ def _swap_server_side(replacing: tuple) -> dict:
 
 def _tool_edit(arguments: dict) -> dict:
     """Patch the server-side source of the running composition and re-admit —
-    deltas, not documents (roadmap item 50, docs/mcp-bridge.md)."""
+    deltas, not documents (roadmap item 50, docs/mcp-bridge.md).
+
+    With nothing loaded, a call that carries `files` or `source` loads it first,
+    through `revl_load` itself, then edits it (issue #1690): an agent never has
+    to learn that the edit verb needs a load verb before it."""
+    carried = any(arguments.get(k) is not None for k in ("source", "files"))
+    if carried and SESSION.loaded:
+        return _session_error(
+            "a composition is already loaded: revl_edit patches it, so omit "
+            "`files`/`source` (or revl_unload first to load another)",
+            edited=False, swapped=False)
+    loaded = None
+    if carried:
+        load_arguments = {k: arguments[k] for k in
+                          ("source", "files", "modules", "config", "record")
+                          if k in arguments}
+        # the load half answers to the load gate: the call was gated as an edit
+        decision = _operator.decide(SESSION, "revl_load", load_arguments)
+        if decision.gated and not decision.allowed:
+            return {**_refused_by_operator(decision), "loaded": False,
+                    "edited": False, "swapped": False}
+        loaded = _tool_load(load_arguments)
+        if not loaded.get("ok"):
+            return {**loaded, "loaded": False, "edited": False, "swapped": False}
+    result = _edit_loaded(arguments)
+    return {**result, "loaded": True} if loaded is not None else result
+
+
+def _edit_loaded(arguments: dict) -> dict:
     try:
         return _edit.apply_edit(SESSION, arguments)
     except _edit.EditError as error:
@@ -2484,7 +2511,12 @@ TOOLS = [
                        "hot-swapped in; one that still has open holes advances the "
                        "server-side source (so the next edit builds on it) but swaps "
                        "nothing. Returns the admission verdict / holes / diagnostic — "
-                       "never the whole source.",
+                       "never the whole source. A composition loaded from `files` is "
+                       "edited too: each loaded file is a buffer named by its path, an "
+                       "edit's own `target` lets one call change several files (a `use` "
+                       "between edited files resolves to the edited text), and the disk "
+                       "is never written. With nothing loaded, pass `files` or `source` "
+                       "and this loads it first, then edits it.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2511,14 +2543,29 @@ TOOLS = [
                             "count": {"type": "integer",
                                       "description": "max anchor sites to replace "
                                                      "(omit for all)"},
+                            "target": {"type": "string",
+                                       "description": "this edit's buffer, when it is "
+                                                      "not the call's `target`"},
                         },
                     },
                 },
                 "target": {"type": "string",
                            "description": "which server-side buffer to edit: omit for the "
-                                          "main inline source, or name an in-memory module"},
+                                          "main inline source (or the one loaded file), "
+                                          "name a loaded file by its path, or name an "
+                                          "in-memory module"},
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
+                "files": {"type": "array", "items": {"type": "string"},
+                          "description": "with nothing loaded: load these files first, "
+                                         "then edit them"},
+                "source": {"type": "string",
+                           "description": "with nothing loaded: load this source first, "
+                                          "then edit it"},
+                "modules": {"type": "object",
+                            "description": "in-memory `use` modules for that load"},
+                "config": {"type": "object",
+                           "description": "config for that load, as revl_load takes it"},
             },
             "required": ["edits"],
         },

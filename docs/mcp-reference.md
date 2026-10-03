@@ -57,7 +57,7 @@ the transition, so the running system keeps serving.
 | `revl_load` | no | no | - (source) |
 | `revl_call` | no | no | `key`, `method` |
 | `revl_swap` | no | yes | - (source) |
-| `revl_edit` | no | yes | `edits` |
+| `revl_edit` | no | yes | `edits` (source) |
 | `revl_gauntlet` | yes | no | - (source) |
 | `revl_quarantine` | yes | no | - (source) |
 | `revl_repair` | no | yes | `component` |
@@ -293,8 +293,8 @@ available, and the trace since the last call. No inputs.
 Admit a candidate against the RUNNING composition and hot-swap it in. A rejected
 candidate leaves the running system untouched; this is the acting half of
 `revl_admit`. Called with NO source (`source`/`files`/`modules`), it re-admits
-the source the server already holds - so an agent that edited server-side with
-`revl_edit` need not re-serialize the whole file.
+the source the server already holds, inline or loaded from files - so an agent
+that edited server-side with `revl_edit` need not re-serialize the whole file.
 
 - Inputs: `source` / `files` / `modules` (all optional); `replacing`.
 
@@ -310,9 +310,20 @@ system is untouched. A clean patch is hot-swapped in; one that still has open
 holes advances the server-side source but swaps nothing. Returns the admission
 verdict / holes / diagnostic, never the whole source.
 
+A composition loaded from `files` is edited the same way. Each loaded file is a
+buffer named by the path it was loaded under; an edit may carry its own
+`target`, so one call can change several files, and a `use` between two edited
+files resolves to the edited text. The disk is never written: the swapped text
+is what the session holds, and `revl_snapshot` returns it. With nothing loaded,
+pass `files` (or `source`) and the call loads it through `revl_load` first,
+then edits it.
+
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
-  replacement}` / `{anchor, replacement, count?}`); `target` (which server-side
-  buffer to edit, omit for the main inline source); `replacing`.
+  replacement}` / `{anchor, replacement, count?}`, each with an optional
+  `target`); `target` (which server-side buffer to edit: omit for the main
+  inline source or the one loaded file, a loaded file's path, or an in-memory
+  module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
+  `config` to load first.
 
 ### `revl_unload`
 
