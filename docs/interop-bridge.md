@@ -317,7 +317,10 @@ an undeclared name has nowhere to land; rust checks both lists before the
 emitted `match` over the declared methods runs
 (`backends/rust/placement_runner/src/main.rs`; before issue #1599 it answered
 any key the document provides, and answered an unknown key or method with
-`"ok": true` and a `null` value).
+`"ok": true` and a `null` value). Behind that check the emitted dispatch fails
+closed too: a call it cannot make (an undeclared method, a provider it cannot
+resolve, a parameter type with no wire form) is an error reply, and a probe
+prints `ERROR` (issue #1634).
 (The legacy `serve(ctx, ["db"], sock)` form, used by the hand-written demos,
 has no declared list and derives the allowlist from the provided object's own
 public methods — weaker, because it trusts the object rather than the

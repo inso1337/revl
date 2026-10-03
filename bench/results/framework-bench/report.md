@@ -32,7 +32,7 @@ better one.
 | gate API | 1.0.0 |
 | language | 2.0.0 |
 | checker frontier | `reference-full:2.0.0` |
-| compiler commit | `34cee041f5d78f8f379a9345d23daeade0a5a900-dirty` |
+| compiler commit | `b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty` |
 | report schema | EVAL-REPORT-1 |
 
 Measured throughput: **24.3 t/s** generation (sd 1.0, n=5 warm samples), 83.9 t/s prompt.
@@ -87,7 +87,7 @@ is benchmaxxing whatever the intent.
 
 Gate: `pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter`
 
-Constructs the self-host port does not implement: **188** across six tiers.
+Constructs the self-host port does not implement: **189** across six tiers.
 Programs the embeddable gate admits that the reference refuses (the fail-open direction): **0**.
 
 The full inventory, with the named documents and the gate

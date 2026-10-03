@@ -383,7 +383,7 @@ def test_a_request_with_no_content_length_is_still_a_bodyless_request():
     """RFC 9112 6.3 item 7 / `stdlib/framing.rvl:256`: neither field means no
     body, which is 0, not a refusal."""
     with _serving() as (port, _):
-        blob = _raw(port, b"GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+        blob = _raw(port, b"GET / HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
     status, _, body = _one_reply(blob)
     assert status == 200
     assert "operations" in json.loads(body)

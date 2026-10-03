@@ -35,6 +35,7 @@
   "emit_go": [
     "case=None",
     "case=Some",
+    "class=emission",
     "class=witnessed",
     "fn=Map.new",
     "has_config=<true>",

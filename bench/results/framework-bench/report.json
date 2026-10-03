@@ -18,7 +18,7 @@
     "language": "2.0.0",
     "frontier": "reference-full:2.0.0",
     "compiler_path": "src/revl",
-    "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+    "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
     "report_schema": "EVAL-REPORT-1"
   },
   "model_pin": {
@@ -802,10 +802,13 @@
             "means": "constructs the reference emitter implements and the self-host port does not",
             "tiers": {
               "go": {
-                "unported_constructs": 48,
-                "unported_reasons": 10,
+                "unported_constructs": 49,
+                "unported_reasons": 11,
                 "blind_constructs": 1,
                 "reasons": {
+                  "Issues #1511 and #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit` (a `ctx.Effect` compensation entry), a provide-method `emit` and every value position of a provide method (`registerMethodCompensation`, through `revlDeclared` for a `let`, a `return`, an argument or a nested operand), and a timer firing. It is live stc-go component emission, which emit_go.rvl excludes, so no emit_go_corpus document can carry it; the runtime proof is backends/go/scenarios/emitted/extern_compensate/exec_test.go.": [
+                    "class=emission"
+                  ],
                   "Legacy component expression vocabulary: _expr uses name/fn/format and typed literal kinds, whereas canonical pure v3 IR uses var/call/interp/lit. emit_go.rvl has compatibility name lookup, but the corpus frontend does not emit these component encodings; their presence in this syntax census is not missing pure literal/call support.": [
                     "kind=bool",
                     "kind=fn",
@@ -1154,7 +1157,7 @@
                 }
               }
             },
-            "total_unported": 188
+            "total_unported": 189
           },
           "unreached-constructs": {
             "source": "tests/fixtures/oracle_construct_reach_ledger.json",
@@ -1162,7 +1165,7 @@
             "means": "dispatch arms an oracle's reference implementation can take that no corpus document exhibits; an unexercised path, not a refusal",
             "oracles": {
               "compile": 1,
-              "emit_go": 49,
+              "emit_go": 50,
               "emit_java": 36,
               "emit_py": 29,
               "emit_rust": 34,
@@ -1171,7 +1174,7 @@
               "gate_census": 5,
               "lower_ir": 5
             },
-            "total_unreached": 229
+            "total_unreached": 230
           },
           "gate-reference-divergence": {
             "source": "tools/gate_reference_census_baseline.json",
@@ -1204,7 +1207,7 @@
         "means": "documents the reference compiler accepts and the fully-native chain does not reproduce",
         "gate": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter"
       },
-      "unported_constructs": 188,
+      "unported_constructs": 189,
       "fail_open_programs": 0
     },
     "unload-paths": {
@@ -2570,7 +2573,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "pytest tests/test_selfhost_compile.py::test_the_residual_is_located_in_lower_not_in_the_emitter",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2580,7 +2583,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "bench/results/framework-bench/unload-survey.json",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2590,7 +2593,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "bench/results/hand-corpus",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2600,7 +2603,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2610,7 +2613,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2620,7 +2623,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "bench/results/typed-deepseek-v4-pro",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2630,7 +2633,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }
@@ -2640,7 +2643,7 @@
       "rung": "measured",
       "public": true,
       "evidence": {
-        "compiler_commit": "34cee041f5d78f8f379a9345d23daeade0a5a900-dirty",
+        "compiler_commit": "b675b1e563475050ab9c23f8edaa75213ecb8bd2-dirty",
         "run": "bench/results/injection-ornith",
         "protocol": "docs/eval-protocol.md"
       }

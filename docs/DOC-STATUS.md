@@ -148,6 +148,7 @@ was corrected by hand and had drifted back within a day.
 | interop-bridge.md | needs-work | 51 |  |
 | lifecycle-contract.md | needs-work | 0 |  |
 | mcp-bridge.md | needs-work | 76 |  |
+| mcp-http-transport.md | current | 0 |  |
 | mcp-proxy.md | current | 0 |  |
 | mcp-reference.md | current | 6 |  |
 | model-providers.md | current | 0 | written with issue #1461 |
@@ -156,7 +157,7 @@ was corrected by hand and had drifted back within a day.
 | network-path.md | needs-work | 24 |  |
 | network-placement.md | needs-work | 4 |  |
 | opentelemetry.md | stale-fixed | 0 |  |
-| operator-capabilities.md | needs-work | 42 |  |
+| operator-capabilities.md | needs-work | 41 |  |
 | parallel-activation.md | needs-work | 17 |  |
 | persistence.md | needs-work | 15 |  |
 | plan.md | needs-work | 35 |  |
