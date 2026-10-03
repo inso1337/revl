@@ -794,7 +794,10 @@ def test_replay_tools_say_recording_must_be_switched_on_at_load(
 
 
 def test_replay_tools_validate_their_arguments():
-    assert _call("revl_step_back", {})["diagnostics"][0]["message"].startswith("`to`")
+    # with no arguments at all, step_back reverts the last session change
+    # (issue #1703); naming a component without `to` still requires it
+    assert _call("revl_step_back", {"component": "C"})["diagnostics"][0][
+        "message"].startswith("`to`")
     assert _call("revl_inspect_step", {})["diagnostics"][0]["message"].startswith("`at`")
     assert _call("revl_replay_forward", {})["diagnostics"][0]["message"].startswith("`from`")
     assert _call("revl_replay_bisect", {})["diagnostics"][0]["message"].startswith("`assert`")
