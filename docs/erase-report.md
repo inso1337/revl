@@ -41,6 +41,18 @@ read from the same G8 boundary surface `revl audit` prints
 A realm that made no irreversible crossing at all reports zero crossings
 ("fully revertible, G8").
 
+A **relay** is not a crossing of its own (issue #1707). An `emit key.method(...)`
+whose target is one operation of the composition, with a reach made only of
+witnessed or deferred crossings, is the class-preserving relay the approval
+class map gives class (a) or (b) (`ClassMap.relayed_emissions`, the resolver
+both read). The report lists it under `relayed`, as `[RELAY (a)]` in the text
+form, with the class it took and a `relay:<component>:<key>.<method>` token,
+and leaves it out of `total`, `bareCount` and `bareTokens`. The crossings its
+target makes are listed where they land: a witnessed extern in `witnessed`, a
+deferred emission in `externs`. A forward the class map keeps at (c) is
+counted as an emission exactly as before. `relayed` is absent from a report
+that has no relay.
+
 **[3] Other realms provably untouched — the `survivors` set.**
 Withdrawing the realm's components (`revl.query.withdrawal`, EXACT precision)
 cannot orphan a consumer in another realm: G2 makes each `(key, realm)`
