@@ -408,6 +408,7 @@ class _LoadCheckpoint:
                 self._contents[name] = contents
         self._bridges = [(bridge, bridge.current())
                          for bridge in (admit_bridge, reflect_bridge)]
+        self.had_no_loop = self._namespace.get("_loop") is None
 
     def restore(self, session: "Session") -> None:
         live = vars(session)
@@ -473,6 +474,12 @@ def _emitter_refused(refusal: BaseException) -> "SessionError":
     """The py emitter's refusal, as the `SessionError` the transport reports
     as `category: "session"` (issue #1406)."""
     return SessionError(f"the py emitter refused this composition: {refusal}")
+
+
+def _close_abandoned_loop(loop) -> None:
+    """Close the event loop of a Session that was collected (issue #1720)."""
+    if not loop.is_closed() and not loop.is_running():
+        loop.close()
 
 
 def _backend():
@@ -924,7 +931,46 @@ class Session:
     def _run(self, coro):
         if self._loop is None:
             self._loop = asyncio.new_event_loop()
+            # a session dropped while still loaded never reaches `_reset`;
+            # close its loop when it is collected rather than leave that to
+            # the loop's own finalizer and its ResourceWarning (issue #1720)
+            weakref.finalize(self, _close_abandoned_loop, self._loop)
         return self._loop.run_until_complete(coro)
+
+    def _close_loop(self) -> None:
+        """Close the event loop a torn-down session ran on (issue #1720).
+
+        An event loop holds descriptors (its selector and the self-pipe socket
+        pair), and nothing closed this one: every Session that ever loaded kept
+        three open for the life of the process. A long-running server that loads
+        and unloads, and the test suite, grew by three per session. The next
+        `load` opens a fresh loop through `_run`. Pending tasks are cancelled
+        first: with nothing loaded there is nothing for them to finish, and a
+        later `_run` would otherwise resume them against the next generation.
+        A loop still running (a teardown offloaded to a thread that has not
+        returned) is left alone; it is not ours to close yet."""
+        loop = self._loop
+        if loop is None or loop.is_closed() or loop.is_running():
+            return
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        if asyncio._get_running_loop() is not None:
+            # torn down from a coroutine on the HOST loop (`aclose`, `aabort`):
+            # this thread cannot drive a second loop, so a loop with work
+            # still pending is left to the finalizer, and an idle one closes
+            if not pending:
+                self._loop = None
+                loop.close()
+            return
+        self._loop = None
+        try:
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
 
     @property
     def loaded(self) -> bool:
@@ -963,6 +1009,10 @@ class Session:
             return self._boot(ir, config, record, origin)
         except BaseException as exc:
             checkpoint.restore(self)
+            if checkpoint.had_no_loop and self._driver is None:
+                # issue #1720: the failed load opened the loop; put that back
+                # too, so a refused load leaves no descriptor behind either
+                self._close_loop()
             _name_the_candidate(exc, ir)
             raise
 
@@ -4251,8 +4301,9 @@ class Session:
             self.recorder.wal.close()
 
     def _close_wal(self) -> None:
-        if self.recorder is not None and self.recorder.wal is not None:
-            self.recorder.wal.close()
+        wal = self.recorder.wal if self.recorder is not None else None
+        if wal is not None and getattr(wal, "is_open", True):
+            wal.close()
 
     def _reset(self) -> None:
         if self._driver is not None:
@@ -4273,6 +4324,13 @@ class Session:
         # trace the measurement reads lives on the driver.
         self._seal_generation()
         self._driver = None
+        self._close_loop()
+        # issue #1720: a plain unload left the generation's WAL file open, and
+        # the next `load` opens a new recorder and log, so every recorded load
+        # leaked one descriptor. Every record is already flushed and fsync'd,
+        # so closing changes nothing on disk; a closed log reads as absent to
+        # `_approval_wal`, exactly as after `commit_confirm` or `abort`.
+        self._close_wal()
         # the teardown boundary is the last generation boundary this session will
         # see, so settle any approval the outgoing generation spent before the
         # owner that recorded the spend is dropped — otherwise a fresh `load`
