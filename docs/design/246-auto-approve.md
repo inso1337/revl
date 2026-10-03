@@ -162,6 +162,19 @@ the hot path. A new generation replaces the map atomically with the swap,
 so a call decided against a stale map is impossible (the map and the
 composition change together, under the same verb).
 
+**A relay takes its target's class (issue #1707).** A service emission
+`emit key.method(...)` was class (c) on its own, which made any relay over a
+class-(a) witnessed op prompt per call (D1). The emission crosses no host
+boundary itself; the boundaries its target's body crosses are already in the
+caller's reach closure. So when `key` resolves to one provide-method scope of
+the composition, the emission takes that scope's reach-closure class if it is
+(a) or (b), computed to a fixed point so a relay of a relay settles too
+(`ClassMap._classify_relaxed`). It keeps (c) when it is `compensate`d, when the
+key is routed, carried, or not provided in the composition, and when the target
+reaches no checked crossing (the `emission` marking is then the only signal).
+Its tokens stay in `capabilities` but leave `classC`, so no standing grant is
+needed to forward a call whose own reach needs none.
+
 **The activation gate: load and swap are boundary calls too.** Class-(c)
 emissions do not fire only from `revl_call`. An activation body runs its
 effects at every verb that boots or reboots a generation: `revl_load`,

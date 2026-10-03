@@ -266,6 +266,9 @@
       ]
     },
     "unported": {
+      "Issue #1592: an extern of `class=emission` that declares `compensate` registers that compensation at every site it is emitted from: an activation `emit`, a provide-method `emit` and every other position of a provide method (a block expression registering on `revl_teardown_of(&self.ctx)` for a `let`, a `return`, an argument, a nested operand or an `if` arm), and a timer firing. selfhost/emit_rust.rvl ports no compensation registration, so no emit_rust_corpus document can carry it; the runtime proof is backends/rust/test_emit_rust.py (test_extern_declared_compensation_registers_at_every_site and test_declared_compensation_registers_in_every_value_position, real cordis-rs).": [
+        "class=emission"
+      ],
       "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
         "secret=<true>",
         "secret_return=<true>"
@@ -314,35 +317,6 @@
       ]
     },
     "unported": {
-      "component `call`, `load`, and `unload` steps require routed instance/reference lifecycle machinery rather than the mirrored provide/guard/effect subset; their source branches terminate in the reference component runtime, not v3 statement emission": [
-        "step=call",
-        "step=load",
-        "step=unload"
-      ],
-      "in-file lifecycle tests are emitted by reference-only `_emit_ts_lifecycle_tests`; corpus oracle documents compile library/application output and the port intentionally has no test-runner generation path": [
-        "lifecycle=<true>"
-      ],
-      "item 130 (roadmap #81) lowered the ts reactive tier in the REFERENCE emitter (subscribe/merge/source, the derived combinator chain and the `every ... in` iteration form, against the new runtime.ts Stream); the self-host port selfhost/emit_ts.rvl has NOT yet mirrored it, so these stream constructs are reference-only until the self-host stream port lands (the tracked remainder of #81: the java tier, which still refuses the whole stream surface)": [
-        "kind=stream-merge",
-        "kind=subscribe",
-        "stage=take",
-        "step=stream-iter"
-      ],
-      "reference roots named `stdlib` enter `_emit_ts_ref_runtime`/`_emit_ts_ref_thunk`; the self-host corpus contract requires ordinary host roots and refuses missing host roots instead of synthesizing reference-runtime thunks": [
-        "root=stdlib"
-      ],
-      "temporal `every` and component timer/advance/assert-no-residue steps are handled by reference-only `_emit_temporal` and runtime scheduler hooks, outside the self-host emitter's synchronous component subset": [
-        "mode=every",
-        "step=advance",
-        "step=assert_no_residue",
-        "step=timer"
-      ],
-      "the reference routes `do` through `_v3_do_expr`, whose frame-neutral control-transfer protocol is not mirrored; the self-host emitter keeps this expression outside its declared v3 subset": [
-        "kind=do"
-      ],
-      "transactional witnessed steps use the reference-only undo/frame/replay protocol (`_witnessed_step`, `_method_witnessed_step`, and `_witnessed_extern`); the self-host v3 slice deliberately refuses this component class rather than emitting an unsound partial transaction": [
-        "class=witnessed"
-      ],
       "v3 TypeScript rejects a hole before expression emission through the runtime refusal channel that is not present in the mirrored emitter": [
         "kind=hole"
       ]

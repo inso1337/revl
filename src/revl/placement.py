@@ -250,19 +250,20 @@ def _snake(name: str) -> str:
     return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
 
 
-def _java_placements(ir: dict, own: list) -> dict:
-    """`key -> [{component, realm}]` for every provision this java process's
-    own components make, with the realm an `isolate` publishes it in (None for
-    the shared realm).
+def _process_placements(ir: dict, own: list) -> dict:
+    """`key -> [{component, realm}]` for every provision this process's own
+    components make, with the realm an `isolate` publishes it in (None for the
+    shared realm).
 
-    Issue #1567: the JDK-17 stub runner (`PlacementRunner`) resolved a served
-    or probed key with a shared-realm `ctx.get`, so an isolated provider could
-    be neither served over a seam nor probed. It now resolves each key in the
-    py tier's `resolve_key` order from this map: the shared realm when the key
-    is provided there, else its one isolated realm, and a key isolated in two
-    or more realms is refused by name. The real-cordis4j runner keeps the
-    contexts its components isolate into itself (`RealPlacementRunner.Realms`,
-    issue #1581) and does not read this map."""
+    Issue #1567: the go, rust and node placement runners and the JDK-17 stub
+    java runner (`PlacementRunner`) resolved a served or probed key in the
+    shared realm only, so an isolated provider could be neither served over a
+    seam nor probed. They now resolve each key from this map in the py tier's
+    `resolve_key` order: the shared realm when the key is provided there, else
+    its one isolated realm, and a key isolated in two or more realms is refused
+    by name. The real-cordis4j runner keeps the contexts its components
+    isolate into itself (`RealPlacementRunner.Realms`, issue #1581) and does
+    not read this map; its `resolveKey` has the same order and refusal."""
     by_name = {c.get("name"): c for c in ir.get("components") or []}
     out: dict = {}
     for name in own:
@@ -4661,20 +4662,27 @@ def run_placement(files, placement_path: str, once: bool = False,
         written. Kept identical to what the initial spawn loop always did."""
         if backend == "node":
             spec["module"] = built["node"]
+            spec["placements"] = _process_placements(ir, spec["components"])
         elif backend == "rust":
+            # issue #1567: each provision names the snake_case plugin the
+            # runner's `_revl_isolate_ctx` knows it by, beside the component.
+            spec["placements"] = {
+                key: [{**p, "plugin": _snake(p["component"])} for p in at]
+                for key, at in _process_placements(ir, spec["components"]).items()}
             spec["components"] = [_snake(c) for c in spec["components"]]
             spec["probe"] = [_parse_probe(p, ir) for p in spec["probe"]]
         elif backend == "go":
             # go keeps PascalCase component names (RevlLoad switches on them);
             # only probes are structured rather than eval'd strings.
             spec["probe"] = [_parse_probe(p, ir) for p in spec["probe"]]
+            spec["placements"] = _process_placements(ir, spec["components"])
         elif backend == "java":
             spec["module"] = "revl.Components"
             iface_keys = (set(spec["proxies"]) | set(spec.get("serve", {}).get("keys", []))
                           | set(spec["provides"]))
             spec["ifaces"] = {k: f"revl.Components${key_service[k]}"
                               for k in iface_keys if k in key_service}
-            spec["placements"] = _java_placements(ir, spec["components"])
+            spec["placements"] = _process_placements(ir, spec["components"])
 
     def command_for(backend: str, spec_file: Path) -> tuple[list, dict | None, str]:
         if backend == "node":

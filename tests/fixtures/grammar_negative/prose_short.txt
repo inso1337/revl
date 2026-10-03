@@ -1,0 +1,1 @@
+This should work, but let me know if you want it to handle the empty case too.

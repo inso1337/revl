@@ -1,0 +1,85 @@
+// issue #106 / item 391: component shapes the self-host ts port used to refuse
+// by name or drop silently. Each part below failed against the port before it
+// learned the shape.
+//
+//   * a ROUTED require read inside a provide method: `worker.call(q)` reads
+//     through the `_revl_route_worker` router proxy, not `ctx.worker`, and the
+//     routed key stays out of the inject gate (item 167);
+//   * an async timer body that mixes an async service emission with a plain
+//     service emission and a sync extern emission: the async one is spawned
+//     into the in-flight set, the other two fire inline (item 170);
+//   * a statement-block match arm in an async provide method: an async
+//     immediately-invoked arrow, awaited, with a mutable binding (item 361);
+//   * a lifecycle test that calls an async operation (the driver awaits it).
+service Worker {
+  fn call(request: Str) -> Str
+}
+
+service Front {
+  fn ask(q: Str) -> Str
+}
+
+component WorkerA provides worker: Worker {
+  isolate worker in realm("w1")
+  provide worker { fn call(request) = "a:" + request }
+}
+
+component WorkerB provides worker: Worker {
+  isolate worker in realm("w2")
+  provide worker { fn call(request) = "b:" + request }
+}
+
+component Balancer requires worker: Worker provides front: Front {
+  isolate worker in realms("w1", "w2") strategy(least_loaded)
+  provide front {
+    fn ask(q) = worker.call(q)
+  }
+}
+
+service Ledger {
+  fn count() -> Int
+  emission async fn tick()
+  emission fn note(msg: Str)
+  async fn score(o: Opt[Int]) -> Int
+}
+
+component Tally provides ledger: Ledger {
+  let store = effect Map.new() undo store.drop()
+  provide ledger {
+    fn count() = store.size()
+    async fn tick() {
+      let key = `tick-${store.size()}`
+      effect store.insert(key, "fired")
+      undo store.remove(key)
+    }
+    fn note(msg) {
+      let key = `note-${msg}`
+      effect store.insert(key, msg)
+      undo store.remove(key)
+    }
+    async fn score(o) {
+      return match o { Some(n) => { var bumped = n + 1 bumped }, None => 0 }
+    }
+  }
+}
+
+extern emission fn log_beat(tag: Str) = @py { return None } = @ts { return; }
+
+component Pulse requires ledger: Ledger {
+  every 5s {
+    emit ledger.tick()
+    emit ledger.note("beat")
+    emit log_beat("pulse")
+  }
+}
+
+lifecycle test "an async operation is awaited by the driver" {
+  load Tally
+  let s = call ledger.score(Some(4))
+  assert s == 5
+  call ledger.tick()
+  let n = call ledger.count()
+  assert n != 0
+  unload Tally
+  assert no_residue
+}

@@ -366,6 +366,10 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     "_grants_consumed",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
+    # The agent-loop axes (issue #1738). They count what the session did,
+    # refusals included, and a count that a failed load could take back would
+    # be one an agent can lower on demand.
+    "_loop_axes",
     # The event loop the load ran on. It is plumbing, not composition state, and
     # putting back `None` would orphan an open loop rather than undo anything.
     "_loop",
@@ -447,6 +451,9 @@ class _SwapPlan:
     pre: dict
     handoff_pre: dict
     pre_resolved: set
+    # issue #1751: the components gen N was ALREADY running PENDING (an unmet
+    # requirement, e.g. an ambient host service this host does not supply)
+    pre_pending: frozenset = frozenset()
 
 
 def _container_copy(value):
@@ -689,6 +696,14 @@ class Session:
         # at every load/swap so a call decided against a stale map is impossible.
         # None when nothing is loaded or the policy is off.
         self._class_map = None
+        # issue #1738: the agent-loop axes `state()` always reports. Cumulative
+        # for the whole MCP session, so `_reset` leaves them alone, and a failed
+        # load does not roll them back (`_SURVIVES_A_FAILED_LOAD`). The class map
+        # they classify a call against when the policy is off is built lazily
+        # per generation, `(generation, map)`.
+        from .loop_axes import LoopAxes  # noqa: PLC0415
+        self._loop_axes = LoopAxes()
+        self._loop_class_map: tuple | None = None
         # the outstanding-ticket table (Fix 8): every class-(c) ticket the server
         # issues, keyed by its hash. `revl_approve` refuses a hash not in here —
         # an approval can only be minted for a question the server actually asked.
@@ -1641,8 +1656,14 @@ class Session:
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
         pre_resolved = set(driver.resolved_keys())
+        # issue #1751: and the components it was running PENDING, so the gate
+        # does not hold the successor to a health its predecessor never had
+        pre_pending = frozenset(
+            name for name, fiber in driver.fibers.items()
+            if driver.FiberState(fiber.state).name == "PENDING")
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
-                         handoff_pre=handoff_pre, pre_resolved=pre_resolved)
+                         handoff_pre=handoff_pre, pre_resolved=pre_resolved,
+                         pre_pending=pre_pending)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
@@ -1692,7 +1713,8 @@ class Session:
             # opposite of the revert guarantee. So assert the successor activated
             # CLEANLY and, if not, raise into the `_activation_error` branch below,
             # which routes to `_abort_swap` (revert to gen N, keep serving gen N).
-            self._assert_successor_activated(ir, plan.pre_resolved)
+            self._assert_successor_activated(ir, plan.pre_resolved,
+                                             plan.pre_pending)
         except BaseException as exc:
             # item 372: the successor's activation did not complete — roll the
             # whole swap back to the predecessor (which activated cleanly) so the
@@ -1954,7 +1976,8 @@ class Session:
                         pass
 
     def _assert_successor_activated(self, ir: dict,
-                                    pre_resolved: set | None = None) -> None:
+                                    pre_resolved: set | None = None,
+                                    pre_pending: frozenset | None = None) -> None:
         """The item-334 post-activation health gate (EDGE 1).
 
         `driver._load` returns cleanly even when the successor did not truly come
@@ -1997,6 +2020,17 @@ class Session:
         and `Gate.propose` both report the smaller set honestly). What it may
         not do is claim a key it inherited and deliver nothing.
 
+        A component gen N was ALREADY running PENDING (`pre_pending`, issue
+        #1751) may come back PENDING: the swap does not make it worse, and
+        refusing it made a composition with one legitimately pending component
+        (an ambient host service this host does not supply, as
+        `examples/app/notes.rvl`'s `NotesConsole` needs `webui`) impossible to
+        swap at all, even to itself. Its root keys are not held against the
+        successor either, since gen N never served them. Everything else stands:
+        a FAILED fiber, a component that was ACTIVE and comes back PENDING, a
+        new component that comes up PENDING, and a key gen N served that no
+        longer resolves are all refused.
+
         On any failure, raise `ActivationError` so the enclosing `swap` catches it
         in its `_activation_error()` branch and routes to `_abort_swap` — reverting
         to gen N exactly as a raised activation fault does. `_dispose_all` in the
@@ -2005,9 +2039,14 @@ class Session:
         as part of the rollback (the 245 owner was installed before this load)."""
         ActivationError = _activation_error()
         driver = self._driver
-        # 1) no successor fiber may be FAILED or PENDING.
+        # 1) no successor fiber may be FAILED or PENDING, except one that was
+        #    already PENDING in gen N (issue #1751).
+        still_pending = set()
         for name, fiber in driver.fibers.items():
             state = driver.FiberState(fiber.state).name
+            if state == "PENDING" and name in (pre_pending or ()):
+                still_pending.add(name)
+                continue
             if state in ("FAILED", "PENDING"):
                 comp = next((c for c in (ir.get("components") or [])
                              if c.get("name") == name), {})
@@ -2031,7 +2070,7 @@ class Session:
         for comp in (ir.get("components") or []):
             keys = set((comp.get("provides") or {}).keys())
             declared_all |= keys
-            if comp.get("name") not in templates:
+            if comp.get("name") not in templates and comp.get("name") not in still_pending:
                 declared_root |= keys
         inherited = declared_all & set(pre_resolved or ())
         resolved = driver.resolved_keys()
@@ -3565,6 +3604,7 @@ class Session:
         result = owner.finalize_abort()            # aborted record (+ escrow Phase 2)
         self._close_wal()
         residue = self._surface_compensation_residue(owner)
+        self._loop_axes.record_abort(residue)      # issue #1738
         report = self._teardown_report(driver, residue)
         prompts = dict(owner.prompts)
         self._reset()
@@ -4292,6 +4332,8 @@ class Session:
         # seeds the next owner from an entry still reading `consumed: False` and
         # a single-use approval re-arms across the unload.
         self._settle_approval_spend(self._owner)
+        # issue #1738: the commit session ends here; keep its prompt tally.
+        self._loop_axes.close_owner(self._owner)
         self._owner = None
         self.ir = None
         self.previous = None
@@ -4911,6 +4953,9 @@ class Session:
         # binds to THAT grant/approval (not any that could have covered).
         decision: dict | None = {} if cache_active else None
         self._approval_decide_call(key, method, args, record=decision)
+        # issue #1738: the call is decided and about to cross, so it counts
+        # toward the loop axes now, policy or not.
+        self._loop_axes.record_call(self._loop_call_class(key, method))
 
         async def invoke():
             result = target(*(args or []))
@@ -8686,7 +8731,8 @@ class Session:
         if self._driver is None:
             # even with nothing loaded, the workspace's active leases (item 61)
             # are visible — an agent can survey who holds what before it loads.
-            return {"loaded": False, "leases": self.leases.document()}
+            return {"loaded": False, "leases": self.leases.document(),
+                    "loopAxes": self.loop_axes()}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         paused_now = self.slo_paused()
@@ -8732,8 +8778,46 @@ class Session:
             # configured (off-policy `state()` is byte-identical).
             **({"approval": self.approval_metrics()}
                if self.approval_policy is not None else {}),
+            # issue #1738: the six agent-loop axes, always.
+            "loopAxes": self.loop_axes(),
             **({"trace": driver.drain_events()} if drain else {}),
         }
+
+    def loop_axes(self) -> dict:
+        """The agent-loop axes of issue #1738 (`revl.mcp.loop_axes`), each a
+        numerator, a denominator and their ratio, cumulative for the session."""
+        return self._loop_axes.document(self._owner)
+
+    def record_tool_call(self, name: str, arguments: dict, payload: dict,
+                         ir_before: dict | None) -> None:
+        """Feed one finished MCP tool call to the loop axes. `ir_before` is the
+        running composition before the handler ran; the components that differ
+        from it now are the ones the call touched."""
+        from .loop_axes import EDIT_TOOLS  # noqa: PLC0415
+        touched = None
+        if name in EDIT_TOOLS and self.ir is not ir_before:
+            from .operator import _changed_targets  # noqa: PLC0415
+            touched = [component for component, _ in
+                       _changed_targets(ir_before or {}, self.ir or {})]
+        self._loop_axes.record_tool(name, arguments, payload, touched)
+
+    def _loop_call_class(self, key: str, method: str):
+        """The class of a call's reach for the loop axes: the policy's own class
+        map when there is one, else a policy-independent one for the live
+        generation. `False` when the call cannot be classified."""
+        class_map = self._class_map
+        if class_map is None and self.ir is not None:
+            cached = self._loop_class_map
+            if cached is None or cached[0] is not self.ir:
+                from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
+                try:
+                    cached = (self.ir, ClassMap(self.ir))
+                except Exception:  # noqa: BLE001 — unclassifiable, counted as such
+                    cached = (self.ir, None)
+                self._loop_class_map = cached
+            class_map = cached[1]
+        reach = class_map.classify_call(key, method) if class_map is not None else None
+        return False if reach is None else reach["class"]
 
 
 def _decision_id_of(sources: dict, granted, base_manifest_hash: str | None,
