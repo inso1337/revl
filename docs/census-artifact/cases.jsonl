@@ -1918,6 +1918,8 @@
 
 ["tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl", "agree-admit"]
 
+["tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl", "agree-admit"]
 
 ["tests/fixtures/erase_net.rvl", "agree-admit"]
