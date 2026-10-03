@@ -184,6 +184,96 @@ def resolve(vs: dict, symbol: str) -> tuple[tuple[str, str], str, Decl]:
     return hits[0]
 
 
+# ---------------------------------------------------------------- nested
+
+@dataclass(frozen=True)
+class Nested:
+    """A member under a top-level declaration, with its proved line span."""
+    top: Decl
+    member: object      # nested.Member
+    first: int
+    last: int
+
+    @property
+    def path(self) -> str:
+        return ".".join((self.top.name,) + self.member.path)
+
+
+def _top_and_rest(symbol: str) -> tuple[str, tuple[str, ...]]:
+    """``[buffer:]Top.a.b`` -> (``[buffer:]Top``, ("a", "b"))."""
+    wanted_buffer, rest = _split(symbol.strip())
+    if rest.isdigit() or "." not in rest:
+        return symbol.strip(), ()
+    top, *members = rest.split(".")
+    if not top or not all(members):
+        raise SymbolError(f"`{symbol}` is not a symbol path (Name or Name.member)")
+    return (f"{wanted_buffer}:{top}" if wanted_buffer else top), tuple(members)
+
+
+def locate(vs: dict, symbol: str):
+    """The buffer, its text, the top-level declaration, and the proved nested
+    member (None for a top-level symbol) that `symbol` addresses."""
+    from . import nested  # noqa: PLC0415
+
+    top_symbol, rest = _top_and_rest(symbol)
+    buffer, text, decl = resolve(vs, top_symbol)
+    if not rest:
+        return buffer, text, decl, None
+    try:
+        node = nested.node_of(text, buffer[1], decl.kind, decl.name)
+        member = nested.find(node, decl.kind, rest)
+        first, last = nested.span(text, buffer[1], node, decl.kind, member)
+        nested.prove(text, buffer[1], decl.kind, decl.name, member, first, last)
+    except nested.NestedError as error:
+        raise SymbolError(str(error)) from None
+    return buffer, text, decl, Nested(decl, member, first, last)
+
+
+def _comment_start(text: str, line: int) -> int:
+    lines = text.split("\n")
+    first = line
+    while first > 1 and lines[first - 2].strip().startswith("//"):
+        first -= 1
+    return first
+
+
+def _requires_of(text: str, name: str, decl: Decl) -> dict[str, str]:
+    """A component's require locals -> the services they name."""
+    if decl.kind != "component":
+        return {}
+    program = Parser(text, name).parse()
+    comp = next(c for c in program.components if c.name == decl.name)
+    return {local: service for local, service, _line in comp.requires}
+
+
+def _read_member(vs, buffer, text, found: Nested, deps: bool, comments: bool) -> dict:
+    first = _comment_start(text, found.first) if comments else found.first
+    own = span_text(text, found.first, found.last)
+    shown = span_text(text, first, found.last) if comments else own
+    result = {"symbol": found.path, "kind": found.member.kind,
+              "parent": found.top.name, "parentKind": found.top.kind,
+              "buffer": buffer[1], "line": found.first,
+              "text": render(shown, comments, buffer[1])}
+    if deps:
+        names = _names_in(own, buffer[1])
+        services = {svc for local, svc in _requires_of(text, buffer[1],
+                                                       found.top).items()
+                    if local in names}
+        result["deps"] = [
+            describe(b, d, render(isolate(t, d, b[1]), comments, b[1]))
+            for b, t, d in _named(vs, names | services, (buffer, found.top))]
+    return result
+
+
+def _named(vs: dict, names: set[str], exclude) -> list:
+    out = []
+    for buffer, buffer_text in buffers(vs):
+        for decl in declarations(buffer_text, buffer[1]):
+            if decl.name in names and (buffer, decl) != exclude:
+                out.append((buffer, buffer_text, decl))
+    return out
+
+
 # ---------------------------------------------------------------- reading
 
 def render(text: str, comments: bool, name: str) -> str:
@@ -225,7 +315,9 @@ def read(vs: dict, symbol: str, *, deps: bool = False,
          comments: bool = True) -> dict:
     """`revl_source`'s answer: the addressed declaration and, with `deps`, the
     declarations it names."""
-    buffer, text, decl = resolve(vs, symbol)
+    buffer, text, decl, found = locate(vs, symbol)
+    if found is not None:
+        return _read_member(vs, buffer, text, found, deps, comments)
     own = isolate(text, decl, buffer[1])
     first = leading_comment_start(text, decl) if comments else decl.start
     shown = span_text(text, first, decl.end) if comments else own
@@ -242,7 +334,9 @@ def read(vs: dict, symbol: str, *, deps: bool = False,
 def replace(vs: dict, symbol: str, replacement: str) -> tuple[tuple[str, str], str, dict]:
     """Replace the addressed declaration's lines (not the comments above it)
     with `replacement`. Returns the buffer, its new text and the edit's echo."""
-    buffer, text, decl = resolve(vs, symbol)
+    buffer, text, decl, found = locate(vs, symbol)
+    if found is not None:
+        return _replace_member(buffer, text, found, replacement)
     isolate(text, decl, buffer[1])
     lines = text.split("\n")
     body = replacement if replacement.endswith("\n") else replacement + "\n"
@@ -253,26 +347,52 @@ def replace(vs: dict, symbol: str, replacement: str) -> tuple[tuple[str, str], s
                               "kind": decl.kind, "line": decl.start}
 
 
+def _replace_member(buffer, text: str, found: Nested, replacement: str):
+    """Splice a member's new text in place of its proved span, then prove the
+    result changed that member and nothing else."""
+    from . import nested  # noqa: PLC0415
+
+    lines = text.split("\n")
+    indent = lines[found.first - 1][:len(lines[found.first - 1])
+                                     - len(lines[found.first - 1].lstrip())]
+    body = [line if not line.strip() or line.startswith(indent) else indent + line
+            for line in replacement.rstrip("\n").split("\n")]
+    new_text = "\n".join(lines[:found.first - 1] + body + lines[found.last:])
+    try:
+        nested.prove_replacement(text, new_text, buffer[1], found.top.kind,
+                                 found.top.name, found.member)
+    except nested.NestedError as error:
+        raise SymbolError(str(error)) from None
+    return buffer, new_text, {"form": "symbol", "symbol": found.path,
+                              "kind": found.member.kind, "line": found.first}
+
+
 def remove(vs: dict, symbol: str) -> tuple[tuple[str, str], str, dict]:
     """Delete the addressed declaration and the comment block directly above
     it (issue #1695: a withdrawal). Returns the buffer, its new text and the
     edit's echo."""
-    buffer, text, decl = resolve(vs, symbol)
-    isolate(text, decl, buffer[1])
-    first = leading_comment_start(text, decl)
+    buffer, text, decl, found = locate(vs, symbol)
+    if found is not None:
+        first, end = _comment_start(text, found.first), found.last
+    else:
+        isolate(text, decl, buffer[1])
+        first, end = leading_comment_start(text, decl), decl.end
     lines = text.split("\n")
-    kept = lines[:first - 1] + lines[decl.end:]
+    kept = lines[:first - 1] + lines[end:]
     # do not leave two blank lines where the declaration was
     while first - 1 < len(kept) and first > 1 and not kept[first - 2].strip() \
             and not kept[first - 1].strip():
         del kept[first - 1]
-    return buffer, "\n".join(kept), {"form": "remove", "symbol": decl.name,
-                                      "kind": decl.kind, "line": decl.start}
+    return buffer, "\n".join(kept), {
+        "form": "remove", "symbol": found.path if found else decl.name,
+        "kind": found.member.kind if found else decl.kind,
+        "line": found.first if found else decl.start}
 
 
 # ---------------------------------------------------------------- what changed
 
-def _shapes(text: str, name: str) -> dict[tuple[str, str], object] | None:
+def _shapes(text: str, name: str) -> dict[tuple[str, str], tuple] | None:
+    """(kind, name) -> (shape, node) for every top-level declaration."""
     from ..operator_text import shape  # noqa: PLC0415
 
     try:
@@ -284,8 +404,23 @@ def _shapes(text: str, name: str) -> dict[tuple[str, str], object] | None:
         for item in getattr(program, field):
             item_name = getattr(item, "name", None)
             if isinstance(item_name, str) and item_name:
-                out[(kind, item_name)] = shape(item)
+                out[(kind, item_name)] = (shape(item), item)
     return out
+
+
+def _changed(buffer, key, old_node, new_node) -> list[dict]:
+    """A changed declaration, reported at the finest level that holds: its
+    members when only members changed (issue #1733), else the whole of it."""
+    from . import nested  # noqa: PLC0415
+
+    kind, name = key
+    members = nested.member_changes(kind, old_node, new_node)
+    if not members:
+        return [{"symbol": name, "kind": kind, "buffer": buffer[1],
+                 "change": "changed"}]
+    return [{"symbol": ".".join((name,) + path), "kind": member_kind,
+             "parent": name, "parentKind": kind, "buffer": buffer[1],
+             "change": change} for path, member_kind, change in members]
 
 
 def touched(before: dict, after: dict) -> list[dict]:
@@ -303,16 +438,12 @@ def touched(before: dict, after: dict) -> list[dict]:
             out.append({"buffer": buffer[1], "change": "unparsed"})
             continue
         for key in list(now) + [k for k in was if k not in now]:
-            if key not in was:
-                change = "added"
-            elif key not in now:
-                change = "removed"
-            elif was[key] != now[key]:
-                change = "changed"
-            else:
+            if key in was and key in now:
+                if was[key][0] != now[key][0]:
+                    out += _changed(buffer, key, was[key][1], now[key][1])
                 continue
             out.append({"symbol": key[1], "kind": key[0], "buffer": buffer[1],
-                        "change": change})
+                        "change": "added" if key not in was else "removed"})
     return out
 
 

@@ -351,11 +351,14 @@ is what the session holds, and `revl_snapshot` returns it. With nothing loaded,
 pass `files` (or `source`) and the call loads it through `revl_load` first,
 then edits it.
 
-A `{symbol, replacement}` edit replaces one whole top-level declaration,
+A `{symbol, replacement}` edit replaces one declaration, top-level or nested,
 addressed as `revl_source` addresses it, and keeps the comment block above it.
-Every response that edited, and every swap that landed, lists the `touched`
-symbols: `{symbol, kind, buffer, change}` with `change` one of `added`,
-`changed`, `removed`.
+A nested replacement is re-indented to the member's place. Every response that
+edited, and every swap that landed, lists the `touched` symbols: `{symbol, kind,
+buffer, change}` with `change` one of `added`, `changed`, `removed`, at the
+finest level that holds. When only a component's methods (or a service's
+operations, or a type's members) changed, the members are reported, each with
+`parent` and `parentKind`; otherwise the whole declaration is.
 
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
   replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
@@ -424,7 +427,22 @@ names and no comments is about 300.
 
 A declaration's span runs from its first line to the line before the next
 top-level declaration, less the blank and comment lines between them, and is
-used only when it parses on its own as exactly that declaration. The answer is
+used only when it parses on its own as exactly that declaration.
+
+**Nested symbols (issue #1733).** A dotted path addresses a member under a
+top-level declaration: `Component.key` (a whole `provide key { ... }` block),
+`Component.key.method` (one method in it), `Component.method` when exactly one
+provide block has that method, `Service.operation`, and `Type.field` or
+`Type.Case`. A member's `deps` are what that member names (with a component's
+require locals mapped to their services), not what its whole component names.
+A member's span starts on its own line and runs until the brackets it opens are
+closed and the next member, or the enclosing block's closing brace, begins. It
+is used only once it is proved: deleting the span must re-parse to the same
+enclosing declaration with that one member missing and nothing else different,
+and an edit must re-parse to the same declaration with only that member
+changed. A member that shares a line with anything else (`provide p { fn a() =
+1 }`) fails the proof and is refused rather than guessed; a `range` or `anchor`
+edit still reaches it. The answer is
 `{symbol, kind, buffer, line, text}`, plus `deps` as a list of the same shape.
 
 - Inputs: `symbol` (required); `with`; `comments`; `files` / `source` when
