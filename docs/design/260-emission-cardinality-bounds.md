@@ -286,8 +286,24 @@ is NOT in scope and reports `unbounded` (clause (4)):
    is over paths (an `if`/`match` whose arms EACH contain one in-SCC call is
    still linear - only one arm runs); the violation is two in-SCC calls
    sequentially reachable on one path.
+5. **The dispatch is the one counted (issue #1755).** Every recursive call
+   passes each FUNCTION-TYPED parameter unchanged, in its own position, so an
+   iteration cannot swap in a wider dispatch than the one the loop was entered
+   with. Function-typed means the declared type can hold a function: an arrow
+   type, or a record or variant that can, transitively; an undefined name or a
+   generic parameter counts as one. A DATA parameter may take any value on the
+   back-edge, and an agent loop needs that to grow its history
+   (`msgs + [req.result]` above). Its new value is computed in the recursive
+   arm, so every arrow invoked to compute it is already in
+   `per_iter_crossings`, and a call to any other fn, a host reach or a named
+   capability anywhere in the body already makes the loop `unbounded`. And a
+   parameter whose entry argument carries a crossing is used only by
+   invoking it directly (`step(msgs)`) or by passing it on unchanged. An
+   alias (`let f = step`), a field or element read (`s.step`, `fs[0]`) or any
+   other pass makes the loop `unbounded` with that reason. Its invocations are
+   no longer direct, and counting it as zero would drop the crossing.
 
-When (1)-(4) hold, the recursion is LINEAR (clause (4)), so the max iteration
+When (1)-(5) hold, the recursion is LINEAR (clause (4)), so the max iteration
 count is `ceil((N0 - c) / k)` (with a LITERAL `N0`), and the per-activation
 per-capability ceiling is:
 
