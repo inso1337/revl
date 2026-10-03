@@ -259,9 +259,9 @@ def block_mcp_verbs(current: str) -> str:
     return "\n".join(out)
 
 
-def _core_tier() -> tuple:
-    from revl.mcp.disclosure import CORE
-    return CORE
+def _core_tier() -> list:
+    from revl.mcp.disclosure import core
+    return core(mcp_tools())
 
 
 def block_mcp_count(current: str) -> str:

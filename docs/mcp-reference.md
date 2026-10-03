@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The server has exactly the 56 verbs below, one section each. By default `tools/list` advertises the 7 core verbs and `revl_verbs` returns the rest; see "Find a verb".
+The server has exactly the 56 verbs below, one section each. By default `tools/list` advertises the 11 core verbs and `revl_verbs` returns the rest; see "Find a verb".
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -185,10 +185,13 @@ A successful response is never rewritten.
 
 ## Find a verb
 
-`tools/list` advertises the core tier by default: `revl_check`, `revl_load`,
-`revl_call`, `revl_edit`, `revl_swap`, `revl_live_query` and `revl_verbs`
-(issue #1697). That is about an eighth of the full list's schema size, which
-matters on every cold start. Every other verb is still served and callable by
+`tools/list` advertises the core tier by default (issue #1697): the authoring
+loop `initialize` describes (`revl_resolve`, `revl_scaffold`, `revl_edit`,
+`revl_query_withdraw`, `revl_check`, `revl_admit`, and `revl_plan` before a
+swap), the verbs that run it (`revl_load`, `revl_call`, `revl_swap`), and
+`revl_verbs`. That is about a quarter of the full list's schema size, which
+matters on every cold start. Every verb `initialize` names is in the core tier,
+and a test holds the two together. Every other verb is still served and callable by
 name. A client that wants the whole list up front starts the server with
 `revl mcp serve --all-tools`, or sets `REVL_MCP_ALL_TOOLS=1`. The core tier is
 `CORE` in `src/revl/mcp/disclosure.py`.

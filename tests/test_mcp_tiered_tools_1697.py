@@ -8,6 +8,7 @@ name. `revl mcp serve --all-tools` (or `REVL_MCP_ALL_TOOLS=1`) lists every verb.
 
 import json
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +23,9 @@ from revl.mcp import server as server_mod  # noqa: E402
 from revl.mcp.server import handle  # noqa: E402
 
 ADVERTISED = {tool["name"]: tool for tool in server_mod._ADVERTISED}
+#: CORE may name a verb a later PR adds (revl_source, revl_change); only the
+#: ones this server has are listed
+PRESENT_CORE = [name for name in disclosure.CORE if name in ADVERTISED]
 NOT_CORE = sorted(set(ADVERTISED) - set(disclosure.CORE))
 
 
@@ -49,7 +53,7 @@ def _tiered():
 
 def test_the_default_list_is_the_core_tier_ending_in_discovery():
     listed = _list()
-    assert [t["name"] for t in listed] == list(disclosure.CORE)
+    assert [t["name"] for t in listed] == PRESENT_CORE
     assert listed[-1]["name"] == disclosure.DISCOVERY
     for tool in listed:
         assert tool == ADVERTISED[tool["name"]]   # the exact schema, not a stub
@@ -58,7 +62,32 @@ def test_the_default_list_is_the_core_tier_ending_in_discovery():
 def test_the_core_tier_is_much_smaller_than_the_full_list():
     core = len(json.dumps(_list()))
     full = len(json.dumps(server_mod._ADVERTISED))
-    assert core * 4 < full, (core, full)
+    assert core * 3 < full, (core, full)
+
+
+def _named_in_instructions() -> set:
+    init = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
+    return set(re.findall(r"\brevl_[a-z_]+", init["result"]["instructions"]))
+
+
+def test_every_verb_initialize_names_is_in_the_core_tier():
+    """What `initialize` tells an agent to use is what `tools/list` shows, so
+    the two cannot drift. Taken with the runtime available, because the
+    runtime-gate announcement (#1692) names verbs that are UNAVAILABLE, which
+    is the opposite of a recommendation."""
+    server_mod.set_runtime_available(True)
+    try:
+        named = _named_in_instructions()
+    finally:
+        server_mod.set_runtime_available(None)
+    assert named, "the instructions name no verb at all"
+    assert named <= set(disclosure.CORE), sorted(named - set(disclosure.CORE))
+    assert named <= set(PRESENT_CORE), "an instruction names a verb that does not exist"
+
+
+def test_the_core_tier_stays_small():
+    assert len(disclosure.CORE) <= 13
+    assert disclosure.CORE[-1] == disclosure.DISCOVERY
 
 
 def test_initialize_tells_the_client_how_to_find_the_rest():
@@ -78,7 +107,7 @@ def test_every_verb_has_exactly_one_topic():
 def test_no_arguments_is_the_index_without_schemas():
     payload = _call(disclosure.DISCOVERY, {})
     assert payload["ok"] is True
-    assert payload["listed"] == list(disclosure.CORE)
+    assert payload["listed"] == PRESENT_CORE
     topics = payload["topics"]
     assert list(topics) == list(disclosure.TOPICS)
     for topic in topics.values():
@@ -122,7 +151,7 @@ def test_an_unlisted_verb_is_still_callable_by_name():
 # ------------------------------------------------------- the opt-out
 
 def test_all_tools_lists_every_verb():
-    assert len(_list()) == len(disclosure.CORE)   # tiered first
+    assert len(_list()) == len(PRESENT_CORE)   # tiered first
     disclosure.set_all_tools(True)
     assert _list() == server_mod._ADVERTISED
     init = handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
@@ -145,6 +174,6 @@ def _serve(*flags: str, env_extra: dict | None = None) -> list:
 
 
 def test_the_serve_flag_and_the_environment_opt_out():
-    assert _serve() == list(disclosure.CORE)
+    assert _serve() == PRESENT_CORE
     assert len(_serve("--all-tools")) == len(ADVERTISED)
     assert len(_serve(env_extra={"REVL_MCP_ALL_TOOLS": "1"})) == len(ADVERTISED)

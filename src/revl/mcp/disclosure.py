@@ -21,10 +21,20 @@ import os
 
 DISCOVERY = "revl_verbs"
 
-#: Listed by default: author (check), run (load, call), change (edit, swap),
-#: ask (live query), and find everything else (revl_verbs).
-CORE = ("revl_check", "revl_load", "revl_call", "revl_edit", "revl_swap",
-        "revl_live_query", DISCOVERY)
+#: Listed by default. Every verb `initialize` tells an agent to use must be
+#: here (tests/test_mcp_tiered_tools_1697.py holds the two together):
+#:
+#: * the authoring loop, in its order: reuse (resolve), scaffold, fill (edit),
+#:   withdraw-safety (query_withdraw), check, admit, and plan before a swap;
+#: * running it: load, call, swap;
+#: * `revl_source` and `revl_change`, listed once they exist (#1741's stack);
+#:   a name with no verb behind it is skipped, not listed;
+#: * the way to everything else, `revl_verbs`.
+CORE = ("revl_resolve", "revl_scaffold", "revl_edit", "revl_query_withdraw",
+        "revl_check", "revl_admit", "revl_plan",
+        "revl_load", "revl_call", "revl_swap",
+        "revl_source", "revl_change",
+        DISCOVERY)
 
 #: `{topic: (what it is for, verbs)}`, in docs/mcp-reference.md's order.
 TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
@@ -73,12 +83,15 @@ def all_tools() -> bool:
     return _ALL_TOOLS
 
 
-def listed(advertised: list) -> list:
-    """What `tools/list` returns: every verb, or the core tier in CORE order."""
-    if _ALL_TOOLS:
-        return list(advertised)
+def core(advertised: list) -> list:
+    """The core tier's verbs that this server has, in CORE order."""
     by_name = {tool["name"]: tool for tool in advertised}
     return [by_name[name] for name in CORE if name in by_name]
+
+
+def listed(advertised: list) -> list:
+    """What `tools/list` returns: every verb, or the core tier."""
+    return list(advertised) if _ALL_TOOLS else core(advertised)
 
 
 def index(advertised: list) -> dict:
