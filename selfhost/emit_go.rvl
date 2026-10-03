@@ -4364,7 +4364,7 @@ fn emit_comp_provide_impl(cname: Str, s: Any, c: Any, doc: CDoc) -> List[Str] {
   return out
 }
 
-// `_emit_load_helpers` with no config: a component that isolates a key into a
+// `_emit_load_helpers`: a component that isolates a key into a
 // realm or intercepts one loads into a child context that carries both.
 fn emit_comp_load_helpers(comps: List[Any]) -> List[Str] {
   var out = []
@@ -4372,7 +4372,11 @@ fn emit_comp_load_helpers(comps: List[Any]) -> List[Str] {
     let cname = camel(value_str(value_field(c, "name")))
     let placed = value_field(c, "isolate")
     let watched = value_field(c, "intercept")
-    out = out.push(`func Load${cname}(target *stc.Context) *stc.Fiber {`)
+    let has_config = value_list(value_field(c, "config")).length() > 0
+    if (has_config) {
+      out = out.push(`// Load${cname} isolates the load-target per the component's realm placement, then loads it.`)
+    }
+    out = out.push(has_config ? `func Load${cname}(target *stc.Context, cfg ${cname}Config) *stc.Fiber {` : `func Load${cname}(target *stc.Context) *stc.Fiber {`)
     var target = "target"
     if (value_keys(placed).length() > 0 || value_keys(watched).length() > 0) {
       out = out.push(line(1, "ctx := target.Child()"))
@@ -4384,7 +4388,8 @@ fn emit_comp_load_helpers(comps: List[Any]) -> List[Str] {
       }
       target = "ctx"
     }
-    out = out.push(line(1, `return ${target}.Load(${cname}())`)).push("}").push("")
+    let arg = has_config ? "cfg" : ""
+    out = out.push(line(1, `return ${target}.Load(${cname}(${arg}))`)).push("}").push("")
   }
   return out
 }
