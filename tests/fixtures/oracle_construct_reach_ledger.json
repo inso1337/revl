@@ -216,6 +216,7 @@
     "operands=Float",
     "pattern=_",
     "payload_type=Any",
+    "secret=<true>",
     "secret_witness=<true>",
     "step=await",
     "step=effect",
