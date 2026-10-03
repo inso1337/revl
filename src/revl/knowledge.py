@@ -35,6 +35,7 @@ from dataclasses import dataclass
 DOC_BODY_LIMIT = 2048
 _VERDICT_HEAD = re.compile(r"^(REFUSED|REJECTED|ADMITTED)\b")
 _DOCS_PATH = re.compile(r"\bdocs/[\w./-]+\.md\b")
+_NOTE_TRAILER = re.compile(r"^\[k_[0-9a-f]{12}\]$")
 _CODE = re.compile(r"\b(?:[AGT]\d{1,2}|G-[A-Z]+(?:-[A-Z]+)*|T-UNRESOLVED)\b")
 
 
@@ -67,6 +68,30 @@ def comment_blocks(text: str) -> list[Block]:
         blocks.append(Block(current[0][0], current[-1][0],
                             tuple(b for _, b in current)))
     return blocks
+
+
+# ---------------------------------------------------------------- rendered notes
+
+_NOTE_HEAD = re.compile(r"^note (k_[0-9a-f]{12}):$")
+
+
+def split_note(block: Block) -> tuple["Block | None", "tuple[str, str] | None"]:
+    """A block that ends in a rendered note (issue #1754) is the comment above
+    it plus the note: `note k_<id>:`, the body, then `[k_<id>]`. Returns the
+    comment part (None if there is none) and (id, body) of the note (None if
+    the block carries none). A block that only looks like one is left whole."""
+    if not block.lines or not _NOTE_TRAILER.match(block.lines[-1].strip()):
+        return block, None
+    note_id = block.lines[-1].strip()[1:-1]
+    for index in range(len(block.lines) - 2, -1, -1):
+        head = _NOTE_HEAD.match(block.lines[index].strip())
+        if head and head.group(1) == note_id:
+            body = "\n".join(block.lines[index + 1:-1])
+            if index == 0:
+                return None, (note_id, body)
+            return Block(block.first, block.first + index - 1,
+                         block.lines[:index]), (note_id, body)
+    return block, None
 
 
 # ---------------------------------------------------------------- classify
@@ -206,6 +231,9 @@ def index_text(path: str, text: str, report: dict | None, known_codes) -> list[d
     nodes: dict = {}
     entries = []
     for block in comment_blocks(text):
+        block, _note = split_note(block)
+        if block is None:
+            continue  # all of it is a rendered note (issue #1754)
         record = classify(block, known_codes)
         symbol, first, last = anchor_of(text, path, block, decls, nodes)
         entry = {**record,

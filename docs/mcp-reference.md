@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 58 verbs below, one section each.
+The advertised list is exactly the 59 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -95,6 +95,7 @@ the current interpreter (issue #1692).
 | `revl_call` | no | no | `key`, `method` |
 | `revl_swap` | no | yes | - (source) |
 | `revl_edit` | no | yes | `edits` (source) |
+| `revl_knowledge` | no | no | `op` |
 | `revl_export` | no | yes | - |
 | `revl_change` | no | yes | - (source) |
 | `revl_source` | yes | no | `symbol` (source) |
@@ -497,7 +498,11 @@ roots, checked before anything is written. A proposal is never exported; commit
 it first. After an export, the files on disk equal `revl_snapshot`'s
 `files_content`. Authorized as `snapshot`.
 
-- Inputs: `path` and `overwrite` (inline compositions).
+`with_knowledge: true` also writes the session's notes: each live note as a
+marked comment above its anchor, and every record not yet in the sidecar
+(`revl_knowledge`).
+
+- Inputs: `path` and `overwrite` (inline compositions); `with_knowledge`.
 
 ### The comment index (`knowledge` on responses)
 
@@ -528,6 +533,58 @@ edited comment is a new entry. The index rides on responses:
 
 On this tree, 158 of the 163 `expected error:` blocks are live and 5 are
 refuted: the drift the study measured.
+
+### `revl_knowledge`
+
+Agent NOTES about the running composition's declarations (issue #1754;
+knowledge slice 3). The comment index above is what the files already say;
+notes are what a session adds.
+
+- `op: "add"` `{symbol, kind, body, evidence?}`. The kind is one of
+  `rationale`, `invariant`, `trap`, `alternative-rejected`, `purpose`, `doc`.
+  A body over 2048 characters is refused, not truncated, and so is a 17th live
+  note on one declaration. Evidence is a list of read-only checks: `{kind:
+  diagnostic | query | audit | test | issue, ...}`; any other kind is refused.
+  `revl_edit` and `revl_change` take the same notes as `notes: [...]`,
+  recorded when the change lands and anchored to the one symbol it touched
+  (or the note's own `symbol`).
+- `op: "query"` `{symbol}` lists the notes about a declaration; `{id}`
+  returns one note in full.
+- `op: "confirm"` `{id}`: the note still holds after its declaration's code
+  changed. A note goes `stale` when its anchor's fingerprint changes, as a
+  comment entry does.
+- `op: "retire"` `{id, reason}`, `op: "supersede"` `{id, body}`.
+
+**Trust.** A note is written under the same authoring trust as source: under
+the untrusted-author profile an agent's note is `trust: untrusted`. On
+responses (`knowledge.notes`), an untrusted note rides with its body only when
+it carries evidence; an evidence-free one rides as its id, kind and anchor,
+with `bodyWithheld`, and `query {id}` returns the body when the agent decides
+to read it. A note body is data, never instructions: notes change nothing that
+admits, plans or swaps, and a body never appears outside the `knowledge`
+field.
+
+**Storage.** Records are append-only (a confirm, a retire and a supersede are
+records of their own), one JSON file each under `<composition
+dir>/.revl/knowledge/<id>.json`, so two sessions never write the same file.
+`revl_load` reads them; only `revl_export {with_knowledge: true}` writes them.
+
+**Round trip.** `revl_export {with_knowledge: true}` also writes each live note
+into its file as a marked comment directly above its anchor:
+
+```
+// note k_1a2b3c4d5e6f:
+// create_note mints the id from the row count, so ids are not reused
+// [k_1a2b3c4d5e6f]
+```
+
+Loading that file reads it back: an unchanged block is the same note, so an
+export of the reloaded composition writes nothing (the round trip is byte
+stable); a body a human edited becomes a supersede by `author: {kind: human,
+trust: operator}`; a marked block with no record becomes a human note.
+
+- Inputs: `op` (required); `symbol`, `id`, `kind`, `body`, `evidence`,
+  `reason` per op.
 
 ### `revl_source`
 
