@@ -982,13 +982,55 @@ def test_every_link_is_reached_at_runtime_by_this_file(tmp_path):
         if pd.LINK_NON_LOOPBACK_BIND in str(error):
             reached.add(pd.LINK_NON_LOOPBACK_BIND)
 
-    reached.add(_run_pool_cli(tmp_path, files=["a.rvl", "b.rvl"])[1])
+    reached.add(_run_pool_cli(tmp_path, files=["a.rvl", "../b.rvl"])[1])
+    for task in _bundle_corpus(record):
+        reached.add(runner.handle(task)["link"])
     reached.add(_run_pool_cli(tmp_path, files=["a.rvl"],
                               extra=["--once"])[1])
 
     reached.discard("")
     missing = set(pd.REFUSAL_LINKS) - reached
     assert not missing, f"declared but never reached at runtime: {missing}"
+
+
+def _bundle_corpus(charter_record):
+    """One signed multi-file task per bundle link: a missing file, an extra
+    file, an altered file and a traversal name. Each is signed by the pinned
+    operator key, so only the bundle checks can refuse it."""
+    from revl import pool_bundle as pb
+
+    bundle = pb.Bundle((pb.BundleFile("a.rvl", pb.MODE_FILE, PURE_SOURCE),
+                        pb.BundleFile("lib/b.rvl", pb.MODE_FILE, PURE_SOURCE)))
+
+    def signed(task_id, edit):
+        wire = bundle.to_wire()
+        edit(wire)
+        body = pd.build_task(
+            pool_id=charter_record["pool_id"],
+            charter_digest=pp.canonical_digest(charter_record),
+            peer_id=WORKER, task_id=task_id, artifact=b"",
+            runner=pd.RUNNER_TEST_PY, effect_class=EffectClass.PURE)
+        body.update(artifact="", artifact_digest=pb.bundle_digest(
+            wire["manifest"]) if task_id == "b-path" else bundle.digest(),
+            bundle=wire)
+        return pd.sign_task(body, OPERATOR_ID)
+
+    def drop(wire):
+        wire["files"].pop()
+
+    def add(wire):
+        wire["files"].append({"path": "c.rvl", "mode": pb.MODE_FILE,
+                              "content": ""})
+
+    def alter(wire):
+        wire["files"][0]["content"] = "AAAA"
+
+    def escape(wire):
+        wire["manifest"].append({"path": "../x", "mode": pb.MODE_FILE,
+                                 "digest": pb.file_digest(b"")})
+
+    return [signed("b-missing", drop), signed("b-extra", add),
+            signed("b-altered", alter), signed("b-path", escape)]
 
 
 # ---------------------------------------------------------------------------
@@ -1022,14 +1064,17 @@ def _run_pool_cli(tmp_path, *, files, extra=()):
     return code, link
 
 
-def test_run_pool_private_refuses_a_multi_file_artifact(tmp_path):
-    """A pool task pins ONE artifact by hash. Two files would need a bundle
-    digest, which this slice does not build, so it is refused by name rather
-    than silently hashing the first one."""
-    pool_on_disk(tmp_path)
-    code, link = _run_pool_cli(tmp_path, files=["a.rvl", "b.rvl"])
+def test_run_pool_private_refuses_a_bundle_name_outside_the_working_dir(
+        tmp_path):
+    """Several files are one bundle (`pool_bundle`), each named by its path
+    relative to the working directory. A name that would leave it is refused
+    by name before any file is read or anything is recorded; the end-to-end
+    bundle tests are in `test_pool_bundle_1198.py`."""
+    pool_dir, _record, _roster, _directory = pool_on_disk(tmp_path)
+    code, link = _run_pool_cli(tmp_path, files=["a.rvl", "../b.rvl"])
     assert code == 1
-    assert link == pd.LINK_MULTI_FILE_ARTIFACT
+    assert link == pd.LINK_BUNDLE_PATH
+    assert not (pool_dir / pd.LEDGER_FILE).exists()
 
 
 @pytest.mark.parametrize("flag", [
