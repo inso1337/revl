@@ -303,6 +303,13 @@ Three summary readings of that map:
 | `RevL.A2.fixture_release_before_withdrawal` | A2 — the converse, computed | **proved** | `propext` | on the fixture's stack every settling verdict runs a release BEFORE the withdrawal: the window `docs/rejections.md#a2` describes |
 | `RevL.A2.fixture_opens_the_window` | A2 — the converse | **proved** | `propext` | the fixture's pass violates the ordering claim, so the `A2OK` hypothesis excludes a real body rather than nothing |
 | `RevL.A2.a2_not_vacuous` | A2 — non-vacuity | **proved** | `propext, Quot.sound` | `[acquire, provide]`: admitted by fold and rule, stack `[release, withdrawal]`, commit and abort passes `[withdrawal, release]`, halted pass empty |
+| `RevL.G4Deferred.legalB_iff` | G4 deferred position — one reach (issue #1742) | **proved** | `propext` | `legalB r = true ↔ Legal r`: a reach of a `deferred` extern is legal exactly when it is a call (bare or in an arrow) in a component |
+| `RevL.G4Deferred.deferredB_iff` | G4 deferred position — the bridge | **proved** | `propext, Quot.sound` | `deferredB rs = true ↔ DeferredOK rs`: the printed `DF` verdict is exactly "every reach is legal" |
+| `RevL.G4Deferred.value_never_legal` | G4 deferred position — values | **proved** | none | the extern as a function value is refused in every scope, a component included |
+| `RevL.G4Deferred.body_reach_refused` | G4 deferred position — `fn`/`test` bodies | **proved** | none | any reach in a `fn` or `test` body is refused, inside an arrow or not: neither has a session commit |
+| `RevL.G4Deferred.refused_of_mem` | G4 deferred position — the file rule | **proved** | none | one illegal reach refuses the file wherever it sits |
+| `RevL.G4Deferred.fixtures_decided` | G4 deferred position — the corpus shapes | **proved** | `propext` | `ok_emit_step` admitted; a call in a `fn` body, a call in an arrow there and a component value refused |
+| `RevL.G4Deferred.deferred_not_vacuous` | G4 deferred position — non-vacuity | **proved** | `propext, Quot.sound` | the rule admits the component call and refuses the `fn`-body call and the component value |
 (`propext` / `Quot.sound` are Lean's standard foundation axioms; the gate
 whitelists exactly those three.)
 
@@ -1036,12 +1043,12 @@ printed 1. Nothing compared the two, in either direction.
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
 **693 .rvl files -> 626 components -> 1537 statements = 442 modeled +
-222 componentless + 29 refused at parse**, and **7943 verdicts compared
+222 componentless + 29 refused at parse**, and **8385 verdicts compared
 (442 files + 626 components + 222 provide methods + 38 spawn edges + 29
 parse refusals + 267 teardown scenarios + 1620 recoveries + 1537
 confinements + 1537 surfaces + 419 teardowns + 497 provide-clause
-components + 83 config fields + 626 A2 bodies), 7943 agree, 0
-mismatches**.
+components + 83 config fields + 626 A2 bodies + 442 deferred-position
+files), 8385 agree, 0 mismatches**.
 
 Checker alignment over the 442 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
@@ -1052,15 +1059,15 @@ not that it disagrees.
 
 An absence cannot disagree, so the two buckets aimed at a row the model
 does carry are `ratcheted` instead: `out-of-fragment-G5` and
-`out-of-fragment-G6` and `out-of-fragment-approval` and
-`out-of-fragment-deferred` are held to the names in
-`formal/out_of_fragment_ledger.json`, which shrinks only. A file that
-JOINS one fails the gate, and a line no longer in its bucket fails it
-until it is deleted. So a new `undo` shape the `Prog` cannot resolve, or
-a new G6 fixture, cannot arrive while the model stays silent about it.
-`agree-*` and the generic `out-of-fragment` stay informational; that one
-collects every code the model states no row about at all, so it grows
-with corpus work that never touched this layer.
+`out-of-fragment-G6` and `out-of-fragment-approval` are held to the
+names in `formal/out_of_fragment_ledger.json`, which shrinks only. A
+file that JOINS one fails the gate, and a line no longer in its bucket
+fails it until it is deleted. So a new `undo` shape the `Prog` cannot
+resolve, or a new G6 fixture, cannot arrive while the model stays silent
+about it. `agree-*` and the generic `out-of-fragment` stay
+informational; that one collects every code the model states no row
+about at all, so it grows with corpus work that never touched this
+layer.
 
 | bucket | files | gate |
 | --- | --- | --- |
@@ -1068,7 +1075,7 @@ with corpus work that never touched this layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 91 | informational |
+| `agree-G4` | 97 | informational |
 | `agree-G5` | 2 | informational |
 | `agree-accept` | 222 | informational |
 | `formal-found-other` | 0 | **FATAL** |
@@ -1082,7 +1089,6 @@ with corpus work that never touched this layer.
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 | `out-of-fragment-approval` | 34 | ratcheted |
-| `out-of-fragment-deferred` | 6 | ratcheted |
 
 Nothing is counted without being named; the files in the non-`agree`
 buckets are:
@@ -1132,12 +1138,6 @@ buckets are:
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_match_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_receiver_expressions/g4_record_marked.rvl`
 - `out-of-fragment-approval`: `tests/fixtures/service_typed_params/g4_param_marked_no_edge.rvl`
-- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_call_in_arrow_in_fn_body.rvl`
-- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_call_in_fn_body.rvl`
-- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_call_in_test_body.rvl`
-- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_value_in_component.rvl`
-- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_value_in_fn_body.rvl`
-- `out-of-fragment-deferred`: `tests/fixtures/deferred_reach/g4_value_in_test_body.rvl`
 
 `agree-G5` says which row saw the crossing: the `U5` registration count,
 or the `G` row refusing the component through the marker rule.

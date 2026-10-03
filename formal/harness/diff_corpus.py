@@ -1429,6 +1429,57 @@ def config_shape(type_name: str | None, *, service_names: set[str],
     return out
 
 
+#: The positions a reach of a `deferred` emission extern can sit in (`DR`
+#: rows, issue #1742), and the scopes. Read off the same AST walk the checker
+#: makes (`lower._refuse_teardown_externs_in_fn_bodies`): a CALL is the extern
+#: in a call's callee position, `arrow` when that call sits inside an arrow,
+#: and a VALUE is any other reference to it. The rule over them is stated in
+#: the model (`RevL.G4Deferred`), not here.
+DEFERRED_SCOPES = ("fn", "test", "component")
+DEFERRED_POSITIONS = ("call", "arrow", "value")
+
+
+def _deferred_reaches(node, deferred: set, out: list, in_arrow: bool = False) -> None:
+    """Every reach of a `deferred` extern under `node`, as (extern, position)."""
+    if isinstance(node, ExprArrow):
+        in_arrow = True
+    if isinstance(node, ExprVar) and node.name in deferred:
+        out.append((node.name, "value"))
+    if isinstance(node, ExprCall) and isinstance(node.callee, ExprVar) \
+            and node.callee.name in deferred:
+        out.append((node.callee.name, "arrow" if in_arrow else "call"))
+    if dataclasses.is_dataclass(node) and not isinstance(node, type):
+        for f in dataclasses.fields(node):
+            child = getattr(node, f.name)
+            if f.name == "callee" and isinstance(node, ExprCall) \
+                    and isinstance(child, ExprVar):
+                continue  # the callee position is the CALL, recorded above
+            _deferred_reaches(child, deferred, out, in_arrow)
+    elif isinstance(node, (list, tuple)):
+        for x in node:
+            _deferred_reaches(x, deferred, out, in_arrow)
+
+
+def deferred_reach_rows(prog, rel: str) -> list[str]:
+    """`DR <file> <scope> <owner> <extern> <position>`: one row per reach of a
+    `deferred` emission extern, in the body of a `fn`, a `test` or a
+    component (issue #1742). Facts only: which reaches are legal is the
+    model's `RevL.G4Deferred.legalB`."""
+    deferred = {e.name for e in prog.externs if getattr(e, "deferred", False)}
+    if not deferred:
+        return []
+    rows: list[str] = []
+    scopes = ([("fn", fn.name, fn.body) for fn in prog.fn_decls]
+              + [("test", t.name, t.body) for t in prog.tests]
+              + [("component", c.name, c.body) for c in prog.components])
+    for scope, owner, body in scopes:
+        found: list = []
+        _deferred_reaches(body, deferred, found)
+        for ext, pos in found:
+            rows.append("\t".join(["DR", rel, scope, owner, ext, pos]))
+    return rows
+
+
 def config_rows(prog, rel: str) -> list[str]:
     """`CF` (a config field is declared) + `CN` (one node its type reaches)
     for every config field in the file — a component's and an extern's, the
@@ -1550,6 +1601,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
         # reaches. An extern's config is judged at the same bar as a
         # component's, so both owners ship rows (issue 1161).
         tsv.extend(config_rows(prog, rel))
+        # deferred-position facts (DR, issue #1742), file-wide: every reach of
+        # a `deferred` emission extern and where it sits.
+        tsv.extend(deferred_reach_rows(prog, rel))
 
         ff: dict = {"components": {}}
         for c in prog.components:
@@ -2623,6 +2677,58 @@ def a2_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE computed for each DF row: (admitted, the file's
+#: (scope, position) reaches). Filled by `reference_from_tsv`; read by
+#: `deferred_coverage`.
+_DEFERRED_FILES: dict = {}
+
+
+def deferred_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `DF` row (issue #1742).
+
+    A row that said `ok` over files with no `deferred` extern would agree
+    over nothing. The corpus must EXERCISE the rule on both sides of it:
+
+      * a file ADMITTED with at least one reach (`ok_emit_step.rvl`: the
+        extern called in a component);
+      * a file REFUSED for a call in a `fn` or `test` body
+        (`g4_call_in_fn_body.rvl`), one for a call inside an arrow there
+        (`g4_call_in_arrow_in_fn_body.rvl`), and one for a value reference
+        in a component (`g4_value_in_component.rvl`).
+
+    The verdict is the model's `RevL.G4Deferred.deferredB` on the Lean side,
+    so a reference that drifted to admit one of those shapes diverges from
+    the Lean row. Returns findings, treated as gate failures."""
+    witnesses = {
+        "an admitted file that reaches a deferred extern":
+            lambda ok, reach: ok and bool(reach),
+        "a file refused for a call in a fn or test body":
+            lambda ok, reach: not ok and any(
+                sc in ("fn", "test") and pos == "call" for sc, pos in reach),
+        "a file refused for a call inside an arrow in a fn or test body":
+            lambda ok, reach: not ok and any(
+                sc in ("fn", "test") and pos == "arrow" for sc, pos in reach),
+        "a file refused for a value reference in a component":
+            lambda ok, reach: not ok and ("component", "value") in reach,
+    }
+    findings: list[str] = []
+    found: dict[str, str] = {}
+    for label, test in witnesses.items():
+        hit = next((rel for rel, (ok, reach) in sorted(_DEFERRED_FILES.items())
+                    if test(ok, reach)), None)
+        if hit is None:
+            findings.append(f"deferred coverage: NO witness of {label} — "
+                            "the DF row would agree vacuously")
+        else:
+            found[label] = hit
+    if not findings:
+        reaching = sum(1 for _ok, reach in _DEFERRED_FILES.values() if reach)
+        print(f"deferred coverage: {len(_DEFERRED_FILES)} files, {reaching} "
+              f"reach a deferred extern; witnesses "
+              + ", ".join(sorted(set(found.values()))))
+    return findings
+
+
 def run_oracle(tsv_path: Path, out_path: Path) -> str | None:
     """Run the Lean oracle over the corpus TSV; None if lake is absent."""
     if shutil.which("lake") is None:
@@ -2653,7 +2759,8 @@ class Verdicts(NamedTuple):
     every declared key is installed by a block or a `realms(...)` route),
     `configs` CD rows (G4 config-is-data: a config field's declared type is
     built out of data), `a2` A2 rows (A2: no acquisition after a provision in
-    a component's activation body)."""
+    a component's activation body), `deferred` DF rows (G4 deferred position:
+    a `deferred` emission is reached only by a call in a component)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -2668,6 +2775,7 @@ class Verdicts(NamedTuple):
 
     configs: dict[tuple[str, str, str, str], str]
     a2: dict[tuple[str, str], str]
+    deferred: dict[str, str]
 
 
     def total(self) -> int:
@@ -2677,7 +2785,7 @@ class Verdicts(NamedTuple):
                 + len(self.confinements) + len(self.g8surface)
 
                 + len(self.g5reg) + len(self.a9) + len(self.configs)
-                + len(self.a2))
+                + len(self.a2) + len(self.deferred))
 
 
 
@@ -2703,6 +2811,7 @@ def parse_verdicts(text: str) -> Verdicts:
 
     configs: dict[tuple[str, str, str, str], str] = {}
     a2: dict[tuple[str, str], str] = {}
+    deferred: dict[str, str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -2771,11 +2880,14 @@ def parse_verdicts(text: str) -> Verdicts:
         elif parts[0] == "A2" and len(parts) == 4:
             # A2 ordering: (file, comp) -> ok|fail.
             a2[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
+        elif parts[0] == "DF" and len(parts) == 3:
+            # G4 deferred position (issue #1742): file -> ok|fail.
+            deferred[parts[1]] = parts[2].split("=", 1)[1]
         else:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
-                    a2)
+                    a2, deferred)
 
 
 
@@ -3164,10 +3276,26 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         a2[key] = "ok" if ok else "fail"
         _A2_BODIES[key] = (ok, n_acq, n_prov)
 
+    # DF rows (G4 deferred position, issue #1742), recomputed INDEPENDENTLY
+    # from the DR rows with the checker's own rule (`lower.
+    # _refuse_teardown_externs_in_fn_bodies`): a component walk records
+    # value references only, so a call (bare or inside an arrow) is legal
+    # there, and in a `fn` or `test` body every reach is refused. One verdict
+    # per file the M rows name.
+    drrows = [r for r in rows if r and r[0] == "DR" and len(r) == 6]
+    _DEFERRED_FILES.clear()
+    deferred: dict[str, str] = {}
+    for rel in sorted({r[1] for r in mrows}):
+        mine = [(r[2], r[5]) for r in drrows if r[1] == rel]
+        bad = [(sc, pos) for sc, pos in mine
+               if sc != "component" or pos == "value"]
+        deferred[rel] = "fail" if bad else "ok"
+        _DEFERRED_FILES[rel] = (not bad, frozenset(mine))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
 
                     recoveries, confinements, g8surface, g5reg, a9,
-                    configs, a2)
+                    configs, a2, deferred)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -3434,8 +3562,12 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # fatal `missed-A2`.
         a2_rows = [(k, x) for k, x in v.a2.items() if k[0] == rel]
         vrow = v.files.get(rel, ("ok", "ok", "ok"))
+        # The DF row is the fourth rule under the G4 guarantee (issue #1742):
+        # a DF failure clears a G4 `deferred` refusal, and a DF failure over
+        # a file the checker accepts is `formal-strict` like any other.
+        df_fail = v.deferred.get(rel, "ok") == "fail"
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
-            x == "ok" for _, x in g4_rows + a9_rows + a2_rows)
+            x == "ok" for _, x in g4_rows + a9_rows + a2_rows) and not df_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -3459,15 +3591,13 @@ def checker_alignment(file_facts: dict, componentless: list[str],
                    else "formal-found-other", rel)
         elif code == "G4" and category == "deferred":
             # The deferred-position rule (item 400, issue #1457, `lower.
-            # _deferred_value_refusal` and its call arms) carries the G4 code,
-            # but it is not the marker rule either: it asks WHERE a `deferred`
-            # emission extern is reached (only an `emit`-marked call in a
-            # component enqueues it for the session commit), and the model has
-            # no fact about extern positions in a `fn` or `test` body or about
-            # a function value. Absence of fact, ratcheted by name exactly as
-            # the approval floor is (issue #1688 added the first documents).
-            record("out-of-fragment-deferred" if formal_clean
-                   else "formal-found-other", rel)
+            # _deferred_value_refusal` and its call arms) is the model's
+            # `RevL.G4Deferred` over the `DR` position facts, decided as the
+            # `DF` row (issue #1742). It asks WHERE a `deferred` emission
+            # extern is reached, not whether a crossing is marked, so it is
+            # the DF row that must see it: a checker refusal the row does not
+            # fail is the model being weaker than revl, and fatal.
+            record("agree-G4" if df_fail else "missed-G4", rel)
         elif code == "G4":
             record("agree-G4" if raw_found else "missed-G4", rel)
         elif code in ("G2", "G3"):
@@ -3630,13 +3760,14 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # about a specific row that exists, and that is the claim worth pinning.
 OOF_LEDGER_PATH = FORMAL / "out_of_fragment_ledger.json"
 OOF_RATCHET_BUCKETS = ("out-of-fragment-G5", "out-of-fragment-G6",
-                       "out-of-fragment-approval", "out-of-fragment-deferred")
+                       "out-of-fragment-approval")
 OOF_LEDGER_ABOUT = [
-    "The corpus files the checker refuses G5, G6, with the G4 approval",
-    "floor or with the G4 deferred-position rule, and the model has NO",
-    "fact about: `out-of-fragment-G5`, `out-of-fragment-G6`,",
-    "`out-of-fragment-approval` and `out-of-fragment-deferred` in",
+    "The corpus files the checker refuses G5, G6 or with the G4 approval",
+    "floor, and the model has NO fact about: `out-of-fragment-G5`,",
+    "`out-of-fragment-G6` and `out-of-fragment-approval` in",
     "`formal/harness/diff_corpus.py`'s checker-alignment buckets.",
+    "(The G4 deferred-position rule left this ledger in issue #1742: the",
+    "model states it as `RevL.G4Deferred`, decided as the `DF` row.)",
     "",
     "Each bucket records an absence, so none can disagree with anything",
     "and none could fail the gate on its own (issue #1169). This ledger",
@@ -3772,6 +3903,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         f"{len(ref.g5reg)} teardowns",
         f"{len(ref.a9)} provide-clause components",
         f"{len(ref.configs)} config fields", f"{len(ref.a2)} A2 bodies",
+        f"{len(ref.deferred)} deferred-position files",
     ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
@@ -3942,7 +4074,8 @@ def main() -> int:
             ("a9", ref.a9, formal.a9),
 
             ("config_data", ref.configs, formal.configs),
-            ("a2", ref.a2, formal.a2)):
+            ("a2", ref.a2, formal.a2),
+            ("deferred", ref.deferred, formal.deferred)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -3963,7 +4096,8 @@ def main() -> int:
         f"{len(ref.g5reg)} teardowns + "
         f"{len(ref.a9)} provide-clause components + "
         f"{len(ref.configs)} config fields + "
-        f"{len(ref.a2)} a2 bodies) — "
+        f"{len(ref.a2)} a2 bodies + "
+        f"{len(ref.deferred)} deferred-position files) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -3976,6 +4110,7 @@ def main() -> int:
 
     mismatches.extend(config_coverage())
     mismatches.extend(a2_coverage())
+    mismatches.extend(deferred_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")

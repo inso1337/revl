@@ -226,3 +226,10 @@ RevL.A2.fixture_refused	concrete	-	the fold refuses [acquire, provide, acquire],
 RevL.A2.fixture_release_before_withdrawal	concrete	-	the fixture's proof pass under commit and abort runs a release before the withdrawal: the window docs/rejections.md#a2 describes
 RevL.A2.fixture_opens_the_window	necessity	RevL.A2.fixture_release_before_withdrawal,RevL.A2.a2_not_vacuous	the refused pass is computed, and the refusal is not universal: okBody's pass satisfies the ordering claim
 RevL.A2.a2_not_vacuous	concrete	-	okBody = [acquire, provide]: admitted by the fold and the rule, stack [release, withdrawal], commit and abort passes [withdrawal, release], halted pass empty
+RevL.G4Deferred.legalB_iff	instance	RevL.G4Deferred.deferred_not_vacuous,RevL.G4Deferred.fixtures_decided	legalB decides true on a component call (Legal) and false on a fn-body call and a component value, so the per-reach verdict is mutation-sensitive
+RevL.G4Deferred.deferredB_iff	instance	RevL.G4Deferred.deferred_not_vacuous,RevL.G4Deferred.fixtures_decided	deferredB is true on okEmitStep (which satisfies DeferredOK) and false on callInFn, arrowInFn and valueInComponent, so the printed DF verdict is mutation-sensitive
+RevL.G4Deferred.value_never_legal	necessity	RevL.G4Deferred.deferred_not_vacuous	a value reach is refused in every scope; the refusal is not universal, since a component call is admitted
+RevL.G4Deferred.body_reach_refused	necessity	RevL.G4Deferred.deferred_not_vacuous	a fn or test reach is refused at every position; the component call in okEmitStep is admitted, so the refusal is scoped
+RevL.G4Deferred.refused_of_mem	instance	RevL.G4Deferred.deferred_not_vacuous	callInFn holds the illegal fn call beside a legal component call, and is refused
+RevL.G4Deferred.fixtures_decided	concrete	-	the four tests/fixtures/deferred_reach shapes: ok_emit_step admitted; a call in a fn body, a call in an arrow there, and a component value refused
+RevL.G4Deferred.deferred_not_vacuous	concrete	-	okEmitStep is admitted by the rule, callInFn and valueInComponent refused
