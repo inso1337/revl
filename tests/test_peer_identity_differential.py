@@ -52,8 +52,28 @@ from cryptography.hazmat.primitives.asymmetric import ec, utils as asym_utils
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "src"))
 
+from revl import _ecdsa_backend  # noqa: E402
 from revl import peer_identity as pi  # noqa: E402
-from revl.tee_quote import derive_public_key  # noqa: E402
+from revl.tee_quote import (  # noqa: E402
+    CURVE_P256,
+    CURVE_P384,
+    derive_public_key,
+    signing_backend,
+)
+
+
+@pytest.fixture(autouse=True)
+def _the_pure_signer_is_the_one_under_test(monkeypatch):
+    """Since issue #1460 `ecdsa_sign` and `derive_public_key` go through
+    `cryptography` whenever it is importable, and this file imports it. Left
+    alone, the differential would compare OpenSSL with itself and pass forever.
+    The probe is pinned to "unavailable" for every test here, so each signature
+    and each derived key is the pure implementation's, and the assertion below
+    fails loudly if that pin ever stops taking effect."""
+    monkeypatch.setattr(_ecdsa_backend, "_probe", _ecdsa_backend.Probe(
+        False, "pinned to the pure path by the differential"))
+    assert signing_backend(CURVE_P256) == "pure"
+    assert signing_backend(CURVE_P384) == "pure"
 
 #: Rounds per domain. Pure-Python P-256 arithmetic is the cost; 12 keeps the
 #: file inside a few seconds while putting 36 independent keys and well over a

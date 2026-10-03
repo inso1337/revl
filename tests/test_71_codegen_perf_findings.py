@@ -59,12 +59,20 @@ from pathlib import Path
 
 import pytest
 
+from _load_by_path import load_by_path  # noqa: E402
+
 ROOT = Path(__file__).resolve().parents[1]
 BENCH = ROOT / "bench" / "codegen" / "python"
+# run.py imports its sibling `copycount` by bare name, so its directory stays on
+# sys.path; `copycount` is the only file of that name in the repository.
 if str(BENCH) not in sys.path:
     sys.path.insert(0, str(BENCH))
 
-run = importlib.import_module("run")
+# Five files in the repository are a top-level `run.py` (bench/run.py and one
+# per bench/codegen/<tier>/), so the bare name `run` answers with whichever was
+# imported first and leaks into every later test (issue #1829). Loaded by path
+# under a name only this file uses.
+run = load_by_path("bench_codegen_python_run", BENCH / "run.py")
 copycount = importlib.import_module("copycount")
 
 
