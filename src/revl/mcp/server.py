@@ -826,8 +826,14 @@ def _tool_load(arguments: dict) -> dict:
         return report(error)
     authored = _authored_host_bodies(ir, source, modules)
     try:
+        # issue #1706: the gate is on by default and its spend must be durable,
+        # so a load that does not say otherwise records; an explicit
+        # `record: false` under the gate is still refused by `Session.load`.
+        record = arguments.get("record")
+        if record is None:
+            record = SESSION.approval_policy is not None
         state = SESSION.load(ir, arguments.get("config"),
-                             record=bool(arguments.get("record")),
+                             record=bool(record),
                              origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
@@ -1208,6 +1214,23 @@ def _host_code_fields(bodies: list) -> dict:
             f"`--author-trust trusted`; the default refuses agent-authored "
             f"host code outright."),
     }
+
+def _approval_instructions() -> str:
+    """The `initialize` instructions' sentence on the approval gate (issue
+    #1706), true of this session's mode."""
+    if SESSION.approval_policy is None:
+        return ("No approval gate is configured: a class-(c) crossing fires "
+                "when called.")
+    text = ("The approval gate is on: a witnessed crossing with an inverse "
+            "proceeds, a deferred emission waits for commit, and any other "
+            "emission returns approvalRequired with a ticket and fires nothing. "
+            "Relay the ticket to a human and re-issue the identical call once "
+            "it is approved.")
+    if getattr(SESSION, "approval_separation", False):
+        text += (" You cannot approve a ticket you raised: revl_approve must "
+                 "come from a separate operator identity.")
+    return text
+
 
 def _tool_approve(arguments: dict) -> dict:
     """Say YES to a class-(c) crossing (item 246 / roadmap item 344). Two shapes,
@@ -3763,7 +3786,8 @@ def handle(message: dict) -> dict | None:
             "serverInfo": SERVER_INFO,
             "instructions": "Compile revl components before proposing them; use "
                             "revl_admit against the running manifest before a swap, "
-                            "and revl_plan to see what that swap would do first.",
+                            "and revl_plan to see what that swap would do first. "
+                            + _approval_instructions(),
         }
     elif method == "tools/list":
         result = {"tools": _ADVERTISED}

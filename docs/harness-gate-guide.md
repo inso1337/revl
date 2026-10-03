@@ -11,23 +11,31 @@ need the exact call sequences, and read
 [design/246-auto-approve.md](design/246-auto-approve.md) for why the gate is
 shaped this way.
 
-The gate is off by default. With no policy configured a session behaves byte
-for byte as it does today (`test_no_policy_is_byte_identical`), so turning it
-on is opt-in.
+Since issue #1706 the gate is ON by default in `revl mcp serve`, and the
+identity that raised a ticket cannot approve it.
 
 ## Serve with `--approval-policy`
 
-Enable the auto-approve policy at serve time:
+| `revl mcp serve` | gate | who may approve a ticket |
+|---|---|---|
+| no flag, or `--approval-policy auto` | on: class (a) proceeds, (b) waits for commit, (c) returns a ticket and fires nothing | any operator identity except the one that raised the ticket. With no operator profile, nobody: the session can raise tickets but not answer them |
+| `--approval-policy advisory` | on, as above | any identity, the raiser included, with a startup warning: the ticket is advisory (what `--approval-policy auto` meant before #1706) |
+| `--approval-policy off` | off: a class-(c) crossing fires unprompted (the pre-#1706 default, with a startup warning) | nothing is ticketed |
 
-    revl mcp serve --approval-policy auto
+`revl mcp proxy` always runs the gate and keeps its pre-#1706 approval wiring,
+which is `advisory` unless its operator profile withholds `approve`. A
+`Session` built in Python starts with no policy
+(`test_no_policy_is_byte_identical`); `revl mcp serve` is what turns the gate
+on.
 
-`auto` is the only mode today. Two rules the server enforces the moment it is
-on:
+The server prints the mode on stderr at startup, and with the gate on it says
+how to give a human the `approve` verb. Rules the server enforces while the
+gate is on:
 
 - **Recording is required.** The gate's authority is the WAL. A `revl_load`
-  without `record: true` is refused under an enabled policy
-  (`test_enabled_policy_requires_recording`), because a policy whose approvals
-  evaporate is worse than none.
+  that does not say `record` records under the gate; an explicit
+  `record: false` is refused (`test_enabled_policy_requires_recording`),
+  because a policy whose approvals evaporate is worse than none.
 - **Approval-required capabilities come from the boundary policy file.** Pass
   one with `--policy`. A rule targets a boundary by its capability token:
 
@@ -82,11 +90,19 @@ approvals to distil into one reviewed rule. Leave it off wherever a caller's
 `path=` or `host=` could carry a tenant identifier, a token, or a customer's
 data — those are exactly the values a durable cross-session log should not hold.
 
-Self-approval is the default identity model's hole: with no operator profile
-bound, every verb including `approve` is ungated, so the calling agent could
-answer its own prompt. An enabled policy is only meaningful alongside an
-operator profile (`--operator-profile`) that withholds `approve` from the
-agent and grants it to the human.
+Self-approval was the old identity model's hole: with no operator profile bound,
+every verb including `approve` is ungated, so the calling agent could answer its
+own prompt. `revl mcp serve` now refuses it (issue #1706, separation of duties):
+`revl_approve(hash)`, and a standing grant named from a ticket, are refused to
+the identity that raised the ticket, and a proactive standing grant is refused
+when no operator profile is bound. A human approves as a separate operator:
+
+    revl mcp serve --http 127.0.0.1:8470 --operator-profile ops.profile
+
+with the agent's operator granted the verbs it calls and the human's operator
+granted `approve`. Each HTTP request authenticates as its own operator, so the
+human's `revl_approve` is not the agent's. A multi-party rule (`require N of
+{...}`) already refused its proposer's vote (item 471).
 
 ## The three action classes
 
@@ -149,7 +165,8 @@ of them:
   the running composition. These are how a harness gets an agent's proposed
   component past the same admission gate a human's `revl compile` uses, before
   anything boots.
-- `revl_load` boots the composition. Under the policy, pass `record: true`.
+- `revl_load` boots the composition. Under the gate it records unless told
+  otherwise, and `record: false` is refused.
 - `revl_call` drives a provided service method. This is where the per-call
   decision runs. On a class (a) or (b) target the call proceeds and returns its
   result. On an unapproved class (c) target it returns
@@ -160,15 +177,17 @@ of them:
   (`test_replay_forward_class_c_is_refused_like_a_fresh_call`).
 - `revl_approve(hash)` mints a standing approval for an outstanding ticket. The
   `hash` must be one the server issued; an unknown hash is refused by the
-  outstanding-ticket table (`test_unknown_ticket_hash_is_refused`).
+  outstanding-ticket table (`test_unknown_ticket_hash_is_refused`). Under
+  `revl mcp serve` it must come from an identity other than the one that
+  raised the ticket (issue #1706).
 
 The class (c) loop, per call:
 
 1. `revl_call` returns `approvalRequired` with a `ticket`. The ticket names
    what a yes would mean (component, key, method, an args digest, the reached
    capabilities) and a `hash` over all of it.
-2. The harness relays the ticket to the human. On a yes, call
-   `revl_approve(ticket.hash)`.
+2. The harness relays the ticket to the human. On a yes, the human's operator
+   calls `revl_approve(ticket.hash)`; the agent's own call is refused.
 3. The harness re-issues the identical `revl_call`. It recomputes the same
    hash, finds the standing approval, fires exactly once, and consumes it. A
    second identical call is refused with a fresh ticket: the approval is
