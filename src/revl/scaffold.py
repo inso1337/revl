@@ -32,7 +32,7 @@ import re
 from dataclasses import dataclass, field
 
 from .compiler import compile_source
-from .mcp.fillspec import enrich
+from .mcp.fillspec import enrich, unfillable
 
 
 class ScaffoldError(Exception):
@@ -285,13 +285,20 @@ def scaffold_document(spec: Spec, filename: str = "scaffold.rvl",
     source = build_skeleton(spec)
     ir = compile_source(source, filename)
     holes = ir.get("holes") or []
-    return {
+    obligations = enrich(ir, untrusted=untrusted)
+    document = {
         "ok": True,
         "source": source,
         "holeCount": len(holes),
         "admissible": not holes,
-        "obligations": enrich(ir, untrusted=untrusted),
+        "obligations": obligations,
     }
+    # a hole this author can never fill is flagged up front rather than
+    # handed out as work (fillspec `fillable`); absent when there is none
+    blocked = unfillable(obligations)
+    if blocked:
+        document["unfillable"] = blocked
+    return document
 
 
 __all__ = [
