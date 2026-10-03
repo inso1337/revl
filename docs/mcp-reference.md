@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 56 verbs below, one section each.
+The advertised list is exactly the 59 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -94,7 +94,10 @@ the current interpreter (issue #1692).
 | `revl_load` | no | no | - (source) |
 | `revl_call` | no | no | `key`, `method` |
 | `revl_swap` | no | yes | - (source) |
-| `revl_edit` | no | yes | `edits` |
+| `revl_edit` | no | yes | `edits` (source) |
+| `revl_export` | no | yes | - |
+| `revl_change` | no | yes | - (source) |
+| `revl_source` | yes | no | `symbol` (source) |
 | `revl_gauntlet` | yes | no | - (source) |
 | `revl_quarantine` | yes | no | - (source) |
 | `revl_repair` | no | yes | `component` |
@@ -335,10 +338,24 @@ Boot a composition IN MEMORY and hold it live. Nothing is written to disk, so a
 draft component can be run and tested before it exists as a file. Returns fiber
 states, provided keys, and the lifecycle trace.
 
+**Drafts (issue #1727).** With nothing running, a candidate that still has
+open typed holes (a `revl_scaffold` result, say) is not refused: it opens a
+DRAFT. The draft is compiled and checked, and the answer is `draft: true` with
+every hole and its fillSpec, but nothing boots. `revl_edit` then patches the
+draft (hole fills, ranges, anchors, `{symbol, replacement}`). While a hole
+remains it reports the holes left. The call that fills the last one boots the
+draft through the same gates a `revl_load` runs (the load half of the operator
+gate, a lease on a cold load, the session's admission checks, the approval
+ticket). A gate that refuses leaves the draft held, hole-free, with the reason.
+`revl_load` with no source boots the held draft (with `config`/`record` if
+given), and refuses while a hole remains. `revl_unload` discards it,
+`revl_state` reports `draft: {holes}`, and `revl_source` reads from it. A draft
+never boots while a hole remains.
+
 - Inputs: `source` / `files` / `modules`; `config` (per-component config
   tables); `record` (record the effect accumulator so the composition can be
   stepped backwards - must be set at load, recording is installed before
-  activation).
+  activation). With a draft held and no source: boots the draft.
 
 ### `revl_call`
 
@@ -372,8 +389,8 @@ them. The definitions are in
 Admit a candidate against the RUNNING composition and hot-swap it in. A rejected
 candidate leaves the running system untouched; this is the acting half of
 `revl_admit`. Called with NO source (`source`/`files`/`modules`), it re-admits
-the source the server already holds - so an agent that edited server-side with
-`revl_edit` need not re-serialize the whole file.
+the source the server already holds, inline or loaded from files - so an agent
+that edited server-side with `revl_edit` need not re-serialize the whole file.
 
 - Inputs: `source` / `files` / `modules` (all optional); `replacing`.
 
@@ -389,9 +406,31 @@ system is untouched. A clean patch is hot-swapped in; one that still has open
 holes advances the server-side source but swaps nothing. Returns the admission
 verdict / holes / diagnostic, never the whole source.
 
-A swapped edit and a draft edit with open holes both carry `blastRadius`, which
-makes preflight automatic. It is read off the composition that is running when
-the edit arrives:
+A composition loaded from `files` is edited the same way. Each loaded file is a
+buffer named by the path it was loaded under; an edit may carry its own
+`target`, so one call can change several files, and a `use` between two edited
+files resolves to the edited text. The disk is never written: the swapped text
+is what the session holds, and `revl_snapshot` returns it. With nothing loaded,
+pass `files` (or `source`) and the call loads it through `revl_load` first,
+then edits it.
+
+A `{symbol, replacement}` edit replaces one declaration, top-level or nested,
+addressed as `revl_source` addresses it, and keeps the comment block above it.
+A nested replacement is re-indented to the member's place. Every response that
+edited, and every swap that landed, lists the `touched` symbols: `{symbol, kind,
+buffer, change}` with `change` one of `added`, `changed`, `removed`, at the
+finest level that holds. When only a component's methods (or a service's
+operations, or a type's members) changed, the members are reported, each with
+`parent` and `parentKind`; otherwise the whole declaration is.
+
+`commit: false` proposes instead of swapping: the edit lands in your proposal,
+shared with `revl_change`, and `revl_change {commit: true}` commits it (issue
+#1696). The default stays `commit: true` for now; see the design note.
+
+A swapped edit, a draft edit with open holes and a proposal (`commit: false`)
+all carry `blastRadius`, which makes preflight automatic. It is read off the
+composition that is running when the edit arrives. Its `touched` names
+components, where the top-level `touched` above names symbols:
 - `touched`: the components whose definition changed, plus added and removed
   ones. Shifted source lines alone do not count. A component also counts when a
   service it provides or requires changed its declaration.
@@ -401,8 +440,122 @@ the edit arrives:
 - `breaks`: the total across the touched components.
 
 - Inputs: `edits` (array, required - each `{hole, expr}` / `{range,
-  replacement}` / `{anchor, replacement, count?}`); `target` (which server-side
-  buffer to edit, omit for the main inline source); `replacing`.
+  replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
+  each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
+  inline source or the one loaded file, a loaded file's path, or an in-memory
+  module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
+  `config` to load first.
+
+### `revl_change`
+
+**Speculative by default (issue #1696,
+[design](design/1696-speculation.md)).** A `revl_change` applies the change to
+YOUR proposal (a working copy of the held source, one per caller) and runs the
+whole verification, then stops: nothing swaps, nothing is written, and other
+callers see nothing. Successive changes build on the same proposal.
+`revl_change {commit: true}` with no intent re-verifies the proposal against
+the running composition as it is now and swaps it in (or boots a held draft);
+`{intent, commit: true}` proposes and commits in one call; `{discard: true}`
+drops the proposal. A commit is refused if the running composition moved since
+the proposal was built (another caller committed): it would undo that change.
+`revl_source {proposal: true}` reads the proposal. The loop is propose, verify,
+commit; `revl_export` writes the committed source to disk when you want a file.
+
+Make one change in ONE call (issue #1695). An agent names the intent; the
+server runs the loop an agent used to orchestrate itself (in a benchmark, eight
+calls for one change, five of them `revl_check` polls):
+
+1. **load**, when nothing is loaded and `files`/`source` are given. A
+   candidate with holes opens a draft, as `revl_load` does;
+2. **plan**: for a withdrawal, the cascade of components that would lose a
+   provider (`revl_query_withdraw`'s answer), reported whatever happens next;
+3. **apply** the change to a working copy of the server-side source, so
+   nothing about the running composition has changed yet;
+4. **verify**: admission against the running composition, the lease and
+   quarantine gates, and with `gauntlet: true` the gauntlet's isolated boot
+   and unload of the exact candidate;
+5. **commit** (a hot swap, or the boot of a draft whose last hole it filled)
+   only if every step passed.
+
+Each intent is carried out as `revl_edit` edits, so the path jail, the trust
+rule for edited files, the gates and drafts behave exactly as for `revl_edit`:
+
+| intent | does |
+|---|---|
+| `{edit: {target?, edits}}` | `revl_edit`'s own patch |
+| `{replace: {component, source}}` | replaces one declaration by name with its whole new text |
+| `{withdraw: "Name"}` | removes the component (and the comment above it) and withdraws it. Refused from the plan when the cascade is not empty |
+| `{withdraw: {component, cascade: true}}` | withdraws the component and its whole cascade together |
+
+The answer carries `committed`, `verified` (`admission`, and `gauntlet` when
+asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
+`orphanedKeys`), the `touched` symbols, and `components`: every component the
+change touched, each with `added` / `changed` / `removed`, plus `would lose a
+provider` for a refused cascade. A change that fails verification commits
+nothing, and the running composition is unchanged.
+
+- Inputs: one of `edit` / `replace` / `withdraw`; `gauntlet`; `commit`
+  (default false: propose only); `discard`; with nothing loaded, `files` /
+  `source` / `modules` / `config`.
+
+### `revl_export`
+
+Write the running composition's HELD source to disk, on request (issue #1696).
+The held source (what was loaded or last committed, including text `revl_edit`
+changed) is the source of truth, and disk is an export: no other verb writes a
+file. A composition loaded from files writes each loaded file whose held text
+differs from disk back to its own path. One loaded from inline source writes to
+`path`, with its in-memory modules beside it, and refuses to overwrite an
+existing file unless `overwrite: true`. Every path must be inside the sanctioned
+roots, checked before anything is written. A proposal is never exported; commit
+it first. After an export, the files on disk equal `revl_snapshot`'s
+`files_content`. Authorized as `snapshot`.
+
+- Inputs: `path` and `overwrite` (inline compositions).
+
+### `revl_source`
+
+Read ONE top-level declaration of the server-side source by symbol, instead of
+the whole file (issue #1714). On `examples/app/notes.rvl` the whole file is
+about 4,858 tokens (ceil(chars / 4)); `NotesHttp` with the declarations it
+names and no comments is about 300.
+
+- `symbol`: a declaration's name (component, service, type, fn, extern, test,
+  ...); `<buffer>:Name` when the name is not unique across buffers; or
+  `<buffer>:<line>` for the declaration containing that line. A buffer is a
+  loaded file's path, an in-memory module's key, or `source`.
+- `with: ["deps"]`: also every other top-level declaration it names (the
+  services it provides and requires, the functions and types it uses), from
+  any buffer.
+- `comments: false`: the code alone, in the formatter's canonical form with
+  every comment dropped. The default is the verbatim text with the comment
+  block directly above the declaration.
+- Reads the running composition as the session holds it (edits included).
+  With nothing loaded, pass `files` or `source` to read from.
+
+A declaration's span runs from its first line to the line before the next
+top-level declaration, less the blank and comment lines between them, and is
+used only when it parses on its own as exactly that declaration.
+
+**Nested symbols (issue #1733).** A dotted path addresses a member under a
+top-level declaration: `Component.key` (a whole `provide key { ... }` block),
+`Component.key.method` (one method in it), `Component.method` when exactly one
+provide block has that method, `Service.operation`, and `Type.field` or
+`Type.Case`. A member's `deps` are what that member names (with a component's
+require locals mapped to their services), not what its whole component names.
+A member's span starts on its own line and runs until the brackets it opens are
+closed and the next member, or the enclosing block's closing brace, begins. It
+is used only once it is proved: deleting the span must re-parse to the same
+enclosing declaration with that one member missing and nothing else different,
+and an edit must re-parse to the same declaration with only that member
+changed. A member that shares a line with anything else (`provide p { fn a() =
+1 }`) fails the proof and is refused rather than guessed; a `range` or `anchor`
+edit still reaches it. The answer is
+`{symbol, kind, buffer, line, text}`, plus `deps` as a list of the same shape.
+
+- Inputs: `symbol` (required); `with`; `comments`; `proposal` (true: read
+  your speculative proposal, issue #1696); `files` / `source` when nothing is
+  loaded.
 
 ### `revl_unload`
 

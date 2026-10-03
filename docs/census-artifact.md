@@ -224,7 +224,7 @@ below are the values you should get.
 | programs run, 1042 | the length of the same list, repeats included |
 | run `census-selfhost-42b8e2fa2470` | sha256 over every `(case id, source)` the run read, ids repo-relative |
 | checker version `GATE-CENSUS-1+6feced95a60e` | sha256 over the 5 files in `census.checker_sources`, each listed there with its own sha256 |
-| `src/revl@sha256:eb399b5f334c` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
+| `src/revl@sha256:f33897b45b3a` | sha256 over the `src/revl/**/*.py` modules the run opened, listed in `census.pins.reference` |
 | every bucket count | `tools/gate_reference_census.py --json out.json` |
 | the false-admit allowance | `tools/gate_reference_census_baseline.json`, which is in the tree |
 | the provenance columns | `tools/corpus_provenance.py` over `tests/fixtures/corpus_provenance.json` |
@@ -263,7 +263,7 @@ source is byte-identical in your clone is recomputed and compared.
 The files that decide a verdict are MEASURED rather than listed. The
 generator records, through a Python audit hook, every file under the
 checkout the census run opens, and pins each one. For this run that is
-the corpus (per row), the `src/revl/**/*.py` modules it opened (38 files), and:
+the corpus (per row), the `src/revl/**/*.py` modules it opened (39 files), and:
 
 - `backends/python/emit.py`
 - `tests/test_selfhost_lower.py`

@@ -5338,7 +5338,7 @@
    "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
   },
   "checker_version": "GATE-CENSUS-1+6feced95a60e",
-  "compiler_tree_digest": "src/revl@sha256:eb399b5f334c",
+  "compiler_tree_digest": "src/revl@sha256:f33897b45b3a",
   "compiler_tree_digest_note": "EVAL-REPORT-1 names this field `compiler_commit`. It is not a commit. It is a sha256 over the src/revl/**/*.py modules the census run opened, listed in `pins.reference`, which is narrower than a commit (a commit that touched no module the run reads does not move it) and recomputable by anyone with a checkout.",
   "corpus_dirs": [
    "examples",
@@ -5410,7 +5410,7 @@
     "src/revl/boundary.py": "21ec0b322e0693ca5471e4ee2a04968ef407acab895dd94e5c2881e98496e0d6",
     "src/revl/cap_order.py": "de1032d05b402839a79287cbe62e2b0d2e91dd24002d04dd7264a41e74ed651f",
     "src/revl/cardinality.py": "b3ece8c5c213a047244f45563df9764cf894b203a9eddd1cb6193615df5d2ea0",
-    "src/revl/compiler.py": "9f9c210b6b7dc0a78fe9e1017b4a9017d6a94cd6c048a7c514b51225c895fc45",
+    "src/revl/compiler.py": "d71d519fefdaa234a60093dadab9fc1d6d45a0ae7a3de97c23ddbf5bd48c1dac",
     "src/revl/decode_grammar.py": "f0f44dc8da22fc9674573bf3a584366bac0ae87ff0472f2cdc975aea294d266a",
     "src/revl/diagnostics.py": "7bcfa4eacf1a8a056d2cd7b73ffc9ed5746199e926f18371bb0aad86f701dfbc",
     "src/revl/emission_analysis.py": "f296a58b2c0ada38015372ac322d57a3ba5f12d36e9c0f39d99f9d65ef73f71c",
@@ -5430,6 +5430,7 @@
     "src/revl/model_profile.py": "5e63b72a4ea582f95e1401692dca8c0ada94cfe3bc87c5feefa6e052757c32f4",
     "src/revl/model_route.py": "b3681d9286909b2386d52fa75ca1fdfce7b8cfd1dacc97b3c9f4a98598eb273b",
     "src/revl/navigate.py": "48dc9cf26d966359f04450460bcff0310da73557e19af40a8b29b68e6f00a0f3",
+    "src/revl/operator_text.py": "b4f303ed7d22c9f1cb72bc7a4b556b8a8f7fbe7384145e282268176c27f44477",
     "src/revl/ownership.py": "2433a7fe729a6347d66dbdc0dbab1577fe2f421a753a33995c356a7be86150cf",
     "src/revl/parallel.py": "814a50af84e46926e962e3607cd3308b8271064310ff31429877930b4250fba0",
     "src/revl/parser.py": "7c881b51e28d8f484294590afdeae660f4e10bca20edaf289963c16cf092bcf8",
@@ -5593,7 +5594,7 @@
  "claims": [
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:f33897b45b3a",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
     "run": "census-selfhost-42b8e2fa2470"
@@ -5604,7 +5605,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:f33897b45b3a",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
     "run": "census-selfhost-42b8e2fa2470"
@@ -5615,7 +5616,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:f33897b45b3a",
     "protocol": "EVAL-1",
     "run": "census-selfhost-42b8e2fa2470"
    },
@@ -5625,7 +5626,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:f33897b45b3a",
     "protocol": "EVAL-1",
     "run": "census-selfhost-42b8e2fa2470"
    },
