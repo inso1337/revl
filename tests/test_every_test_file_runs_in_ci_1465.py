@@ -44,12 +44,16 @@ WORKFLOWS_DIR = ROOT / ".github" / "workflows"
 
 # Every root workflow file that has EVER been observed to RUN pytest. A new
 # workflow file with its own pytest invocation must be added here deliberately
+# Every root workflow file that has EVER been observed to run pytest. A new
+# workflow file with its own pytest step must be added here deliberately
 # (test_every_pytest_running_workflow_is_scanned enforces that it cannot just
 # sit outside the scan). A file that only INSTALLS the pytest package is not a
 # runner and is deliberately absent: `pip install ... pytest` names a package,
 # not an invocation (issue #2160 -- `pages.yml` used to be listed here for
 # exactly that token and no longer is).
 WORKFLOWS = ("ci.yml", "arm64-smoke.yml")
+# sit outside the scan).
+WORKFLOWS = ("ci.yml", "arm64-smoke.yml", "x64-smoke.yml")
 
 # Directories that are not part of the checked-in test tree (vendored or
 # build output); a test_*.py under one of these, if it ever appeared, is not
@@ -78,6 +82,11 @@ _BARE_TESTPATHS = {
 # invocation, it selects no target, and it belongs in neither this registry
 # nor WORKFLOWS (issue #2160). `_pytest_statements` drops those statements
 # before they can be read as one.
+# Steps whose pytest target is a shell variable, so it cannot be resolved to
+# a fixed set of paths by reading the YAML. Each has to be named here with a
+# reason, or test_dynamic_steps_are_all_named_explicitly fails: that is the
+# "list it explicitly, not silently" rule for anything this scan cannot
+# parse. Keyed by (workflow file, job id).
 _DYNAMIC_STEPS = {
     ("ci.yml", "root-suite-affected"): (
         "runs `pytest $SEL_PYTEST -q`, where SEL_PYTEST is filled by "
@@ -142,6 +151,8 @@ def _jobs(workflow_name):
 
 def _statements(run_text):
     """(cwd, tokens) for every shell statement in one step's `run`.
+def _pytest_statements(run_text):
+    """(cwd, target_tokens) for every pytest invocation in one step's `run`.
 
     `cd` is tracked across the WHOLE step, not just within one shell line: a
     literal block scalar (`run: |`) can `cd` on one line and invoke pytest on
@@ -167,6 +178,11 @@ def _statements(run_text):
                 cwd = posixpath.normpath(posixpath.join(cwd, tokens[1]))
                 continue
             out.append((cwd, tokens))
+            for i, tok in enumerate(tokens):
+                if tok == "pytest" or tok.rstrip(";").endswith("/pytest"):
+                    rest = [t.rstrip(";") for t in tokens[i + 1:]]
+                    targets = [t for t in rest if not t.startswith("-")]
+                    out.append((cwd, targets))
     return out
 
 
@@ -304,6 +320,7 @@ def _scan():
     a cwd with no modelled testpaths. A `pip install` of the pytest package is
     neither -- it is not an invocation, so it enters no bookkeeping at all
     (issue #2160).
+    a cwd with no modelled testpaths.
     """
     covered = set()
     dynamic = []
@@ -327,6 +344,41 @@ def _scan():
                     # conditionally-present path
             for _cwd, targets in dyn:
                 dynamic.append((key, list(targets)))
+        for job_id, spec in _jobs(wf_name).items():
+            if not isinstance(spec, dict):
+                continue
+            key = (wf_name, job_id)
+            for step in spec.get("steps") or []:
+                if not isinstance(step, dict):
+                    continue
+                run = step.get("run")
+                if not isinstance(run, str) or "pytest" not in run:
+                    continue
+                for cwd, targets in _pytest_statements(run):
+                    var_targets = [t for t in targets if t.startswith("$")]
+                    if var_targets:
+                        dynamic.append((key, list(targets)))
+                        continue
+                    if not targets:
+                        bare = _BARE_TESTPATHS.get(cwd)
+                        if bare is None:
+                            dynamic.append((key, [f"(bare pytest, no testpaths modelled for cwd {cwd!r})"]))
+                            continue
+                        targets = list(bare)
+                    for t in targets:
+                        resolved = posixpath.normpath(posixpath.join(cwd, t.rstrip("/")))
+                        abspath = ROOT / resolved
+                        if abspath.is_dir():
+                            for p in abspath.rglob("test_*.py"):
+                                if any(part in SKIP_PARTS for part in p.relative_to(ROOT).parts):
+                                    continue
+                                covered.add(p.relative_to(ROOT).as_posix())
+                        elif abspath.is_file() and abspath.name.startswith("test_") and abspath.suffix == ".py":
+                            covered.add(Path(resolved).as_posix())
+                        # a target that resolves to nothing on disk is not
+                        # coverage of anything; not an error here, since a
+                        # workflow may reasonably pass a glob-expanded or
+                        # conditionally-present path
     return covered, dynamic
 
 
@@ -349,18 +401,24 @@ def test_every_pytest_running_workflow_is_scanned():
     `pytest` occurrence is an argument to `pip install` installs the package
     and runs nothing, so it is not a runner and needs no entry here (issue
     #2160 -- `pages.yml` is exactly that file)."""
+    runs pytest must be added deliberately, not discovered by this scan
+    quietly missing it."""
     on_disk = sorted(p.name for p in WORKFLOWS_DIR.glob("*.yml"))
     assert on_disk, "no workflow files found; the scan below would be vacuous"
+    unscanned = [name for name in on_disk if name not in WORKFLOWS]
     leaking = [
         name for name in on_disk
         if name not in WORKFLOWS
         and _runs_pytest(run for _key, run in _pytest_steps(name))
+        name for name in unscanned
+        if "pytest" in (WORKFLOWS_DIR / name).read_text(encoding="utf-8")
     ]
     assert not leaking, (
         f"{leaking} run pytest but are not in WORKFLOWS, so this file's scan "
         "does not see their steps at all; add them to WORKFLOWS deliberately. "
         "Only a real pytest invocation counts here: an argument to "
         "`pip install` names a package, not an invocation (issue #2160)."
+        "does not see their steps at all; add them to WORKFLOWS deliberately"
     )
 
 
@@ -540,6 +598,7 @@ def test_dynamic_steps_are_all_named_explicitly():
         "silently drop it from coverage. This fires on a real invocation only: "
         "an argument to `pip install` names a package, not an invocation, and "
         "is not reported here (issue #2160)."
+        "silently drop it from coverage"
     )
     stale = set(_DYNAMIC_STEPS) - seen
     assert not stale, (

@@ -236,6 +236,7 @@ class _Participant:
             self._raw({"record": "header", "walVersion": WAL_VERSION,
                        "generation": self.generation,
                        "participant": self.identity})
+                       "generation": 0, "participant": self.identity})
             self._wal_open = True
         self._raw(record)
 

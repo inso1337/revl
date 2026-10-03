@@ -175,12 +175,14 @@ def _spec(tmp_path: Path, module: Path) -> Path:
 
 def _run(spec: Path, runner: Path = _RUNNER, preload: Path | None = None,
          timeout: int = 300, env: dict | None = None) -> "tuple[int, str, str]":
+         timeout: int = 300) -> "tuple[int, str, str]":
     argv = ["node"]
     if preload is not None:
         argv += ["--import", str(preload)]
     argv += [str(runner), str(spec)]
     done = subprocess.run(argv, capture_output=True, text=True, timeout=timeout,
                           stdin=subprocess.DEVNULL, cwd=_HERE, env=env)
+                          stdin=subprocess.DEVNULL, cwd=_HERE)
     return done.returncode, done.stdout, done.stderr
 
 

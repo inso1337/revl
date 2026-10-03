@@ -102,6 +102,8 @@ _CROSS_CHECK_EXCLUSIONS = {
     "selfhost/emit_go_comp.rvl":
         "106 KB, moved out of emit_go.rvl (#3098), which was excluded for "
         "the same reason. Larger than parser.rvl, 90 s release (#333).",
+        "66 KB. >20 s debug measured; release not timed, and it is larger "
+        "than parser.rvl which costs 90 s release (#333).",
     "selfhost/checker.rvl":
         "72 KB. >20 s debug measured; larger than parser.rvl (#333).",
     "selfhost/emit_wasm.rvl":
@@ -363,15 +365,19 @@ def consumer(tmp_path_factory, cargo_target_dir) -> Path:
     so the crate's own `cargo test` below reuses this build's dependency
     artifacts instead of compiling cordis-rs and serde a second time.
     """
+def consumer(tmp_path_factory) -> Path:
+    """A built standalone binary whose only dependency is `crates/revl-gate`."""
     work = tmp_path_factory.mktemp("revl_gate_consumer")
     (work / "src").mkdir()
     (work / "src" / "main.rs").write_text(CONSUMER_MAIN, encoding="utf-8")
     (work / "Cargo.toml").write_text(_consumer_cargo_toml(CRATE), encoding="utf-8")
     built = _cargo("build", work, "--target-dir", str(cargo_target_dir))
+    built = _cargo("build", work)
     assert built.returncode == 0, (
         "the standalone consumer crate failed to build against crates/revl-gate:\n"
         + (built.stderr or built.stdout or "")[-4000:])
     binary = cargo_target_dir / "debug" / "revl_gate_consumer"
+    binary = work / "target" / "debug" / "revl_gate_consumer"
     assert binary.exists(), f"consumer binary not found at {binary}"
     return binary
 
@@ -1147,9 +1153,13 @@ def test_the_service_block_is_on_the_wire_the_reference_renders():
     operations and — for a PLAIN operation — each operation's own declared
     parameter list AND declared return (issue #346). A hand-spelled wire here
     would let the two sides agree on a shape neither produces."""
+    operations and each operation's own declared parameter list (issue #346).
+    A hand-spelled wire here would let the two sides agree on a shape
+    neither produces."""
     assert ENUMERATED_MANIFEST.endswith(
         ";!services;:Store,get(key:Str):Str;:AppSvc,snapshot():Str"), \
         ENUMERATED_MANIFEST
+        ";!services;:Store,get(key:Str);:AppSvc,snapshot()"), ENUMERATED_MANIFEST
     assert ENUMERATED_MANIFEST.startswith(
         "Kv/store/;App/app/;App<store"), ENUMERATED_MANIFEST
 
@@ -1459,6 +1469,7 @@ TYPE_LAYER_GAP = [
     # holds it instead.
     ("record literal missing a declared field",
      "type P = { x: Int }\nfn f() -> P { return { y: 1 } }"),
+    ("return arrow with no type", "fn f() -> { }"),
     # `("undeclared name in a body", "fn f() -> Int { return undefined_name }")`
     # headed this list until the name-RESOLUTION rule landed
     # (docs/design/457 §2.3): a name READ is resolved against the fn's scope and
@@ -1797,6 +1808,7 @@ def test_the_consumer_reads_the_frontier_the_crate_was_generated_with(consumer):
     assert reported["frontier"] == generator.frontier_id(
         generator.crate_identity(CRATE))
     assert meta["frontier"] == "selfhost-admit:<identity>"
+    assert reported["frontier"] == meta["frontier"]
     assert reported["api"] == meta["gate_api_version"]
     assert reported["language"] == meta["language_version"]
     assert reported["layer"] == meta["covered_layer"]
@@ -1810,11 +1822,13 @@ def test_the_consumer_reads_the_frontier_the_crate_was_generated_with(consumer):
 # multiplies that past the hook's 60s default.
 @pytest.mark.timeout(600)
 def test_the_crate_ships_its_own_cargo_tests(consumer, cargo_target_dir):
+def test_the_crate_ships_its_own_cargo_tests(consumer):
     """`cargo test` inside the crate is the no-Python half of the evidence: the
     self-host's own in-file `test` blocks run natively there, alongside the
     shim's fail-closed assertions. Driven here so a red in the crate's suite is
     a red in this repo's suite."""
     tested = _cargo("test", CRATE, "--target-dir", str(cargo_target_dir))
+    tested = _cargo("test", CRATE)
     assert tested.returncode == 0, (
         "cargo test failed inside crates/revl-gate:\n"
         + (tested.stderr or tested.stdout or "")[-4000:])
@@ -2002,6 +2016,7 @@ def _recorded_emit_divergences() -> set[str]:
     """The documents the crate is KNOWN not to emit byte-identically, i.e. those
     outside the port's declared corpus. SHRINK ONLY — see the fixture."""
     return set(json.loads(_EMIT_CORPUS_DIVERGENCES.read_text(encoding="utf-8"))["diverged"])
+    return set(json.loads(_EMIT_CORPUS_DIVERGENCES.read_text())["diverged"])
 
 
 def test_emit_ir_is_byte_identical_to_the_reference(consumer):

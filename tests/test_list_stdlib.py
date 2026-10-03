@@ -20,6 +20,7 @@ Checked here:
   * `list_sort` == `sorted()` byte-for-byte (fixed cases + fuzz);
   * `list_contains` present/absent/empty; `list_dedup` order + edges;
   * `list_reverse` (generic) edges, double reverse, fuzz vs `reversed()`.
+  * `list_contains` present/absent/empty; `list_dedup` order + edges.
 """
 
 import importlib.util

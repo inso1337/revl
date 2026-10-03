@@ -49,6 +49,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import types
@@ -81,8 +82,10 @@ _OBSERVERS = {
 
 _NODE_TS_REASON = node_ts_skip_reason(
     "node is required to run the emitted ts observation thunks")
+_HAS_NODE = shutil.which("node") is not None
 _needs_node = pytest.mark.skipif(
     _NODE_TS_REASON is not None, reason=_NODE_TS_REASON or "")
+    not _HAS_NODE, reason="node is required to run the emitted ts observation thunks")
 
 
 # ===========================================================================
@@ -433,6 +436,8 @@ def test_py_answers_the_corpus_as_specified(workspace, monkeypatch):
     refused("nul\x00byte", "EINVAL")
     # the refusal names the caller's own path, never the symlink target (#3184)
     assert answers["link_out"]["lexists"]["value"]["path"] == "link_out"
+    # the refusal names the resolved offender, never leaks a fact about it
+    assert answers["link_out"]["lexists"]["value"]["path"].endswith("secret.txt")
 
 
 def test_no_workspace_root_is_an_operator_refusal_not_a_boundary_one(

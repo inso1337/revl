@@ -24,6 +24,10 @@ docs/arithmetic.md specifies for every tier, and `Float` is the native **f64**.
 Linear-memory *addresses* stay i32 (wasm32 addressing is 32-bit), as do Bool,
 Int32 and the internal counters, so this emitter deliberately uses several
 widths and `_wasm_ty` is the single place that decides which.
+docs/arithmetic.md specifies for every tier. Linear-memory *addresses* stay
+i32 (wasm32 addressing is 32-bit), as do Bool and the internal counters, so
+this emitter deliberately uses both widths and `_wasm_ty` is the single place
+that decides which. `Float` remains refused by name.
 
 Tier restrictions (cordis-wasm status: core Wasm, sync base calculus).
 Violations are EmitError, never silent degradation. The service boundary
@@ -37,6 +41,15 @@ whose wasm width disagrees with its declared service type (a `List` from an
 instantiation channel), host builtins outside `await Job.run` (e.g. `Map.new` —
 the tier has no Map representation), method-time effects, and `Map` at the
 boundary are still rejected with a precise reason.
+representation the v3 functions tier uses: an `Int` is an i64 value, a `Bool`
+an i32 value, and every Str/List/record/variant/Opt/Result an i32 *pointer*
+into the module's linear memory (`_boundary_wty`). A value whose wasm width
+disagrees with its declared service type (a `List` from an `Int`-declared
+op) stays refused — a real mismatch, not a silent narrowing. `@wasm`-bodied
+externs lower to internal `(func $name …)`. Config blocks (no instantiation
+channel), host builtins outside `await Job.run` (e.g. `Map.new` — the tier has
+no Map representation), method-time effects, and `Float`/`Map` at the boundary
+are still rejected with a precise reason.
 
 `emit(ir) -> dict[name, wat]` — one WAT module per component, plus a
 `functions` module for IR v3 type/function documents.
@@ -83,6 +96,8 @@ _REDACTED_SECRET = "<redacted:secret>"
 # otherwise. `checked_add/sub/mul` answer the overflow; the division forms
 # answer a zero divisor too (and the one overflowing quotient).
 _CHECKED_ARITH = ("checked_add", "checked_sub", "checked_mul")
+# The total, value-returning division forms (docs/arithmetic.md): same
+# rounding as the faulting operations, Err(reason) at a zero divisor.
 _CHECKED_DIVS = ("checked_div_trunc", "checked_div_floor",
                  "checked_div_euclid", "checked_mod")
 _CHECKED_FORMS = _CHECKED_ARITH + _CHECKED_DIVS
@@ -91,6 +106,9 @@ _DIV_ZERO_MSG = "revl: division by zero"
 #: `Int.MIN / -1` = 2^63, one past Int.MAX). Spelled exactly as the other
 #: five tiers spell it: the total forms answer it as a VALUE, where the
 #: faulting operations trap.
+#: The reason a `checked_*` quotient does not fit (`Int.MIN / -1` is 2^63, one
+#: past Int.MAX). Spelled exactly as the other five tiers spell it: the total
+#: forms answer it as a VALUE, where the faulting operations trap.
 _INT_OVERFLOW_MSG = "revl: Int overflow"
 
 
@@ -110,12 +128,17 @@ def _wasm_ty(ty: str | None) -> str:
     *linear-memory address*, and wasm32 addressing is 32-bit, so those stay
     i32. This one function is what stops "value" and "pointer" from being
     confused now that they are no longer the same wasm type.
+    `Int` is the only revl type here that is 64-bit. Everything else is a Bool
+    (0/1) or a *linear-memory address*, and wasm32 addressing is 32-bit, so
+    those stay i32. This one function is what stops "value" and "pointer" from
+    being confused now that they are no longer the same wasm type.
     """
     if ty == "Int":
         return "i64"
     if ty == "Float":
         return "f64"
     return "i32"
+    return "i64" if ty == "Int" else "i32"
 
 
 def _wat_string(value: str) -> str:
@@ -426,6 +449,7 @@ class _ComponentEmitter:
                  externs: list | None = None, is_template: bool = False,
                  spawn_targets: dict | None = None, record: bool = False,
                  peer_keys: frozenset = frozenset()) -> None:
+                 spawn_targets: dict | None = None, record: bool = False) -> None:
         self.ir = component
         # issue #1601: the keys another component of this composition provides.
         # A required call to one of them crosses into a different module's
@@ -732,12 +756,19 @@ class _ComponentEmitter:
         refused here by `_check_type` — a genuine boundary, not a silent
         narrowing. `None`/`Unit` means the slot is absent (a void operation, no
         param/result).
+        `Int` is an i64 value, `Bool` an i32 value, and every compound type an
+        i32 *pointer* into the module's memory. Anything the v3 value model has
+        no representation for (`Float`, `Map`, function types) is refused here by
+        `_check_type` — a genuine boundary, not a silent narrowing. `None`/`Unit`
+        means the slot is absent (a void operation, no param/result).
         """
         if _is_unit_type(ty):
             return None
         # `_check_type` is the v3 tier's single lowerability gate: it accepts
         # Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result and
         # refuses Map and function types with a named reason.
+        # Int/Bool/Str/Bytes/List/record/variant/Opt/Result and refuses Float,
+        # Map, and function types with a named reason.
         self.v3._check_type(ty, where)
         if not _is_scalar_type(ty):
             self.boundary_uses_memory = True
@@ -779,6 +810,7 @@ class _ComponentEmitter:
         A routed require carries no single-realm provider, so its op resolves
         strictly per named realm through the substrate's `route:<key>` primitive.
         Only SCALAR (Int/Bool/Float) params/returns cross this tier's routed boundary:
+        Only SCALAR (Int/Bool) params/returns cross this tier's routed boundary:
         a Str/List/record pointer is an offset into the CALLER's linear memory,
         which the provider in another realm (another instance, another memory)
         cannot read — the same physical boundary the scalar coeffect boundary
@@ -798,12 +830,14 @@ class _ComponentEmitter:
                 raise EmitError(
                     f"{where}: routed op {key}.{op} param {i} is {pty!r} — only "
                     f"scalar (Int/Bool/Float) values cross a routed require on this "
+                    f"scalar (Int/Bool) values cross a routed require on this "
                     f"tier; a pointer would name the caller's memory, not the "
                     f"cross-realm provider's (use a hosted backend)")
         if return_type is not None and not _is_scalar_type(return_type):
             raise EmitError(
                 f"{where}: routed op {key}.{op} returns {return_type!r} — only "
                 f"scalar (Int/Bool/Float) values cross a routed require on this tier "
+                f"scalar (Int/Bool) values cross a routed require on this tier "
                 f"(use a hosted backend for a compound routed result)")
         param_wtys = [_wasm_ty(pty) for pty in param_types]
         result_wty = _wasm_ty(return_type) if return_type is not None else None
@@ -853,6 +887,7 @@ class _ComponentEmitter:
                     head += f" (result {_wasm_ty(return_type)})"
                 args = "".join(f" (local.get $p{i})" for i in range(len(wtys)))
                 funcs.append(f"{head}\n    (call {_uid('route', key, op)}{args}))")
+                funcs.append(f"{head}\n    (call $route_{key}_{op}{args}))")
         return funcs
 
     def _route_helpers(self) -> list[str]:
@@ -873,16 +908,20 @@ class _ComponentEmitter:
             n = len(realms)
             strategy = self.routes[key].get("strategy") or "round_robin"
             live = _uid("route_live", key)
+            live = f"$route_live_{key}"
             if strategy == "least_loaded":
                 for i in range(n):
                     self.globals.append((_uid("route_served", key, str(i)), "i32"))
+                    self.globals.append((f"$route_served_{key}_{i}", "i32"))
                 sel = [
                     f"  (func {_uid('route_select', key)} (result i32)"
+                    f"  (func $route_select_{key} (result i32)"
                     f" (local $best i32) (local $bc i32) (local $c i32)",
                     "    (local.set $best (i32.const -1))",
                 ]
                 for i in range(n):
                     served = _uid("route_served", key, str(i))
+                    served = f"$route_served_{key}_{i}"
                     sel.append(
                         f"    (if (call {live} (i32.const {i})) (then\n"
                         f"      (local.set $c (global.get {served}))\n"
@@ -893,6 +932,7 @@ class _ComponentEmitter:
                 sel.append("    (if (i32.eq (local.get $best) (i32.const -1)) (then (unreachable)))")
                 for i in range(n):
                     served = _uid("route_served", key, str(i))
+                    served = f"$route_served_{key}_{i}"
                     sel.append(
                         f"    (if (i32.eq (local.get $best) (i32.const {i}))"
                         f" (then (global.set {served}"
@@ -901,9 +941,11 @@ class _ComponentEmitter:
                 funcs.append("\n".join(sel))
             else:  # round_robin (the default when strategy is omitted)
                 cursor = _uid("route_cursor", key)
+                cursor = f"$route_cursor_{key}"
                 self.globals.append((cursor, "i32"))
                 funcs.append("\n".join([
                     f"  (func {_uid('route_select', key)} (result i32)"
+                    f"  (func $route_select_{key} (result i32)"
                     f" (local $off i32) (local $cand i32)",
                     "    (local.set $off (i32.const 0))",
                     "    (loop $scan",
@@ -922,6 +964,7 @@ class _ComponentEmitter:
                 param_wtys, result_wty = self.route_imports[(key, op)]
                 decl = " ".join(f"(param $p{i} {w})" for i, w in enumerate(param_wtys))
                 head = f"  (func {_uid('route', key, op)}"
+                head = f"  (func $route_{key}_{op}"
                 if decl:
                     head += f" {decl}"
                 if result_wty:
@@ -929,8 +972,11 @@ class _ComponentEmitter:
                 fwd_args = " ".join(f"(local.get $p{i})" for i in range(len(param_wtys)))
                 disp = _uid("route_disp", key, op)
                 inner = (f"(call {disp} (call {_uid('route_select', key)}) {fwd_args})"
+                disp = f"$route_disp_{key}_{op}"
+                inner = (f"(call {disp} (call $route_select_{key}) {fwd_args})"
                          if fwd_args else
                          f"(call {disp} (call {_uid('route_select', key)}))")
+                         f"(call {disp} (call $route_select_{key}))")
                 funcs.append(f"{head}\n    {inner})")
         return funcs
 
@@ -1022,6 +1068,7 @@ class _ComponentEmitter:
             # so resolve the binding to it here and nowhere else.
             binding = _ident(target.get("name"), f"{where}: req")
             key = self.req_keys.get(binding, binding)
+            key = _ident(target.get("name"), f"{where}: req")
             op = _ident(node.get("method"), f"{where}: method")
             # item 173: a routed require resolves per named realm through the
             # generated selector + `route:<key>` dispatch, never a single
@@ -1056,11 +1103,13 @@ class _ComponentEmitter:
                 # FIRST operand so its cursor/served side effect runs before the
                 # args, matching the single-shot select rust does per call.
                 fn = _uid("route", key, op)
+                fn = f"$route_{key}_{op}"
                 call = (f"(call {fn} {' '.join(parts)})" if parts
                         else f"(call {fn})")
                 return _E(call, return_type)
             call = (f"(call {_uid('req', key, op)} {' '.join(parts)})" if parts
                     else f"(call {_uid('req', key, op)})")
+            call = f"(call $req_{key}_{op} {' '.join(parts)})" if parts else f"(call $req_{key}_{op})"
             return _E(call, return_type)
         if kind == "config":
             # A template reads its own `config { }` fields through the
@@ -1079,10 +1128,12 @@ class _ComponentEmitter:
                 raise EmitError(
                     f"{where}: config field {field!r} is {fty!r} — only scalar "
                     f"config (Int/Bool/Float) crosses the spawn boundary on this tier; "
+                    f"config (Int/Bool) crosses the spawn boundary on this tier; "
                     f"a Str/record/List config value would cross as a pointer into "
                     f"memory the instance does not own (use a hosted backend)")
             self.config_imports[field] = _wasm_ty(fty)
             return _E(f"(call {_uid('config', field)})", fty)
+            return _E(f"(call $config_{field})", fty)
         if kind == "host":
             fn = node.get("fn") or ""
             if fn.startswith("Stream."):
@@ -1160,6 +1211,7 @@ class _ComponentEmitter:
                 raise EmitError(
                     f"{where}: spawn {target}.{fname} is {ftype!r} — only scalar "
                     f"config (Int/Bool/Float) crosses the spawn boundary on this tier")
+                    f"config (Int/Bool) crosses the spawn boundary on this tier")
             wty = _wasm_ty(ftype)
             value = self._lower(supplied[fname], scope, types, where)
             if _wasm_ty(value.ty) != wty:
@@ -1170,6 +1222,7 @@ class _ComponentEmitter:
             param_wtys.append(wty)
         self.spawn_imports[target] = param_wtys
         call = f"(call {_uid('spawn', target)} {' '.join(args_wat)})".replace("  ", " ")
+        call = f"(call $spawn_{target} {' '.join(args_wat)})".replace("  ", " ")
         # the handle is a host-frontier instance id (i32); `Instance[T]` is
         # advisory and never Int, so _wasm_ty carries it as i32.
         return _E(call, f"Instance[{target}]")
@@ -1192,6 +1245,9 @@ class _ComponentEmitter:
         if not isinstance(component, str) or not component.isidentifier():
             raise EmitError(f"{where}: bad instance-get component {component!r}")
         key = _provision_key(get.get("key"), f"{where}: instance-get key")
+        key = get.get("key")
+        if not isinstance(key, str) or not key.isidentifier():
+            raise EmitError(f"{where}: bad instance-get key {key!r}")
         service_name = get.get("service")
         op = _ident(node.get("method"), f"{where}: method")
         # The service type is frozen inline on the node (the typing rule's
@@ -1223,10 +1279,12 @@ class _ComponentEmitter:
             # rich (pointer) param would cross as a pointer into memory the
             # spawner does not own — the same genuine boundary spawn/config draw.
             # Scalars (Int/Bool/Float) cross by value and resolve cleanly.
+            # Scalars (Int/Bool) cross by value and resolve cleanly.
             if not _is_scalar_type(ptype):
                 raise EmitError(
                     f"{where}: {key}.{op} param {i} is {ptype!r} — only scalar "
                     f"(Int/Bool/Float) values cross the instance-accessor boundary on "
+                    f"(Int/Bool) values cross the instance-accessor boundary on "
                     f"this tier; a Str/record/List would cross as a pointer into "
                     f"the instance's own memory (use a hosted backend)")
             value = self._lower(arg, scope, types, where)
@@ -1241,13 +1299,16 @@ class _ComponentEmitter:
             raise EmitError(
                 f"{where}: {key}.{op} returns {return_type!r} — only scalar "
                 f"(Int/Bool/Float) provisions cross the instance-accessor boundary on "
+                f"(Int/Bool) provisions cross the instance-accessor boundary on "
                 f"this tier; a rich return is a pointer into the instance's own "
                 f"memory (use a hosted backend)")
         result_wty = _wasm_ty(return_type) if not _is_unit_type(return_type) else None
         self.instance_imports[(component, key, op)] = (param_wtys, result_wty)
         # $inst.<Component>.<key>.<op> — bound to the `instance:<Component>`
+        # $inst_<Component>_<key>_<op> — bound to the `instance:<Component>`
         # `<key>.<op>` host import; the runtime resolves the handle's realm.
         call = f"(call {_uid('inst', component, key, op)} {' '.join(parts)})".replace("  ", " ")
+        call = f"(call $inst_{component}_{key}_{op} {' '.join(parts)})".replace("  ", " ")
         return _E(call, return_type)
 
     def _scalar_operator(self, node: Any, scope: dict[str, str],
@@ -1274,6 +1335,7 @@ class _ComponentEmitter:
         right = self._lower(node.get("right"), scope, types, where)
         if _is_unit_type(left.ty) or _is_unit_type(right.ty):
             raise EmitError(f"{where}: `{op}` on a void expression")
+        _refuse_float_operands(node, where)
         operand_ty = left.ty if left.ty == right.ty else None
         instruction = _bin_instr(op, operand_ty) if _is_scalar_type(operand_ty) else None
         if instruction is None:
@@ -1417,6 +1479,7 @@ class _ComponentEmitter:
         if kind == "name":
             return {"kind": "var", "name": node.get("id"),
                     **({"widen": node["widen"]} if node.get("widen") else {})}
+            return {"kind": "var", "name": node.get("id")}
         if kind == "fn":
             name = _ident(node.get("name"), f"{where}: function")
             if name not in self.fn_by_name and name in self.externs:
@@ -1514,6 +1577,7 @@ class _ComponentEmitter:
     def _register_witnessed_calls(self, expr: Any,
                                   subject: str = "a witnessed extern's `undo`",
                                   ) -> None:
+    def _register_witnessed_calls(self, expr: Any) -> None:
         """Plan every top-level `fn`/@wasm-extern this witnessed extern's
         DECLARED `undo` reaches, exactly as `_to_v3`'s `kind == "fn"` branch
         does for an ordinary body call — the undo lives on the extern
@@ -1525,6 +1589,7 @@ class _ComponentEmitter:
         walks an emission extern's DECLARED `compensate` instead (issue #1979):
         the closure rule is identical, but a bodyless extern it reaches is a
         dropped COMPENSATION, and the refusal has to say so."""
+        before anything renders."""
         for name in sorted(self._called_names(expr, set())):
             if name in self.fn_by_name:
                 self._need_fn(name)
@@ -1534,6 +1599,7 @@ class _ComponentEmitter:
                     available = ", ".join(sorted((ext.get("bodies") or {}))) or "none"
                     raise EmitError(
                         f"{self.name}: {subject} calls "
+                        f"{self.name}: a witnessed extern's `undo` calls "
                         f"`{name}`, which has no @wasm body — not portable to "
                         f"this backend (available: {available})"
                     )
@@ -1748,6 +1814,7 @@ class _ComponentEmitter:
                 if kind == "let-effect":
                     bind = _ident(step.get("bind"), f"{where}: bind")
                     glob = _uid("g", bind)
+                    glob = f"$g_{bind}"
                     value = self._lower(step["acquire"], scope, {}, where)
                     if _is_unit_type(value.ty):
                         raise EmitError(
@@ -1779,8 +1846,10 @@ class _ComponentEmitter:
                 # the spelled one.
                 comp = self._declared_compensation(step)
                 if comp is not None:
+                if step.get("compensate") is not None:
                     entries.append({"index": index, "kind": "compensation",
                                     "wat": self._statement(comp, scope, where)})
+                                    "wat": self._statement(step["compensate"], scope, where)})
                 segments.append("\n      ".join(seg))
             elif kind == "await":
                 # A1 on the substrate: the segment launches an async host op;
@@ -1943,6 +2012,7 @@ class _ComponentEmitter:
         )
         if bind is not None:
             glob = _uid("g", bind)
+            glob = f"$g_{bind}"
             self.globals.append((glob, "i32"))
             lines.append(f"(global.set {glob} (local.get ${tmp}))")
             scope[bind] = f"(global.get {glob})"
@@ -2213,6 +2283,7 @@ class _ComponentEmitter:
         # string is the wiring identity and the WAT address, so it is carried
         # through verbatim (`_provision_key`, above).
         key = _provision_key(step.get("name"), f"{where}: provide key")
+        key = _ident(step.get("name"), f"{where}: provide key")
         service_name = step.get("service")
         service = self.services.get(service_name)
         if service is None or self.provides.get(key) != service_name:
@@ -2329,6 +2400,7 @@ class _ComponentEmitter:
                             f"`compensate`); declare `compensate` on the extern "
                             f"itself (#1979) or use a hosted backend for "
                             f"method-time compensation"
+                            f"the wasm accumulator is the activation state machine"
                         )
                     ext = self._compensated_extern(mstep.get("expr"))
                     if ext is not None:
@@ -2351,11 +2423,14 @@ class _ComponentEmitter:
                             raise EmitError(f"{mwhere}: `{name}` is already bound")
                         mlocals.append(name)
                         mscope[name] = f"(local.get $l_{name})"
+                        mscope[name] = f"(local.get ${name})"
                         mtypes[name] = value.ty
                         self.v3._declare_local(f"l_{name}", value.ty, mwhere)
+                        self.v3._declare_local(name, value.ty, mwhere)
                     elif name not in mlocals:
                         raise EmitError(f"{mwhere}: `{name}` is not declared")
                     out_lines.append(f"(local.set $l_{name} {value.wat})")
+                    out_lines.append(f"(local.set ${name} {value.wat})")
                 elif mkind == "if":
                     # issue #548: control flow over the method's value
                     # computation. The arms are pure method steps, so they
@@ -2452,8 +2527,10 @@ class _ComponentEmitter:
                         raise EmitError(f"{mwhere}: `{bind}` is already bound")
                     mlocals.append(bind)
                     mscope[bind] = f"(local.get $l_{bind})"
+                    mscope[bind] = f"(local.get ${bind})"
                     mtypes[bind] = elem_ty
                     self.v3._declare_local(f"l_{bind}", elem_ty, mwhere)
+                    self.v3._declare_local(bind, elem_ty, mwhere)
                     element = self.v3._slot_load(
                         f"(i32.add (local.get {ptr}) "
                         f"(i32.add (i32.const {_SLOT}) "
@@ -2487,6 +2564,7 @@ class _ComponentEmitter:
                         out_lines.append(f"    (br_if {brk})")
                         out_lines.append(f"    {element}")
                         out_lines.append(f"    (local.set $l_{bind})")
+                        out_lines.append(f"    (local.set ${bind})")
                         out_lines.append(f"    (block {cntl}")
                         out_lines.extend("      " + line for line in body_lines2)
                         out_lines.append("    )")
@@ -2508,6 +2586,7 @@ class _ComponentEmitter:
                         out_lines.append("    (br_if 1)")
                         out_lines.append(f"    {element}")
                         out_lines.append(f"    (local.set $l_{bind})")
+                        out_lines.append(f"    (local.set ${bind})")
                         out_lines.extend("    " + line for line in body_lines2)
                         out_lines.append(
                             f"    (local.set {idx} "
@@ -2550,9 +2629,12 @@ class _ComponentEmitter:
             # so one declared both ways is declared once.
             user_locals = [f"l_{name}" for name in mlocals]
             header += "".join(self.v3._local_decl(name) for name in user_locals)
+            if mlocals:
+                header += "".join(self.v3._local_decl(name) for name in mlocals)
             # scratch slots the value engine needs (match binds + scrutinee
             # pointers, inlined-arrow params, the allocation temporary)
             for extra in sorted(self.extra_locals - set(user_locals)):
+            for extra in sorted(self.extra_locals):
                 header += self.v3._local_decl(extra)
             if self.func_uses_v3:
                 header += f" (local ${self.v3._tmp} i32)"
@@ -2581,6 +2663,7 @@ class _ComponentEmitter:
         # `abort`, ...), so a `fn deactivate` broke the module (issue #1756).
         fn_defs = [self.v3._emit_function(self.fn_by_name[name], export=False)
                    for name in self.needed_fns]
+        fn_defs = [self.v3._emit_function(self.fn_by_name[name]) for name in self.needed_fns]
         # @wasm-bodied externs this component calls, emitted as internal funcs
         extern_defs = [_emit_extern_func(self.externs[name], self.v3._check_type)
                        for name in self.needed_externs]
@@ -2667,6 +2750,7 @@ class _ComponentEmitter:
         needs_method_comp_drain = bool(self.method_compensated_externs)
         needs_teardown_scaffold = (needs_teardown_scaffold or needs_method_drain
                                    or needs_method_comp_drain)
+        needs_teardown_scaffold = needs_teardown_scaffold or needs_method_drain
 
         lines = [f";; Generated by the revl cordis-wasm backend (ir_version {self.ir_version}) — do not edit.",
                  f";; component {self.name}",
@@ -2683,6 +2767,7 @@ class _ComponentEmitter:
             result = f" (result {result_wty})" if result_wty else ""
             sig = f" {params}" if params else ""
             lines.append(f'  (import "{_wat_string(self._import_module(key))}" "{_wat_string(op)}" (func {_uid("req", key, op)}{sig}{result}))')
+            lines.append(f'  (import "{_wat_string(self._import_module(key))}" "{_wat_string(op)}" (func $req_{key}_{op}{sig}{result}))')
         # item 173: the routed-require ABI. Per routed key called: a `live`
         # probe (`route:<key>.live(index) -> i32`, 1 iff that one realm has an
         # ACTIVE provider — the strict, no-parent-fallback liveness the emitted
@@ -2694,6 +2779,7 @@ class _ComponentEmitter:
         for key in sorted(self.route_ops):
             lines.append(f'  (import "route:{key}" "live" '
                          f'(func {_uid("route_live", key)} (param i32) (result i32)))')
+                         f'(func $route_live_{key} (param i32) (result i32)))')
             for op in self.route_ops[key]:
                 param_wtys, result_wty = self.route_imports[(key, op)]
                 params = " ".join(f"(param {w})" for w in param_wtys)
@@ -2701,6 +2787,7 @@ class _ComponentEmitter:
                 sig = f" {params}" if params else ""
                 lines.append(f'  (import "route:{key}" "{op}" '
                              f'(func {_uid("route_disp", key, op)} (param i32){sig}{result}))')
+                             f'(func $route_disp_{key}_{op} (param i32){sig}{result}))')
         if self._needs_record_import:
             # item 322 Slice 2: the durable-WAL framing channel. `record` takes
             # (seq, receiver_ptr, method_ptr, witness_ptr) — the runtime values
@@ -2720,10 +2807,12 @@ class _ComponentEmitter:
         # non-spawning program's import section is byte-identical to before.
         for field, wty in sorted(self.config_imports.items()):
             lines.append(f'  (import "config" "{field}" (func {_uid("config", field)} (result {wty})))')
+            lines.append(f'  (import "config" "{field}" (func $config_{field} (result {wty})))')
         for target, param_wtys in sorted(self.spawn_imports.items()):
             params = " ".join(f"(param {w})" for w in param_wtys)
             sig = f" {params}" if params else ""
             lines.append(f'  (import "spawn:{target}" "new" (func {_uid("spawn", target)}{sig} (result i32)))')
+            lines.append(f'  (import "spawn:{target}" "new" (func $spawn_{target}{sig} (result i32)))')
         if self.uses_dispose:
             lines.append('  (import "dispose" "instance" (func $dispose_instance (param i32) (result i32)))')
         # instance-accessor ABI (docs/design-v2-instances.md "Instance accessor").
@@ -2738,6 +2827,7 @@ class _ComponentEmitter:
             lines.append(
                 f'  (import "instance:{component}" "{key}.{op}" '
                 f'(func {_uid("inst", component, key, op)} (param i32){sig}{result}))')
+                f'(func $inst_{component}_{key}_{op} (param i32){sig}{result}))')
         # item 289, the wasm tier's `host imports subset-of declared caps` leg:
         # every capability-bearing host import (`coeffect:<key>`, `route:<key>`)
         # names a required key. This holds BY CONSTRUCTION -- `_coeffect_op_spec`
@@ -2859,6 +2949,7 @@ class _ComponentEmitter:
         lines.append('  (func (export "committed") (result i32) (global.get $__committed))')
 
         if needs_method_drain or needs_method_comp_drain:
+        if needs_method_drain:
             # item 324: the abort seam (py's `Frame.abort()`) and the
             # enumeration surface (py's WAL discharge descriptors).
             #
@@ -2894,6 +2985,13 @@ class _ComponentEmitter:
                 # registered as side-effect-free (the emit still fires) and that
                 # the abort drain brings it back to 0.
                 lines.append('  (func (export "mc_live") (result i32) (global.get $__mc_count))')
+            # `mw_live` is how a host enumerates the outstanding per-tool-call
+            # crossings — one per registered inverse still parked, the wasm
+            # analogue of reading the WAL discharge descriptors. It counts UP as
+            # calls register and back DOWN as the abort drain replays them, so
+            # after a clean abort it reads 0 (no rollback residue) and after a
+            # commit it holds the count of discharged deliverables.
+            lines.append('  (func (export "mw_live") (result i32) (global.get $__mw_count))')
 
         # deactivate_step / deactivate: the two-phase accumulator (docs/
         # design/teardown-contract.md). One LIFO stack, three entry kinds
@@ -3136,6 +3234,8 @@ _BOOL_OPS = {"&&": "i32.and", "||": "i32.or"}
 #: arithmetic, so `+`/`-`/`*` go through helpers that test for overflow and
 #: execute `unreachable`. `%` cannot overflow into a wrong value: it traps
 #: natively on a zero divisor, which is the fault every other tier gives.
+#: execute `unreachable`. `/` and `%` cannot overflow into a wrong value — they
+#: trap natively on a zero divisor, which is the fault every other tier gives.
 _TRAPPING_INT_OPS = {"+": "call $int_add", "-": "call $int_sub", "*": "call $int_mul"}
 #: Int32 `+ - *` trap at the i32 edge through their own checked helpers, the
 #: same discipline as `Int` at half the width (docs/arithmetic.md).
@@ -3147,6 +3247,7 @@ _TRAPPING_INT32_OPS = {"+": "call $int32_add", "-": "call $int32_sub",
 #: is spelled `div_trunc` / `div_floor` / `div_euclid`. `%` over Int is
 #: `i64.rem_s`, which traps at a zero divisor: the fault every tier gives.
 _RAW_INT_OPS = {"%": "i64.rem_s"}
+_RAW_INT_OPS = {"/": "i64.div_s", "%": "i64.rem_s"}
 #: Int32 bitwise operators (item 366). wasm is the reference substrate: every
 #: one is a single native i32 instruction, and both shifts mask the count to 5
 #: bits (mod 32) exactly as the spec requires, so no count-masking is emitted
@@ -3223,10 +3324,26 @@ def _bin_instr(op: str, operand_ty: str | None) -> str | None:
     if operand_ty == "Int32":
         # Only `+ - *` reach here for Int32 (docs/arithmetic.md): `/` yields
         # Float (lowered through f64) and `%` is Int-only.
+        # Float (refused on this tier) and `%` is Int-only.
         return _TRAPPING_INT32_OPS.get(op)
     if operand_ty != "Int":
         return None
     return _TRAPPING_INT_OPS.get(op) or _RAW_INT_OPS.get(op)
+
+
+def _refuse_float_operands(node: Any, where: str) -> None:
+    """`Float` stays refused on this tier, by name (docs/arithmetic.md).
+
+    The IR annotates `/ % + - *` with the *operand* type, which is the only
+    thing that distinguishes `Int / Int` from `Float / Float` in the node. It
+    is also what tells this tier that a site is Float-valued before it tries to
+    infer a type for it, so the refusal names Float rather than surfacing as a
+    confusing failure further down.
+    """
+    if isinstance(node, dict) and node.get("operands") == "Float":
+        raise EmitError(
+            f"{where}: type 'Float' is not lowerable — this tier supports "
+            f"Int/Bool, and the operands of `{node.get('op')}` are Float")
 
 
 def _extern_wasm_body(ext: dict) -> str | None:
@@ -3250,6 +3367,10 @@ def _emit_extern_func(ext: dict, check_type) -> str:
     caller's lowerability gate so a Map/function-typed extern is refused the
     same way an ordinary value of that type is, rather than emitting an
     unvalidated body.
+    an `Int` param/return is an i64 value, a Str/List/record/variant/Opt/Result
+    is an i32 pointer. `check_type` is the caller's lowerability gate so a
+    Float/Map/function-typed extern is refused the same way an ordinary value of
+    that type is, rather than emitting an unvalidated body.
     """
     name = _ident(ext.get("name"), "extern name")
     body = (_extern_wasm_body(ext) or "").strip()
@@ -3271,6 +3392,7 @@ def _emit_extern_func(ext: dict, check_type) -> str:
     if not _is_unit_type(rtype):
         decl.append(f"(result {_wasm_ty(rtype)})")
     header = f"(func {_uid('fn', name)}"
+    header = f"(func ${name}"
     if decl:
         header += " " + " ".join(decl)
     return f"  {header}\n    {body or 'nop'})"
@@ -3323,8 +3445,12 @@ def _is_scalar_type(ty: str | None) -> bool:
     (Was `_is_i32_type` while every value was an i32; an `Int` is an i64 and a
     `Float` an f64 now, so the question the callers actually ask — "does this
     cross a service boundary without a pointer?" — needed its own name.)
+    (Was `_is_i32_type` while every value was an i32; an `Int` is an i64 now,
+    so the question the callers actually ask — "does this cross a service
+    boundary without a pointer?" — needed its own name.)
     """
     return ty in ("Int", "Bool", "Float")
+    return ty in ("Int", "Bool")
 
 
 def _is_list_type(ty: str | None) -> bool:
@@ -3556,6 +3682,21 @@ class _V3Emitter:
 
     def _declare_local(self, name: str, ty: str | None, where: str) -> None:
         """Record the wasm width of a local. Idempotent; conflicts are fatal."""
+        if ty == "Float":
+            # `_wasm_ty` carries every non-Int revl type as i32 (a pointer or a
+            # 0/1), and a Float VALUE is an f64: `(local.set $l_x (f64.const
+            # 0.5))` into an i32 local is a module that does not validate
+            # ("type mismatch: expected i32, found f64"), which wasmtime
+            # refuses at load. A Float parameter, return, comparison, equality
+            # and `.to_str()` are each refused BY NAME on this tier; the
+            # binding was the one position that emitted instead, so a program
+            # that merely wrote `let x: Float = 0.5` — even without reading it
+            # — got a broken artifact where every sibling position got a
+            # diagnostic. Same refusal, same wording, at the same boundary.
+            raise EmitError(
+                f"{where}: type 'Float' is not lowerable — this tier supports "
+                f"Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+            )
         wasm = _wasm_ty(ty)
         previous = self._local_types.get(name)
         if previous is not None and previous != wasm:
@@ -3645,6 +3786,7 @@ class _V3Emitter:
 
     def _check_type(self, ty: str | None, where: str) -> None:
         if ty in (None, "Unit", "Int", "Int32", "Bool", "Str", "Bytes", "Float"):
+        if ty in (None, "Unit", "Int", "Int32", "Bool", "Str", "Bytes"):
             return
         if _is_fn_type(ty):
             raise EmitError(
@@ -3679,6 +3821,7 @@ class _V3Emitter:
         raise EmitError(
             f"{where}: type {ty!r} is not lowerable — this tier supports "
             f"Int/Int32/Float/Bool/Str/Bytes/List/record/variant/Opt/Result values"
+            f"Int/Bool/Str/Bytes/List/record/variant/Opt/Result values"
         )
 
     def _record_fields(self, ty: str | None) -> dict[str, str] | None:
@@ -3748,12 +3891,19 @@ class _V3Emitter:
                 if node.get("method") in _CHECKED_FORMS:
                     # the total forms carry their Err reasons from the
                     # emitter, not from a literal in the source — pool them
+                if node.get("method") in _CHECKED_DIVS:
+                    # the total division forms carry their Err reasons from
+                    # the emitter, not from a literal in the source — pool them
                     # here so `_str_ptr` can name them at lowering time. The
                     # division forms carry a second one for `Int.MIN / -1`,
                     # which has no representable quotient; the arithmetic
                     # forms carry only the overflow reason.
                     if node.get("method") in _CHECKED_DIVS:
                         seen.setdefault(_DIV_ZERO_MSG, None)
+                    # three quotient forms carry a second one: `Int.MIN / -1`
+                    # has no representable quotient, and they answer that as a
+                    # value rather than trapping the way `/` does.
+                    seen.setdefault(_DIV_ZERO_MSG, None)
                     if node.get("method") != "checked_mod":
                         seen.setdefault(_INT_OVERFLOW_MSG, None)
                 if node.get("kind") == "interp":
@@ -3823,6 +3973,9 @@ class _V3Emitter:
         if ty == "Float":
             return f"(i64.reinterpret_f64 {value})"
         return f"(i64.extend_i32_u {value})"
+    def _slot_load(address: str, ty: str | None) -> str:
+        load = f"(i64.load {address})"
+        return load if ty == "Int" else f"(i32.wrap_i64 {load})"
 
     @staticmethod
     def _slot_load(address: str, ty: str | None) -> str:
@@ -3833,6 +3986,10 @@ class _V3Emitter:
 
     def _slot_store(self, address: str, value: str, ty: str | None) -> str:
         return f"(i64.store {address} {self._slot_value(value, ty)})"
+    def _slot_store(address: str, value: str, ty: str | None) -> str:
+        if ty != "Int":
+            value = f"(i64.extend_i32_u {value})"
+        return f"(i64.store {address} {value})"
 
 
     # -- linear-memory runtime helpers ---------------------------------------
@@ -5114,6 +5271,10 @@ class _V3Emitter:
             if op in ("+", "-", "*", "%") and (
                     node.get("operands") == "Float"
                     or left == "Float" or right == "Float"):
+            if node.get("operands") == "Float" and op in ("+", "-", "*", "/"):
+                # Float arithmetic on this tier lowers to f64 ops only so the
+                # result can be rendered (docs/strings.md); the value never
+                # enters the storage ABI.
                 return "Float"
             if op in ("&", "|", "^", "<<", ">>"):
                 return "Int32"  # bitwise ops are Int32-only (docs/arithmetic.md)
@@ -5292,6 +5453,7 @@ class _V3Emitter:
         if method == "to_char":
             if target_ty != "Int":
                 raise EmitError("to_char is only lowerable on Int values")
+                raise EmitError("to_str is only lowerable on Int values")
             return "Str"
         # The prefix/suffix probes (FR-6, docs/stdlib-2.0.md §Str.startsWith).
         if method == "startsWith" or method == "endsWith":
@@ -5317,6 +5479,7 @@ class _V3Emitter:
                 "element comparison has no representation here for "
                 f"{target_ty!r} (only List[Str]/List[Int]/List[Int32]/"
                 "List[Bool] have one); use a hosted backend")
+                "element comparison has no representation here; use a hosted backend")
         if method == "split":
             # Str.split(sep) → List[Str] (docs/stdlib-2.0.md §split).
             if target_ty not in ("Str", "Bytes"):
@@ -5344,6 +5507,7 @@ class _V3Emitter:
         for raw_name, raw_value in node.get("fields") or []:
             name = _ident(raw_name, "record field")
             ftype = self._infer_type(raw_value, scope, (declared or {}).get(name))
+            ftype = self._infer_type(raw_value, scope)
             if ftype is None or ftype == "Unit":
                 raise EmitError(f"record field {name!r} has void type")
             fields.append((name, ftype))
@@ -5391,6 +5555,10 @@ class _V3Emitter:
         # implicit numeric conversion so each backend emits it at the same
         # place. Int32 -> Int is a sign-extend; Int/Int32 -> Float is the
         # binary64 conversion every tier performs (Int / Int is Float).
+        # An Int32 -> Int widening site (docs/arithmetic.md): Int32 is an i32
+        # and Int is an i64, so the lossless widening is a sign-extend, emitted
+        # where the frontend marked it. (`widen: "Float"` never reaches this
+        # tier — Float is refused by name.)
         if node.get("widen") == "Int":
             inner = {k: v for k, v in node.items() if k != "widen"}
             operand = self._expr(inner, scope, where, "Int32")
@@ -5423,6 +5591,11 @@ class _V3Emitter:
                 # Float is a native f64 value (locals, fields, list elements,
                 # return values and the boundary all use it); a slot stores its
                 # bit pattern, see `_slot_value`.
+                # A Float value on this tier exists only to be rendered: it is
+                # an f64 on the wasm stack, produced here and consumed by
+                # `$f64_to_str` in interpolation. It is never stored in an
+                # i32/8-byte slot, so no Float ever reaches the value ABI —
+                # storing/returning a Float still refuses by name below.
                 return _E(f"(f64.const {_f64_literal(value)})", "Float")
             raise EmitError(f"{where}: literal {value!r} is not lowerable on this tier")
         if kind == "var":
@@ -5603,6 +5776,7 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: relational operator {op!r} is only lowerable for "
                 f"Int/Int32/Float/Str")
+            raise EmitError(f"{where}: relational operator {op!r} is only lowerable for Int/Int32")
         if op in ("&&", "||") and (left_ty != "Bool" or right_ty != "Bool"):
             raise EmitError(f"{where}: logical operator {op!r} is only lowerable for Bool")
         if op in ("&&", "||") and not self._trap_free(right_node, scope):
@@ -5632,6 +5806,7 @@ class _V3Emitter:
             raise EmitError(
                 f"{where}: equality on this tier is lowerable for Int, Int32, "
                 f"Bool, Float, and Str")
+            raise EmitError(f"{where}: equality on this tier is lowerable for Int, Int32, Bool, and Str")
         if op in ("==", "===", "!=", "!==") and left_ty != right_ty:
             # Int (i64), Int32 (i32) and Bool (i32) are distinct wasm types, and
             # no comparison instruction spans two widths — say so rather than
@@ -5649,6 +5824,16 @@ class _V3Emitter:
                 or left_ty == "Float" or right_ty == "Float"):
             numeric = ("Int", "Int32", "Float")
             if left_ty not in numeric or right_ty not in numeric:
+        if op in ("+", "-", "*", "/") and node.get("operands") == "Float":
+            # Float arithmetic is lowerable *only* to feed the renderer: it
+            # produces a bare f64 on the stack (IEEE-754 semantics, matching
+            # every other tier's host), consumed by `$f64_to_str` in an
+            # interpolation. No Float ever reaches an i32 slot, a local, a
+            # return or the boundary — those positions still refuse by name
+            # (docs/strings.md §"Remaining wasm WAT work").
+            left = self._expr(left_node, scope, where, "Float")
+            right = self._expr(right_node, scope, where, "Float")
+            if left.ty != "Float" or right.ty != "Float":
                 raise EmitError(
                     f"{where}: arithmetic operator {op!r} is not lowerable over "
                     f"{left_ty!r}/{right_ty!r} on this tier")
@@ -5656,14 +5841,19 @@ class _V3Emitter:
             right = self._float_operand(right_node, scope, where)
             if op == "%":
                 return _E(f"{left}\n      {right}\n      (call $f64_mod)", "Float")
+                    f"{where}: `{op}` marked Float but an operand is "
+                    f"{left.ty!r}/{right.ty!r} on this tier")
             instr = {"+": "f64.add", "-": "f64.sub",
                      "*": "f64.mul", "/": "f64.div"}[op]
             return _E(f"{left}\n      {right}\n      ({instr})", "Float")
+            return _E(f"{left.wat}\n      {right.wat}\n      ({instr})", "Float")
         if op in ("+", "-", "*", "/", "%") and not (
                 left_ty == right_ty and left_ty in ("Int", "Int32")):
+            _refuse_float_operands(node, where)
             raise EmitError(f"{where}: arithmetic operator {op!r} is only lowerable for Int/Int32")
         if op not in _BINARY_OPS:
             raise EmitError(f"{where}: unsupported binary operator {op!r}")
+        _refuse_float_operands(node, where)
         # `expected` is the *operand* type, which is also what picks the
         # instruction: `i64.eq` and `i32.eq` are the same comparison at two
         # widths, and only the operands say which.
@@ -5772,6 +5962,7 @@ class _V3Emitter:
                 raise EmitError(f"{where}: void expression used as an argument")
             parts.append(value.wat)
         parts.append(f"(call {_uid('fn', name)})")
+        parts.append(f"(call ${name})")
         return _E("\n      ".join(parts), sig["returns"])
 
     def _builtin_expr(self, node: dict, scope: _Scope, where: str,
@@ -5786,6 +5977,12 @@ class _V3Emitter:
         # Both operands are evaluated once into scratch slots; each branch
         # allocates its own tagged cell.
         if method in _CHECKED_FORMS:
+        # The total forms (docs/arithmetic.md): same quotient as the faulting
+        # operation, but a zero divisor yields Err(reason) instead of the
+        # `i64.div_s` trap — `fail` is refused in a pure fn, so the error
+        # travels as a value. Both operands are evaluated once into scratch
+        # slots; each branch allocates its own tagged cell.
+        if method in _CHECKED_DIVS:
             ty = expected if self._tagged_layout(expected) is not None else "Result[Int, Str]"
             if self._tagged_layout(ty) is None:
                 raise EmitError(f"{where}: {ty!r} is not a tagged union")
@@ -5798,6 +5995,8 @@ class _V3Emitter:
             self._declare_local(tmp_b, "Int", where)
             left = self._expr(target_node, scope, where, "Int")
             right = self._expr(args[0], scope, where, "Int")
+            dividend = self._expr(target_node, scope, where, "Int")
+            divisor = self._expr(args[0], scope, where, "Int")
             read_a = f"(local.get ${tmp_a})"
             read_b = f"(local.get ${tmp_b})"
             if method in _CHECKED_ARITH:
@@ -5886,6 +6085,8 @@ class _V3Emitter:
                          f"        (else {ok_cell.wat}))")
             wat = (f"{left.wat}\n      (local.set ${tmp_a})\n"
                    f"      {right.wat}\n      (local.set ${tmp_b})\n"
+            wat = (f"{dividend.wat}\n      (local.set ${tmp_a})\n"
+                   f"      {divisor.wat}\n      (local.set ${tmp_b})\n"
                    f"      (if (result i32)\n"
                    f"        (i64.eqz {read_b})\n"
                    f"        (then {err_cell.wat})\n"
@@ -5921,6 +6122,8 @@ class _V3Emitter:
             # type, so a Float is stored as its bit pattern and a non-Int
             # scalar/pointer is zero-extended, exactly as `_slot_store` does.
             elem = self._slot_value(arg.wat, elem_ty)
+            # type, so a non-Int element is widened into the slot here
+            elem = arg.wat if elem_ty == "Int" else f"(i64.extend_i32_u {arg.wat})"
             return _E(f"{target.wat}\n      {elem}\n      (call $list_push)", target_ty)
         if method == "concat":
             if target_ty not in ("Str", "Bytes") and not _is_list_type(target_ty):
@@ -5993,8 +6196,12 @@ class _V3Emitter:
             if target_ty == "Float":
                 target = self._expr(target_node, scope, where, "Float")
                 return _E(f"(call $f64_to_str {target.wat})", "Str")
+            # The rendering builtin (docs/stdlib-2.0.md §Int.to_str). The runtime
+            # helper already exists for templates; it renders Int.MIN exactly
+            # by dividing the negated bit pattern as unsigned.
             if target_ty != "Int":
                 raise EmitError(f"{where}: to_str is only lowerable on Int/Float")
+                raise EmitError(f"{where}: to_str is only lowerable on Int")
             target = self._expr(target_node, scope, where, "Int")
             return _E(f"(call $int_to_str {target.wat})", "Str")
         if method == "to_char":
@@ -6050,6 +6257,7 @@ class _V3Emitter:
                     f"the element comparison has no representation here for "
                     f"{target_ty!r} (only List[Str]/List[Int]/List[Int32]/"
                     f"List[Bool] have one); use a hosted backend")
+                    f"the element comparison has no representation here; use a hosted backend")
             target = self._expr(target_node, scope, where, target_ty)
             arg = self._expr(args[0], scope, where, "Str")
             return _E(f"{target.wat}\n      {arg.wat}\n      (call $str_index_of)\n      (i64.extend_i32_s)", "Int")
@@ -6342,8 +6550,12 @@ class _V3Emitter:
         scratch, since both live in expression position. The arithmetic forms
         need a third local for the computed value, whose sign is part of the
         overflow test."""
+        """Mint the i64 operand locals each total-division form needs, in the
+        order the bodies are lowered — the same pre-pass `_collect_match_locals`
+        does for match scratch, since both live in expression position."""
         if isinstance(node, dict):
             if node.get("method") in _CHECKED_FORMS and "_cdiv" not in node:
+            if node.get("method") in _CHECKED_DIVS and "_cdiv" not in node:
                 self._cdiv_counter += 1
                 node["_cdiv"] = self._cdiv_counter
                 names.extend([f"cdiv_{self._cdiv_counter}_a",
@@ -6585,6 +6797,7 @@ class _V3Emitter:
         out: list[str] = []
         stmts = stmts or []
         for position, stmt in enumerate(stmts):
+        for stmt in stmts or []:
             step = stmt.get("step")
             if step in ("let", "assign"):
                 name = _ident(stmt.get("name"), f"{where}: binding")
@@ -6839,6 +7052,7 @@ class _V3Emitter:
 
     def _emit_function(self, fn: dict, *, test_mode: bool = False,
                        export: bool = True) -> str:
+    def _emit_function(self, fn: dict, *, test_mode: bool = False) -> str:
         """Lower one v3 function (or, with *test_mode*, one `test` block).
 
         A test lowers as an exported zero-arg function returning Bool (i32):
@@ -6945,6 +7159,7 @@ class _V3Emitter:
         # (`call $name`); without it intra-module calls fail to resolve
         exported = f' (export "{name}")' if export else ""
         header = f'(func {_uid("fn", name)}{exported} {" ".join(decls)}'.rstrip()
+        header = f'(func ${name} (export "{name}") {" ".join(decls)}'.rstrip()
         return f"  {header}\n    {body})"
 
     def emit(self) -> str:
@@ -7053,6 +7268,7 @@ class _V3Emitter:
 def _peer_keys(components: list) -> frozenset:
     """Every key a component of this composition provides (issue #1601)."""
     return frozenset(key for c in components for key in (c.get("provides") or {}))
+        return "\n".join(lines) + "\n"
 
 
 def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
@@ -7076,6 +7292,7 @@ def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
             types=ir.get("types"), functions=ir.get("functions"),
             externs=ir.get("externs"), record=record,
             peer_keys=_peer_keys(components))
+            externs=ir.get("externs"), record=record)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
@@ -7121,6 +7338,7 @@ def _emit_v3(ir: dict, record: bool = False) -> dict[str, str]:
                                     is_template=component.get("name") in templates,
                                     spawn_targets=spawn_targets, record=record,
                                     peer_keys=_peer_keys(components))
+                                    spawn_targets=spawn_targets, record=record)
         if emitter.name in out:
             raise EmitError(f"duplicate component name {emitter.name!r}")
         out[emitter.name] = emitter.emit()
@@ -7446,11 +7664,14 @@ _WAT_ID = r"\$[0-9A-Za-z!#$%&'*+\-./:<=>?@\\^_`|~]+"
 # Only an instruction token counts, never a name. A service method named
 # `call_indirect` is the export `"provide:s.call_indirect"` and the import
 # `$req.s.call_indirect`, and a `fn call_indirect` is `$fn.call_indirect`; each
+# `$req_s_call_indirect`, and a `fn call_indirect` is `$call_indirect`; each
 # used to match the token above and switch the sweep off for the whole module
 # (issue #1512). The check reads the module with every string literal, `;;`
 # comment and `$` identifier blanked, in one left-to-right pass, so a quote
 # inside a comment and a `;;` inside a string are each read as what they are.
 _WAT_NAME_OR_COMMENT = re.compile(r'"(?:[^"\\]|\\.)*"|;;[^\n]*|' + _WAT_ID)
+_WAT_NAME_OR_COMMENT = re.compile(
+    r'"(?:[^"\\]|\\.)*"|;;[^\n]*|\$[0-9A-Za-z!#$%&\'*+\-./:<=>?@\\^_`|~]+')
 
 
 def _code_of(wat: str) -> str:
@@ -7461,6 +7682,8 @@ def _code_of(wat: str) -> str:
 
 _FUNC_HEAD = re.compile(r'^\s*\(func\s+(?:(' + _WAT_ID + r')\s*)?(?:\(export\s+"([^"]+)"\))?')
 _CALL_EDGE = re.compile(r"\(call\s+(" + _WAT_ID + r")")
+_FUNC_HEAD = re.compile(r'^\s*\(func\s+(?:(\$[\w:.#$-]+)\s*)?(?:\(export\s+"([^"]+)"\))?')
+_CALL_EDGE = re.compile(r"\(call\s+(\$[\w:.#$-]+)")
 
 
 def _top_level_funcs(wat: str) -> list[tuple[str | None, str | None, str, str]]:

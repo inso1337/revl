@@ -557,6 +557,10 @@ def renders_promotion(source: str) -> bool:
     :data:`SWEEP_EXEMPT` (`src/revl/promotion_barrier.py`,
     `tools/evolution_progress.py`, `src/revl/__main__.py`,
     `src/revl/cli/parser.py`, `src/revl/registry.py`).
+    over `origin/main` at d41ee937, it selects six modules: the four in
+    :data:`REGISTRY` (`src/revl/mcp/canary.py`,
+    `tools/evolution_controller.py`, `src/revl/peer_pool.py`,
+    `src/revl/shadow_promotion.py`) and the two in :data:`SWEEP_EXEMPT`.
 
     It errs WIDE, and that is the direction to err in. A module that renders a
     verdict conferring no authority is selected and has to be argued out by

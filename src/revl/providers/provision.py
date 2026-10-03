@@ -52,6 +52,11 @@ preference the design fixed (decision 12 of `docs/design/539-model-portfolio.md`
 §11.6), and whether a resident fallback should beat a cold first choice is a
 program author's question that needs its own surface rather than a new default.
 That, and a declared load cost on the profile, are the rest of S3.
+RESIDENCY OVER TIME (slice S3's raw material, recorded, not yet read). Every
+load and unload is appended to `timeline` with its monotonic time, the device,
+the wall time revl waited for the load, and the load duration the server
+reported. Nothing reads it to rank candidates yet; the scheduler that would is
+S3's.
 """
 
 from __future__ import annotations
@@ -212,6 +217,7 @@ class RoleProvision:
         self.unloads += 1
         self.timeline.append({"event": "unload", "device": self.device,
                               "at": at, "unload_seconds": finished - at})
+                              "at": at})
         self.device = None
 
     # -- what was recorded --------------------------------------------------
@@ -291,6 +297,10 @@ class RoleProvision:
             line += (f" in {r['unload_seconds']:.2f}s, "
                      f"held {r['resident_seconds']:.1f}s")
         return line
+        where = f" on {self.timeline[0]['device']}" if self.timeline else ""
+        return (f"model role `{self.role}`: {len(self.consumers)} consumer(s) "
+                f"({', '.join(self.consumers)}), {self.loads} load(s){where}, "
+                f"{self.unloads} unload(s)")
 
 
 class Provisions:

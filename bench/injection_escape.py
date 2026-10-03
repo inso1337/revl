@@ -208,6 +208,7 @@ CARRIER_NOTE = {
 
 def load_spec(spec_id: str) -> dict:
     specs = json.loads((BENCH / "specs.json").read_text(encoding="utf-8"))["specs"]
+    specs = json.loads((BENCH / "specs.json").read_text())["specs"]
     for spec in specs:
         if spec["id"] == spec_id:
             return spec
@@ -703,8 +704,10 @@ def _merge(labels: list, label: str) -> int:
             print(f"injection escape: no attempts at {path.relative_to(ROOT)}")
             return 1
         rows.extend(json.loads(path.read_text(encoding="utf-8")))
+        rows.extend(json.loads(path.read_text()))
         if meta.is_file():
             doc = json.loads(meta.read_text(encoding="utf-8"))
+            doc = json.loads(meta.read_text())
             runners.add(doc.get("runner"))
             models.add(doc.get("model"))
             for v in doc.get("vectors") or []:
@@ -780,6 +783,7 @@ def main(argv: list = None) -> int:
             print(f"injection escape: no run at {path.relative_to(ROOT)}")
             return 1
         doc = json.loads(path.read_text(encoding="utf-8"))
+        doc = json.loads(path.read_text())
         if args.check:
             problems = check(doc)
             for problem in problems:
@@ -794,6 +798,7 @@ def main(argv: list = None) -> int:
 
     if args.runner == "local" and not args.model:
         hosts = json.loads((BENCH / "hosts.json").read_text(encoding="utf-8"))
+        hosts = json.loads((BENCH / "hosts.json").read_text())
         args.model = hosts["pinned_model"]["id"]
 
     spec = load_spec(args.spec)

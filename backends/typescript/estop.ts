@@ -75,6 +75,9 @@ export function latchPath(
  *  unreadable latch, so it reads as HALTED. Only a genuinely absent latch
  *  (ENOENT) reads as not-halted, matching `estop.py::read_latch`
  *  (`FileNotFoundError` -> None, every other `OSError` -> unreadable). */
+ *  and now this — applies the same rule. A latch the OS refuses to open at all
+ *  (a missing file, a permission error) reads as absent, matching
+ *  `estop.py::read_latch` (`FileNotFoundError`/`OSError` -> None). */
 export function readLatch(path: string | null): LatchRecord | null {
   if (!path) return null
   let text: string
@@ -85,6 +88,10 @@ export function readLatch(path: string | null): LatchRecord | null {
     // Any other read failure: a halt no reader can inspect must never be
     // mistaken for the absence of a halt.
     return unreadable()
+  } catch {
+    // ENOENT or any other OS-level read failure: the latch is not readable, so
+    // it is not a halt. (A malformed BUT readable latch is handled below.)
+    return null
   }
   let record: unknown
   try {

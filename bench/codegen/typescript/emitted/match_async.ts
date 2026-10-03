@@ -44,6 +44,17 @@ function revlCpsDecode(s: string): string | string[] {
   for (let i = 0; i < s.length; i++) {
     const u = s.charCodeAt(i)
     if (u >= 0xD800 && u <= 0xDFFF) return Array.from(s)
+let revlCpsK0: string | undefined
+let revlCpsV0: string[] = []
+let revlCpsK1: string | undefined
+let revlCpsV1: string[] = []
+function revlCps(s: string): string[] {
+  if (s === revlCpsK0) return revlCpsV0
+  if (s === revlCpsK1) {
+    const k = revlCpsK1, v = revlCpsV1
+    revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+    revlCpsK0 = k; revlCpsV0 = v
+    return v
   }
   return s
 }
@@ -60,6 +71,9 @@ function revlCps(s: string): string | string[] {
   if (k === revlCpsN) k--
   for (; k > 0; k--) { revlCpsK[k] = revlCpsK[k - 1]; revlCpsV[k] = revlCpsV[k - 1]; revlCpsF[k] = revlCpsF[k - 1] }
   revlCpsK[0] = s; revlCpsV[0] = v; revlCpsF[0] = f
+  const v = Array.from(s)
+  revlCpsK1 = revlCpsK0; revlCpsV1 = revlCpsV0
+  revlCpsK0 = s; revlCpsV0 = v
   return v
 }
 function revlLen(x: string | ArrayLike<unknown>): bigint {
@@ -74,16 +88,21 @@ function revlSlice(x: unknown, a: bigint, b: bigint): string | Uint8Array | unkn
   if (typeof x !== "string") return (x as Uint8Array | unknown[]).slice(i, j)
   const v = revlCps(x)
   return typeof v === "string" ? v.slice(i, j) : v.slice(i, j).join("")
+  return typeof x === "string"
+    ? revlCps(x).slice(i, j).join("")
+    : (x as string | Uint8Array | unknown[]).slice(i, j)
 }
 function revlCharAt(s: string, i: bigint): string {
   const c = revlCps(s)[Number(i)]
   if (c === undefined) { throw new RangeError("revl: Str index out of range") }
   return c
+  return c === undefined ? "" : c
 }
 function revlCharCodeAt(s: string, i: bigint): bigint {
   const c = revlCps(s)[Number(i)]
   if (c === undefined) { throw new RangeError("revl: Str index out of range") }
   return BigInt(c.codePointAt(0) as number)
+  return BigInt(c === undefined ? NaN : (c.codePointAt(0) as number))
 }
 function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   if (typeof x === "string") {
@@ -92,6 +111,7 @@ function revlIndexOf(x: string | unknown[], v: unknown): bigint {
   }
   for (let i = 0; i < x.length; i++) { if (revlEq(x[i], v)) return BigInt(i) }
   return -1n
+  return BigInt(x.indexOf(v))
 }
 
 export type Step =

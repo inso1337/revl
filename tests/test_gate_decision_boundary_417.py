@@ -103,6 +103,8 @@ def test_the_crate_states_what_it_decides_and_does_not_decide():
     assert "provide-method" in GEN.ADMITTED_LAYER
     assert "every term in the region is one this gate types itself" \
         in GEN.ADMITTED_LAYER
+    assert "interface declarations only" in GEN.ADMITTED_LAYER
+    assert "no term the reference type layer decides" in GEN.ADMITTED_LAYER
     # Both halves must be spelled out, or a reader cannot know where the gap is.
     assert "composition" in GEN.COVERED_LAYER and "guarantee" in GEN.COVERED_LAYER
     assert "NOT the reference type layer" in GEN.COVERED_LAYER
@@ -157,10 +159,12 @@ def test_337_polyglot_mesh_receiver_is_gated_on_the_same_statement():
     # be named there, or a seam cannot tell which claim it is caching: the
     # interface declarations it always held, and the provide-method bodies the
     # certifier types itself (docs/design/457 T6).
+    # cached admission is only valid inside
     assert "ADMISSION_SURFACE_ID" in contract
     assert "interface declarations" in contract
     assert "provide methods are" in contract
     assert "does not defer them" in contract
+    assert "interface declarations only" in contract
 
 
 def test_338_rust_cargo_consumer_treats_the_gate_as_refuse_only():

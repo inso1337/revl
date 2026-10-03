@@ -191,11 +191,17 @@ def receipt_and_task(record, **kwargs):
                           grant=kwargs.get("grant"),
                           policy_digest=kwargs.get("policy_digest"))
     return honest_receipt(record, task=task, **kwargs), task
+                   identity=WORKER_ID, artifact=GOOD_ARTIFACT, at=None):
+    return pr.issue_receipt(pool_id=record["pool_id"], task_id=task_id,
+                            artifact_digest=artifact, result=result,
+                            identity=identity, at=at)
 
 
 def honest_pair(record, **kwargs):
     receipt, task = receipt_and_task(record, **kwargs)
     return receipt, pr.attest_receipt(receipt, identity=ATTESTOR_ID), task
+    receipt = honest_receipt(record, **kwargs)
+    return receipt, pr.attest_receipt(receipt, identity=ATTESTOR_ID)
 
 
 def signed_body(body, identity, domain):
@@ -217,6 +223,7 @@ def check(pair, record, roster, directory, **kwargs):
         admitted_at=member.admitted_at,
         attest_key_ids=charter.attest_key_ids, directory=directory,
         task=task_of(pair), **kwargs)
+        attest_key_ids=charter.attest_key_ids, directory=directory, **kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -330,8 +337,10 @@ def corpus(record, roster):
         """An honest receipt whose result is swapped after signing. The point
         of signing a digest rather than a description."""
         receipt, attestation, task = honest_pair(record)
+        receipt, attestation = honest_pair(record)
         forged = {**receipt, "result_digest": pr.result_digest({"rows": 99})}
         return forged, attestation, task
+        return forged, attestation
 
     def wrong_artifact():
         return honest_pair(record, artifact=OTHER_ARTIFACT)
@@ -339,6 +348,7 @@ def corpus(record, roster):
     def wrong_pool():
         receipt = signed_body(
             {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION_V1,
+            {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION,
              "pool_id": "some-other-pool", "peer_id": WORKER,
              "task_id": "task-1", "artifact_digest": GOOD_ARTIFACT,
              "result_digest": pr.result_digest(RESULT),
@@ -360,6 +370,7 @@ def corpus(record, roster):
         apart."""
         receipt = signed_body(
             {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION_V1,
+            {"kind": pr.RECEIPT_KIND, "version": pr.RECEIPT_VERSION,
              "pool_id": pool_id, "peer_id": ADMITTER, "task_id": "task-1",
              "artifact_digest": GOOD_ARTIFACT,
              "result_digest": pr.result_digest(RESULT),
@@ -376,29 +387,41 @@ def corpus(record, roster):
     def self_attested():
         receipt, task = receipt_and_task(record)
         return receipt, pr.attest_receipt(receipt, identity=WORKER_ID), task
+        receipt = honest_receipt(record)
+        return receipt, pr.attest_receipt(receipt, identity=WORKER_ID)
 
     def unauthorised_attestor():
         """Attested by a peer whose key IS pinned and is not named by the
         charter as attesting authority."""
         receipt, task = receipt_and_task(record)
         return receipt, pr.attest_receipt(receipt, identity=ADMITTER_ID), task
+        receipt = honest_receipt(record)
+        return receipt, pr.attest_receipt(receipt, identity=ADMITTER_ID)
 
     def forged_attestation():
         receipt, task = receipt_and_task(record)
+        receipt = honest_receipt(record)
         attestation = pr.attest_receipt(receipt, identity=INTRUDER_ID)
         return receipt, {**attestation, "attestor": ATTESTOR}, task
+        return receipt, {**attestation, "attestor": ATTESTOR}
 
     def swapped_attestation():
         """A real attestation over a DIFFERENT receipt, moved onto this one."""
         receipt, task = receipt_and_task(record, task_id="task-1")
         other, _other_task = receipt_and_task(record, task_id="task-2")
         return receipt, pr.attest_receipt(other, identity=ATTESTOR_ID), task
+        receipt = honest_receipt(record, task_id="task-1")
+        other = honest_receipt(record, task_id="task-2")
+        return receipt, pr.attest_receipt(other, identity=ATTESTOR_ID)
 
     def refused_verdict():
         receipt, task = receipt_and_task(record)
         return (receipt,
                 pr.attest_receipt(receipt, identity=ATTESTOR_ID,
                                   verdict="refused"), task)
+        receipt = honest_receipt(record)
+        return receipt, pr.attest_receipt(receipt, identity=ATTESTOR_ID,
+                                          verdict="refused")
 
     def shapeless():
         return {"kind": "not-a-receipt"}, {"kind": "not-an-attestation"}

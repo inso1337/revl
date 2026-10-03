@@ -285,6 +285,11 @@ missing `acting`, or a bare op (which still names nothing). The provider upper
 bound reads the same crossing at the same scope (`lower._resolved_crossings`),
 so a parent bound that misses it still refuses. The self-host gate does not
 parse `within`/`acting` and stays out of slice for this item.
+returns nothing, such as a provision call off a spawn handle or a crossing
+through a service-typed parameter. No declared object can be SHOWN to cover any
+of them, and reading the unnameable as the declared one is exactly the direction
+slice 1 was built to close: an empty capability set is "nothing to compare", not
+"nothing to check".
 
 Both clauses are CONTEXTUAL, recognised only in the one slot each occupies (the
 post-return-type slot of a service operation, which the `cache` clause already

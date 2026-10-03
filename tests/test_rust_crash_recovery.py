@@ -59,6 +59,7 @@ def producer_binary():
     # cargo honours CARGO_TARGET_DIR, so the binary is wherever it points
     target = Path(os.environ.get("CARGO_TARGET_DIR") or (SCENARIO / "target"))
     binary = target / "debug" / "crash_producer"
+    binary = SCENARIO / "target" / "debug" / "crash_producer"
     assert binary.exists(), f"expected {binary} after cargo build"
     return binary
 

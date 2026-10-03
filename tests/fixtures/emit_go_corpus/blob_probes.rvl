@@ -7,6 +7,10 @@
 // matches a total-form call (`"method": "checked_mod"`), not any key. The
 // port mirrors the probe rather than the intent, because byte agreement is
 // the contract; the extra preambles are dead code, not wrong code.
+// `slices` import), and a field named `checked_mod` pulls in the Result one,
+// in a document that uses neither (issue #106). The port mirrors the probe
+// rather than the intent, because byte agreement is the contract; the extra
+// preambles are dead code, not wrong code.
 type Quirks = { maplit: Int, checked_mod: Int }
 
 fn total(q: Quirks) -> Int { return q.maplit + q.checked_mod }

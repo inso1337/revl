@@ -78,6 +78,13 @@ which model answers a call, and a revert restores the incumbent
 tiers still discard the observer's return, so for them the register is the
 declared arm and the gate's rule and not a cutover; that is the part of item
 518 still open.
+No tier consults the register to choose which model answers. Item 512's route
+is a permission and item 515 owns scheduling inside it
+(`revl.model_route`), and the python seam discards the observer's return, so
+the incumbent's completion is the one the body receives before and after a
+promotion lands. The register is the declared arm and the gate's rule. It is
+not a cutover, and until a tier routes by it a promotion does not change which
+model answers a call; that is the part of item 518 still open.
 
 NO NEW GUARANTEE CODE
 ---------------------

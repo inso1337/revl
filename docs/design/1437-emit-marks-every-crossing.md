@@ -251,6 +251,7 @@ is refused. The 24 block-nesting documents above are among the 32 that
 moved, and the census test no longer holds them undecided by name.
 
 ## The compensate slot and spawn-handle crossings
+## What is not covered
 
 Two carriers the floor did not see, decided by the product owner after the
 change above.
@@ -374,3 +375,15 @@ the method's service-typed parameters are typed in `Ctx.svcTys` and marked
   `RevL.G4Approval.CrossingOK` per crossing. The approval documents file
   under `agree-G4`; the ratcheted `out-of-fragment-approval` bucket that held
   them before is gone.
+- **Teardown slots and approval.** A `compensate` slot that calls an
+  approval-required extern (`emit notify(1) compensate charge(2)`) is admitted:
+  the slot keeps its bare-emission exception and has no place for a `with`
+  edge. Whether a compensation may cross an approval-required capability is a
+  question about the teardown contract, left open here.
+- **Spawn-handle and service-typed-local carriers.** `_emit_crossed_caps`
+  resolves only a `req` target and a direct extern, so a crossing through a
+  spawn handle meets the floor only if its token is reached some other way.
+- **The formal model** carries no fact about approvals. The fifteen approval
+  documents sit in the ratcheted `out-of-fragment-approval` bucket
+  (`formal/out_of_fragment_ledger.json`) rather than being judged against the
+  marker rule's `G` row. Modelling approval is its own issue.

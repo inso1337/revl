@@ -31,6 +31,7 @@ walk over the surface type. The surface type is consulted only for the
 One gate at compile time, and one rule the gate already enforces.
 
 1. `fully_expressible` (item 257, `revl.type_schema`) is the gate. A type with no
+1. `fully_expressible` (item 257, `revl.mcp.schema`) is the gate. A type with no
    exact schema has no grammar either. It is inherited unchanged and is never
    widened here. A context-free grammar *can* express a recursive type, which
    the inline schema cannot, so the grammar domain is naturally wider than the
@@ -77,6 +78,7 @@ import hashlib
 import json
 
 from .type_schema import _parse_type
+from .mcp.schema import _parse_type
 
 #: The grammar dialect this module emits. GBNF (llama.cpp's grammar format) is
 #: the one constrained-decoding dialect with implementations across local

@@ -30,6 +30,7 @@ The shape added to every obligation in `revl_check` is::
       "construct": "provide-method",
       "idiom": {"name": "provide-method", "rules": ["G4: ..."],
                 "exampleExpression": "db.get(key)", "example": "..."},
+                "fill": "db.get(key)", "example": "..."},
       "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                      "reason": "..."},
       "crossing": {"permitted": false, "required": false, "form": null,
@@ -298,6 +299,7 @@ def _extern_write(ext: dict, position: str = "pure") -> str:
     """How a call of `ext` is written at a hole in `position`. In the
     acquisition slot of an `effect` the hole already follows `effect`, so the
     fill is the bare call: `effect effect open()` does not parse (#1846)."""
+def _extern_write(ext: dict) -> str:
     args = ", ".join(f"<{p['name']}: {p['type']}>"
                      for p in ext.get("params", []))
     call = f"{ext['name']}({args})"
@@ -305,6 +307,7 @@ def _extern_write(ext: dict, position: str = "pure") -> str:
     if cls == "emission":
         return f"emit {call}"
     if cls in ("acquire", "witnessed") and position != "effect-acquire":
+    if cls in ("acquire", "witnessed"):
         return f"effect {call}"
     return call
 
@@ -324,6 +327,7 @@ def _externs(externs: list, calls: list[dict], position: str,
     for ext in externs or []:
         cls = ext.get("class")
         write = _extern_write(ext, position)
+        write = _extern_write(ext)
         if untrusted:
             here = False
         elif cls == "pure":
@@ -743,6 +747,7 @@ def _idiom(construct: str) -> dict:
     example (`revl.idioms`). The example's expression position is served as
     `exampleExpression`, never as `fill` — it is example-internal, not a fill
     (issue #2115); the hole's `fillable.producers[].write` carries the fills."""
+    example (`revl.idioms`)."""
     entry = idioms.get(construct)
     if entry is None:
         raise ValueError(f"fillspec: no idiom for construct {construct!r}")
@@ -784,6 +789,7 @@ def _walk_body(body, services, functions, bindings, capability,
                 value_scope["@only_token"] = token
             _collect_exprs(stmt.get("value"), services, functions,
                            value_scope, capability, collected)
+                           dict(bindings), capability, collected)
             bindings[stmt["name"]] = _expr_type(
                 stmt.get("value"), services, functions, bindings)
         elif step == "return":
@@ -838,6 +844,11 @@ def _collect_exprs(node, services, functions, bindings, capability,
                     node.get("type"), visible, reachable, calls,
                     extern_block, functions, bindings.get("@types") or {},
                     untrusted, bindings.get("@resources") or ()),
+                "reachableServices": _callable_here(
+                    bindings.get("@reachable", []), calls),
+                "externs": _externs(externs, calls,
+                                    bindings.get("@position") or "pure",
+                                    untrusted),
             }))
             if bindings.get("@whole_body"):
                 parts = _split(node.get("type"), bindings.get("@method"),
@@ -865,6 +876,7 @@ def _collect_exprs(node, services, functions, bindings, capability,
 
 def _position_context(component, services, externs,
                       untrusted: bool = False, types: dict | None = None) -> dict:
+                      untrusted: bool = False) -> dict:
     """The internal (`@`-prefixed) entries every scope inside `component`
     carries: its reachable service table, its `requires` and `carrying(...)`
     maps, and the program's externs, which the crossing calls are read off."""
@@ -881,10 +893,12 @@ def _position_context(component, services, externs,
 def _method_scope(component, method, service_decl, services, functions,
                   externs, untrusted: bool = False, types: dict | None = None,
                   resources: list | None = None):
+                  externs, untrusted: bool = False):
     """The binding scope a provide-method's body opens with: the component's
     config fields and the method's parameters, each with a declared type."""
     bindings: dict = _position_context(component, services, externs, untrusted,
                                        types)
+    bindings: dict = _position_context(component, services, externs, untrusted)
     bindings["@position"] = "method"
     # issue #1948: the resources this component acquired before this method.
     # Only methods see them — a setup or `undo` position writes nothing — and
@@ -959,6 +973,7 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
     for component in ir.get("components") or []:
         setup_scope: dict = _position_context(component, services, externs,
                                               untrusted, types)
+                                              untrusted)
         setup_scope["@position"] = "setup"
         for field in component.get("config", []) or []:
             setup_scope[field["name"]] = field.get("type")
@@ -987,6 +1002,7 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                         untrusted, types, owned)
                     _mark_split_body(scope, method, capability, services,
                                      externs, untrusted)
+                        untrusted)
                     _walk_body(method.get("body"), services, functions,
                                scope, capability, collected)
             elif stmt.get("step") == "let":
@@ -1030,6 +1046,7 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
                           reason="a function body — pure, no emission")
     for fn in ir.get("functions") or []:
         scope = {"@reachable": [], "@externs": externs, "@types": types,
+        scope = {"@reachable": [], "@externs": externs,
                  "@untrusted": untrusted, "@position": "function"}
         for p in fn.get("params", []):
             scope[p["name"]] = p.get("type")
@@ -1039,6 +1056,7 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
         for item in ir.get(section) or []:
             _walk_body(item.get("body"), services, functions,
                        {"@reachable": [], "@externs": externs, "@types": types,
+                       {"@reachable": [], "@externs": externs,
                         "@untrusted": untrusted, "@position": "test"},
                        pure_fn, collected)
 
@@ -1049,3 +1067,4 @@ def enrich(ir: dict, untrusted: bool = False) -> list[dict]:
 __all__ = ["enrich", "CONSTRUCTS", "EMITTABLE_SECTIONS", "FILL_SPEC_VERSION",
            "CROSSING_FORM", "CROSSING_RULE", "EXTERN_PLACEMENT",
            "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS", "unfillable", "step_name"]
+           "EXTERN_TEMPLATE", "UNTRUSTED_EXTERNS"]

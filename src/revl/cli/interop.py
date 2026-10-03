@@ -29,6 +29,7 @@ def _run_fmt(args: argparse.Namespace) -> int:
     REFUSED (named, nonzero exit) rather than written.
     """
     from ..formatter import format_admitted, ir_equivalent, FormatError
+    from ..formatter import format_source, ir_equivalent, FormatError
 
     if args.output and len(args.files) != 1:
         print("error: `fmt -o` expects exactly one input file", file=sys.stderr)
@@ -57,6 +58,7 @@ def _run_fmt(args: argparse.Namespace) -> int:
                 # issue #1700: the member split when the gate admits it, the
                 # line-preserving layout when it does not
                 rewritten, _gate = format_admitted(original, str(path))
+                rewritten = format_source(original, str(path))
             except FormatError as error:
                 print(f"error: cannot format {path_str}: {error}", file=sys.stderr)
                 exit_code = 1
@@ -475,6 +477,9 @@ def _run_mcp(args) -> int:
             # generated surface says so (`Untrusted[...]`, origin `net`), so G9
             # refuses using it as authority without a declared declassification.
             origin="net")
+        source = import_tools(manifest, service=args.service, key=args.key,
+                              backend=args.backend,
+                              undo=parse_undo_specs(getattr(args, "undo", None)))
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -578,11 +583,13 @@ def _run_mcp_proxy(args) -> int:
                          trust_read_only=args.trust_read_only_hints,
                          timeout=args.upstream_timeout, http=http, live=live,
                          pin=pin)
+                         timeout=args.upstream_timeout, http=http, live=live)
     with _sigterm_unwinds():
         return proxy.run(command, undo=undo,
                          trust_read_only=args.trust_read_only_hints,
                          timeout=args.upstream_timeout, http=http, live=live,
                          pin=pin)
+                         timeout=args.upstream_timeout, http=http, live=live)
 
 
 def _run_serve(args) -> int:

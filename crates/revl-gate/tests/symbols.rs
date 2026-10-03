@@ -106,6 +106,7 @@ fn an_unclassified_extern_gets_no_signature() {
 fn a_construct_the_front_end_cannot_parse_makes_the_whole_document_undecided() {
     for source in [
         "commutative service S { fn op() -> Int }\n",
+        "verified fn f() -> Int {\n  return 1\n}\n",
         "fn broken( {\n",
     ] {
         let found = symbols(source);

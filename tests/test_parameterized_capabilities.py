@@ -5,6 +5,7 @@ Covers the source grammar (an optional literal parameter list on the existing
 dotted token, validated at parse against a registry that is CLOSED — against
 UNDECLARED names: the core vocabulary plus whatever a `capability <token>(...)`
 line declares for that capability, issue #1938), and the key-to-token
+dotted token, validated against a CLOSED registry at parse), and the key-to-token
 attenuation bridge: `_check_spawn_attenuation` now resolves an emit step's
 wiring key to the declared `emission[...]` valuation on BOTH the child's reach
 and the parent's held, so a parameterized token is actually compared via
@@ -62,6 +63,8 @@ def test_bare_token_is_byte_identical():
     ('fs.write(path="/a/./b")', "`.` component"),
     ('fs.write(path="/a/../b")', "`..` component"),
     ('fs.write(path="/tmp",path="/etc")', "duplicate capability parameter"),
+    ('fs.write(path=notliteral)',
+     "must be a string literal, an integer, or a per-instance"),
 ])
 def test_parse_refusals(bad, needle):
     with pytest.raises(RevlError) as exc:

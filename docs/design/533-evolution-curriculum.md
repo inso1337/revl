@@ -19,6 +19,7 @@ Sources studied, all at `c136eae6`: `tools/oracle_construct_reach.py`,
 A curriculum is auditable when a task can be regenerated from the tree rather
 than recalled, and when its rung is read off a measurement rather than
 asserted. `tools/evolve_curriculum.py` does both: seven adapters read seven of
+asserted. `tools/evolve_curriculum.py` does both: four adapters read four of
 the review's eight sources and emit one task per gap the source exhibits, each
 task carrying the repository path it was derived from, the locator inside it,
 the gap in one line, the change site, and the mechanism that decides the task
@@ -108,6 +109,7 @@ equals `tier(task.signal)` and that two tasks with the same triple never carry
 different rungs, so a source cannot smuggle a difficulty in.
 
 ## 3. The seven adapters, and the gap each one reads
+## 3. The four adapters, and the gap each one reads
 
 ### 3.1 `construct-reach` (source: known gaps) -> medium, 244 tasks
 
@@ -305,6 +307,7 @@ the generator uses**:
 | easy | an AST scan of `src/revl/**` for raise sites | calls the shipped `revl.diagnostics.explain(code)` and asserts `ok` is False with `no diagnostic code` |
 | medium | `survey()["unreached"]` | re-runs `survey()` and, for each task, reads the dispatch value straight out of `backends/<tier>/emit.py` |
 | hard | the census baseline JSON and the census record's out-of-slice bucket | compiles the named program with `revl.compile_files` and requires a `RevlError`, and for a probe re-reads the census record it was derived from |
+| hard | the census baseline JSON | compiles the named program with `revl.compile_files` and requires a `RevlError` |
 | expert | an AST scan plus a scan of `formal/**.lean` | a plain word-boundary grep over `formal/**.lean`, which is what a reviewer would do |
 
 and `test_the_non_vacuity_assertions_would_reject_an_invented_task` is the
@@ -497,6 +500,8 @@ before it does.
 
 Slices 1, 3, 4 and 6 are landed. Each later slice states the source it adds, the rung
 it is expected to land on, and the oracle that would catch it going vacuous.
+Slice 1 is landed. Each later slice states the source it adds, the rung it is
+expected to land on, and the oracle that would catch it going vacuous.
 
 | slice | source added | expected rung | fixture / oracle |
 |---|---|---|---|
@@ -504,11 +509,15 @@ it is expected to land on, and the oracle that would catch it going vacuous.
 | 2 | the `compile` and `gate_census` oracles of `tools/oracle_construct_reach.py`, once issue #1203's fix for the `_ir_reach` string-value defect in section 3.1 has landed | medium | the same reach report, read through its shrink-only ledger |
 | 3 (landed) | cross-tier differential probes: the `examples/rejections/` programs the census parks in `no-objection-out-of-slice`, which the lower oracle's `REJECTED_PROGRAMS` cannot carry yet | hard | the committed census record; `tests/test_selfhost_lower.py` for the oracle, and a task must name a program the reference refuses and the port does not (section 3.5) |
 | 4 (landed) | design documents: a slice table row in `docs/design/*.md` whose named oracle does not exist in `tests/` | varies with the oracle named (medium for slice B of design 456) | the doc's own slice table; the gap is checkable by looking for the test file (section 3.6) |
+| 3 | cross-tier differential probes: `ACCEPTED_PROGRAMS` / `REJECTED_PROGRAMS` in `tests/test_selfhost_lower.py`, paired with the `no-objection-out-of-slice` bucket | hard | `tests/test_selfhost_lower.py`; a task must name a program in one list and a reference refusal the port does not raise |
+| 4 | design documents: a slice table row in `docs/design/*.md` whose named oracle does not exist in `tests/` | varies with the oracle named | the doc's own slice table; the gap is checkable by looking for the test file |
 | 5 | generated adversarial programs: `tools/fuzz_frontend.py` seeds that survive to a divergence | hard | the fuzz corpus; a seed is only a task while it still diverges |
 | 6 (landed) | the tracker | varies with the verifier an issue names | an offline snapshot only, so the curriculum stays computable in a checkout with no network (section 3.7) |
+| 6 | the tracker | varies | offline snapshot only, so the curriculum stays computable in a checkout with no network |
 | 7 | mutation testing, which the issue is right that this tree does not have | expert | see section 7 |
 
 ## 7. Mutation testing is absent and stays absent in slice 3
+## 7. Mutation testing is absent and stays absent in slice 1
 
 The issue is precise about this and the check still holds at `c136eae6`:
 
@@ -524,6 +533,7 @@ and only the second is a difficulty signal, because it measures whether the
 suite that scores a candidate is sensitive enough to be worth scoring against.
 
 Slices 1, 3, 4 and 6 do not add it, and do not pretend to. It is slice 7 because it is
+Slice 1 does not add it, and does not pretend to. It is slice 7 because it is
 the one source whose machinery does not exist, and because it interacts with
 issue #1207: a mutation test a candidate can read is not a hidden mutation
 test, so where the mutants live is that item's question and not this one's.
@@ -536,8 +546,11 @@ test, so where the mutants live is that item's question and not this one's.
 - It does not claim to read all eight sources. It reads seven. The other one is
   slice 5 (fuzz seeds), with a named oracle; slice 2 is an extra oracle, not one
   of the eight.
+- It does not claim to read all eight sources. It reads four. The other four
+  are slices 2 to 6 with a named oracle each.
 - It does not claim the derived tasks are a complete list of what is wrong with
   the tree. They are the gaps seven artifacts exhibit, no more.
+  the tree. They are the gaps four artifacts exhibit, no more.
 - It does not touch the reward (issue #1206) or the held-out scoring set
   (issue #1207). A curriculum task names a mechanism that verifies it; whether
   that mechanism is one the candidate could read is #1207's question, and every

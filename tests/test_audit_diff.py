@@ -110,6 +110,7 @@ def test_a_first_class_laundered_new_extern_is_detected_and_fails():
     Since issue #2842 the compiler refuses the regeneration outright; the diff
     reads IR, so it is measured on the IR an earlier compiler emitted
     (`tests/_legacy_emission_ir.py`)."""
+    call would — audit --diff catches it instead of silently accepting it."""
     prev_src = """
     extern emission fn write(msg: Str) -> Str = @py { return msg }
     fn passthru(x: Str) -> Str { return x }
@@ -131,6 +132,7 @@ def test_a_first_class_laundered_new_extern_is_detected_and_fails():
         compile_source(new_src)
     with value_rule_off():
         new = _audit(new_src)
+    new = _audit(new_src)
     result = evaluate(prev, new)
     assert "host:Quiet:write" in result["added"]
     assert result["widened"] is True

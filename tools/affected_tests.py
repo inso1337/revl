@@ -4,6 +4,8 @@
 WHY THIS EXISTS. `make pre-merge` (tools/pre_merge.sh, roadmap item 327) runs the
 full `tests/` suite (hours locally; its size is the generated suite-size paragraph
 in CONTRIBUTING.md) plus every per-backend emit/golden suite on every change. An agent that touched one emitter or one stdlib module should not pay for
+full ~8-minute `tests/` suite plus every per-backend emit/golden suite on every
+change. An agent that touched one emitter or one stdlib module should not pay for
 all of it on the inner loop. This selector maps the changed files to the MINIMAL
 set of pre-merge targets to run, and `sh tools/pre_merge.sh --affected` runs only
 those.
@@ -21,6 +23,8 @@ the FULL gate, never fails open. Concretely:
     tests that import it or any module whose imports reach it (the transitive
     closure), plus the tests that name it or a command served by one of its
     direct importers (issue #2962).
+    computed here from the real tree (see `compile_reachable`) so a newly added
+    core module cannot silently fall through to a narrow selection.
   * A changed file matching NO mapping rule -> FULL.
   * Structural changes (Makefile, tools/pre_merge.sh, CI config, tests/conftest.py,
     shared test helpers/fixtures, the reference IR, or a test file DELETED) -> FULL.
@@ -48,6 +52,7 @@ MACHINE OUTPUT (one key per line, for tools/pre_merge.sh to consume):
     BACKENDS <space-separated tiers with a dedicated pre-merge step>
     GATES <space-separated of: conformance site-wheel ruff formal docs
            vocabulary census>
+    GATES <space-separated of: conformance site-wheel ruff formal>
 Lines beginning with '# ' are the human summary and are ignored by the parser.
 """
 from __future__ import annotations
@@ -82,6 +87,7 @@ GATES_ALL = ("conformance", "site-wheel", "ruff", "formal", "docs",
 # `tests/` on main, where no narrow selection ran it. Every `.py` diff therefore
 # selects it (see `select`); a docs-only diff does not pay for the tree walk.
 READ_TEXT_GUARD_TEST = "tests/test_read_text_encoding_guard.py"
+             "vocabulary")
 
 # The documented hard core (the top-level import closure of compile_source): a
 # change to any of these is unambiguously a full-gate trigger. `compile_reachable`
@@ -244,6 +250,7 @@ BENCH_DEPENDENT_TESTS = (
 # formal/ — a change to one self-host file can only break its own oracle set,
 # never the frontend pipeline. Before this mapping every self-host edit matched
 # no rule and fell to the fail-safe FULL gate (the whole suite), which then aborted on the
+# no rule and fell to the fail-safe FULL gate (~8 min), which then aborted on the
 # pre-existing >120s descent test tests/test_selfhost_lower.py under the hook's
 # --timeout, so the commit could not complete at all and the whole class of edits
 # had to be landed with --no-verify (issue #431). Mapping each file to its narrow
@@ -329,6 +336,11 @@ REFERENCE_EMITTER_ORACLE = {
 # through a path built at runtime (the survey assembles `backends/<tier>/emit.py`
 # programmatically, the construct-reach oracle hands the tier to
 # tools/selfhost_coverage.py), so the text heuristic in `_tier_tests` cannot see
+# The self-host oracles that load EVERY tier's reference emitter and compare it
+# with its port, so any tier's `backends/*/emit.py` can break them. They name the
+# reference only in prose (tools/selfhost_differential_survey.py builds
+# `backends/<tier>/emit.py` paths programmatically and the test module never
+# spells out a tier name), so the text heuristic in `_tier_tests` cannot see
 # them. This is the other half of the #850 hole: that PR changed
 # `backends/python/emit.py` alone and the matrix was skipped, but even the
 # inner-loop selector would not have selected
@@ -349,6 +361,7 @@ REFERENCE_EMITTER_ALWAYS = (
     # change most likely to trip it, which is the defect this tuple closes.
     "tests/test_oracle_construct_reach.py",
 )
+REFERENCE_EMITTER_ALWAYS = ("tests/test_selfhost_differential_survey.py",)
 
 # Files `tools/evolution_progress.py` reads a counter out of WITHOUT importing
 # them, so no import graph reaches them (issue #1224). Each one is a repository
@@ -371,6 +384,8 @@ PROGRESS_COUNTER_SOURCES |= {
 #
 # DERIVED from the tools' own source, not copied: a copy here is exactly the
 # drift the selection exists to catch. Issue #1307 landed because
+# DERIVED from the tool, by AST rather than by import: a copy here is exactly
+# the drift the selection exists to catch. Issue #1307 landed because
 # `tools/gate_reference_census.py` began naming `tools/corpus_provenance.py`
 # and the tests selected for that file did not include the one that holds the
 # classification, so main went red on a path nobody ran.
@@ -379,9 +394,11 @@ _FENCE_CACHE: dict[Path, frozenset] = {}
 
 def held_out_fence(root: Path) -> frozenset[str]:
     """The `held_out` view of the evaluator enumeration (issue #2802).
+    """`HELD_OUT_FENCE` as written in `tools/heldout_scoring.py`.
 
     An empty result is returned rather than raised: the caller treats it as "no
     fence file changed", and the tool's own suite holds the derivation. A scorer
+    fence file changed", and the tool's own suite holds the parse. A scorer
     file that is renamed away is a rename the generic rules still cover.
 
     Cached per root, same shape and same reason as `_READ_CACHE` below: this
@@ -411,6 +428,7 @@ def _held_out_fence(root: Path) -> frozenset[str]:
     enumeration at all.
     """
     source = root / "src" / "revl" / "kernel_boundary.py"
+    source = root / "tools" / "heldout_scoring.py"
     try:
         tree = ast.parse(source.read_text(encoding="utf-8"))
     except (OSError, SyntaxError):
@@ -430,8 +448,13 @@ def _held_out_fence(root: Path) -> frozenset[str]:
                 continue
             value = node.value
         else:
+        if not isinstance(node, ast.Assign):
             continue
         if not isinstance(value, (ast.Tuple, ast.List)):
+        names = [t.id for t in node.targets if isinstance(t, ast.Name)]
+        if "HELD_OUT_FENCE" not in names:
+            continue
+        if not isinstance(node.value, (ast.Tuple, ast.List)):
             return frozenset()
         out = set()
         for row in value.elts:
@@ -448,6 +471,9 @@ def _held_out_fence(root: Path) -> frozenset[str]:
             if "held_out" in named:
                 out.add(path.value)
         return frozenset(out)
+        return frozenset(
+            e.value for e in node.value.elts
+            if isinstance(e, ast.Constant) and isinstance(e.value, str))
     return frozenset()
 
 
@@ -672,6 +698,7 @@ def _test_listing_key(root: Path) -> tuple[str, str] | None:
 
 
 def _list_test_files(root: Path):
+def _test_files(root: Path):
     d = root / "tests"
     if not d.is_dir():
         return []
@@ -731,6 +758,8 @@ def _node(p: Path) -> str:
 #
 # It does NOT replace those tables, and the difference is measured: of the 32
 # modules BENCH_DEPENDENT_TESTS declares, exactly 15 SPELL a `bench/` path.
+# It does NOT replace those tables, and the difference is measured: of the 18
+# modules BENCH_DEPENDENT_TESTS declares, exactly three SPELL a `bench/` path.
 # The rest reach it through a computed root, a directory walk, or a declaration
 # made only in prose, and no AST can see those. The tables stay; what this adds
 # is that a dependency somebody wrote down plainly no longer has to be noticed
@@ -1238,6 +1267,10 @@ def compile_reachable(root: Path):
     What it gives up compared with a module-granular graph is nothing: a
     module that no chain of imports names cannot execute during compilation.
     """
+    """Top-level module names reachable from the package entry (`revl/__init__`)
+    through ALL imports, lazy/nested included. A change to any of these can run
+    during compilation, so it fails safe to the FULL gate. Returns None if the
+    tree cannot be analyzed (also -> FULL at the call site)."""
     key = Path(root).resolve()
     if key in _REACH_CACHE:
         cached = _REACH_CACHE[key]
@@ -1406,6 +1439,7 @@ def import_graph(root: Path) -> dict[str, set[str]] | None:
 
 
 def _import_graph_uncached(root: Path) -> dict[str, set[str]] | None:
+def _compile_reachable_uncached(root: Path):
     pkg = root / "src" / "revl"
     if not pkg.is_dir():
         return None
@@ -1418,6 +1452,41 @@ def _import_graph_uncached(root: Path) -> dict[str, set[str]] | None:
             graph[name] = _module_edges(mods, name, _import_nodes(text))
             if _loads_code(text):
                 graph[name] |= backend - {name}
+        mods: dict[str, Path] = {}
+        for p in pkg.rglob("*.py"):
+            name = ".".join(p.relative_to(pkg).with_suffix("").parts)
+            mods[name] = p
+
+        def deps(path: Path) -> set[str]:
+            out: set[str] = set()
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for n in ast.walk(tree):
+                if isinstance(n, ast.ImportFrom):
+                    if n.level >= 1 and n.module:
+                        out.add(n.module.split(".")[0])
+                    elif n.level >= 1:
+                        for a in n.names:
+                            out.add(a.name.split(".")[0])
+                    elif n.module and n.module.startswith("revl."):
+                        out.add(n.module.split(".")[1])
+            return out
+
+        seen: set[str] = set()
+        stack = ["__init__"]
+        while stack:
+            m = stack.pop()
+            if m in seen:
+                continue
+            seen.add(m)
+            p = mods.get(m) or mods.get(m + ".__init__")
+            if not p:
+                continue
+            for d in deps(p):
+                if d in seen:
+                    continue
+                if d in mods or (d + ".__init__") in mods:
+                    stack.append(d)
+        return {m.split(".")[0] for m in seen}
     except (OSError, SyntaxError, ValueError):
         return None
     return graph
@@ -1767,6 +1836,9 @@ def select(changed, root) -> dict:
             module = module_of(f)
             top = module.split(".")[0]
             if top in DOCUMENTED_CORE or module in reach:
+            top = f[len("src/revl/"):].split("/")[0]
+            top = top[:-3] if top.endswith(".py") else top
+            if top in reach:
                 where = "core" if top in DOCUMENTED_CORE else "compile-reachable"
                 return _full(f"src/revl/{module.replace('.', '/')} is {where} -> full")
             # Not on the compile path. A test executes this module at import
@@ -1798,10 +1870,14 @@ def select(changed, root) -> dict:
                 if iparts:
                     names.add(iparts[-1])
             hits |= set().union(*(_word_tests(root, n) for n in sorted(names)))
+                return _full(f"src/revl/{top} is {where} -> full")
+            hits = _word_tests(root, top)
             if not hits:
                 return _full(f"src/revl/{module} (leaf) has no referencing test -> full")
+                return _full(f"src/revl/{top} (leaf) has no referencing test -> full")
             pytest_nodes |= hits
             reasons.append(f"src/revl/{module} (leaf)")
+            reasons.append(f"src/revl/{top} (leaf)")
             continue
         # --- claims (issue #2846) ------------------------------------------- #
         # The root registry and the repository gate have no `test_<stem>.py`
@@ -1915,6 +1991,7 @@ def select(changed, root) -> dict:
         # `tools/formal_wording.py` is the do-not-say table that gate and the
         # `formal-wording` docgen block both read.
         if f in ("tools/check_vision_claims.py", "tools/formal_wording.py"):
+        if f == "tools/check_vision_claims.py":
             gates.add("docs")
             pytest_nodes.add("tests/test_check_vision_claims.py")
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
@@ -1930,6 +2007,7 @@ def select(changed, root) -> dict:
         if f in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
             pytest_nodes.add("tests/test_root_suite_shards_1774.py")
             reasons.append(f"{f} (shard balance only)")
+            reasons.append("tools/check_vision_claims.py")
             continue
         # issue #1233: the roadmap claim gate's covering test is named for the
         # DOCUMENT it reads, so the generic tools/*.py rule below looks for a
@@ -1997,6 +2075,13 @@ def select(changed, root) -> dict:
             # selector says the change was covered (measured on issue #1169,
             # where a STATUS.md rewrite dropped the clause the census reader
             # then parsed, and again on #1768).
+            # `formal/STATUS.md` is not only prose: `revl.cert` PARSES it for
+            # the census the component certificate reports, and the alignment
+            # census is generated into it by the harness. Rewriting that
+            # section without this node reds `test_826_component_certificate`
+            # in CI while the selector says the change was covered (measured
+            # on issue #1169, where the rewrite dropped the agree/mismatch
+            # clause `cert.oracle_census` reads).
             pytest_nodes.add("tests/test_826_component_certificate.py")
             reasons.append(f"{f} (formal gate)")
             continue
@@ -2066,6 +2151,7 @@ def select(changed, root) -> dict:
             # The archive under docs/roadmap-archive/ is the same document to
             # the gate (tools/roadmap_source.py).
             if f == "docs/v2.0-roadmap.md" or f.startswith("docs/roadmap-archive/"):
+            if f == "docs/v2.0-roadmap.md":
                 pytest_nodes.add("tests/test_roadmap_claims_gate.py")
             reasons.append(f"{f} (doc examples + generated-matrix + docgen check)")
             continue
@@ -2094,12 +2180,14 @@ def select(changed, root) -> dict:
 
     reason = "; ".join(dict.fromkeys(reasons)) + " -> targeted"
     return add_census_gate({
+    return {
         "full": False,
         "reason": reason,
         "pytest": sorted(pytest_nodes),
         "backends": sorted(backends),
         "gates": sorted(gates),
     }, changed, root)
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -2264,6 +2352,7 @@ def _test_add_delete_override(changed, added, deleted, root):
     added test is a new `.py`) can newly fail. The bare-`read_text` guard rides
     along either way: its body is exactly where a new call site can appear (two
     of 76d80f879's four sites were in added test files).
+    changed, so nothing but the new tests can newly fail.
     """
     root = Path(root)
     changed = [_norm(f) for f in changed]
@@ -2291,6 +2380,8 @@ def _test_add_delete_override(changed, added, deleted, root):
             # when select() is not reached for this diff.
             "pytest": sorted(set(new_tests)
                              | {READ_TEXT_GUARD_TEST, OPEN_ENCODING_GUARD}),
+                       + " ".join(new_tests) + " -> targeted"),
+            "pytest": new_tests,
             "backends": [],
             "gates": ["ruff"],
         }
@@ -2342,6 +2433,9 @@ def _test_add_delete_override(changed, added, deleted, root):
         # Python.
         "pytest": sorted(set(base["pytest"]) | set(new_tests)
                          | {READ_TEXT_GUARD_TEST, OPEN_ENCODING_GUARD}),
+        "reason": base["reason"] + "; + added test file(s) "
+                  + " ".join(new_tests),
+        "pytest": sorted(set(base["pytest"]) | set(new_tests)),
         "backends": base["backends"],
         "gates": base["gates"],
     }
@@ -2571,6 +2665,8 @@ def main(argv=None) -> int:
     if args.ci_backends:
         print(f"CI_BACKENDS {' '.join(ci_backends(changed, result, root))}".rstrip())
         return 0
+    result = (_test_add_delete_override(changed, added, deleted, root)
+              or select(changed, root))
     print(_emit(result, base, args.format))
     return 0
 

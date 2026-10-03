@@ -125,6 +125,7 @@ def test_method_witnessed_effect_is_lowerable_and_wires_the_runtime_accumulator(
     assert "(global.set $__mw_head" in wat
     # the declared inverse (`unstash`) is planned and rendered into the drain
     assert "(call $fn.unstash)" in wat
+    assert "(call $unstash)" in wat
 
 
 def test_a_program_without_a_method_witnessed_effect_is_byte_identical():
@@ -169,6 +170,9 @@ def test_method_time_compensation_stays_refused():
     `compensate`, which registers into a runtime accumulator. A clause spelled
     at the SITE is still refused, because the tier cannot know how many times
     the site ran. Same refusal prefix, same `EmitError`."""
+    """item 301's soundness bar, unchanged by this slice: a compensation
+    attached inside a provide-method body is still a hard `EmitError`. This
+    slice lifts the witnessed position only, never the compensation one."""
     src = '''
     service Bus { emission fn send(x: Int) -> Int }
     service S { emission fn f(x: Int) -> Int }

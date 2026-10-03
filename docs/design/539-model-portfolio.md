@@ -839,6 +839,8 @@ time, the wall time revl waited, and the server's own `load_duration`; every
 unload with its time. That is the raw load cost and the residency interval per
 role per host, which is what section 8 says S3 needs. The three things S3
 needs, and where each stands:
+role per host, which is what section 8 says S3 needs. What S3 still needs, and
+is not built:
 
 1. **A reader.** Built, via #2106 (merge `2435f7c5a`):
    `RoleProvision.residency()` and `Provisions.residency()` read the recorded
@@ -868,3 +870,16 @@ needs, and where each stands:
    a second source of truth that can disagree with the measurement, and a
    fourth clause after `device`, `memory` and `quant` that S1's grammar would
    have to admit and the self-host gate would have to read.
+1. **A reader.** The scheduler runs in the conductor at plan time; the
+   timeline lives in the child. Either the child reports it (a new line or
+   spec channel back to the conductor), or the conductor asks each managed
+   binding's server `/api/ps` at plan time for what is resident now.
+2. **A ranking rule.** Decision 12 makes the written order the preference.
+   Letting residency or load cost reorder candidates is a change to that
+   decision, and whether a resident fallback should beat a cold first choice
+   is a program author's question, so it needs its own surface (a per-arm
+   opt-in, for example), not a default.
+3. **A cost on the profile.** The declared profile has no load-cost field. A
+   measured cost is a provider fact (item 538); a declared one would be a
+   fourth clause after `device`, `memory` and `quant`, which S1's grammar
+   would have to admit and the self-host gate would have to read.

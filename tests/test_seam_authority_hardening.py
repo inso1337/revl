@@ -102,6 +102,7 @@ service Ctl { async fn go() -> Str }
 component C provides t: TopSvc {
   let sock = effect open_sock() undo close_sock(0)
   provide t { async fn top() = sock }
+  provide t { async fn top() = open_sock() }
 }
 """
 

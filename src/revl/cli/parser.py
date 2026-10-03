@@ -10,6 +10,7 @@ import argparse
 from .._run_backends import KNOWN_BACKENDS, RUNNABLE_BACKENDS
 from .._update_consents import UPDATE_OPERATOR_CONSENTS
 from ..tiers import tier_metavar, tier_type
+from ..run import KNOWN_BACKENDS, RUNNABLE_BACKENDS
 
 # The backends `revl bundle` can emit (the emitter package names under
 # backends/). Kept as a literal here so parser assembly stays import-light —
@@ -205,6 +206,7 @@ class _Parser(argparse.ArgumentParser):
 def build_parser() -> argparse.ArgumentParser:
     """Assemble the full `revl` subcommand parser."""
     parser = _Parser(prog="revl")
+    parser = argparse.ArgumentParser(prog="revl")
     sub = parser.add_subparsers(dest="command", required=True)
 
     cmd = sub.add_parser("compile", help="compile .rvl files to a backend IR document")
@@ -353,6 +355,7 @@ def build_parser() -> argparse.ArgumentParser:
                                "application like 'Map[Str, Str]' names a host "
                                "family whose Unit-returning operations a Unit "
                                "method's fill spec lists")
+                               "(default: <Service>Resource)")
     scaffold.add_argument("--no-effect", action="store_true",
                           help="omit the acquire/undo effect block")
     scaffold.add_argument("-o", "--out", default=None, metavar="PATH",
@@ -612,6 +615,8 @@ def build_parser() -> argparse.ArgumentParser:
         "simulate",
         help="preview a policy change, or re-run a component change, over "
              "recorded history (item 468, issue #2713)")
+        help="preview what a change would have done to recorded history "
+             "(item 468)")
     simulate_sub = simulate_cmd.add_subparsers(dest="simulate_command",
                                                required=True)
     sim_policy = simulate_sub.add_parser(
@@ -1255,6 +1260,7 @@ def build_parser() -> argparse.ArgumentParser:
     test.add_argument("--backend", default="py",
                       type=tier_type(None, extra=("all",)),
                       metavar=tier_metavar(None, ("all",)),
+                      choices=("py", "ts", "rust", "java", "wasm", "go", "all"),
                       help="tier to run the `test` blocks on (default: py); "
                            "`all` runs every tier whose toolchain is present")
     test.add_argument("--sweep", action="store_true",
@@ -1346,6 +1352,7 @@ def build_parser() -> argparse.ArgumentParser:
     # that raised a ticket cannot approve it. `advisory` is the pre-#1706 `auto`
     # (the raiser may approve), and `off` the pre-#1706 default: no policy, so a
     # class-(c) crossing fires unprompted.
+    # no checked inverse). Off by default — omit for byte-identical behaviour.
     mcp_serve.add_argument("--approval-policy", default=None, metavar="MODE",
                            choices=("auto", "advisory", "off"),
                            help="the effect-class approval gate (item 246). `auto` "
@@ -1359,6 +1366,12 @@ def build_parser() -> argparse.ArgumentParser:
                                 "issue #1706). `off`: no gate, so a class-(c) "
                                 "crossing fires unprompted (the default before "
                                 "issue #1706)")
+                           choices=("auto",),
+                           help="enable the auto-approve policy (item 246): class "
+                                "(a)/(b) crossings auto-approve, class (c) prompts "
+                                "per call via the ticket two-step. Requires "
+                                "`record: true` at load. Omit for no policy "
+                                "(today's behaviour)")
     # roadmap 425 F3 / 427 F5: whether an approved crossing's CALLER-SUPPLIED
     # resource value (`host=`, `path=`, `table=`) is written into the durable
     # cross-session approval WAL. Defaults to `withheld` — an operator who never
@@ -1530,6 +1543,7 @@ def build_parser() -> argparse.ArgumentParser:
     mcp_import.add_argument("--backend", default="ts",
                             type=tier_type(("ts", "py")),
                             metavar=tier_metavar(("ts", "py")),
+    mcp_import.add_argument("--backend", default="ts", choices=("ts", "py"),
                             help="host block backend for the generated externs")
     mcp_import.add_argument("--undo", action="append", default=[],
                             metavar="TOOL=INVERSE[:result]",
@@ -1630,6 +1644,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp_wit.add_argument("--backend", default="wasm",
                          type=tier_type(("wasm", "ts", "py", "rust")),
                          metavar=tier_metavar(("wasm", "ts", "py", "rust")),
+                         choices=("wasm", "ts", "py", "rust"),
                          help="host block backend for the generated extern stubs "
                               "(default: wasm)")
     imp_wit.add_argument(
@@ -1651,6 +1666,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp_api.add_argument("--backend", default="ts",
                      type=tier_type(("ts", "py", "rust")),
                      metavar=tier_metavar(("ts", "py", "rust")),
+    imp_api.add_argument("--backend", default="ts", choices=("ts", "py", "rust"),
                          help="host block backend for the generated extern stubs "
                               "(default: ts)")
     imp_api.add_argument("--service", default=None,
@@ -1716,6 +1732,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp_cordis.add_argument("--backend", default="ts",
                         type=tier_type(("ts", "py", "rust")),
                         metavar=tier_metavar(("ts", "py", "rust")),
+    imp_cordis.add_argument("--backend", default="ts", choices=("ts", "py", "rust"),
                             help="host block backend for the generated extern stubs "
                                  "(default: ts)")
     imp_cordis.add_argument("--service", default=None,
@@ -1747,6 +1764,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp_a2a.add_argument("--backend", default="ts",
                          type=tier_type(("ts", "py")),
                          metavar=tier_metavar(("ts", "py")),
+    imp_a2a.add_argument("--backend", default="ts", choices=("ts", "py"),
                          help="host block backend for the generated externs "
                               "(default: ts)")
     imp_a2a.add_argument("--service", default=None,
@@ -1936,6 +1954,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--backend", default="py",
                      type=tier_type(KNOWN_BACKENDS),
                      metavar=tier_metavar(KNOWN_BACKENDS),
+    run.add_argument("--backend", default="py", choices=KNOWN_BACKENDS,
                      help="target runtime tier (default: py). All tiers run: "
                           f"{', '.join(RUNNABLE_BACKENDS)} — py boots in-process, "
                           "the rest each boot as a separate process over the bridge "
@@ -1963,6 +1982,11 @@ def build_parser() -> argparse.ArgumentParser:
                           "is rejected. With --backend wasm it also enforces the "
                           "item-289 least-authority chain over the emitted host "
                           "imports (docs/boundary-policy.md)")
+                     help="boundary policy file (item 33). With --backend wasm it "
+                          "enforces the item-289 least-authority chain (host "
+                          "imports subset-of declared caps subset-of policy-allowed) "
+                          "before booting; a wasm cell exceeding the allow-list is "
+                          "refused (docs/boundary-policy.md)")
     run.add_argument("--watch", action="store_true",
                      help="watch the sources and recompile on change; a rejected edit is refused, the run keeps going")
     run.add_argument("--record", action="store_true",
@@ -1988,6 +2012,7 @@ def build_parser() -> argparse.ArgumentParser:
                      help="refuse a new run while the WAL contains unresolved emissions")
     run.add_argument("--allow-unsynced-wal", action="store_true",
                      help="explicitly permit fsync failures; WAL durability is not guaranteed")
+                          "(docs/crash-recovery.md)")
     run.add_argument("--trace", default=None, metavar="FILE",
                      help="write a causal lifecycle trace (JSONL) — every "
                           "transition carries the cause chain behind it, "
@@ -2093,6 +2118,7 @@ def build_parser() -> argparse.ArgumentParser:
                               "whose process WALs are recovered together")
     recover.add_argument("--operator-resolved", type=int, action="append", default=[],
                          metavar="SEQ", help="acknowledge a reconciled crossing by sequence")
+                         help="a write-ahead log written by `revl run --wal`")
     recover.add_argument("--restore", default=None, metavar="SNAPSHOT.json",
                          help="on roll-forward, the item-15 snapshot to re-admit "
                               "so recovery resumes the persisted generation")
@@ -2355,6 +2381,7 @@ def build_parser() -> argparse.ArgumentParser:
              "because a crossing's capability token is not on the WAL")
     replay_cmd.add_argument(
         "--candidate", action="append", nargs="+", default=None, metavar="FILE",
+        "--candidate", nargs="+", default=None, metavar="FILE",
         help="the candidate composition to resolve each recorded crossing's "
              "capability token from, and to admit under --under. Repeat it to "
              "compare competing compositions with --probe. Compiled statically: "
@@ -2367,6 +2394,8 @@ def build_parser() -> argparse.ArgumentParser:
              "and newly allowed counts, the first dangerous crossing and the "
              "bounds. Ordering evidence only; a clean row admits nothing and a "
              "refusal does not fail the command")
+             "capability token from, and to admit under --under. Compiled "
+             "statically: no live effect fires")
     replay_cmd.add_argument("--json", action="store_true",
                             help="machine-readable output")
 
@@ -2770,6 +2799,9 @@ def build_parser() -> argparse.ArgumentParser:
                                  "run are kept, so a restart does not run one "
                                  "again (default: a fresh temporary directory "
                                  "that is removed on exit, which forgets them)")
+                            help="where artifacts are written and run "
+                                 "(default: a fresh temporary directory that "
+                                 "is removed on exit)")
     pool_serve.add_argument("--timeout", type=float, default=300.0,
                             metavar="SECONDS",
                             help="how long one artifact may run (default: 300)")
@@ -2806,12 +2838,15 @@ def build_parser() -> argparse.ArgumentParser:
              "--verify one. With --anchor, sign a chain-neutral record over a "
              "set of named digests instead (docs/revl-attest.md, "
              "docs/revl-anchor.md)")
+             "--verify one (docs/revl-attest.md)")
     attest_cmd.add_argument(
         "target", metavar="TARGET", nargs="?",
+        "target", metavar="TARGET",
         help="what to attest: a composition (a `.rvl` source, a compiled IR, "
              "or an `audit --json` document). With --verify, the attestation "
              "JSON to check instead. With --anchor, optional: when given, its "
              "canonical composition hash is added under the name 'composition'")
+             "JSON to check instead")
     attest_cmd.add_argument(
         "--verify", action="store_true",
         help="verify mode: TARGET is an attestation JSON — check its signature "
@@ -2977,6 +3012,8 @@ def build_parser() -> argparse.ArgumentParser:
     bundle_cmd.add_argument(
         "--backend", action="append", default=[],
         type=tier_type(spelling="dir"), metavar=tier_metavar(),
+        "--backend", action="append", default=[], metavar="BACKEND",
+        choices=list(BUNDLE_BACKENDS),
         help="a backend to emit into the bundle; repeatable. Omit to emit every "
              f"backend ({', '.join(BUNDLE_BACKENDS)}). An emitter that is absent "
              "here is omitted quietly (exit 0); an emitter that REFUSES this IR "
@@ -3013,6 +3050,7 @@ def build_parser() -> argparse.ArgumentParser:
     emit_cmd.add_argument("--backend", default="typescript",
                           type=tier_type(spelling="dir"),
                           metavar=tier_metavar(),
+                          choices=list(BUNDLE_BACKENDS),
                           help="the backend emitter to render (default: typescript)")
     emit_cmd.add_argument("--target", default=None, metavar="TARGET",
                           help="a rendering of the backend's emitter, orthogonal "
@@ -3049,9 +3087,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="with --anchor: a named digest the verifier holds; the anchor may "
              "not commit to a different value for that name, or omit it. "
              "Repeatable")
+             "(item 305, docs/bundle.md)")
+    verify_cmd.add_argument("bundle", metavar="BUNDLE",
+                            help="a bundle written by `revl bundle`: either the "
+                                 ".revlbundle directory or a one-file bundle "
+                                 "(--one-file); both verify identically")
     verify_cmd.add_argument("--json", action="store_true",
                             help="machine-readable tier-by-tier report, or the "
                                  "anchor verdict with --anchor")
+                            help="machine-readable tier-by-tier report")
 
     # `revl deploy MAP [--dry-run]` — admit a deploy map (roadmap item 118,
     # docs/design/118-revl-deploy.md §1.1). With --dry-run it is the deploy
@@ -3098,6 +3142,7 @@ def build_parser() -> argparse.ArgumentParser:
     deploy_cmd.add_argument(
         "--backend", default="python",
         type=tier_type(spelling="dir"), metavar=tier_metavar(),
+        "--backend", metavar="NAME", default="python",
         help="the receiver backend whose emitted artifact bytes the chain is "
              "re-hashed over when --bundle is given (default: python)")
     deploy_cmd.add_argument(

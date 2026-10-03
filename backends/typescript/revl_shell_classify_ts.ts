@@ -194,6 +194,7 @@ function shlexSplit(cmd: string): string[] {
     // shlex's whitespace set: space, tab, CR, LF. VT and FF are word
     // characters (py agrees), so `rm a<VT>b` is one operand on both tiers.
     if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r' || c === '\f' || c === '\v') {
       if (has) {
         tokens.push(cur)
         cur = ''

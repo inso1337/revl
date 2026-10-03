@@ -289,6 +289,7 @@ def test_an_edit_to_the_ceiling_origins_moves_the_ruleset_digest(
 
     copy = after_dir / "model_route.py"
     source = copy.read_text(encoding="utf-8")
+    source = copy.read_text()
     edited = source.replace('CEILING_ORIGINS = ("confidential",)',
                             "CEILING_ORIGINS = ()")
     assert edited != source, "CEILING_ORIGINS moved; re-anchor this edit"
@@ -315,6 +316,7 @@ def test_an_edit_to_the_council_rules_moves_the_ruleset_digest(
     after_dir = _scratch_ruleset(tmp_path, "cafter")
     copy = after_dir / "model_council.py"
     copy.write_text(copy.read_text(encoding="utf-8") + "\n# rule change\n")
+    copy.write_text(copy.read_text() + "\n# rule change\n")
 
     before, _ = _digest_of(monkeypatch, before_dir)
     after, _ = _digest_of(monkeypatch, after_dir)
@@ -346,6 +348,7 @@ def test_the_set_the_digest_covers_is_the_one_the_refusal_reads():
     and this fails then."""
     taint_source = (Path(attest.__file__).resolve().parent
                     / "taint.py").read_text(encoding="utf-8")
+                    / "taint.py").read_text()
     assert "_mr.CEILING_ORIGINS" in taint_source
     assert "_mr.admits(" in taint_source
     assert "CEILING_ORIGINS = " not in taint_source

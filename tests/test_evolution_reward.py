@@ -70,12 +70,14 @@ def _candidate(mod, tree, base="origin/main", scope=("**",), allow=(),
     """A candidate whose operator base defaults to the commit its own `base`
     names, so a case that is about something else is measured against the base
     it says. A case about the base passes `pin` (a commit id, or `""` for none)."""
+def _candidate(mod, tree, base="origin/main", scope=("**",), **extra):
     record = {"tree": str(tree), "base": base, "scope": list(scope)}
     record.update(extra)
     if pin is _AUTO:
         pin = mod.resolve_commit(tree, base) or ""
     return mod.load_candidate(record, allow=allow, base_pin=pin,
                               base_source="--base" if pin else "")
+    return mod.load_candidate(record)
 
 
 def _git_env():
@@ -121,6 +123,7 @@ def test_a_hook_environment_cannot_reach_another_repo(
     bystander = tmp_path / "bystander"
     _git(tmp_path, "init", "-q", str(bystander))
     config_before = (bystander / ".git" / "config").read_text(encoding="utf-8")
+    config_before = (bystander / ".git" / "config").read_text()
     monkeypatch.setenv("GIT_DIR", str(bystander / ".git"))
     monkeypatch.setenv("GIT_INDEX_FILE", str(bystander / ".git" / "index"))
 
@@ -134,6 +137,7 @@ def test_a_hook_environment_cannot_reach_another_repo(
     _git(tree, "commit", "-qm", "base")
 
     assert (bystander / ".git" / "config").read_text(encoding="utf-8") == config_before
+    assert (bystander / ".git" / "config").read_text() == config_before
     assert not (bystander / ".git" / "index").exists()
     ok, out = reward.run_git(
         _candidate(reward, tree, base="HEAD"), ["log", "--format=%s", "-1"])
@@ -246,8 +250,11 @@ def test_the_held_out_seed_is_not_a_candidate_record_key(reward):
     `RECORD_KEYS` is the whitelist that keeps a candidate from reaching a
     probe, and the seed file path stays outside it: it arrives in the
     environment, where the operator holds it.
+    probe, and the seed stays outside it: it arrives in the environment, where
+    the operator holds it.
     """
     assert reward.HELDOUT_SEED_FILE_ENV not in reward.RECORD_KEYS
+    assert reward.HELDOUT_SEED_ENV not in reward.RECORD_KEYS
     assert "seed" not in reward.RECORD_KEYS
     candidate = reward.load_candidate(
         {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"],
@@ -265,11 +272,13 @@ def test_an_unset_held_out_seed_fails_the_component_rather_than_skipping_it(
     this must not invent one.
     """
     monkeypatch.delenv(reward.HELDOUT_SEED_FILE_ENV, raising=False)
+    monkeypatch.delenv(reward.HELDOUT_SEED_ENV, raising=False)
     candidate = reward.load_candidate(
         {"tree": "/nowhere", "base": "origin/main", "scope": ["tools/**"]})
     verdict = reward.probe_held_out(candidate)
     assert not verdict.verified
     assert reward.HELDOUT_SEED_FILE_ENV in verdict.reason
+    assert reward.HELDOUT_SEED_ENV in verdict.reason
 
 
 def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
@@ -283,6 +292,7 @@ def test_a_refused_held_out_run_fails_the_component(reward, monkeypatch,
     """
     monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
                        str(tmp_path.parent / "heldout.seed"))
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
 
@@ -308,6 +318,7 @@ def test_a_held_out_run_that_writes_no_record_fails(reward, monkeypatch,
     """A tool that exits 0 and says nothing has verified nothing."""
     monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
                        str(tmp_path.parent / "heldout.seed"))
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -324,6 +335,7 @@ def test_a_clean_held_out_run_verifies_the_component(reward, monkeypatch,
     """The control: the only path on which this component passes."""
     monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
                        str(tmp_path.parent / "heldout.seed"))
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -354,6 +366,7 @@ def test_a_held_out_run_that_writes_no_file_into_the_candidate_tree(
     """
     monkeypatch.setenv(reward.HELDOUT_SEED_FILE_ENV,
                        str(tmp_path.parent / "heldout.seed"))
+    monkeypatch.setenv(reward.HELDOUT_SEED_ENV, "a" * 32)
     candidate = reward.load_candidate(
         {"tree": str(tmp_path), "base": "origin/main", "scope": ["tools/**"]})
     tool = tmp_path / "tools"
@@ -486,6 +499,7 @@ def test_the_conformance_component_does_not_wait_on_a_tool_that_never_existed(
     registers that DO record cross-tier divergence, so the scorer must no
     longer depend on that name in either direction."""
     source = (ROOT / "tools" / "evolution_reward.py").read_text(encoding="utf-8")
+    source = (ROOT / "tools" / "evolution_reward.py").read_text()
     assert "gate_verdict_parity" in source, \
         "the decision not to build it is recorded in the module, not erased"
     assert reward.PROBES["conformance"] is reward.probe_conformance
@@ -495,12 +509,16 @@ def test_the_conformance_component_does_not_wait_on_a_tool_that_never_existed(
 
 # --------------------------------------------------------------------------
 # Scope: the changed-file set against the declared scope AND the operator grant.
+# Scope: the changed-file set against the declared scope.
 # --------------------------------------------------------------------------
 
 def test_scope_passes_when_every_change_is_declared_and_allowed(reward, tiny_repo):
+def test_scope_passes_when_every_change_is_declared(reward, tiny_repo):
     (tiny_repo / "tools" / "a.py").write_text("a\n")
     verdict = reward.probe_scope(_candidate(
         reward, tiny_repo, base="HEAD", scope=("tools/**",), allow=("tools/**",)))
+    verdict = reward.probe_scope(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",)))
     assert verdict.verified is True, verdict.reason
 
 
@@ -511,6 +529,8 @@ def test_scope_fails_on_an_undeclared_path(reward, tiny_repo):
     verdict = reward.probe_scope(_candidate(
         reward, tiny_repo, base="HEAD", scope=("tools/**",),
         allow=("tools/**", "src/**")))
+    verdict = reward.probe_scope(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",)))
     assert verdict.verified is False
     assert "src/sneak.py" in verdict.reason
     assert "declared scope" in verdict.reason
@@ -524,6 +544,8 @@ def test_scope_counts_committed_and_uncommitted_change_alike(reward, tiny_repo):
     verdict = reward.probe_scope(_candidate(
         reward, tiny_repo, base="HEAD~1", scope=("tools/**",),
         allow=("tools/**", "src/**")))
+    verdict = reward.probe_scope(
+        _candidate(reward, tiny_repo, base="HEAD~1", scope=("tools/**",)))
     assert verdict.verified is False
     assert "src/sneak.py" in verdict.reason
 
@@ -532,12 +554,16 @@ def test_an_empty_scope_declaration_cannot_be_satisfied(reward, tiny_repo):
     (tiny_repo / "tools" / "a.py").write_text("a\n")
     verdict = reward.probe_scope(_candidate(
         reward, tiny_repo, base="HEAD", scope=(), allow=("tools/**",)))
+    verdict = reward.probe_scope(
+        _candidate(reward, tiny_repo, base="HEAD", scope=()))
     assert verdict.verified is False
 
 
 def test_an_empty_change_set_is_not_a_pass(reward, tiny_repo):
     verdict = reward.probe_scope(_candidate(
         reward, tiny_repo, base="HEAD", scope=("tools/**",), allow=("tools/**",)))
+    verdict = reward.probe_scope(
+        _candidate(reward, tiny_repo, base="HEAD", scope=("tools/**",)))
     assert verdict.verified is False
     assert "no file changed" in verdict.reason
 
@@ -546,6 +572,8 @@ def test_an_unreadable_base_fails_rather_than_scoring_nothing(reward, tiny_repo)
     verdict = reward.probe_scope(_candidate(
         reward, tiny_repo, base="no/such/ref", scope=("tools/**",),
         allow=("tools/**",)))
+    verdict = reward.probe_scope(
+        _candidate(reward, tiny_repo, base="no/such/ref", scope=("tools/**",)))
     assert verdict.verified is False
 
 
@@ -717,6 +745,7 @@ def test_every_evaluator_fence_entry_exists_in_this_tree(reward):
 _BASE_READERS = ("probe_no_new_false_admits", "probe_scope", "probe_tests",
                  "probe_conformance", "probe_formal", "probe_reach",
                  "probe_resource", "probe_host_fallback")
+                 "probe_conformance", "probe_formal")
 
 
 @pytest.mark.parametrize("probe", _BASE_READERS)
@@ -729,6 +758,7 @@ def test_a_base_the_tree_cannot_resolve_is_refused_by_name(
     (tiny_repo / "tools" / "a.py").write_text("a\n")
     missing = _candidate(reward, tiny_repo, base="origin/main",
                          scope=("tools/**",), allow=("tools/**",))
+    missing = _candidate(reward, tiny_repo, base="origin/main", scope=("**",))
     verdict = getattr(reward, probe)(missing)
     assert verdict.verified is False
     assert "base `origin/main` does not name a commit" in verdict.reason, (
@@ -1171,9 +1201,11 @@ def test_record_refuses_to_write_a_false_admission_and_check_still_fails(
 
     assert census.main(["--record"]) == 0
     written = json.loads(baseline.read_text(encoding="utf-8"))["buckets"]
+    written = json.loads(baseline.read_text())["buckets"]
     assert "false-admission" not in written
     assert written["false-admit/T1"] == ["known.rvl"]
     problems = census.compare(buckets, json.loads(baseline.read_text(encoding="utf-8")))
+    problems = census.compare(buckets, json.loads(baseline.read_text()))
     assert any("FALSE ADMISSION" in p for p in problems), problems
 
 
@@ -1330,6 +1362,8 @@ def test_the_cli_exits_nonzero_while_anything_is_unverified(
     assert reward.main(["--candidate", str(record), "--allow", "tools/**",
                         "--json", str(out)]) == 1
     card = json.loads(out.read_text(encoding="utf-8"))
+    assert reward.main(["--candidate", str(record), "--json", str(out)]) == 1
+    card = json.loads(out.read_text())
     assert card["retained"] is False
     assert card["allow"] == ["tools/**"]
     assert "compiles" in card["blockers"]
@@ -1587,6 +1621,7 @@ def stub_cargo(tmp_path, monkeypatch):
 
     def calls():
         return log.read_text(encoding="utf-8").splitlines() if log.exists() else []
+        return log.read_text().splitlines() if log.exists() else []
     return (lambda mode: monkeypatch.setenv("STUB_CARGO_MODE", mode)), calls
 
 
@@ -1972,6 +2007,7 @@ def test_the_committed_block_parser_reads_the_real_one(reward):
     mimics it."""
     ok, cells = reward._committed_matrix(
         (ROOT / "docs" / "conformance.md").read_text(encoding="utf-8"))
+        (ROOT / "docs" / "conformance.md").read_text())
     assert ok, cells
     assert cells[("G1", "py")] == "proved"
     assert set(cells.values()) <= set(reward.CELL_STRENGTH)

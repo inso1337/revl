@@ -55,6 +55,8 @@ def test_an_emission_smuggled_through_a_first_class_value_is_refused():
     """`quiet` never names `ship` in call position; the value does. Since
     issue #2842 the value reference itself is refused, before the declaration
     check: an emission is only ever called by name under `emit`."""
+    """`quiet` never names `ship` in call position — the value does. The
+    declaration check must refuse it exactly like the direct call."""
     with pytest.raises(RevlError) as excinfo:
         compile_source(FIRST_CLASS)
     message = str(excinfo.value)
@@ -86,6 +88,7 @@ component C provides s: S {
 """)
     message = str(excinfo.value)
     assert "`S.quiet` is declared plain" in message
+    # the diagnostic names the first-class flow, not just a callee name
     assert "passed as a function value" in message
     assert excinfo.value.category == "emission-propagation"
     assert "first-class dispatch" in (excinfo.value.hint or "")
@@ -145,6 +148,8 @@ component C provides s: S {
     # refused where `getship` hands `ship` on as a value (issue #2842)
     assert "emission `ship` cannot be used as a function value" \
         in str(excinfo.value)
+    assert "`S.quiet` is declared plain" in str(excinfo.value)
+    assert "`getship()`" in str(excinfo.value)
 
 
 def test_aliasing_an_emission_to_a_local_is_refused():
@@ -165,6 +170,7 @@ component C provides s: S {
 """)
     assert "emission `ship` cannot be used as a function value" \
         in str(excinfo.value)
+    assert "passed as a function value" in str(excinfo.value)
 
 
 def test_a_three_layer_transitive_chain_is_refused():

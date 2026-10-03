@@ -39,6 +39,10 @@ is the trace of the run, `w₁` is the world the run actually built, and
 enter these theorems), a `witnessed` step that appends its descriptor and
 mutates atomically (collapsing a real window the reference has), and no
 cascading abort, compensation drain or escrow.
+`RevL.Lemmas` documents the fragment's limits: five body forms, a
+`witnessed` step that appends its descriptor and mutates atomically
+(collapsing a real window the reference has), and no cascading abort,
+compensation drain or escrow.
 
 ## Scope
 

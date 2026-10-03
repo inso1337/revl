@@ -587,9 +587,12 @@ def _visible(summary: dict, fn_like: dict) -> dict:
     """
     body = fn_like.get("body")
     shadowed = _bound_names(body, set())
+    """`summary` with every name this body binds removed."""
+    shadowed = _bound_names(fn_like.get("body"), set())
     shadowed.update(p.get("name") for p in fn_like.get("params") or [])
     return {name: summary[name] for name in _callee_names(body, set())
             if name in summary and name not in shadowed}
+    return {name: keeps for name, keeps in summary.items() if name not in shadowed}
 
 
 def _callee_names(node: Any, found: set) -> set:

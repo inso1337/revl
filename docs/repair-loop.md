@@ -73,6 +73,7 @@ Three bounds, three behaviours:
   component that keeps a realm a rule selects stays eligible when it adds
   another realm a rule also selects. A candidate arriving as untrusted text is
   still refused first by the realm-placement gate (`status: rejected`).
+  privileged direction, so its floor is closed, not open.
 * **`mayTouch`** — an absolute cap on the capabilities a repair may reach. A
   candidate that reaches outside it is **refused** (`status: rejected`, reason
   `may-touch`) — not an ack, a refusal: the bound is hard. `None` means *inherit
@@ -113,8 +114,10 @@ runtime. Shape:
   "fault":       {chain, root, oracle},          # item 27 (+ the 27 oracle)
   "slice":       {bisect | unavailable},          # item 40
   "eligibility": {eligible, by, byRunning?, note, candidate?},  # self-repair policy
+  "eligibility": {eligible, by, note},            # self-repair policy
   "candidate":   {origin: regenerated|reused, reuse},  # item 49
   "verdicts":    {gauntlet, policy, mayTouch, widening, eligibility?},  # 31 / 33 / self / 21
+  "verdicts":    {gauntlet, policy, mayTouch, widening},  # 31 / 33 / self / 21
   "remediation": {strategy, applied, swap, canaryFollowOn},  # item 23
   "authority":   {authority, unattended, operator, why},     # item 55
   "dossier":     {steps: [ {stage, roadmapItem, reached, detail} ... ]}
@@ -145,6 +148,7 @@ placement of a provider that stays admitted: one that leaves out its
 and the G9 diagnostic `revl_change` gives (issue #2520), and `apply: false`
 reports the same refusal rather than `planned`. Jailed `files` alone and a
 trusted operator's candidate are the operator's own and are not checked.
+and swapped.
 
 ## Remediation is pluggable — the canary follow-on hook
 

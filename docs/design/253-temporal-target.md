@@ -335,6 +335,9 @@ So a declaration written `... undo pure chk(result)` carries `register: "read"`.
 It is the TOP of the partial order and a member of item 440's `REDISPATCH_FREE`.
 The declaration says nothing whatever about re-delivering the FORWARD
 crossing. A
+So a declaration written `... undo pure chk(result)` carries `register: "read"`
+— the TOP of the partial order, and a member of item 440's `REDISPATCH_FREE` —
+while saying nothing whatever about re-delivering the FORWARD crossing. A
 retry policy asks exactly one question ("may this call be issued again?") and
 it asks it about the forward. So `emit_temporal._forward_register` reads the
 two forward-side facts (`idempotency_key`, `idempotent`) DIRECTLY and never
@@ -361,6 +364,7 @@ ever have landed in that row. `docs/design/207-checkable-extern-body.md`.
 
 **Why `declared` gets no opt-in knob.** The design said "opt-in to relax", and
 revl already has that knob: `recovery may re-issue owed emissions (strength:
+revl already has that knob — `recovery may re-issue owed emissions (strength:
 declared)`, read by `recovery._reissue_permitted`, which returns False for
 `declared` unless an operator supplied that strength. A Temporal `RetryPolicy`
 is baked into the emitted workflow: there is no operator at the run to supply
@@ -378,6 +382,8 @@ reachable.
 **The crossing mapping had to widen first.** A service-interface METHOD carries
 only the bare `idempotent` modifier; `parser.py` still has
 `TODO(309-slice1): accept the idempotent(key: p) keyed form` for a method, so
+only the bare `idempotent` modifier — `parser.py` still has
+`TODO(309-slice1): accept the idempotent(key: p) keyed form` for a method — so
 no `key.method(...)` crossing can reach above `declared`, and the derivation
 would have been vacuous. Slice 2 therefore maps a direct emission-extern
 crossing (`emit charge(...)`) to an activity as well; an extern carries the

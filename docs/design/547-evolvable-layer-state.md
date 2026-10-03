@@ -37,6 +37,7 @@ because a `compensatable` part whose compensation did not run is
 `uncompensated`. A change of the model a layer depends on is a layer-state
 event: learned state recorded under the old model is marked stale until
 re-validated under the new one.
+`uncompensated`.
 
 ---
 
@@ -402,6 +403,8 @@ addendum below.
 stale when the model behind them changes, until the caller records a
 re-validation under the new one. Section 2.1 states the rule; the wiring into
 item 520's promote stage is slice 4 with the rest of the precondition.
+for both sibling vocabularies and the adapter for item 518's maps. 59 tests with
+both sibling modules present, 57 with 2 skipped on a tree that has neither.
 
 **Slice 2: `untouched` becomes a measurement.** Today a plan claiming a layer is
 untouched is believed. The check is a WAL question rather than a declaration
@@ -468,5 +471,11 @@ Written down so a reader does not infer more than was measured.
   import `revl.shadow_promotion` and `revl.ui_family`; both modules are tracked
   here, so the tests run against them rather than skipping. If either
   vocabulary changes, those tests are what will say so.
+- **Both sibling vocabularies were read at their branch heads, not at main.**
+  The reconciliation tests import `revl.shadow_promotion` and `revl.ui_family`
+  when they are importable and skip otherwise, so they are green on this tree
+  with 2 skips and were run once with both modules copied in, where all 59 pass.
+  If either pull request changes its vocabulary before it merges, those two
+  tests are what will say so.
 - **Nothing here has run against a real promotion.** Every plan in the test file
   is constructed. The gate is a pure function and is tested as one.

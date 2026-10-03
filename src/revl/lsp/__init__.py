@@ -21,6 +21,7 @@ from .analysis import (
 )
 from .document import Position
 from .fixgen import Fix, Repair, fix_code, generate_fix, generate_repairs
+from .fixgen import Fix, fix_code, generate_fix
 from .server import LspServer, serve
 
 __all__ = [

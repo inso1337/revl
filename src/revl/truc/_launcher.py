@@ -128,12 +128,15 @@ def _pin_rows(entries: list, key: str) -> list[dict]:
     rows: list[dict] = []
     seen: set[str] = set()
     for row in entries:
+    for row in files:
         if not isinstance(row, dict):
             raise _refuse(f"truc.lock has a `{key}` entry that is not an "
+            raise _refuse(f"truc.lock has a `files` entry that is not an "
                           f"object: {row!r}")
         path = row.get("path")
         if not isinstance(path, str) or not path:
             raise _refuse(f"truc.lock has a `{key}` entry with no path: {row!r}")
+            raise _refuse(f"truc.lock has a `files` entry with no path: {row!r}")
         if path in seen:
             raise _refuse(f"truc.lock names {path!r} twice")
         seen.add(path)
@@ -184,6 +187,15 @@ def component_files() -> list[str]:
     out = [str(_pinned_path(row)) for row in _lock_rows(data)]
     for row in _import_rows(data):
         _pinned_path(row)
+    out: list[str] = []
+    for row in _lock_rows(data):
+        path = _contained_path(row["path"])
+        actual = _sha256_file(path)
+        if actual != row["sha256"]:
+            raise _refuse(
+                f"hash drift: {row['path']} ({actual}) does not match its "
+                f"truc.lock pin ({row['sha256']})")
+        out.append(str(path))
     return out
 
 
@@ -207,8 +219,15 @@ def lock_document() -> dict:
     only for the file LISTS, the roots and their imports (which files make up
     truc is a decision, not something to be discovered by globbing), and
     recomputes every hash."""
+    only for the file LIST (which components make up truc is a decision,
+    not something to be discovered by globbing) and recomputes every
+    hash."""
     lock = _HERE / "truc.lock"
     data = json.loads(lock.read_text(encoding="utf-8"))
+    files = []
+    for row in data.get("files") or []:
+        rel = row["path"] if isinstance(row, dict) else row
+        files.append({"path": rel, "sha256": _sha256_file(_contained_path(rel))})
     return {"lockVersion": LOCK_VERSION, "note": data.get("note", ""),
             "files": _repinned(data.get("files")),
             "imports": _repinned(data.get("imports"))}
@@ -221,6 +240,7 @@ def _repinned(rows: object) -> list[dict]:
         rel = row["path"] if isinstance(row, dict) else row
         out.append({"path": rel, "sha256": _sha256_file(_contained_path(rel))})
     return out
+            "files": files}
 
 
 def main(argv: list[str] | None = None) -> int:

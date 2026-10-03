@@ -143,6 +143,7 @@ def test_swap_invalidates_a_standing_approval(sink):
     # swap in a semantically-changed Agent: the reach-closure candidate hash
     # moves, so the standing approval no longer covers the re-issued call.
     session.swap(compile_source(_SWAPPED, "typed_approval.rvl"), agent_authored=False)
+    session.swap(compile_source(_SWAPPED, "typed_approval.rvl"))
     with pytest.raises(ApprovalRequired) as e2:
         session.call("ops", "shout", [sink, "hi"])
     assert e2.value.ticket["candidateHash"] != e1.value.ticket["candidateHash"]
@@ -397,6 +398,7 @@ def test_consume_before_fire_wal_ordering(sink, tmp_path):
     # out — a cut BEFORE the emission leaves consumed-but-unfired (owed).
     records = [__import__("json").loads(line)
                for line in Path(wal_path).read_text(encoding="utf-8").splitlines()]
+               for line in Path(wal_path).read_text().splitlines()]
     consumed = [i for i, r in enumerate(records)
                 if r.get("record") == "approval-consumed"
                 and r.get("requestId") == rid]

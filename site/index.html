@@ -259,11 +259,13 @@
     <div class="block-head reveal">
       <p class="eyebrow">G1 – G8</p>
       <h2>Eight paradigm guarantees, enforced before code exists.</h2>
+      <h2>Eight guarantees, enforced before code exists.</h2>
       <p>Each one is a theorem from the
       <a href="https://github.com/cordiverse/paper">spatiotemporal-composability paper</a>,
       turned into something the compiler refuses to violate. revl adds a ninth, G9
       (authority from untrusted data), and the rest are listed in
       <a href="https://github.com/inso1337/revl/blob/main/docs/guarantees.md">the guarantees reference</a>.</p>
+      turned into something the compiler refuses to violate.</p>
     </div>
     <div class="g-grid">
       <div class="g-card reveal"><div class="g-id">G1 <span class="g-when">compile</span></div>
@@ -620,6 +622,8 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
 <span class="t-prompt">$</span> python3 -m venv .venv && source .venv/bin/activate
 <span class="t-prompt">$</span> pip install -e .                        <span class="tok-com"># not `pip install revl`, an unrelated PyPI project</span>
 <span class="t-prompt">$</span> revl compile examples/user_cache.rvl   <span class="tok-com"># source → checked IR (JSON)</span>
+<span class="t-prompt">$</span> uv venv && uv pip install -e ".[test]"
+<span class="t-prompt">$</span> revl compile examples/user_cache.rvl   <span class="tok-com"># source → checked IR</span>
 <span class="t-prompt">$</span> revl mcp serve                         <span class="tok-com"># the compiler as an agent gate</span></code></pre>
     </div>
   </div>
@@ -630,6 +634,7 @@ service Http { emission fn post(url: Str, body: Str) -> Str }</code></pre>
     <div>
       <span style="font-family:var(--mono); color:var(--text)">revl</span>:
       a research language for spatiotemporal composability · AGPL-3.0-only compiler, MIT runtime and examples; the code you compile is yours
+      a research language for spatiotemporal composability · AGPL-3.0, MIT for what you compile
     </div>
     <div class="foot-links">
       <a href="https://github.com/inso1337/revl">GitHub</a>

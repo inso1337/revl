@@ -79,6 +79,7 @@ from revl import compile_source  # noqa: E402
 
 PLACEMENT = BACKEND / "placement"
 SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text(encoding="utf-8")
+SCENARIO = (BACKEND / "scenarios" / "secret_registry.rvl").read_text()
 RUNNERS = (PLACEMENT / "PlacementRunner.java", PLACEMENT / "RealPlacementRunner.java")
 
 # The canary is a class name ON PURPOSE. The uncaught failure this funnel covers
@@ -177,6 +178,7 @@ def _boot_that_fails(classpath: Path) -> tuple[int, str, str]:
         [javac_gate.JAVA, "-cp", str(classpath), "PlacementRunner", str(spec)],
         capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
     return result.returncode, result.stdout, _jvm_stderr(result.stderr)
+    return result.returncode, result.stdout, result.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -402,6 +404,7 @@ def _run_harness(classpath: Path) -> tuple[int, str, str]:
         [javac_gate.JAVA, "-cp", str(classpath), "ThreadFunnelHarness"],
         capture_output=True, text=True, timeout=300, stdin=subprocess.DEVNULL)
     return result.returncode, result.stdout, _jvm_stderr(result.stderr)
+    return result.returncode, result.stdout, result.stderr
 
 
 @needs_jdk

@@ -82,6 +82,7 @@ beside the type:
 The last two let a unit compiled against this IR as a manifest keep the
 operation's taint (issue #1937). Each key is absent unless declared, and an
 emitter may ignore them. **Amendment to errata A6**: provide-method
+annotations optional in v1. **Amendment to errata A6**: provide-method
 entries *keep* their `params` list — those are the surface names that bind
 the method body (they may differ from the service's declared names); what
 emitters derive from the service is the *type* signature, not the names.

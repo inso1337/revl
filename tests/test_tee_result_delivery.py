@@ -623,6 +623,7 @@ def hardware_requirement(**overrides) -> TeeRequirement:
     own file."""
     return requirement(measurements=frozenset({MRTD}),
                        tdx=TdxPolicy(accept_mrtd_only=True), **overrides)
+    return requirement(measurements=frozenset({MRTD}), **overrides)
 
 
 def test_a_hardware_rooted_run_delivers_and_is_not_labelled_development():

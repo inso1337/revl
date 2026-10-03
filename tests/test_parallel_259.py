@@ -40,6 +40,9 @@ from revl.parallel import parallel_plan  # noqa: E402
 
 # Shared declarations: three distinct-token emission services, a `commutative`
 # metrics service and a bare (`*`) emission.
+# metrics service, a bare (`*`) emission, and a first-class dispatcher chain
+# (`dispatch` passes the emitting extern `launder` to `indirect`, so its reach is
+# `*`/unknown_dispatch - the arm walk cannot name it).
 HDR = """
 service Mailer { emission[send.email] fn send(to: Str) }
 service Db { emission[db.write] fn write(row: Str) }
@@ -63,6 +66,8 @@ fn dispatch(x: Str) -> Str { return indirect(launder, x) }
 def _ir(requires: str, body: str) -> dict:
     dispatch = "dispatch(" in body
     src = HDR + (DISPATCH if dispatch else "") + (
+def _plan(requires: str, body: str) -> list[list[int]]:
+    src = HDR + (
         f"component W requires {requires} provides run: Run {{\n"
         f"  provide run {{ fn run(x) {{ {body} return x }} }}\n"
         f"}}\n"
@@ -77,10 +82,17 @@ def _ir(requires: str, body: str) -> dict:
 
 def _plan(requires: str, body: str) -> list[list[int]]:
     return parallel_plan(_ir(requires, body)).get("W", [])
+    return parallel_plan(compile_source(src, "parallel.rvl")).get("W", [])
 
 
 def _audit(requires: str, body: str) -> dict:
     return audit_report(_ir(requires, body))
+    src = HDR + (
+        f"component W requires {requires} provides run: Run {{\n"
+        f"  provide run {{ fn run(x) {{ {body} return x }} }}\n"
+        f"}}\n"
+    )
+    return audit_report(compile_source(src, "parallel.rvl"))
 
 
 # ---------------------------------------------------------------- cap_order.disjoint

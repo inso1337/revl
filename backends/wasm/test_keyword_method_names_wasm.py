@@ -18,6 +18,7 @@ value is wrong.
 WHY. A method name never becomes a WAT token. It is the field of the import
 `(import "coeffect:<key>" "<op>" ...)` and of the export `"provide:<key>.<op>"`,
 which are WAT strings, and the internal identifier `$req.<key>.<op>` (issue #1756) sits in
+which are WAT strings, and the internal identifier `$req_<key>_<op>` sits in
 the `$` sigil namespace, which no keyword can reach. So these tests pin the
 property rather than fix a defect: they pass on main by design, and they turn
 red if a later change starts spelling a method name as a bare token.
@@ -123,6 +124,7 @@ def test_the_frontend_hands_the_emitter_these_names():
     """Pinned so a frontend change that admits or refuses another name is seen
     here: the emitter must carry every name it is handed."""
     assert len(CANDIDATES) == 148 and len(ADMITTED) == 123
+    assert len(CANDIDATES) == 148 and len(ADMITTED) == 124
     refused = set(CANDIDATES) - set(ADMITTED)
     assert {"if", "return", "match", "type", "provide", "config", "spawn"} <= refused
     assert {"func", "module", "memory", "call", "end", "class", "def",
@@ -145,6 +147,7 @@ def test_a_method_name_is_only_ever_a_string_or_a_sigil_identifier():
         modules = emit.emit(compile_source(_program([name])))
         assert f'(export "provide:s.{name}")' in modules["P"], name
         assert f'(import "coeffect:s" "{name}" (func $req.s.{name} ' in modules["C"], name
+        assert f'(import "coeffect:s" "{name}" (func $req_s_{name} ' in modules["C"], name
         for component in ("P", "C"):
             assert _tokens(modules[component]) == _tokens(neutral[component]), (name, component)
 

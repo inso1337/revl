@@ -7,8 +7,11 @@
 #    (formal/scripts/oracle_summary.py, issue #2739);
 # 4. lake build over the Lean package;
 # 5. CheckAxioms.lean's `#print axioms` output through the axioms gate
+# 3. lake build over the Lean package;
+# 4. CheckAxioms.lean's `#print axioms` output through the axioms gate
 #    (no sorryAx, no project-defined axioms, no missing theorem);
 # 6. the same axioms gate over harness/Oracle.lean's own `#print axioms`
+# 5. the same axioms gate over harness/Oracle.lean's own `#print axioms`
 #    block — that file is outside the RevL library root, so it is outside
 #    CheckAxioms.lean and outside the layering gate, and its bridge
 #    theorems are what make the differential oracle bite;
@@ -19,6 +22,7 @@
 # guarantee, oracle rows, accepted and refused documents per row kind) is
 # appended to it on every exit, a failure or a skip included
 # (formal/scripts/proof_summary.py, issue #2745).
+# 6. the harness census (formal/harness/diff_corpus.py).
 #
 # Steps 1 and 2 need no toolchain and always run. Item 418 step 8: the
 # axioms gate cannot tell a load-bearing theorem from a vacuous one, and
@@ -27,6 +31,8 @@
 #
 # A missing elan/lake skips LOUDLY, with exit code 77, never a false green,
 # matching the pre-merge discipline in the Makefile. This lives in a script, not
+# A missing elan/lake skips LOUDLY — never a false green — matching the
+# pre-merge discipline in the Makefile. This lives in a script, not
 # Makefile recipe lines, because each recipe line is its own shell: an
 # `exit 0` skip-guard inside the Makefile cannot stop the target.
 set -e
@@ -65,6 +71,8 @@ fi
 if ! command -v lake >/dev/null 2>&1; then
   echo "SKIP (loud): elan/lake not installed, so the formal proofs were NOT checked"
   exit 77
+  echo "SKIP (loud): elan/lake not installed — the formal proofs were NOT checked"
+  exit 0
 fi
 
 lake build
@@ -470,6 +478,7 @@ python3 scripts/axioms_gate.py \
   RevL.Fanout.over_fired_witnessed_member_is_undone \
   RevL.Fanout.over_fired_emission_is_residue \
   RevL.A5.witness_bites < .axioms.out
+  RevL.A2.a2_not_vacuous < .axioms.out
 
 # The oracle's bridge theorems (harness/Oracle.lean) are outside the RevL
 # library root, so CheckAxioms.lean cannot reach them and the layering gate
@@ -535,5 +544,6 @@ python3 scripts/axioms_gate.py \
   RevLOracle.g4InvRowB_iff RevLOracle.g4invRowB_iff \
   RevLOracle.swRowB_iff RevLOracle.swRowBAll_iff \
   RevLOracle.a5RowB_iff RevLOracle.a5RowBAll_iff < .oracle-axioms.out
+  RevLOracle.a2OKB_iff < .oracle-axioms.out
 
 python3 harness/diff_corpus.py

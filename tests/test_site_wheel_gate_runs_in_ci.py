@@ -40,6 +40,8 @@ it needs no toolchain and no PyYAML (not a declared dependency) and rides the
 `frontend` job's plain `pytest tests/ -q`. The `main()` test patches
 `_build_fresh`, so this file does NOT build a wheel; it costs a PR nothing and
 cannot itself become a per-PR wheel gate.
+`frontend` job's plain `pytest tests/ -q`. It does NOT build a wheel, so it
+costs a PR nothing and cannot itself become a per-PR wheel gate.
 """
 
 from __future__ import annotations

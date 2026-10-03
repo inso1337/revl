@@ -402,6 +402,8 @@ def test_ts_readers_consult_own_keys_only():
 # tier-divergent answer to a length a policy check or a bound may size against.
 #
 # U+1F600 is reached through `json_parse` so the source stays ASCII.
+# U+1F600 is reached through `json_parse` so the source stays ASCII: the lexer
+# refuses a non-ASCII literal and `str_char` stops at U+007E.
 CODEPOINT_CONSUMER = """\
 use "stdlib/json.rvl" { json_parse }
 use "stdlib/value.rvl" { value_len }

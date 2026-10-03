@@ -62,6 +62,7 @@ def test_admission_gate_is_realm_aware():
     # a third store in a fresh realm admits cleanly
     third = """
     service Kv { fn get(k: Str) -> Opt[Str] fn set(k: Str, v: Str) fn unset(k: Str) }
+    service Kv { fn get(k: Str) -> Opt[Str] fn set(k: Str, v: Str) }
     component TenantCStore provides kv: Kv {
       isolate kv in realm("tenant_c")
       let store = effect Map.new() undo store.drop()

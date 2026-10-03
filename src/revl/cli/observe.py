@@ -33,6 +33,7 @@ def _run_explain(args) -> int:
         print(f"  category: {record['category']}")
     if record.get("guarantee") and record.get("meaning"):
         print(f"  {record['meaning']}")
+    print(f"{record['code']}  {record['guarantee']}")
     if record.get("fix"):
         print(f"  fix: {record['fix']}")
     if record.get("repairs"):
@@ -124,11 +125,13 @@ def _run_dash(args) -> int:
                       and not getattr(args, "trust_exported", False) else None)
     resolved = _composition_document(args, label="dash",
                                      read_report=compile_report)
+    resolved = _composition_document(args, label="dash")
     if isinstance(resolved, int):
         return resolved
     try:
         ir = (compile_files(args.files, report=compile_report)
               if resolved is None else resolved)
+        ir = compile_files(args.files) if resolved is None else resolved
     except RevlError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1
@@ -172,6 +175,7 @@ def _run_dash(args) -> int:
         prev_audit=prev_audit, accepted=set(args.accept),
         accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope,
         rejected=args.rejected, profile=profile)
+        accept_all=args.accept_all, policy=policy, mcp_scope=args.mcp_scope)
 
     if args.json:
         print(json.dumps(board.snapshot(), indent=2))

@@ -19,6 +19,8 @@
 //
 // selfhost/emit_rust.rvl names the reached call instead
 // (`<<UNSUPPORTED-DEFERRED-EMISSION:Agent.deliver>>`, issue #2353).
+// selfhost/emit_rust.rvl has no counterpart to this refusal: it does not read
+// the `deferred` modifier.
 extern emission deferred fn deliver(sink: Str, msg: Str)
   = @py { return } = @ts { return; } = @rs { () } = @go { return } = @java { return; }
 service Ops { emission fn enqueue(sink: Str, msg: Str) }

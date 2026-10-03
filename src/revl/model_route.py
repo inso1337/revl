@@ -881,6 +881,7 @@ def check(program, filename: str | None = None,
                 # role, not at the component head. A consumer reading
                 # `role`/`residence` is unaffected.
                 arm_placement = {
+                arms[arm.origin] = {
                     "role": head.name,
                     "residence": head.residence,
                     "candidates": tuple(r.name for r in resolved),

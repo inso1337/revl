@@ -196,12 +196,15 @@ def build_probe(*, pool_id: str, charter_digest: str, peer_id: str,
 def sign_probe(body: Mapping[str, Any],
                identity: peer_identity.PeerIdentity, *,
                network_exposed: bool = False) -> dict:
+               identity: peer_identity.PeerIdentity) -> dict:
     """Signed under the operator's key pair, the same key a task is signed
     with, so the peer checks both against the one operator key it pinned.
     ``network_exposed`` is passed to :func:`revl.peer_identity.sign_record`
     (issue #1460)."""
     return peer_identity.sign_record(PROBE_DOMAIN, body, identity,
                                      network_exposed=network_exposed)
+    with, so the peer checks both against the one operator key it pinned."""
+    return peer_identity.sign_record(PROBE_DOMAIN, body, identity)
 
 
 def probe_digest(probe: Mapping[str, Any]) -> str:
@@ -247,6 +250,7 @@ def answer_probe(record: Any, *, charter_record: Mapping[str, Any],
                  operator_public: peer_identity.PublicIdentity,
                  at: Optional[datetime] = None,
                  network_exposed: bool = False) -> dict:
+                 at: Optional[datetime] = None) -> dict:
     """The PEER side: check a probe and, if it passes, sign a heartbeat.
 
     Never raises: the wire is hostile. The heartbeat carries the probe's nonce
@@ -254,6 +258,7 @@ def answer_probe(record: Any, *, charter_record: Mapping[str, Any],
     another. ``network_exposed`` is passed to
     :func:`revl.peer_identity.sign_record` (issue #1460); the runner that
     serves off loopback has already refused to bind without the backend."""
+    another."""
     shape = _probe_shape(record)
     if shape:
         return _refusal(LINK_PROBE_SHAPE, f"not a probe: {shape}")
@@ -279,6 +284,8 @@ def answer_probe(record: Any, *, charter_record: Mapping[str, Any],
             "heartbeat": peer_identity.sign_record(
                 HEARTBEAT_DOMAIN, body, identity,
                 network_exposed=network_exposed)}
+            "heartbeat": peer_identity.sign_record(HEARTBEAT_DOMAIN, body,
+                                                   identity)}
 
 
 # ---------------------------------------------------------------------------
@@ -562,6 +569,7 @@ def probe_member(*, pool_dir, peer_id: str, addr: str,
     """Probe one member and record the result. `addr` is HOST:PORT, or "" to
     use the address of the member's last verified contact."""
     from .pool_dispatch import _split_addr, signer_exposure  # noqa: PLC0415
+    from .pool_dispatch import _split_addr  # noqa: PLC0415
 
     charter_record, roster = peer_pool.load_pool(pool_dir)
     member = roster.members.get(peer_id)
@@ -584,6 +592,7 @@ def probe_member(*, pool_dir, peer_id: str, addr: str,
         charter_digest=peer_pool.canonical_digest(charter_record),
         peer_id=peer_id, at=when), dispatch_identity,
         network_exposed=exposed)
+        peer_id=peer_id, at=when), dispatch_identity)
     answer = _exchange(probe, host=host, port=port, timeout=timeout)
     outcome = answer if not answer.get("ok") else check_heartbeat(
         answer.get("heartbeat"), probe=probe, member=member,

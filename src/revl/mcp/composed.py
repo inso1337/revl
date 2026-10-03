@@ -144,6 +144,7 @@ class ComposedServer:
                 # client can pin the revision it is talking to.
                 "serverInfo": {"name": f"revl:{self.composition}", "version": "2.0",
                                **_identity.identity()},
+                "serverInfo": {"name": f"revl:{self.composition}", "version": "2.0"},
                 "instructions": (
                     "These tools ARE a running revl composition "
                     f"({' -> '.join(manifest.get('loadOrder') or []) or 'empty'}). "

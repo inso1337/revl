@@ -150,6 +150,8 @@ def test_async_call_site_awaited_sync_call_site_not(backend):
                 "engine_run_revl_sync, (x,))") in out
     else:
         assert "await engine_run(x)" in out
+    # the async clone is awaited; the sync clone is a plain call
+    assert "await engine_run(x)" in out
     assert "await engine_run_revl_sync" not in out
     assert "await _revl_extern_emit(_revl_ctx, 'engine_run_revl_sync'" not in out
 

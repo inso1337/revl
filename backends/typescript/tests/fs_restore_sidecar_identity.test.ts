@@ -32,6 +32,7 @@
 // refused `EIDENTITY`, not read as an absent key.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
+import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import * as fs from 'node:fs'
 import * as os from 'node:os'
 import * as path from 'node:path'
@@ -140,11 +141,13 @@ function asIfSameTick(witness: WriteWitness, sidecar: string): void {
 }
 
 function refusalOf(fn: () => void): FsOpError {
+function codeOf(fn: () => void): string {
   try {
     fn()
   } catch (e) {
     expect(e).toBeInstanceOf(FsOpError)
     return e as FsOpError
+    return (e as FsOpError).code
   }
   throw new Error('the call was expected to refuse, and did not')
 }
@@ -286,6 +289,9 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     // therefore pinned to the tampered file's own tuple before the inverse
     // runs, so the tick is out of the test and the only comparison left that
     // can refuse is the recorded sha256.
+  it('refuses one rewritten in place', () => {
+    // Same inode, same length: `(dev, ino)` alone cannot see this, which is why
+    // the capture records the stamps too.
     const { witness, target, sidecar } = written()
     const before = fs.statSync(sidecar, { bigint: true })
     const fd = fs.openSync(sidecar, 'r+')
@@ -300,6 +306,7 @@ describe('a sidecar that is not the captured snapshot is refused', () => {
     const refusal = refusalOf(() => fsRestore(witness))
     expect(refusal.code).toBe('EIDENTITY')
     expect(refusal.message).toContain('sha256')
+    expect(codeOf(() => fsRestore(witness))).toBe('EIDENTITY')
 
     expect(fs.readFileSync(target, 'utf-8')).toBe('v2')
     expect(fs.readFileSync(sidecar, 'utf-8')).toBe('zz')

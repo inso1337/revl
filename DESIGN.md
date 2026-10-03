@@ -1,12 +1,19 @@
 # revl: a language for spatiotemporal composability
+# revl — a language for spatiotemporal composability
 
 **Status:** the original v1 design (2026-08-16), kept as written; the
 implemented language has grown past it (realms and interception shipped in 2.0).
 The guarantees table (§4) and the tiering rationale (§8) remain normative. For
 the current language see docs/syntax-2.0.md and docs/stability.md.
+**Status:** v1 design (2026-08-16) — implemented and frozen; the 2.0
+language grows from it (docs/syntax-2.0.md · docs/v2.0-roadmap.md). Kept
+as written for the guarantees table (§4) and the tiering rationale (§8),
+which remain normative.
 
 revl is a research language that makes *dynamic composition* (loading, unloading,
 and hot-swapping components in a running system) a checked property instead of a
+revl is a research language that makes *dynamic composition* — loading, unloading,
+and hot-swapping components in a running system — a checked property instead of a
 runtime discipline. It is the language-level realization of the paradigm
 formalized in [*A Programming Paradigm for Spatiotemporal Composability*](https://github.com/cordiverse/paper)
 (the "Cordis paper") and implemented as a library by [Cordis](https://github.com/cordiverse/cordis).
@@ -49,6 +56,7 @@ gaps reproduced in cordis-py and were fixed in
 hold ourselves to: C++ had RAII as a discipline; Rust made it a type system.
 Cordis has revertible effects as a discipline; revl makes them a language.
 The borrow checker governs *lexical* resource scope; revl's checker governs
+The borrow checker governs *lexical* resource scope — revl's checker governs
 *dynamic component* scope.
 
 A second motivation is forward-looking: if components are increasingly written
@@ -61,6 +69,8 @@ to be the language such a harness could require its own components to pass.
 
 1. **The component is the compilation unit.** Its signature (what it requires,
    what it provides) is the whole of its interface to the world.
+1. **The component is the compilation unit.** Its signature — what it requires,
+   what it provides — is the whole of its interface to the world.
 2. **Effects are syntactically paired with inverses.** You cannot write the
    mutation without writing (or deriving) the undo. Composite teardown is
    compiler-derived, LIFO, and not expressible incorrectly.
@@ -76,9 +86,11 @@ to be the language such a harness could require its own components to pass.
 ### Non-goals (v0)
 
 - Raw native code generation (see §8; the Wasm component model is our "native").
+- Raw native code generation (see §8 — the Wasm component model is our "native").
 - General-purpose ergonomics: revl v0 is for writing *components*, not
   applications-at-large; the host application assembles compiled components.
 - Isolation realms and interception (§3.2.3 of the paper): deferred past v0 in this design; they shipped in 2.0.
+- Isolation realms and interception (§3.2.3 of the paper) — deferred to v1.
 - Verifying inverse *semantic* correctness in general (undecidable); v0 checks
   presence and shape, §6 sketches the opt-in verification story.
 
@@ -87,6 +99,7 @@ to be the language such a harness could require its own components to pass.
 ### 3.1 Services (coeffect interfaces)
 
 A *service* is the typed interface behind a coeffect key, which is what the paper calls
+A *service* is the typed interface behind a coeffect key — what the paper calls
 the coeffect at key *k*.
 
 ```revl
@@ -106,6 +119,7 @@ service Cache {
 A component names its requirements and provisions in its header. The body is
 its *activation*: it runs when every requirement is satisfied, and everything
 it does is undone (in derived, LIFO order) when it deactivates.
+it does is undone — in derived, LIFO order — when it deactivates.
 
 ```revl
 component PgDatabase provides db: Database {
@@ -139,15 +153,19 @@ component UserCache requires db: Database provides cache: Cache {
 Reading guide:
 
 - `requires db: Database`: the coeffect specification. `db` is in scope in the
+- `requires db: Database` — the coeffect specification. `db` is in scope in the
   body, typed as `Database`; the component cannot activate until some active
   component provides it, and is deactivated (in dependency order, per the
   paper's Theorem 63) when its provider leaves. **`db` stays readable
   throughout this component's own teardown**; the withdrawal guard is part of
+  throughout this component's own teardown** — the withdrawal guard is part of
   the semantics.
 - `provides cache: Cache`: the provision. Installed as an effect (with a
+- `provides cache: Cache` — the provision. Installed as an effect (with a
   compiler-derived inverse that withdraws it); the checker enforces provision
   disjointness across a composition and rejects dependency cycles.
 - `effect E undo U`: a revertible effect. `E` runs at activation; `U` is
+- `effect E undo U` — a revertible effect. `E` runs at activation; `U` is
   pushed onto the component's accumulator. `let x = effect ... undo ...` binds
   the acquisition; the `undo` expression may refer to it.
 
@@ -162,6 +180,7 @@ the paper's Figure 2). What the language guarantees statically:
 - every mutation is inside an `effect` form and therefore accumulated;
 - nothing can register an effect during teardown (there is no syntactic
   position for it: `undo` bodies type-check against a context with no effect
+  position for it — `undo` bodies type-check against a context with no effect
   capability, which is the language-level form of the `INACTIVE_EFFECT`
   hardening).
 
@@ -171,6 +190,7 @@ An activation body may `await`. Every `await` and every `effect` form is an
 *iteration boundary* in the paper's sense (§4.3.2): the compiled state machine
 can be diverted there, reverting exactly the effects accumulated so far. This
 is the compiler-lowered form of Cordis's async-generator effects: no closure
+is the compiler-lowered form of Cordis's async-generator effects — no closure
 per step; one state machine per component with inverse slots in its frame.
 
 ```revl
@@ -188,6 +208,8 @@ mean, *in the types*:
 
 - `effect E undo U`: an **acquisition**, revertible, tracked.
 - `emit E`: an **emission**: crosses the boundary (bytes sent, rows written to
+- `effect E undo U` — an **acquisition**: revertible, tracked.
+- `emit E` — an **emission**: crosses the boundary (bytes sent, rows written to
   a shared table). No inverse exists; the checker *requires* the `emit` marker
   wherever a declared-`emission` operation is called, so irreversibility is
   visible at every call site. Services declare which operations are emissions:
@@ -201,6 +223,7 @@ service Database {
 
 An `emission` may declare a `compensate` clause (saga-style), which composes in
 LIFO order like an inverse but is typed distinctly: the metatheory's exactness
+LIFO order like an inverse but is typed distinctly — the metatheory's exactness
 claims apply only to acquisitions, and the types keep the two apart.
 
 ### 3.6 Foreign functions
@@ -216,6 +239,7 @@ extern pure fn sha256(data: Bytes) -> Bytes
 An `extern` without a classification does not compile. This is where the
 honesty lives: revl cannot verify the foreign inverse, but it can force every
 escape hatch to be declared, enumerable, and auditable: `revl audit` lists a
+escape hatch to be declared, enumerable, and auditable — `revl audit` lists a
 component's entire boundary surface.
 
 ## 4. Checked guarantees (the point of the language)
@@ -236,15 +260,18 @@ component's entire boundary surface.
 
 "Compile (link)" means checked when a *composition* (a set of components) is
 assembled: the language has a linker phase precisely so G2/G3 are static even
+assembled — the language has a linker phase precisely so G2/G3 are static even
 though loading is dynamic: a composition manifest type-checks as a whole.
 Dynamically-added components re-run the link check against the running
 manifest before admission: the runtime gate exists, but it is the *same
+manifest before admission — the runtime gate exists, but it is the *same
 checker*, not a separate weaker one.
 
 ## 5. Type system sketch
 
 - **Context rows.** A component body types against a row `Γ = {db: Database,
   ...}` fixed by its `requires` clause, row-typed coeffects in the sense the
+  ...}` fixed by its `requires` clause — row-typed coeffects in the sense the
   paper attributes to Koka-style rows (§6.7). There is no subsumption trickery
   in v0: exact rows, width subtyping later.
 - **Effect capability as an index.** Judgments carry a mode `m ∈ {setup,
@@ -252,6 +279,7 @@ checker*, not a separate weaker one.
   `undo`/`compensate` bodies type in `teardown`; `provide` method bodies type
   in `setup` (they run while active and may install effects, which join the
   accumulator; the paper's coeffect-operations-are-effects synergy).
+  accumulator — the paper's coeffect-operations-are-effects synergy).
 - **Purity by default.** The expression language is pure; mutation exists only
   via effect forms and service calls. This is what makes G6 a type-level fact
   rather than an escape analysis.
@@ -263,6 +291,8 @@ Formalization plan: elaborate revl to a kernel calculus that is exactly the
 paper's §4 calculus with a typed effect language in place of opaque effect
 functions; the metatheorems then transfer by construction. This (not novelty
 of type rules) is the research claim: *a surface language whose every
+functions; the metatheorems then transfer by construction. This — not novelty
+of type rules — is the research claim: *a surface language whose every
 well-typed program satisfies the calculus's hypotheses*.
 
 ## 6. What remains unchecked, and the story for it
@@ -277,6 +307,7 @@ well-typed program satisfies the calculus's hypotheses*.
   reorderable recovery): v1 opt-in `commutative` annotation on service
   operations, discharged the same way. Without it, revl only promises the
   paper's LIFO guarantees, which is exactly what the runtime delivers anyway.
+  paper's LIFO guarantees — which is exactly what the runtime delivers anyway.
 
 ## 7. Compilation model
 
@@ -296,6 +327,7 @@ Lowering (v0, cordis-py backend):
 - `component` → a plugin dict `{"name", "inject", "apply", "Config"}`;
   `requires` → `inject`, `config {}` → a schema, body → `apply` compiled to an
   async generator whose `yield`s are the inverses, landing exactly on
+  async generator whose `yield`s are the inverses — landing exactly on
   `ctx.effect`'s iterator protocol, so divert-at-boundary comes from the
   runtime for free.
 - `provide` → `ctx.provide`/`ctx.set` with the derived withdrawal inverse.
@@ -306,6 +338,7 @@ Lowering (v0, cordis-py backend):
 
 The backend contract is small (install effect with inverse; provide/read keys;
 reactive refresh) and documented, so backends are swappable: this is what
+reactive refresh) and documented, so backends are swappable — this is what
 makes the Wasm tier a codegen project rather than a redesign.
 
 ## 8. Backend tiers ("shouldn't it compile to native?")
@@ -314,6 +347,7 @@ Deliberately not, and not first. The paradigm's hardest runtime requirement is
 *unloading code and reclaiming everything it owned*. Raw native (`dlopen`/
 `dlclose`) offers no per-component heap, no reclamation guarantee, and no
 confinement; it is the paradigm's known-hard case, and rebuilding a hardened
+confinement — it is the paradigm's known-hard case, and rebuilding a hardened
 lifecycle runtime is precisely the multi-year cost this project's architecture
 avoids (§2.5).
 
@@ -322,6 +356,7 @@ avoids (§2.5).
 | v0 | cordis-py | the semantics and the checker, on a runtime we have hardened ourselves and whose paper-conformance suite doubles as ours |
 | v1 | Wasm component model | performance *and* enforcement: imports-at-instantiation are coeffects made physical, instances drop cleanly, and confinement stops being advisory |
 | n/a | raw native | non-goal until something the Wasm tier cannot do demands it |
+| — | raw native | non-goal until something the Wasm tier cannot do demands it |
 
 Precedent: Rust bootstrapped on OCaml, Kotlin on the JVM, TypeScript on JS.
 Hosted first is how languages are born; native is graduation, and for this
@@ -339,11 +374,14 @@ program *rejected* (or an outcome forced) that the library version accepts:
 3. Linker: composition manifest (G2, G3).
 4. Codegen: cordis-py backend (§7).
 5. Demo: `PgDatabase` (stubbed pool) + `UserCache`: swap the database
+5. Demo: `PgDatabase` (stubbed pool) + `UserCache` — swap the database
    provider at runtime; observe the cache deactivate → reactivate; unload
    everything; assert the environment is exactly recovered.
 6. Negative suite: one minimal source file per guarantee, each failing to
    compile with a good error message. **The error messages are a deliverable**:
    a research language earns readers through its rejections.
+   compile with a good error message. **The error messages are a deliverable**
+   — a research language earns readers through its rejections.
 
 Out of scope for v0: realms/interception, `verified`/`commutative`
 annotations, Wasm tier, self-hosting, editor tooling beyond syntax
@@ -353,6 +391,7 @@ highlighting.
 
 - Surface syntax for *replacing* a provision (rolling update / service broker,
   paper §6.2): language construct or library pattern on top?
+  paper §6.2) — language construct or library pattern on top?
 - Should `config` changes be diffable in the language (reload-on-change per
   field, like the Cordis loader) or always restart-the-component in v0?
 - How much of the linker's manifest should be a stable, documented format?

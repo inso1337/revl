@@ -75,6 +75,7 @@ binding. See
 [566-pool-execution-receipts.md](566-pool-execution-receipts.md#the-grant-the-policy-the-outcome-and-the-budget-claim-issue-2720).
 
 Ten checks on the peer side (and an eleventh, `peer-state`, below), each naming one lowercase link, each failing
+Eight checks on the peer side, each naming one lowercase link, each failing
 closed: `task-shape`, `task-signature`, `pool-identity`, `charter-identity`,
 `policy-identity`, `peer-identity`, `stale-task`, `artifact-digest`,
 `unknown-runner`, `replayed-task`. A task's signed `issued_at` must be within
@@ -88,6 +89,7 @@ and never re-run under the old one. One peer per `--workdir`: the file is read
 at start, so a second `pool serve` on the same directory is not covered. Both
 clocks matter now: an operator and a peer more than `join_window_s` apart see
 every task refused on `stale-task`. A
+`peer-identity`, `artifact-digest`, `unknown-runner`, `replayed-task`. A
 multi-file task adds four, each naming the file it is about: `bundle-path`,
 `bundle-missing-file`, `bundle-extra-file` and `bundle-file-digest` (see
 "Multi-file artifacts" below). Four more on the way back: `peer-unreachable`, `result-digest`, `receipt-refused`,
@@ -238,6 +240,7 @@ exchange on the operator, so a far side that drips a byte before every expiry
 cannot renew the wait, and the peer reads frames on a per-connection thread so
 one held frame does not stop it accepting another. Running the task itself
 stays serial: the peer has one workspace and one result per task.
+near side grow without limit.
 
 A non-loopback bind is refused unless `--allow-remote` is passed, because the
 channel carries no transport security. Every record on it is signed, so nothing
@@ -285,6 +288,11 @@ it made. The wall time is NOT in the record, for the same reason the path is
 not: it would make two runs of the same work two different results. It is
 returned beside the result and appears only in the receipt's `budget_consumed`
 claim.
+The result record is `{runner, exit_code, stdout, stderr}` and the peer's own
+workspace path is replaced in every line before it is signed. A receipt is a
+signed record that leaves the peer's machine, so a local absolute path in it is
+both a reproducibility problem - the digest would differ per run for the same
+work - and a needless disclosure about the peer.
 
 ## A flag that is ignored is not implemented
 

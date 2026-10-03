@@ -136,6 +136,8 @@ name. This is the Go analog of the Rust backend's `_revl_realm` fix.
 - **ASCII classifiers** (`is_digit`, `is_alpha`, `is_alnum`, `is_space`): a
   chained string comparison in a func literal that binds the receiver once,
   total on the empty string.
+- **Still rejected with a clear `EmitError`**: the four ASCII classifiers
+  (`unknown v3 builtin method 'is_digit'`).
 
 ## Tier-fidelity fixes (fuzzer-found, E5 exit test)
 

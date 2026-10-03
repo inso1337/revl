@@ -50,6 +50,7 @@ fn parse_cmd(argv: List[Str]) -> Cmd {
   // payload), for `add` and `assemble` too (issue #2552) and for `rm` (issue
   // #2561); it is read from argv and nowhere else. A bare `truc stack` with
   // no `check` is unknown.
+  // payload); a bare `truc stack` with no `check` is unknown.
   if (s == "apply") {
     return Apply
   }
@@ -73,6 +74,10 @@ component CliDispatch requires asm: Assembler, ship: Shipper provides cli: Cli {
       Rm            => emit asm.rm(nth(argv, 1), has_flag(argv, "--trust-host-code")),
       Assemble      => emit asm.assemble(has_flag(argv, "--trust-host-code")),
       AssembleCheck => emit asm.assemble_check(has_flag(argv, "--trust-host-code")),
+      Add           => emit asm.add(nth(argv, 1)),
+      Rm            => emit asm.rm(nth(argv, 1)),
+      Assemble      => emit asm.assemble(),
+      AssembleCheck => emit asm.assemble_check(),
       Ship          => emit ship.run(".", nth(argv, 1)),
       Apply         => emit asm.apply(has_flag(argv, "--trust-host-code")),
       StackCheck    => emit asm.stack_check(),

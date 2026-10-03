@@ -8,6 +8,8 @@ other farm depends on it. Two L2 files are built on it:
 `RevL.Theorems.G9_NoAuthorityFromUntrusted`, the G9 guarantee, and
 `RevL.Theorems.G9Flow`, the differential-oracle row issue #1811 group 2
 added — which is why the `Step`/`Flow` walk they share is defined here.
+other farm depends on it. `RevL.Theorems.G9_NoAuthorityFromUntrusted` is
+the L2 guarantee built on it.
 
 ## What is modelled
 

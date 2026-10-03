@@ -65,6 +65,7 @@ spec:
           revl recover --wal "$wal" --json > "$here/recovery/$name.json"
           recover_status=$?
           echo "revl recover $name: exit $recover_status (0 clean, 1 residue, 3 a model stood in); verdict in $here/recovery/$name.json"
+          echo "revl recover $name: exit $? (0 clean, 1 residue); verdict in $here/recovery/$name.json"
         done
         exit "$status"
     # A stand-in for an MCP server you already run, so `revl-proxy` below has
@@ -158,6 +159,13 @@ spec:
       # The other route: an MCP server you already run, gated with no .rvl
       # written. `revl mcp proxy` (issue #1463) landed in revl 2.0; this is the
       # entry the commented slot here was waiting for.
+            --approval-policy auto
+      # Slot for `revl mcp proxy` (issue #1463, not released yet). It is meant
+      # to sit in front of an existing MCP server with no .rvl written. Once
+      # it ships, an entry here would launch the proxy with the upstream
+      # server's command. Its flags are not final: take them from
+      # `revl mcp proxy --help` in the release you install, then re-run
+      # ./validate.sh.
       #
       # `--undo close_ticket=reopen_ticket` is the operator's statement that
       # reopen_ticket reverts close_ticket. It makes close_ticket `witnessed`:
@@ -180,6 +188,9 @@ spec:
             --undo close_ticket=reopen_ticket
             --
             python3 tickets-mcp.py
+      # - name: git-tools
+      #   command: revl
+      #   args: [mcp, proxy, <flags from the release>, <upstream server command>]
 ---
 apiVersion: ax.io/v1alpha1
 kind: Task

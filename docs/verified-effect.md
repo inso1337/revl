@@ -42,6 +42,8 @@ only so far.
 `verified` is a modifier on an **activation-body** effect, or on a witnessed
 effect in a provide method (below), exactly as `verified fn` is a modifier on a
 function (syntax-2.0 §7). One token in one
+`verified` is a modifier on an **activation-body** effect, exactly as
+`verified fn` is a modifier on a function (syntax-2.0 §7). One token in one
 position; nothing is added to the lexer (`verified` is already a keyword).
 
 ```revl fragment
@@ -143,6 +145,10 @@ verdict and never counted against it: `noResidue` judges what the runtime can
 observe. A write in a provide method that is not bracketed at all
 (`fn seed(k) = data.insert(k, 1)`) is legal: the caller brackets the crossing,
 as `Seeder` does above.
+`verified effect` is refused in a **provide-method** body. The round trip is
+defined by a closed *activate → tear down* window, and the fiber runs an
+activation effect's inverse on teardown; a method effect runs per request and
+has no such window. The refusal is a compile error, not a silent no-op.
 
 ## 3. What the round trip actually measures
 

@@ -43,6 +43,9 @@
 //! literal that misses a declared field (`type P = { x: Int }` with
 //! `fn f() -> P { return { y: 1 } }`); the self-host gate raises no objection
 //! to it.
+//! run the rest of it. Measured, not assumed: the reference refuses
+//! `fn f() -> Int { return undefined_name }` and `fn f() -> { }`; the self-host
+//! gate raises no objection to either.
 //!
 //! So [`Verdict`] has no admitting arm and no `is_admitted()`. Its non-refusing
 //! outcome is [`Verdict::NoObjection`], which means exactly *"this gate found
@@ -77,6 +80,8 @@
 //!    ([`ADMISSION_SURFACE_ID`], `src/admission.rs`) — the region where the
 //!    covered layer, plus the terms `src/admission.rs` types ITSELF, is the
 //!    WHOLE question.
+//!    covered layer is the WHOLE question, because the source carries no term
+//!    the reference type layer decides.
 //!
 //! The surface is deliberately tiny, and it has two halves. `service` method
 //! signatures and scalar `type` aliases, over a closed scalar vocabulary derived
@@ -92,6 +97,13 @@
 //! reading it as an admission is sound, and it is measured rather than argued —
 //! every certified program in the census corpus is a program the reference
 //! admits, and the `false-admission` bucket of
+//! The surface is deliberately tiny: `service` method signatures and scalar
+//! `type` aliases, over a closed scalar vocabulary derived from the reference's
+//! own table. No body, no expression, no literal, no generic head. That is not
+//! the covered layer read optimistically; it is the sliver of the covered layer
+//! where reading it as an admission is sound, and it is measured rather than
+//! argued — every certified program in the census corpus is a program the
+//! reference admits, and the `false-admission` bucket of
 //! `tools/gate_reference_census.py` reds on the first one that is not.
 //!
 //! A source OUTSIDE the surface is [`Admission::Withheld`] carrying the verdict
@@ -109,6 +121,10 @@
 //! are all fresh have no running toucher to break and are admitted. In exchange
 //! the wire's service block is what a certified provide-method body's calls are
 //! TYPED against.
+//! composition. The extra obligation is redeclaration: a candidate declaring a
+//! service the composition already declares is gated on the reference's §5
+//! compatibility relation, which is the type layer, so it is withheld; one whose
+//! declarations are all fresh has no running toucher to break and is admitted.
 //! The running names come from the item-186 wire's service block, a `!services`
 //! header followed by one `:S` row per declared service. A wire with no header
 //! makes NO claim, so the running set is unknown and any declared service is
@@ -316,6 +332,7 @@ pub const ADMISSION_SURFACE_ID: &str = admission::SURFACE_ID;
 /// treating an [`Admission::Withheld`] as a defect: outside this region the
 /// honest answer is to withhold.
 pub const ADMITTED_LAYER: &str = "interface declarations, and components whose provide-method bodies are parameter reads and calls on a required service, over a closed scalar type vocabulary; every term in the region is one this gate types itself";
+pub const ADMITTED_LAYER: &str = "interface declarations only: service method signatures and scalar type aliases, over a closed scalar type vocabulary; no term the reference type layer decides";
 
 /// The three values a host can branch on (design "Versioning").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -638,6 +655,8 @@ pub fn admit_into(source: &str, manifest: &str) -> Verdict {
 /// 2. `source` must be inside the ADMISSION SURFACE ([`ADMISSION_SURFACE_ID`]),
 ///    the region where the covered layer, plus the terms [`admission`] types
 ///    ITSELF, is the WHOLE question.
+///    the region where the covered layer is the WHOLE question because the
+///    source carries no term the reference type layer decides.
 ///
 /// Outside that region the answer is [`Admission::Withheld`] carrying the
 /// verdict, which is exactly what a consumer of [`admit`] already handles. See
@@ -662,8 +681,13 @@ pub fn issue_admission(source: &str) -> Admission {
 /// Against a NON-EMPTY manifest the candidate carries two obligations more than
 /// it does standalone. Nothing it declares may REDECLARE a service the running
 /// composition already declares
+/// Against a NON-EMPTY manifest the candidate carries one obligation more than
+/// it does standalone: nothing it declares may REDECLARE a service the running
+/// composition already declares. That is the only interaction the reference has
+/// between an interface-only candidate and a running manifest
 /// (`revl.admission._admit_service_replacement`, which `lower.py` reaches only
 /// when the declared name is already in the ambient service table), because a
+/// when the declared name is already in the ambient service table), and a
 /// redeclaration is gated on the §5 compatibility relation, which is the type
 /// layer and therefore withheld here. And no component it declares may take the
 /// name of one the wire NAMES: a same-name component is a REPLACEMENT, whose
@@ -674,6 +698,7 @@ pub fn issue_admission(source: &str) -> Admission {
 /// certified. Names are compared folded (letter case and underscores dropped),
 /// and the wire names every running component, so a candidate whose name folds
 /// onto any of them under another spelling is withheld.
+/// layer and therefore withheld here.
 ///
 /// In exchange the manifest is what makes an AMBIENT requirement admissible at
 /// all: the item-186 wire's SERVICE BLOCK is a `!services` header followed by
@@ -688,6 +713,13 @@ pub fn issue_admission(source: &str) -> Admission {
 /// and any declared service is withheld, exactly as it was before the block
 /// existed. Reading silence as "declares nothing" would be the wave-through this
 /// crate exists to prevent.
+/// The running names arrive in the item-186 wire's SERVICE BLOCK: a `!services`
+/// header followed by one `:S` row per declared service
+/// (`revl.manifest.manifest_wire`). The header is what makes the block usable —
+/// a wire without it CLAIMS NOTHING about the running services, so the set is
+/// unknown rather than empty and any declared service is withheld, exactly as it
+/// was before the block existed. Reading silence as "declares nothing" would be
+/// the wave-through this crate exists to prevent.
 ///
 /// What still cannot be admitted here, and why: a candidate whose service NAME
 /// the composition already declares, even one whose shape is byte-identical to
@@ -696,6 +728,9 @@ pub fn issue_admission(source: &str) -> Admission {
 /// wire could not spell whole, which every MARKED operation is; and anything at
 /// all against a wire carrying a WITHDRAWAL row, which the fold decides in full
 /// and this surface declines.
+/// the running one (the wire carries the name, not the shape — that is the
+/// self-host type layer's lane); and anything at all against a wire carrying a
+/// WITHDRAWAL row, which the fold decides in full and this surface declines.
 pub fn issue_admission_into(source: &str, manifest: &str) -> Admission {
     if manifest.is_empty() {
         return issue_admission(source);
@@ -1255,6 +1290,7 @@ component CacheMiss requires store: Store provides cache: Cache {\n\
 
     /// A source inside the admission surface: an interface declaration, the
     /// half of it that carries no term at all.
+    /// A source inside the admission surface: interface declarations only.
     const CERTIFIABLE: &str = "service Store {\n  fn get(key: Str) -> Str\n}\n";
 
     #[test]

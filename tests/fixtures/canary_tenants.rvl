@@ -61,14 +61,17 @@ component TenantCStore provides kv: Kv {
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
   effect kv.set("who", "alice") undo kv.unset("who")
+  effect kv.set("who", "alice") undo kv.set("who", "")
 }
 
 component TenantBApp requires kv: Kv {
   isolate kv in realm("tenant_b")
   effect kv.set("who", "bob") undo kv.unset("who")
+  effect kv.set("who", "bob") undo kv.set("who", "")
 }
 
 component TenantCApp requires kv: Kv {
   isolate kv in realm("tenant_c")
   effect kv.set("who", "carol") undo kv.unset("who")
+  effect kv.set("who", "carol") undo kv.set("who", "")
 }

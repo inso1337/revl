@@ -85,6 +85,7 @@ owns. None of them is a new gate, and none of them reads a candidate's prose:
                           read of the theorem ledger against `base`
     scope                 the changed-file set against the declared scope AND
                           the operator's allow set
+    scope                 the changed-file set against the declared scope
     documentation         tools/docgen.py --check, tools/check_roadmap_claims.py
     reach                 tools/promotion_evidence.py: the audit of every
                           conformance case at `base` and at head, put through
@@ -148,6 +149,7 @@ gate rather than read one.
 USAGE
 -----
     python3 tools/evolution_reward.py --candidate candidate.json --allow 'src/**,tests/**'
+    python3 tools/evolution_reward.py --candidate candidate.json
     python3 tools/evolution_reward.py --candidate candidate.json --json out.json
 
 The candidate record is a JSON object. Exactly three keys are read:
@@ -183,6 +185,9 @@ when a directory glob in the grant covers it, because the grant names the
 subject and the fence is the judge.
 
 Exit status is 0 only when the trajectory is retained.
+`REVL_HELDOUT_SEED`, because a candidate that could name its own seed would
+choose the draw it is judged on. Exit status is 0 only when the trajectory is
+retained.
 """
 
 from __future__ import annotations
@@ -248,6 +253,7 @@ COMPONENTS = (
 HELDOUT_DRAW = 200
 
 # The environment variable the seed FILE arrives in. It is NOT a field on the
+# The environment variable the seed arrives in. It is NOT a field on the
 # candidate record: `RECORD_KEYS` is the whitelist that keeps a candidate from
 # reaching a probe, and a candidate that could name its own seed would choose
 # the draw it is judged on. A value here is a path outside the candidate tree,
@@ -298,6 +304,8 @@ def __getattr__(name: str):
     if name == "EVALUATOR_FENCE":
         return _evaluator_fence()
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+# the draw it is judged on.
+HELDOUT_SEED_ENV = "REVL_HELDOUT_SEED"
 
 # The census baseline. `probe_no_new_false_admits` reads this file on both sides
 # of the candidate's change, which is the half of the item's "can only shrink in
@@ -408,6 +416,7 @@ class Candidate:
 
 def load_candidate(record: dict, allow=(), base_pin: str = "",
                    base_source: str = "") -> Candidate:
+def load_candidate(record: dict) -> Candidate:
     """Build a `Candidate` from a record, dropping every other key by name.
 
     Refuses rather than guesses: a record with no `tree`, no `base` or no `scope`
@@ -500,6 +509,7 @@ def run_git(candidate: Candidate, args, timeout: int = 120):
         proc = subprocess.run(
             ["git", "-C", str(candidate.tree)] + [str(a) for a in args],
             timeout=timeout, capture_output=True, text=True, env=_read_env())
+            timeout=timeout, capture_output=True, text=True, env=candidate_env())
     except (subprocess.TimeoutExpired, OSError) as exc:
         return False, f"git {' '.join(str(a) for a in args)} failed: {exc}"
     if proc.returncode != 0:
@@ -536,6 +546,7 @@ def changed_files(candidate: Candidate):
     on the tree it produced and not on how tidily it was committed. The read
     itself is `measured_paths`, shared with `tools/evolution_controller.py`'s
     `measured_diff` so the two cannot drift apart.
+    on the tree it produced and not on how tidily it was committed.
     """
     return measured_paths(candidate.tree, candidate.base)
 
@@ -567,6 +578,7 @@ def _read_env() -> dict:
 def _git_z(tree: Path, args, env, timeout: int):
     """`(ok, [paths])` from a NUL-separated git listing, or `(False, error)`."""
     ok, raw = _git_bytes(tree, args, env, timeout)
+    ok, out = run_git(candidate, ["diff", "--name-only", candidate.base])
     if not ok:
         return False, raw
     return True, [p.decode("utf-8", "surrogateescape").rstrip("/")
@@ -593,6 +605,9 @@ def _base_ignore_rules(tree: Path, base: str, env, timeout: int):
     """`(ok, {path: bytes})`: every `.gitignore` blob in the base commit."""
     ok, names = _git_z(tree, ["ls-tree", "-r", "-z", "--name-only",
                               "--end-of-options", base + "^{tree}"], env, timeout)
+        return False, out
+    paths = {line.strip() for line in out.splitlines() if line.strip()}
+    ok, out = run_git(candidate, ["ls-files", "--others", "--exclude-standard"])
     if not ok:
         return False, names
     rules = {}
@@ -847,6 +862,9 @@ def check_base(tree, record_base: str, pin: str, source: str = ""):
             + f", not the operator base {commit}" + (f" ({source})" if source else "")
             + ". A record cannot move the base off the one the operator "
             "fixed" + detail, commit)
+        return False, out
+    paths |= {line.strip() for line in out.splitlines() if line.strip()}
+    return True, sorted(paths)
 
 
 def _sha256(path: Path) -> str:
@@ -884,6 +902,7 @@ def probe_no_new_false_admits(candidate: Candidate) -> Verdict:
         return failed(name, f"{CENSUS_BASELINE} is not present in the candidate tree")
     try:
         head = json.loads(baseline_path.read_text(encoding="utf-8"))
+        head = json.loads(baseline_path.read_text())
     except (OSError, ValueError) as exc:
         return failed(name, f"{CENSUS_BASELINE} is unreadable: {exc}")
 
@@ -956,14 +975,22 @@ def probe_held_out(candidate: Candidate) -> Verdict:
     component rather than a skipped one: a promotion pipeline that silently
     drops this check when nobody configured a seed has exactly the property
     item 537 was opened about.
+    on, which is the fail-open shape this component exists to close. An absent
+    seed is a failed component rather than a skipped one: a promotion pipeline
+    that silently drops this check when nobody configured a seed has exactly
+    the property item 537 was opened about.
     """
     name = "held-out"
     seed_file = os.environ.get(HELDOUT_SEED_FILE_ENV, "")
     if not seed_file:
+    seed = os.environ.get(HELDOUT_SEED_ENV, "")
+    if not seed:
         return failed(
             name,
             f"no held-out seed file: {HELDOUT_SEED_FILE_ENV} is unset, so the "
             "candidate was not scored on anything it could not read")
+            f"no held-out seed: {HELDOUT_SEED_ENV} is unset, so the candidate "
+            "was not scored on anything it could not read")
 
     with tempfile.TemporaryDirectory() as scratch:
         # The record is written OUTSIDE the candidate tree on purpose. Writing
@@ -981,6 +1008,7 @@ def probe_held_out(candidate: Candidate) -> Verdict:
         if verdict_path.is_file():
             try:
                 record = json.loads(verdict_path.read_text(encoding="utf-8"))
+                record = json.loads(verdict_path.read_text())
             except ValueError:
                 record = None
 
@@ -1046,6 +1074,7 @@ def probe_documentation(candidate: Candidate) -> Verdict:
 
 def probe_scope(candidate: Candidate) -> Verdict:
     """The measured change set against the declared scope AND the operator grant.
+    """The changed-file set against the declared scope.
 
     The declared scope is the candidate's claim about its own work; the operator
     allow set (`--allow` / `ALLOW_ENV`) is the grant that claim is checked
@@ -1079,6 +1108,11 @@ def probe_scope(candidate: Candidate) -> Verdict:
     The diff is the MEASURED one. A declared change set is never consulted, for
     the same reason the controller refuses one: it is the candidate's account
     of itself.
+    Fail-closed in three directions. An empty scope declaration cannot be
+    satisfied, because a candidate that declares nothing has not constrained
+    itself. An empty change set cannot be satisfied either: there is no work to
+    retain. And a path matching no declared glob fails, listing the paths, so the
+    verdict is readable without re-running git.
     """
     name = "scope"
     fence = _evaluator_fence()
@@ -1152,6 +1186,7 @@ def probe_scope(candidate: Candidate) -> Verdict:
             f"{len(stray)} changed path(s) outside the declared scope: "
             + ", ".join(stray[:6]),
             [f"git diff --no-renames --name-only {candidate.base}"])
+            [f"git diff --name-only {candidate.base}"])
     return verified(
         name,
         f"{len(paths)} changed path(s), all inside the declared scope and the "
@@ -1211,6 +1246,8 @@ def _whole_tree(scope) -> bool:
     plus `*`) passes it. The operator allow set bounds that case.
     """
     return all(_in_scope(path, scope) for path in WHOLE_TREE_SENTINELS)
+        f"{len(paths)} changed path(s), all inside the declared scope",
+        [f"git diff --name-only {candidate.base}", "scope=" + ";".join(candidate.scope)])
 
 
 def _glob_to_regex(pattern: str):
@@ -2403,6 +2440,7 @@ class Scorecard:
                  "allow " + (";".join(self.candidate.allow)
                              if self.candidate.allow else "(none: default deny)"),
                  f"protocol {self._protocol_identity() or 'unavailable'}", ""]
+                 f"base {self.candidate.base}", ""]
         for v in self.verdicts:
             mark = "ok  " if v.verified else "FAIL"
             lines.append(f"  {mark} {v.component:<22} {v.reason}")
@@ -2452,6 +2490,7 @@ def score(candidate: Candidate, probes=None) -> Scorecard:
     except (OSError, RuntimeError, ImportError):
         protocol = None
     return Scorecard(candidate, verdicts, protocol)
+    return Scorecard(candidate, verdicts)
 
 
 def main(argv=None) -> int:
@@ -2475,12 +2514,14 @@ def main(argv=None) -> int:
 
     try:
         record = json.loads(args.candidate.read_text(encoding="utf-8"))
+        record = json.loads(args.candidate.read_text())
     except (OSError, ValueError) as exc:
         print(f"evolution_reward: cannot read {args.candidate}: {exc}", file=sys.stderr)
         return 1
     try:
         candidate = load_candidate(record, allow=allow, base_pin=base_pin,
                                    base_source=base_source)
+        candidate = load_candidate(record)
     except ValueError as exc:
         print(f"evolution_reward: {exc}", file=sys.stderr)
         return 1

@@ -30,6 +30,7 @@ records render, with no census run, and section 6 holds the layout: sorted
 records, no stored aggregate, a report that is the same whether it is built
 from a run or from the records, and two independent changes that merge under
 git's ordinary line merge.
+     committed bytes rather than trusted to have been run once.
 
 The census run itself is expensive (one self-host build, one pass over ~850
 programs), so it happens once per module.
@@ -73,11 +74,14 @@ def checker():
 def committed(artifact):
     """The report the committed records render, with no census run."""
     return artifact.report_from_records()
+    return json.loads(artifact.REPORT_JSON.read_text(encoding="utf-8"))
 
 
 @pytest.fixture(scope="module")
 def committed_md(artifact, committed):
     return artifact.render_markdown(committed)
+def committed_md(artifact):
+    return artifact.REPORT_MD.read_text(encoding="utf-8")
 
 
 @pytest.fixture(scope="module")
@@ -106,6 +110,7 @@ def test_the_published_residuals_are_exactly_the_baselined_ones(
                 if k.split("/", 1)[0] == census.HARD}
     assert {k: sorted(v) for k, v in published.items()} == recorded, (
         "docs/census-artifact/ renders a different false-admit allowance "
+        "docs/census-artifact.json names a different false-admit allowance "
         "than tools/gate_reference_census_baseline.json records. Regenerate: "
         "python3 tools/census_artifact.py --write")
 
@@ -121,6 +126,8 @@ def test_every_residual_is_named_in_the_markdown(committed, committed_md):
         assert case_id in committed_md, (
             f"{case_id} is in the allowance but not named in the rendered "
             f"markdown")
+            f"{case_id} is in the allowance but not named in "
+            f"docs/census-artifact.md")
 
 
 def test_the_markdown_states_n_and_the_checker_version(committed, committed_md):
@@ -283,6 +290,18 @@ def test_a_stale_reproduction_lifts_no_claim(artifact, committed):
     rung is computed from whether a record at the CURRENT checker version
     exists, never declared, in both directions: with one, the claims it backs
     are lifted; without one, none is, and the stale records are named.
+    rung is computed from whether the reproduction is current, never declared:
+    a reproduction recorded at another checker version must drop every lifted
+    claim back down."""
+    rep = committed["census"]["reproduction"]
+    assert rep is not None and rep["is_current"] is True, (
+        "the committed reproduction is stale; re-run "
+        "tools/gate_reference_census.py --engine crate and "
+        "tools/census_artifact.py --record-reproduction --write")
+    lifted = [c for c in committed["claims"] if c["rung"] == "demonstrated"]
+    assert lifted, "nothing was lifted, so this test measures nothing"
+    for claim in lifted:
+        assert "reproduced_by" in claim["evidence"]
 
     Since issue #1768 a tree may briefly hold no current record (two pull
     requests that each re-recorded land, and each record predates the other's
@@ -298,11 +317,18 @@ def test_a_stale_reproduction_lifts_no_claim(artifact, committed):
     else:
         assert not lifted, "a claim was lifted with no current reproduction"
         assert committed["census"]["stale_reproduction_records"] or rep is None
+    # and the drop actually happens: the same evidence at a version that is not
+    # the current one justifies only `measured`.
+    stale = dict(committed["census"]["reproduction"])
+    stale["recorded_at_checker_version"] = "GATE-CENSUS-1+000000000000"
+    assert stale["recorded_at_checker_version"] != stale["current_checker_version"]
 
 
 def test_the_reproduction_fixture_matches_what_was_published(artifact,
                                                              committed):
     recorded = artifact.load_reproduction()
+    recorded = json.loads(
+        artifact.CRATE_REPRODUCTION.read_text(encoding="utf-8"))
     rep = committed["census"]["reproduction"]
     if recorded is None:
         assert rep is None
@@ -325,6 +351,7 @@ def test_the_report_names_what_it_does_not_establish(committed, committed_md):
 
 
 def test_the_reproduction_states_its_own_limit(artifact, committed):
+def test_the_reproduction_states_its_own_limit(committed):
     """The crate is built FROM `selfhost/lower.rvl`, so it is the same source
     through a different toolchain and not a second specification. Publishing it
     as an independent reproduction without that sentence would over-claim.
@@ -336,6 +363,7 @@ def test_the_reproduction_states_its_own_limit(artifact, committed):
     the merge ref, so a pull request's checker version is merge(main, branch),
     and every checker-moving landing makes every other open pull request's
     record stale. A root-suite failure on that would never converge."""
+    as an independent reproduction without that sentence would over-claim."""
     rep = committed["census"]["reproduction"]
     if rep is None:
         pytest.skip("\n".join(artifact.reproduction_problems()
@@ -719,11 +747,13 @@ def test_recording_reads_sees_an_open_and_leaves_no_state(artifact, tmp_path):
     with artifact.recording_reads() as outer:
         with artifact.recording_reads() as inner:
             target.read_text(encoding="utf-8")
+            target.read_text()
         (tmp_path / "second.txt").write_text("y")
     assert str(target) in {str(Path(p)) for p in inner}
     assert str(target) not in {str(Path(p)) for p in outer}
     assert artifact._READS == before == []
     target.read_text(encoding="utf-8")
+    target.read_text()
     assert artifact._READS == []
 
 
@@ -819,6 +849,7 @@ def test_the_diff_filter_names_every_kind_of_input(artifact):
               "tests/fixtures/brand_new.rvl", "crates/revl-gate/src/admission.rs",
               "crates/revl-gate/Cargo.toml", "tools/census_artifact.py",
               "docs/census-artifact/cases/examples/a.rvl.json", "selfhost/lower.rvl"]
+              "docs/census-artifact.json", "selfhost/lower.rvl"]
     assert artifact.moved_inputs(inputs, committed) == inputs
 
 

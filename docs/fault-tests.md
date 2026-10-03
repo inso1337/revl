@@ -83,6 +83,7 @@ executed, so a leaky undo on the very step the author pointed at passed
 `tests/test_fault_tests.py::test_a_non_inverse_undo_fails_under_an_injected_fault`;
 since issue #1859 the checker refuses that `undo` outright, and the test reaches
 the program past the checker so the runtime accounting stays pinned).
+`tests/test_fault_tests.py::test_a_non_inverse_undo_fails_under_an_injected_fault`).
 Under the current placement every `fail at step N` exercises the unwind of the
 named step itself; "die before step N" is expressed as `fail at step N-1`, and
 the empty prefix (die before anything ran) is no longer addressable — it
@@ -463,6 +464,7 @@ every fault point the sweep therefore also compares:
   that declares one (`extern emission fn put(..) compensate undo()`). An emit
   owes one compensation: a site-spelled one replaces the extern's declared one
   for that crossing, as every tier registers it (issue #1902); and
+  that declares one (`extern emission fn put(..) compensate undo()`); and
 * **ran**, observed on the tier: the sweep prepends one line to the host body
   of every compensation extern, on every tier, printing
   `[revl-sweep] compensation ran: <name>`. The host body itself proves it ran.

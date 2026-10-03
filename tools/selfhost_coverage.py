@@ -150,6 +150,7 @@ def reference_constructs(path: Path) -> dict[str, int]:
     file-wide union would credit `_fn_stmt`'s `step=let` to `_expr`'s `kind`.
     """
     tree = ast.parse(path.read_text(encoding="utf-8"))
+    tree = ast.parse(path.read_text())
     # name -> [(line, field-or-None)]. A binding from something that is NOT a
     # discriminant read records None, which INVALIDATES the name from that line
     # on. Without that, a `for index, (kind, value) in ...` unpacking shadows an
@@ -265,6 +266,7 @@ def port_sources(port: str) -> list[Path]:
 
 
 def selfhost_constructs(path: Path, helper_src: str | None = None) -> set[str]:
+def selfhost_constructs(path: Path) -> set[str]:
     """Every discriminant `selfhost/emit_<tier>.rvl` branches on.
 
     The ported emitters read the IR through one fixed spelling set (item 185's
@@ -278,6 +280,8 @@ def selfhost_constructs(path: Path, helper_src: str | None = None) -> set[str]:
     # split port, and called from its siblings: read them from the whole port.
     helpers = {m.group(1): m.group(2)
                for m in _HELPER.finditer(src if helper_src is None else helper_src)}
+    src = path.read_text()
+    helpers = {m.group(1): m.group(2) for m in _HELPER.finditer(src)}
     binds: dict[str, list[tuple[int, str]]] = {}
 
     def line_of(offset: int) -> int:
@@ -322,6 +326,7 @@ def corpus_documents(tier: str) -> list[Path]:
     credited with coverage here either.
     """
     test = (ROOT / "tests" / f"test_selfhost_emit_{tier}.py").read_text(encoding="utf-8")
+    test = (ROOT / "tests" / f"test_selfhost_emit_{tier}.py").read_text()
     block = re.search(r"^CORPUS\s*=\s*\[(.*?)^\]", test, re.S | re.M)
     if block is None:  # pragma: no cover - shape change in an oracle
         raise SystemExit(f"cannot find a CORPUS list in test_selfhost_emit_{tier}.py")
@@ -366,6 +371,7 @@ def survey() -> dict[str, dict[str, object]]:
         ported = set()
         for source in sources:
             ported |= selfhost_constructs(source, whole)
+        ported = selfhost_constructs(ROOT / "selfhost" / f"{port}.rvl")
         covered = corpus_constructs(tier)
         mirrored = set(reference) & ported
         result[tier] = {
@@ -382,6 +388,7 @@ def _ledger() -> dict:
     """The recorded blind spots, minus the `_`-prefixed prose keys JSON has no
     comment syntax for."""
     raw = json.loads(LEDGER.read_text(encoding="utf-8"))
+    raw = json.loads(LEDGER.read_text())
     return {k: v for k, v in raw.items() if not k.startswith("_")}
 
 
@@ -509,6 +516,7 @@ def _regroup(existing: dict, present: set[str], default: str) -> dict:
 
 def write_ledger(data: dict) -> None:
     ledger = json.loads(LEDGER.read_text(encoding="utf-8")) if LEDGER.exists() else {}
+    ledger = json.loads(LEDGER.read_text()) if LEDGER.exists() else {}
     for tier, found in data.items():
         entry = ledger.setdefault(tier, {})
         entry["blind"] = _regroup(

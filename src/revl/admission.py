@@ -74,6 +74,7 @@ def _service_equal(a: ServiceDecl, b: ServiceDecl) -> bool:
                 m.name: (tuple(m.params), m.returns, m.emission, m.async_,
                          m.commutative, m.capabilities,
                          tuple(m.witnessed) if m.witnessed is not None else None)
+                         m.commutative, m.capabilities)
                 for m in svc.methods.values()
             },
         )
@@ -132,6 +133,7 @@ class _Drift:
     """One reason a replacement interface is not compatible."""
     method: str | None      # the offending method, or None for a service-wide clash
     kind: str               # added | removed | signature | emission | witnessed | commutative
+    kind: str               # added | removed | signature | emission | commutative
     reason: str             # human-readable "what and why"
 
 

@@ -202,8 +202,13 @@ def test_a_crossing_with_no_resolvable_capability_is_refused():
     (here, a bare `emission` op reached through a service-typed parameter). An
     empty or unnameable capability set is "nothing to compare", not "nothing
     to check": treating it as the latter is the silent hole."""
+    """The same rule for the shapes whose boundary set the per-crossing
+    resolution cannot pin down at all (here, a crossing through a service-typed
+    parameter). An empty capability set is "nothing to compare", not "nothing to
+    check": treating it as the latter is the silent hole."""
     src = (
         'service Store { emission fn ingest(row: Str) -> Int }\n'
+        'service Store { emission[db] fn ingest(row: Str) -> Int }\n'
         'service Worker { emission fn run(s: Store) -> Str'
         ' within { object: db, verbs: [ingest] } }\n'
         'component W provides worker: Worker {\n'

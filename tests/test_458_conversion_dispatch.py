@@ -46,6 +46,14 @@ six-tier fault on a `to_int32` out of range.
        run time (`unreachable`), because the canonical shortest-round-trip
        renderer is not implemented there (docs/strings.md,
        docs/wasm-capabilities.md).
+       local on that tier is an i32 except an `Int`, and a Float value is an
+       f64. A Float parameter, return, comparison, equality, list element,
+       variant payload and `.to_str()` are each refused BY NAME there; the
+       binding was the one Float position that emitted instead — even for a
+       program that never read it. It is the same named refusal now
+       (docs/wasm-capabilities.md). An interpolated Float EXPRESSION that is
+       never bound (`` `${3.0}` ``) still lowers, inside the documented
+       `$f64_to_str` fence.
 
     3. `?.to_int()` / `?.to_str()` / `?.to_int32()` on ts  **TypeError at run time**
 
@@ -277,6 +285,21 @@ test "Float.to_str uses the same renderer" { assert stringed() == "3" }
     if status == "skip":
         pytest.skip(f"wasm: {message}")
     assert status == "pass", f"wasm: {message}"
+def test_wasm_refuses_a_float_binding_by_name():
+    """The tier cannot hold a Float local — every local is an i32 but an Int —
+    and it fails CLOSED now: an emit-time refusal naming the type, not a module
+    wasmtime rejects at load (docs/wasm-capabilities.md)."""
+    with pytest.raises(Exception) as excinfo:
+        _emit("wasm", "pub fn probe() -> Int { let x: Float = 0.5 return 7 }")
+    assert "type 'Float' is not lowerable" in str(excinfo.value), excinfo.value
+
+
+def test_wasm_refuses_a_float_binding_even_where_it_is_read():
+    """The shape that surfaced it: a `${…}` template over a bound Float. The
+    same refusal, at the binding, before the rendering is reached."""
+    with pytest.raises(Exception) as excinfo:
+        _emit("wasm", "pub fn probe() -> Str { let x: Float = 0.5 return `${x}` }")
+    assert "type 'Float' is not lowerable" in str(excinfo.value), excinfo.value
 
 
 WASM_INLINE_FLOAT = """

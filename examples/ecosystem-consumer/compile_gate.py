@@ -9,6 +9,10 @@ tag, imports ONLY `revl.gate`, and programmatically compiles a batch of
 agent-authored candidates to real target source with `compile_to`, gating
 whether it writes/emits each one on the SAME verdict `ci_gate.py` gates its
 "register" decision on.
+the COMPILE half: an external tool that does `pip install revl`, imports ONLY
+`revl.gate`, and programmatically compiles a batch of agent-authored candidates
+to real target source with `compile_to`, gating whether it writes/emits each
+one on the SAME verdict `ci_gate.py` gates its "register" decision on.
 
 READ THIS BEFORE YOU COPY IT: THE ASYMMETRIC SECURITY CONTRACT
 ================================================================

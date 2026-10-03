@@ -37,6 +37,7 @@ from ..compiler import compile_source
 
 def _load(path: str) -> dict:
     text = Path(path).read_text(encoding="utf-8")
+    text = Path(path).read_text()
     return compile_source(text, path)
 
 
@@ -83,6 +84,7 @@ def _run_adapt(args) -> int:
     opt_ins: dict = {}
     if args.adapt:
         opt_ins = json.loads(Path(args.adapt).read_text(encoding="utf-8"))
+        opt_ins = json.loads(Path(args.adapt).read_text())
 
     res = bridge_plan(req, prov, opt_ins,
                       req_types=req_types, prov_types=prov_types)
@@ -118,6 +120,7 @@ def _run_adapt(args) -> int:
     # proposed hop and the committed inner hop end to end, so the review sees
     # the composed loss rather than just this hop's slice of it.
     cand_text = Path(args.candidate).read_text(encoding="utf-8")
+    cand_text = Path(args.candidate).read_text()
     depth = chain_depth_for(cand_text)
     plan["chainDepth"] = depth
     if depth > 1:

@@ -50,6 +50,8 @@ Verdicts (in ``report["quarantine"]["verdict"]``):
                       ``trapped``: a guest that loops forever spends its fuel
                       budget and traps (see ``ComponentLimits``), so reaching
                       this verdict means the guest outran the runtime itself.
+                      budget and traps (see ``PROBE_FUEL``), so reaching this
+                      verdict means the guest outran the runtime itself.
                       Contained — the host was never touched — but the candidate
                       is neither proved nor disproved. Not eligible.
   * ``rejected``    — admission refused; the candidate never reached the
@@ -137,6 +139,19 @@ _BATTERY: tuple[str, ...] = ("", "a", "revl", "x" * 64)
 # `Str`-surface boundary function costs on this battery — a trivial `Str -> Str`
 # template measures under 1e5 — so it caps a runaway guest without narrowing
 # what a real candidate may compute.
+# The fuel budget for one probe, in wasm instructions. Fuel bounds a guest by
+# *work* rather than by elapsed time, so a candidate whose boundary function
+# never returns (an unbounded `while`) traps deterministically in about a tenth
+# of a second instead of holding the wasmtime process until the 120 s
+# wall-clock timeout fires. That distinction is the whole point: a trap is an
+# `EmitError` this battery already grades, while a wall-clock timeout surfaces
+# as `subprocess.TimeoutExpired`, which is not a verdict at all.
+#
+# The budget sits three orders of magnitude above what a `Str`-surface boundary
+# function costs on this battery — a trivial `Str -> Str` template measures
+# under 1e5 — so it caps a runaway guest without narrowing what a real
+# candidate may compute.
+PROBE_FUEL = 1_000_000_000
 
 
 # --------------------------------------------------------------- canonical tier
@@ -153,6 +168,7 @@ def _load_canonical():
 
     The wasm backend lives outside the ``revl`` package (a sibling ``backends/``
     tree), and a parallel session owns that file, so it is loaded by location,
+    tree), and a parallel session owns that file — so it is loaded by location,
     never imported as a package and never modified. Returns the module, or
     ``None`` when the backend tree is not present (an installed-package
     environment with no in-tree ``backends/``), which the caller reports as an
@@ -164,6 +180,14 @@ def _load_canonical():
     absent; that one entry is taken out again afterwards, and only when this
     load is what added it. Nothing else is removed: other threads may change
     ``sys.path`` meanwhile (issue #2204).
+    ``canonical.py`` binds ``from emit import emit`` at load, resolving the bare
+    name ``emit`` against ``sys.modules``. By the time quarantine runs, the
+    gauntlet's scratch boot has already cached a *different* backend's
+    ``emit.py`` there (the python driver's), so a naive load would bind the wrong
+    emitter. We therefore pin ``sys.modules['emit']`` to the wasm backend's own
+    ``emit.py`` for the duration of the canonical exec, then restore whatever was
+    there — an import-state swap fully contained to this call, canonical.py
+    itself unmodified.
     """
     import sys  # noqa: PLC0415
 
@@ -171,18 +195,34 @@ def _load_canonical():
 
     canonical_path = backends_root() / "wasm" / "canonical.py"
     if not canonical_path.is_file():
+    backend = backends_root() / "wasm"
+    canonical_path = backend / "canonical.py"
+    emit_path = backend / "emit.py"
+    if not canonical_path.is_file() or not emit_path.is_file():
         return None
 
     # canonical.py's own `_SRC`: `_HERE.parents[1] / "src"`, `_HERE` resolved
     src_entry = str(canonical_path.resolve().parents[2] / "src")
     src_was_on_path = src_entry in sys.path
+    saved = sys.modules.get("emit")
     try:
+        wasm_emit = _load_by_path("emit", emit_path)
+        sys.modules["emit"] = wasm_emit  # canonical's `from emit import` binds here
+        if str(backend) not in sys.path:
+            sys.path.insert(0, str(backend))
         return _load_by_path("revl_wasm_canonical_quarantine", canonical_path)
     except Exception:  # pragma: no cover - defensive: a broken backend tree
         return None
     finally:
         if not src_was_on_path and src_entry in sys.path:
             sys.path.remove(src_entry)
+        # restore whatever `emit` the rest of the process expects (the python
+        # driver's emitter the gauntlet cached), so nothing downstream is
+        # perturbed by our temporary pin.
+        if saved is not None:
+            sys.modules["emit"] = saved
+        else:
+            sys.modules.pop("emit", None)
 
 
 def _service_name(ir: dict, arguments: dict) -> str:
@@ -215,6 +255,7 @@ def _unavailable(reason: str, *, functions=None) -> dict:
 
 
 def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
+def _run_substrate(canonical, ir: dict, service: str) -> dict:
     """Compile the candidate to a standard component and run the lifecycle +
     fault battery on the substrate — the physical confinement proof.
 
@@ -232,11 +273,13 @@ def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
     re-raised. The section's ``status`` is ``passed`` when every probe returned,
     ``trapped`` when any probe trapped (including a guest that spent its whole
     fuel budget, see ``ComponentLimits``), ``timeout`` when a probe outran the
+    fuel budget, see ``PROBE_FUEL``), ``timeout`` when a probe outran the
     runtime's own wall-clock budget and was killed, ``deferred`` when the
     candidate has no canonical-ABI-emittable boundary function to present (every
     boundary signature carries a still-un-lowerable type — Float/Map/resource/
     function-value), and ``unavailable`` when the toolchain is absent or the
     component never instantiated (nothing ran, so no trap was caught)."""
+    function-value), and ``unavailable`` when the toolchain is absent."""
     EmitError = canonical.EmitError
 
     # 0. Confinement first (issue #2729): the policy's ceilings, or the
@@ -336,6 +379,8 @@ def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
                             # a config import in its bytes is refused.
                             config_fields=tuple(),
                             isolate=isolate, declared_targets=targets)
+                        result = canonical.run_component_str(component, func, arg,
+                                                             fuel=PROBE_FUEL)
                         probe["outcome"] = "returned"
                         probe["result"] = result
                         returned += 1
@@ -371,6 +416,15 @@ def _run_substrate(canonical, ir: dict, service: str, *, policy=None) -> dict:
                             probe["outcome"] = "trapped"
                             probe["trap"] = _trap_detail(str(error))
                             trapped += 1
+                        # the physical confinement: wasmtime caught a trap and
+                        # exited non-zero. The host was never touched — this is a
+                        # contained trap, recorded, never re-raised. A guest that
+                        # spends its whole fuel budget lands here too ("all fuel
+                        # consumed by WebAssembly"): a runaway candidate is a
+                        # trap, not a special case.
+                        probe["outcome"] = "trapped"
+                        probe["trap"] = _trap_detail(str(error))
+                        trapped += 1
                     except subprocess.TimeoutExpired:
                         # The wall-clock backstop for whatever fuel does not
                         # cover. The guest did not return, so this is not a pass
@@ -424,6 +478,8 @@ def _trap_detail(message: str) -> str:
         _lead, separator, rest = message.partition(": ")
         if separator:
             text = rest
+    prefix = "component invocation failed: "
+    text = message[len(prefix):] if message.startswith(prefix) else message
     lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
     # keep the first couple of meaningful lines (the error + first cause)
     return " / ".join(lines[:3]) if lines else "wasm trap (no detail)"
@@ -576,6 +632,7 @@ def run(session, arguments: dict, *,
                 "counts": {"probes": 0, "returned": 0, "trapped": 0,
                            "timeout": 0, "skipped": 0},
             }
+            substrate = _run_substrate(canonical, ir, service)
         except RevlError as error:
             # admissible against the live composition but not a whole
             # composition on its own — the same honest split the gauntlet makes.

@@ -52,6 +52,7 @@ _SOURCE = (
     # the raising inverse is the DECLARED one: since issue #1859 a site `undo`
     # of an `extern acquire` must be the inverse its declaration names
     "extern acquire fn acq(tag: Str) -> H undo boom()"
+    "extern acquire fn acq(tag: Str) -> H undo rel(result)"
     " = @py { return {'id': 1} }\n"
     "service Ops { fn run(tag: Str) -> Int }\n"
     "component Agent provides ops: Ops {\n"

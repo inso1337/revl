@@ -1,7 +1,9 @@
 # Rejections: what the compiler refuses, and how to fix it
+# Rejections — what the compiler refuses, and how to fix it
 
 A rejection is a deliverable, not a failure mode (DESIGN.md §9): every
 refusal names the guarantee it enforces (the `(G4)` in the message) and,
+refusal names the guarantee it enforces — the `(G4)` in the message — and,
 where one exists, carries a fix hint on the line below. The point is that an
 author, or an agent, learns something from being refused.
 
@@ -9,9 +11,11 @@ This document catalogs the guarantee-code families. It is the prose twin of
 two executable sources of truth:
 
 * `examples/rejections/`: the spec corpus. One program per refusal, each
+* `examples/rejections/` — the spec corpus. One program per refusal, each
   naming its expected error in a header comment; `tests/test_frontend.py`
   compiles every file and holds it to that text.
 * `src/revl/diagnostics.py`: the machine-facing projection. `GUARANTEES`
+* `src/revl/diagnostics.py` — the machine-facing projection. `GUARANTEES`
   says what each code is about, `FIXES` says how to satisfy it, and
   `revl explain <code>` prints the pair. A code with no `FIXES` entry still
   explains itself through `GUARANTEES`.
@@ -37,12 +41,15 @@ The fenced examples below are compiled by `tests/test_doc_examples.py`: a
 `reject CODE` fence must be refused, and the diagnostic must classify as
 `CODE`. If you edit a checker message, this page fails until its quotes
 match: that is the gate working.
+match — that is the gate working.
 
 Codes are derived, not hand-maintained at ~100 raise sites: a rejection that
 names its guarantee in the message or hint carries the tag through, and the
 rest are classified by message shape (`_PATTERNS`). For the three rejections
 that are the verdict of a whole-composition search (G4's emission fixed
 point, G3's cycle, G2's provider table), the derivation itself is attached
+that are the verdict of a whole-composition search — G4's emission fixed
+point, G3's cycle, G2's provider table — the derivation itself is attached
 to the diagnostic; see docs/why-traces.md.
 
 ## The families
@@ -73,6 +80,7 @@ not carry.
 | A2 | no acquisition after a provision | linker |
 | A3 | host-safe identifiers | lowering transform (renames, never refuses) |
 | A5 | compensation accompanies an emission | extern declaration (registry rule); reported as G4 / `reversibility` |
+| A5 | compensation accompanies an emission | by construction |
 | A6 | provide-methods match the service signature | lower / compat gate |
 | A8 | mid-body failure reverts and contains (L-Raise) | lower |
 | A9 | a provide key is declared in the component's `provides` clause | lower |
@@ -83,9 +91,11 @@ not carry.
 <!-- docgen:guarantees end -->
 
 ## G1: declared access
+## G1 — declared access
 
 A component body may only name what it declares: `requires` keys, config
 fields, and its own `let` bindings. Anything else is refused: the library
+fields, and its own `let` bindings. Anything else is refused — the library
 equivalent is a runtime proxy error at best.
 
 ```revl reject G1
@@ -102,6 +112,9 @@ g1_undeclared_access.rvl:12: `db` is not a declared requirement of Logger
 ```
 
 Fix: add the key to the component's `requires` clause, or drop the access.
+The same rule refuses an undeclared name inside a function body
+(`` `nobody` is not declared in this function ``) and an `intercept` of a
+key the component does not require.
 
 `G1` is one guarantee refused for several reasons, and the rewrite on the
 diagnostic is chosen by the reason, not by the code. An undeclared name inside
@@ -112,6 +125,7 @@ the `requires` rewrite above; a `Delegate[X]` that names no service names one;
 and a requirement key that spells a builtin type or a host root is renamed.
 
 ## G2: provision disjointness
+## G2 — provision disjointness
 
 A key has at most one possible provider per realm: dependents bind to a key,
 not to a component, so two providers would make the binding ambiguous
@@ -139,6 +153,7 @@ provision conflict: key `db` is provided by both PgDatabase and SqliteDatabase (
 ```
 
 Fix: one provider per key per realm. Withdraw one component, or `isolate`
+Fix: one provider per key per realm — withdraw one component, or `isolate`
 them into different realms (then the same pair is legal; see
 v2_same_realm_conflict.rvl for the realm-scoped variant). The why-trace
 names both providers so nobody has to grep for the second one.
@@ -149,6 +164,7 @@ docs/distribution-model.md §4) has no grammar at all:
 pins that it stays a refusal.
 
 ## G3: acyclic dependencies
+## G3 — acyclic dependencies
 
 If Alpha requires what Beta provides and vice versa, neither satisfaction
 predicate can ever hold. The linker refuses at compile time instead of
@@ -177,15 +193,19 @@ dependency cycle: Alpha -> Beta -> Alpha (G3)
 ```
 
 Fix: break the cycle. Split the interface, or move the shared state into a
+Fix: break the cycle — split the interface, or move the shared state into a
 third component both depend on. Import cycles between modules refuse with
 the same code (`import cycle:`, v2_use_cycle.rvl).
 
 ## G4: inverse or emit
+## G4 — inverse or emit
 
 Every mutation carries an inverse, or admits irreversibility with `emit`.
 Seven distinct shapes violate it, all in `examples/rejections/`.
+Five distinct shapes violate it, all in `examples/rejections/`.
 
 **A bare acquisition**: `effect` without `undo` where the callee is not
+**A bare acquisition** — `effect` without `undo` where the callee is not
 pure (g4_missing_undo.rvl):
 
 ```revl reject G4
@@ -199,6 +219,8 @@ component Leaky {
 effect has no `undo` and `Pool.open` is not pure
   write `let <name> = effect Pool.open(...) undo <name>.close()`: a host
   acquisition's inverse is its family's release on the handle it bound (G4)
+  write `effect Pool.open(...) undo <expr>`, or mark the call `emit`
+  if it deliberately crosses the system boundary (G4)
 ```
 
 **A host acquisition whose `undo` is not its release**: for `Map.new`,
@@ -309,6 +331,7 @@ assertion. A provide-method step records how far the check reached as
 [verified effect](verified-effect.md#which-positions-carry-an-inverse-guarantee)).
 
 **An unmarked emission call**: the operation is declared `emission fn`,
+**An unmarked emission call** — the operation is declared `emission fn`,
 so the call site must say `emit` (g4_unmarked_emission.rvl):
 
 ```revl reject G4
@@ -360,6 +383,7 @@ Until issue #1437 an unmarked extern call was refused only inside an `emit`'s
 arguments; docs/design/1437-emit-marks-every-crossing.md records the change.
 
 **A crossing nested in an `emit`'s arguments**: one `emit` marks one
+**A crossing nested in an `emit`'s arguments** — one `emit` marks one
 boundary crossing. The marker covers the head call it is written on, and the
 head's arguments are judged in the position the `emit` itself sits in, so an
 emission evaluated to build an argument draws the refusal it would draw one
@@ -462,6 +486,7 @@ head the `emit` and a host extern be nested under it
 (`g4_nested_service_emission_in_host_emit.rvl`).
 
 **A provider that exceeds a plain declaration**: a service declaration is
+**A provider that exceeds a plain declaration** — a service declaration is
 an *upper bound* on its providers' effects, because consumers bind to the
 service and providers are hot-swappable (g4_emission_not_declared.rvl):
 
@@ -470,6 +495,7 @@ service and providers are hot-swappable (g4_emission_not_declared.rvl):
 ```
 
 **A provider that emits through an undeclared capability**: the
+**A provider that emits through an undeclared capability** — the
 declaration bounds *which* boundary the method reaches, not just whether
 (g4_capability_not_declared.rvl):
 
@@ -507,6 +533,7 @@ fix is an `emit … with a` step whose approval, minted in the activation body b
 `let a = await approval[production.payment] { … }`, covers the token.
 
 Fix: give the mutation an `undo`, or admit it is irreversible: `emit` at
+Fix: give the mutation an `undo`, or admit it is irreversible — `emit` at
 the call site and `emission fn` on the service operation. The propagation
 check is a least fixed point over the call graph; when it refuses, the
 diagnostic carries the chain (docs/why-traces.md). An `acquire`-classified
@@ -514,16 +541,19 @@ extern without `undo` refuses under the same code
 (v2_extern_acquire_no_undo.rvl).
 
 ## G5: teardown cannot register effects
+## G5 — teardown cannot register effects
 
 There is no refusing example, because there is no violating program:
 `undo`/`compensate` bodies are pure expressions typed in `teardown` mode,
 and `effect`/`emit` are statements that only type-check in `setup` mode:
+and `effect`/`emit` are statements that only type-check in `setup` mode —
 an `effect` inside an `undo` is a parse error, not a G5 diagnostic. The
 guarantee is by construction (DESIGN.md §5). The residue it guards against
 at runtime is a host-framework concern; see docs/contract-errata.md
 (the cordis-TS `assertActive` bug).
 
 ## G6: purity outside effect forms
+## G6 — purity outside effect forms
 
 A component body contains only effect forms (`let`, `effect`, `emit`,
 `fail`, `if`, `provide`). A bare expression statement has no effect to
@@ -543,11 +573,13 @@ expected a statement (`let`, `effect`, `emit`, `fail`, `if`, `provide`), found '
 ```
 
 Fix: outside an effect form every statement is pure. Bind the value with
+Fix: outside an effect form every statement is pure — bind the value with
 `let`, or wrap the call in `effect ... undo ...`. Reassignment of a `let`
 refuses under the same code (`cannot reassign `n` — it is `let`
 (single-assignment)`, v2_let_reassignment.rvl).
 
 ## G7: derived LIFO teardown
+## G7 — derived LIFO teardown
 
 Teardown order is compiler-derived, so it cannot be written incorrectly:
 the property is by lowering (DESIGN.md guarantee table, Thm. 16), exercised
@@ -569,9 +601,11 @@ verified fn `recurse` is not total: it participates in direct or mutual recursio
 Fix: make every recursive call structurally smaller.
 
 ## G8: the boundary surface is enumerable
+## G8 — the boundary surface is enumerable
 
 Everything that reaches the host must appear on the audit surface, and an
 `extern` is exactly the escape hatch, so an extern must say what it is.
+`extern` is exactly the escape hatch — so an extern must say what it is.
 An unclassified one is refused:
 
 ```revl reject G8
@@ -581,16 +615,21 @@ extern fn f() = @py { pass }
 ```
 unclassified extern — expected `pure`, `acquire`, `emission`, or `witnessed` after `extern`
   classification is mandatory: `pure` has no observable effect, `acquire` must declare `undo`, `emission` may declare `compensate`, `witnessed` is a reversible mutation whose declared `undo` the accumulator auto-registers, and `local` is a durable write to local state that crosses no boundary and so asks no owner
+unclassified extern — expected `pure`, `acquire`, or `emission` after `extern`
+  classification is mandatory: `pure` has no observable effect, `acquire` must declare `undo`, and `emission` may declare `compensate`
 ```
 
 Fix: keep the boundary enumerable. Declare host code as an `extern` with a
 `pure`/`acquire`/`emission`/`witnessed`/`local` classification. Emissions that
 reach the
+Fix: keep the boundary enumerable — declare host code as an `extern` with a
+`pure`/`acquire`/`emission` classification. Emissions that reach the
 boundary without a declaration are caught earlier, by G4's propagation;
 G8 is the reason those declarations are an upper bound (see
 docs/capabilities.md §3).
 
 ## A1: iteration boundaries exist only during activation
+## A1 — iteration boundaries exist only during activation
 
 `await` diverts a component transition; a provide method runs while the
 component is ACTIVE, where there is no transition to divert.
@@ -618,9 +657,11 @@ Fix: move the `await` into the component body, or declare the operation
 `async fn` if it must suspend per-call.
 
 ## A2: no acquisition after a provision
+## A2 — no acquisition after a provision
 
 An effect acquired after `provide` would be reverted (LIFO) while
 dependents can still call the service through the withdrawal guard:
+dependents can still call the service through the withdrawal guard —
 provide-methods would run against a torn-down acquisition.
 
 ```revl reject A2
@@ -641,12 +682,14 @@ acquisition after `provide` — an effect acquired after a provision would be re
 Fix: acquire everything before the first `provide`.
 
 ## A3: host-safe identifiers
+## A3 — host-safe identifiers
 
 Never refused: names colliding with host keywords are *renamed*
 (`class` → `class_`, `frame` → `frame_`) by a lowering transform, so the
 source keeps the natural name and the emitted host code stays legal. The
 positive test is `test_a3_host_colliding_names_are_renamed`. (`config` and
 `await` reject as revl's *own* reserved words: unrelated to A3.)
+`await` reject as revl's *own* reserved words — unrelated to A3.)
 
 ```revl
 component Renamer {
@@ -666,16 +709,24 @@ provided class carries the contract name as an alias (issue #1474). On wasm
 nothing is renamed: a method name is only ever the import field
 `(import "coeffect:<key>" "<op>" ...)`, the export string `"provide:<key>.<op>"`
 and the `$req.<key>.<op>` identifier (issue #1756), none of which a WAT keyword can reach.
+and the `$req_<key>_<op>` identifier, none of which a WAT keyword can reach.
 All 124 reserved words the frontend admits (WAT, Python, JavaScript and the
 emitter's own helper names) cross on the live cordis-wasm runtime
 (`backends/wasm/test_keyword_method_names_wasm.py`, issue #1512).
 
 ## A5: compensation accompanies an emission
+## A5 — compensation accompanies an emission
 
 The obligation is a **registry** rule, and the code that carries it is
 **G4 with category `reversibility`**: there is no A5 code. Since issue
 #2114 that is what this section says, and it supersedes an earlier
 argument here that claimed "no refusing example *can* exist".
+No refusing example: `compensate` is an *optional* slot (DESIGN.md §3.5 —
+an emission "may declare" one) that the grammar binds only to an `emit`,
+and `emit` requires a declared `emission` (G4). For every ordinary
+capability there is no "compensation required but missing" program; the
+guarantee is by construction. The lowering test is
+`test_a5_compensate_lowering`.
 
 That earlier argument ran: `compensate` is an *optional* slot (DESIGN.md
 §3.5: an emission "may declare" one), the grammar binds it only to an
@@ -689,6 +740,14 @@ ordinary capabilities because nothing in the language asked them for a
 compensation. The claim was therefore a statement about the absence of a
 rule, not a guarantee, and it is withdrawn here rather than left
 standing.
+One family is the exception, and it refuses under G4 rather than here
+(roadmap item 522, `docs/design/538-ui-transactions.md`). A computer-use
+verb carries a reversibility class that the registry owns, not the
+author, so the `compensate` slot is no longer free: `ui.text` is
+compensatable and must declare one, while `ui.click` (unknown) and
+`ui.download` (irreversible) may not, because the declared slot is what
+the residue and erase reports read and a transaction over a step with no
+inverse has to report `uncompensated` rather than a clean teardown.
 
 What states the requirement is the registry. A computer-use verb carries
 a reversibility class that the registry owns, not the author
@@ -715,6 +774,7 @@ A5 row and its non-vacuity witnesses; the rule itself is
 `RevL.A5.legalToken` and the boundary lemmas beside it.
 
 ## A6: provide-methods match the service signature
+## A6 — provide-methods match the service signature
 
 The service declaration is the source of truth for what a key offers: a
 call to something it does not declare has no signature to check against.
@@ -732,12 +792,14 @@ component Migrator requires db: Database {
 ```
 
 Fix: a provide-method must match the service declaration: name, arity,
+Fix: a provide-method must match the service declaration — name, arity,
 parameter types, `async`. The same amendment is enforced across upgrades by
 the compat gate: a running provider that implements a method at a retyped
 signature refuses the new manifest (`... implements it at \`Int\` (A6)`,
 docs/service-compat.md; tests/test_service_compat.py).
 
 ## A8: mid-body failure reverts and contains
+## A8 — mid-body failure reverts and contains
 
 `fail` is an activation-body transition: deliberate L-Raise only makes
 sense while a component activation is loading, where the runtime can revert
@@ -760,6 +822,7 @@ Fix: put the `fail` in a component activation body, or model the outcome as
 `Result[T]`.
 
 ## A9: the `provides` clause and the `provide` blocks name the same keys
+## A9 — the `provides` clause and the `provide` blocks name the same keys
 
 The `provides` clause is the source of truth for what a component offers:
 the linker computes G2's provider table and G3's layering from it. A9 holds
@@ -817,9 +880,11 @@ stdlib/router.rvl, docs/router.md). `handoff`, `isolate <key> in realm(...)`
 and `intercept` decorate a key; none of them installs one.
 
 ## T1: declared types are checked
+## T1 — declared types are checked
 
 The workhorse family: argument types, arity, returns, exhaustiveness,
 field access: every shape mismatch refuses with a `T1` diagnostic. The
+field access — every shape mismatch refuses with a `T1` diagnostic. The
 minimal case is a service argument of the wrong type:
 
 ```revl reject T1
@@ -838,8 +903,10 @@ Fix: make the types agree at the call site, or change the declaration.
 Where a value flows from context the diagnostic carries `expected` /
 `actual` fields for the machine-facing view. Twenty of the corpus entries
 exercise T1 shapes: see `t3_` … `t20_` in `examples/rejections/`.
+exercise T1 shapes — see `t3_` … `t20_` in `examples/rejections/`.
 
 ## T2: absence is `Opt[T]`
+## T2 — absence is `Opt[T]`
 
 `null` has no type in revl expressions; absence is modeled as `Opt[T]` and
 unwrapped with `??`, `?.` or `match`.
@@ -861,11 +928,14 @@ component BadNull provides cache: Cache {
 ```
 
 Fix: revl has no `null`. Model absence as `Opt[T]` and unwrap with `??`,
+Fix: revl has no `null` — model absence as `Opt[T]` and unwrap with `??`,
 `?.` or `match`.
 
 ## T3: a hole is an obligation
+## T3 — a hole is an obligation
 
 A `hole` checks and compiles: that is the point (docs/holes.md). Drafts
+A `hole` checks and compiles — that is the point (docs/holes.md): drafts
 compile so the checker can comment on the whole file. But a hole can never
 run: admission refuses a draft with open holes, and `revl compile` lists
 every obligation on stderr:
@@ -888,11 +958,14 @@ component C provides c: Cache {
 ```
 
 The obligations are severity `obligation`, not `error`: an agent should
+The obligations are severity `obligation`, not `error` — an agent should
 treat the list as remaining work, not as a rejection. Fix: fill the hole in.
 
 ## T4: no field read off an erased value (`Any` / `Value`)
+## T4 — no field read off an erased value (`Any` / `Value`)
 
 An erased value (a `json_parse` result, any `Any` or `Value`) has no known
+An erased value — a `json_parse` result, any `Any` or `Value` — has no known
 fields, so a plain field read on it (`v.kind`) is the silent-divergence class
 items 279/299 chased: the py tier raises `KeyError` on an absent key, the ts
 tier yields `undefined`, and neither is a defensible total answer for a field
@@ -920,9 +993,13 @@ Fix, two designed surfaces (roadmap item 380):
 * bind the value to a **record type** and read the field there. A field whose
   declared type is `Opt[T]` then reads TOTAL on every tier (absent is the
   empty Opt, never a raise or a stray `undefined`), so `e.kind ?? "<none>"` is
+  declared type is `Opt[T]` then reads TOTAL on every tier — absent is the
+  empty Opt, never a raise or a stray `undefined` — so `e.kind ?? "<none>"` is
   the one spelling for "may be absent" and it means the same everywhere;
 * walk the erased value with the total **shape accessors** in `stdlib/value.rvl`:
   `value_is_object(v)` / `value_is_list(v)` / `value_is_scalar(v)` discriminate
+* walk the erased value with the total **shape accessors** in `stdlib/value.rvl`
+  — `value_is_object(v)` / `value_is_list(v)` / `value_is_scalar(v)` discriminate
   the shape, and `value_opt(v, "kind")` / `value_has(v, "kind")` /
   `value_field_or(v, "kind", d)` read a field tolerantly by string key (which
   also sidesteps the reserved-word-key mangle that started items 279/299).
@@ -955,6 +1032,7 @@ resolve is still `T1`, because the opaque-name contract of
 (`examples/rejections/t35_...`) depend on that reading.
 
 ## G-MODEL-PLACE: a model placement is declared, and checked
+## G-MODEL-PLACE — a model placement is declared, and checked
 
 Roadmap item 512, `docs/design/531-model-placement.md`. A **model role** is a
 declared placement, a name plus where a call to it runs:
@@ -1042,6 +1120,7 @@ because a role can only steer an action that reaches a boundary. See
 `docs/design/541-model-in-attenuation.md`.
 
 ## G-COUNCIL-SPLIT: a council never answers for members that disagreed
+## G-COUNCIL-SPLIT — a council never answers for members that disagreed
 
 Roadmap item 516, `docs/design/543-model-council.md` and
 `docs/design/557-council-disagreement.md`. A **model council** binds several
@@ -1115,6 +1194,7 @@ an admitted program is byte-identical to the same program without it.
 Rejections that enforce no guarantee code exist too, and follow the same
 message-plus-hint discipline: parse and lex errors (`expected ..., found
 ...`, classified `SYNTAX`; a `requires`/`provides` clause written inside a
+...` — classified `SYNTAX`; a `requires`/`provides` clause written inside a
 component body is its own `SYNTAX` refusal, category `header`, whose `fix` is
 the corrected header line), arithmetic definedness (`mod` by a literal
 zero), integer literal range, lifecycle-test mistakes (`unknown component
@@ -1125,9 +1205,11 @@ refusals (missing import, private access). Each has its entry in
 Two commands close the loop from either side:
 
 * `revl explain <code>`: what a code means and how to fix it. An unknown
+* `revl explain <code>` — what a code means and how to fix it. An unknown
   code answers with the roster, so a typo is one command from the right
   code.
 * `revl compile --json-diagnostics <file>`: the failed compile as a
+* `revl compile --json-diagnostics <file>` — the failed compile as a
   structured document: stable `code`, `category`, `guarantee`, the
   expected/actual pair where one exists, and the why-trace for search-based
   verdicts.

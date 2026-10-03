@@ -136,6 +136,7 @@ sys.path.insert(0, str(ROOT / "src"))
 
 from revl import compile_source  # noqa: E402
 from _compiled_ir import compiled_ir  # noqa: E402
+from revl import compile_files, compile_source  # noqa: E402
 from revl.errors import RevlError, RevlErrors  # noqa: E402
 
 
@@ -143,6 +144,7 @@ from revl.errors import RevlError, RevlErrors  # noqa: E402
 
 def _exec_emitted() -> dict:
     ir = compiled_ir(ROOT / "selfhost" / "lower.rvl")
+    ir = compile_files([str(ROOT / "selfhost" / "lower.rvl")])
     assert ir["ir_version"] == 3
     spec = importlib.util.spec_from_file_location(
         "pyemit_selfhost_lower", ROOT / "backends" / "python" / "emit.py")
@@ -270,6 +272,10 @@ def _classify(e: RevlError) -> str:
             # Seven more sentences the gate now spells byte for byte, added on
             # the same terms as every marker above: a marker here is a CLAIM
             # of byte agreement, so only a ported refusal gets one.
+            # of byte agreement, so only a ported refusal gets one. Item 519's
+            # reach fold is deliberately absent - it is a capability product
+            # over a component's HELD set, the gate has none, and it stays
+            # out for the same reason the item-514 value side does.
             or m.startswith("unknown device class `")
             or (m.startswith("model role `") and " declares `memory " in m)
             or m.endswith(") places the origin on any available role")
@@ -289,6 +295,7 @@ def _classify(e: RevlError) -> str:
             # included.
             or m.endswith(" a model may not reach past the component that "
                           "consults it (G-MODEL-PLACE)")):
+                          "cannot be ordered")):
         return "MODEL"
     # ---- item 516: the model COUNCIL declaration ---------------------------
     # `selfhost/lower.rvl`'s model-council section decides `model council` and
@@ -561,6 +568,7 @@ def _classify(e: RevlError) -> str:
             # byte (selfhost/lower.rvl's effect-statement section).
             or ("a teardown-registering step (`effect`/`let-effect`/`await`) "
                 "is not allowed inside a provide-method ") in m):
+            or "has no field" in m):
         return "T1"
     if ("is not a case of" in m
             or "record update names" in m
@@ -630,6 +638,7 @@ def _ref_all(src: str) -> list[tuple[int, str]]:
 
 def _fixture(name: str) -> str:
     return (ROOT / "examples" / "rejections" / f"{name}.rvl").read_text(encoding="utf-8")
+    return (ROOT / "examples" / "rejections" / f"{name}.rvl").read_text()
 
 
 def _oneline(src: str) -> str:
@@ -1043,6 +1052,10 @@ component Reader provides feed: Feed {
     # The case carries a payload: a nullary `Str` called with an argument is
     # refused for its count (issue #2447).
     ("bare call of a builtin-named case in a multi-case variant", """type T = Foo | Str(Str)
+    # included (`type T = Foo | Str` makes `Str(...)` a real case), so both
+    # implementations admit the call. Pinned so the `type_ctors` alias/variant
+    # split cannot regress into refusing a genuine constructor.
+    ("bare call of a builtin-named case in a multi-case variant", """type T = Foo | Str
 service S { fn go() -> Int }
 component C provides s: S {
   provide s { fn go() { let x = Str("a")   return 0 } }
@@ -1346,6 +1359,7 @@ component C provides s: S { provide s { fn go() { return 0 } } }
     # enters the static G2 table, so there is no provision conflict.
     ("per-tenant spawn narrowing composes",
      (ROOT / "examples" / "tenant_attenuation.rvl").read_text(encoding="utf-8")),
+     (ROOT / "examples" / "tenant_attenuation.rvl").read_text()),
     # G4/G6 spawn-emission bounds ADMIT: an `emission[kv]` method spawning a
     # target that emits only `kv` is within bound.
     ("scoped method whose spawn target stays in bound admits", """
@@ -1828,6 +1842,17 @@ fn f(o: Opt[Int]) -> Int {
   }
 }
 """),
+    # a PARAMETERIZED ADT: the reference looks its `types` entry up under the
+    # applied spelling (`Box[Int]`) and misses, so a missing case is admitted.
+    ("a match over a parameterized ADT draws no verdict", """
+type Box[T] = Full(T) | Empty
+
+fn f(b: Box[Int]) -> Int {
+  return match b {
+    Empty => 0,
+  }
+}
+"""),
     # an alias CHAIN that terminates is the whole point of the erasure; only a
     # cycle has no expansion.
     ("a terminating chain of transparent aliases", """
@@ -1944,6 +1969,7 @@ component Supervisor requires net: Kv provides sup: Sup {
     ("item 309: the checked-in deferred idempotent fixture",
      (ROOT / "tests" / "fixtures" /
       "extern_idempotent_deferred.rvl").read_text(encoding="utf-8")),
+      "extern_idempotent_deferred.rvl").read_text()),
     ("item 309: a bare idempotent emission", _IDEM.format(mods="idempotent")),
     ("item 309: a keyed idempotent emission",
      _IDEM.format(mods="idempotent(key: id)")),
@@ -2197,6 +2223,7 @@ boot component B2 provides e2: Env2 {
     ("dynamic reserved key: a field read on a json_parse result",
      (ROOT / "backends" / "typescript" / "tests" / "fixtures"
       / "dynamic_reserved_key.rvl").read_text(encoding="utf-8"), "T1"),
+      / "dynamic_reserved_key.rvl").read_text(), "T1"),
     # ---- calls and signatures (docs/design/457 T2b) ------------------------
     # The same walk resolves a CALL against a declaration: the signature table's
     # arity window and per-argument check (monomorphic by `compatible`, generic
@@ -2366,6 +2393,7 @@ component C provides s: S {
   provide s { fn go() { let x = Int("1")   return 0 } }
 }
 """, "T1"),
+""", "G1"),
     # G1 bare CALL head: a single-case type application (`type Rows = List[Row]`)
     # is an alias RHS too, so its head `List` is not a constructor.
     ("g1 bare call of a type-application alias head",
@@ -2375,6 +2403,7 @@ component C provides s: S {
   provide s { fn go() { let x = List(1)   return 0 } }
 }
 """, "T1"),
+""", "G1"),
     # The accepting twin: in a MULTI-case variant the same builtin name IS a
     # registered case, so `Str("a")` resolves and both admit. (Held in the
     # ACCEPTED corpus below so a future over-eager fix cannot silently start
@@ -3913,9 +3942,15 @@ component Supervisor requires net: Kv provides sup: Sup {
     # cover. (The same program with `Sup.run` declared `emission[net]` is
     # admitted; it is in ACCEPTED_PROGRAMS.)
     ("a spawn-handle emit under a bound that misses the op's scope", """
+    # The one the reach gap ADMITTED: the supervisor's bound names the very key
+    # the child emits through, so the spawn-emission bound is satisfied and only
+    # the body's own crossing is left to refuse it. No `emission[...]` list can
+    # name `*`, so the reference refuses; the gate saw an empty reach.
+    ("a spawn-handle emit under a bound naming the child's key", """
 service Kv { emission fn write(row: Str) -> Int }
 service Task { emission[net] fn go() -> Int }
 service Sup { emission[db] fn run() -> Int }
+service Sup { emission[net] fn run() -> Int }
 component Worker requires net: Kv provides task: Task {
   provide task { fn go() { emit net.write("x")  return 0 } }
 }
@@ -3963,6 +3998,11 @@ component Supervisor requires net: Kv provides sup: Sup {
     # issue #1508 both engines read it at the op's declared scope wherever it
     # is written (`*` here, a bare op), so the body's own crossing refuses it,
     # exactly as the step form above.
+    # Control 2: `let r = emit w.task.go()` binds an emit-marked VALUE, which
+    # the reference lowers through its expression path and never builds an
+    # `emit` step from, so neither engine notes the label and the spawn-bound
+    # verdict is the whole answer. This is the control a fix that labelled every
+    # handle call rather than every emit STEP would fail.
     ("an emit-marked binding through a handle notes no label", """
 service Kv { emission fn write(row: Str) -> Int }
 service Task { emission fn go() -> Int }
@@ -4953,6 +4993,7 @@ def test_generated_spawn_attenuation_agree(admit, seed, oneline):
 # asserts.
 def _infile_programs() -> list[str]:
     text = (ROOT / "selfhost" / "lower.rvl").read_text(encoding="utf-8")
+    text = (ROOT / "selfhost" / "lower.rvl").read_text()
     section = text.split("======= tests")[-1]
     progs: list[str] = []
     for head in ("admit_src(", "admit_tag("):
@@ -6429,14 +6470,17 @@ def test_manifest_wire_projects_the_service_block():
     what lets a candidate's provide-method body be typed against the running
     declaration. An operation carrying any marking has its return WITHHELD, so
     silence there is silence about the result."""
+    resolved against it."""
     from revl import manifest_wire
 
     ir = compile_source(_G3_SVC + _G3_M, "m.rvl")
     assert manifest_wire(ir).endswith(";!services;:A,pa():Int;:B,pb():Int"), \
         manifest_wire(ir)
+    assert manifest_wire(ir).endswith(";!services;:A,pa();:B,pb()"), manifest_wire(ir)
     rows = manifest_wire(ir, replacing=("A",)).split(";")
     assert rows[-1] == "-A"
     assert rows[-4:-1] == ["!services", ":A,pa():Int", ":B,pb():Int"]
+    assert rows[-4:-1] == ["!services", ":A,pa()", ":B,pb()"]
     # the composition rows keep their exact positions and order, so the G3 DFS
     # seed order cannot have moved
     assert rows[:rows.index("!services")] == manifest_wire(ir).split(
@@ -6699,6 +6743,8 @@ def test_manifest_wire_renders_the_route_rows():
     assert rows == ["StoreA/kv/r1", "StoreB/kv/r2", "Router/api/", "Router<*kv",
                     "Router>kv/r1,r2", "!services", ":Kv,get(k:Str):Str",
                     ":Api,go(k:Str):Str"], rows
+                    "Router>kv/r1,r2", "!services", ":Kv,get(k:Str)",
+                    ":Api,go(k:Str)"], rows
     # the withdrawal row stays last, after the service block
     assert manifest_wire(ir, replacing=("StoreB",)).split(";")[-1] == "-StoreB"
     # a composition with no route renders no route row (the earlier slices are
@@ -7172,6 +7218,7 @@ _HANDOFF_CORPUS = (
     # running one on the wire (`C=k:T` is rendered from the lowered IR) and the
     # incoming one off the component's own annotation
     ("an ALIAS on the running side is erased, so the spellings agree",
+    ("an ALIAS is not erased on either side, so the spellings differ",
      _h_comp("Store", "S", extra="type S = Str\n"), _h_comp("Store", "Str"),
      ("Store",), ""),
     ("an ALIAS on the incoming side is erased too",
@@ -7179,6 +7226,7 @@ _HANDOFF_CORPUS = (
     ("and a drift through an alias is reported in the erased spelling",
      _H_M, _h_comp("Store", "S", extra="type S = Int\n"), ("Store",),
      _h_drift("Int", "Str")),
+     ("Store",), _h_drift("Str", "S")),
     ("the implicit same-name replacement reaches it with no `replacing=`",
      _H_M, _h_comp("Store", "Int"), (), _h_drift("Int", "Str")),
 )
@@ -7575,6 +7623,9 @@ def _tsb_program(rng) -> str:
 # mirror the refusal yet, reports the first problem inside the value (a builtin
 # arity). The gate still must never refuse what the reference admits.
 _TSB_LATER_SLICES: tuple[str, ...] = ("only a bare value widens",)
+# BUILT (the G1 read position, docs/design/457). The exclusion list is empty and
+# stays here so the next slice that needs one has the shape to hand.
+_TSB_LATER_SLICES: tuple[str, ...] = ()
 
 _TSB_TAGS = ("T1", "T2", "TYPE", "HOST-METHOD", "HOST-ARITY", "G1")
 
@@ -7719,18 +7770,30 @@ def test_a_defaulted_parameter_list_is_marked_sigd_so_its_arity_is_not_counted(a
     """A signature carrying a DEFAULT (item 187) builds a `sigd` row and its
     arity window is never counted: a call omitting the default must not be
     refused short. `tk_named` answers the named refusal before the count.
+def test_a_defaulted_parameter_list_builds_no_signature_row(admit):
+    """A signature carrying a DEFAULT (item 187) gets no row, so the arity
+    window is never counted: a call omitting the default must not be refused
+    short. `params_at` cannot spell such a list, and `sig_walk` gates the row on
+    it spelling the whole one.
 
     The gate still refuses this program (the reference admits it). Since issue
     #2397 the declaration parses, and the refusal is the named one for a call
     that omits a defaulted argument, whose call-site expansion the self-host
     does not mirror; what is asserted is that the arity count adds nothing to
     it."""
+    The gate still refuses this program, and the refusal is the PARSER's, not
+    this slice's — `fb_span`/`p_fn` read the same parameter list and neither
+    spells a default, so `fn g(a: Int, b: Str = "s")` never reaches a body. That
+    divergence is older than this slice (the reference admits the program) and
+    is not closed here; what is asserted is that the CALL layer adds nothing to
+    it, which is what the withheld row buys."""
     src = ('fn g(a: Int, b: Str = "s") -> Int { return a }\n'
            "fn f() -> Int { return g(1) }\n")
     assert _ref(src) == ("", "")
     got = admit(src)
     assert got.startswith("UNSUPPORTED|"), got
     assert "self-host compiler" in got, got
+    assert got.startswith("BAD|"), got
     assert "argument(s)" not in got, got
 
 

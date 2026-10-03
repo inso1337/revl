@@ -123,6 +123,7 @@ def test_state_migrates_onto_a_compatible_successor():
         # hot-swap the template with a live instance of it
         state = session.swap(compile_source(_source(WORKER_V2), "mig.rvl"),
                              origin={"source": _source(WORKER_V2)}, agent_authored=False)
+                             origin={"source": _source(WORKER_V2)})
 
         # the swap reports the migration it performed
         assert state.get("migration") == {
@@ -149,6 +150,7 @@ def test_incompatible_successor_is_rejected_and_rolled_back():
         with pytest.raises(SessionError, match="cannot migrate|state-compat|residue"):
             session.swap(compile_source(_source(WORKER_BAD), "mig.rvl"),
                          origin={"source": _source(WORKER_BAD)}, agent_authored=False)
+                         origin={"source": _source(WORKER_BAD)})
 
         # rolled back: still T (version 1), state intact — nothing dropped
         assert session.call("admin", "ver", [])["result"] == 1
@@ -156,6 +158,7 @@ def test_incompatible_successor_is_rejected_and_rolled_back():
         # a subsequent *compatible* swap still works after the rejection
         session.swap(compile_source(_source(WORKER_V2), "mig.rvl"),
                      origin={"source": _source(WORKER_V2)}, agent_authored=False)
+                     origin={"source": _source(WORKER_V2)})
         assert session.call("admin", "ver", [])["result"] == 2
         assert session.call("admin", "read", ["bob"])["result"] == "99"
     finally:
@@ -177,6 +180,7 @@ component G provides greeter: Greeter {
     try:
         state = session.swap(compile_source(src2, "plain.rvl"),
                              origin={"source": src2}, agent_authored=False)
+                             origin={"source": src2})
         assert "migration" not in state
         assert session.call("greeter", "hi", [])["result"] == 2
     finally:
@@ -247,6 +251,7 @@ def test_reorder_hazard_same_typed_resources_migrate_to_the_wrong_slot():
 
         src_ba = _TWO_MAP_SRC % _ORDER_BA
         session.swap(compile_source(src_ba, "mig.rvl"), origin={"source": src_ba}, agent_authored=False)
+        session.swap(compile_source(src_ba, "mig.rvl"), origin={"source": src_ba})
 
         # THE HAZARD: gate passed ([Map, Map] == [Map, Map]) but positional
         # correlation crossed the state — each store now reads the OTHER's value.

@@ -30,6 +30,7 @@ import { fileURLToPath } from 'node:url'
 import {
   agree_three, char_at, checksum, code_at, common_prefix, count_digits, count_marks, len_of, slice_of,
 } from './generated/str_scan.ts'
+import { count_digits, checksum, common_prefix } from './generated/str_scan.ts'
 
 const backend = resolve(fileURLToPath(new URL('.', import.meta.url)), '..')
 
@@ -64,6 +65,7 @@ describe('435(c): the Str helpers share one memoised code-point decode', () => {
   it('materialises each code point exactly once across a whole scan', () => {
     for (const n of [200, 400, 800, 1600]) {
       const s = astral(n, `once${n}`)
+      const s = ascii(n, `once${n}`)
       const expected = Array.from(s).length // derived from the input, not pinned
       expect(expected).toBe(n)
       // Before 435(c) this was 2n^2 + n: 5,121,600 at n = 1600.
@@ -75,6 +77,7 @@ describe('435(c): the Str helpers share one memoised code-point decode', () => {
     const sizes = [200, 400, 800, 1600]
     const counts = sizes.map((n) => {
       const s = astral(n, `grow${n}`)
+      const s = ascii(n, `grow${n}`)
       return codePointsMaterialised(() => { count_digits(s) })
     })
     for (let i = 1; i < counts.length; i++) {
@@ -87,6 +90,7 @@ describe('435(c): the Str helpers share one memoised code-point decode', () => {
 
   it('holds for charCodeAt as well as charAt', () => {
     const s = astral(800, 'sum')
+    const s = ascii(800, 'sum')
     expect(codePointsMaterialised(() => { checksum(s) })).toBe(Array.from(s).length)
   })
 
@@ -95,6 +99,10 @@ describe('435(c): the Str helpers share one memoised code-point decode', () => {
     // on every helper call and falls straight back to the pre-435(c) cost.
     const a = astral(800, 'pairA')
     const b = astral(800, 'pairB')
+    // The reason the memo has two slots: with one, this shape misses on every
+    // helper call and falls straight back to the pre-435(c) cost.
+    const a = ascii(800, 'pairA')
+    const b = ascii(800, 'pairB')
     expect(a).not.toBe(b)
     const expected = Array.from(a).length + Array.from(b).length
     expect(codePointsMaterialised(() => { common_prefix(a, b) })).toBe(expected)
@@ -110,6 +118,8 @@ describe('435(c): the Str helpers share one memoised code-point decode', () => {
     const s = '😀4😀5😀6'.repeat(12)
     let digits = 0n
     expect(codePointsMaterialised(() => { digits = count_digits(s) }))
+    const s = '😀4😀5😀6'
+    expect(codePointsMaterialised(() => { count_digits(s) }))
       .toBe(Array.from(s).length)
     expect(digits).toBe(36n)
   })

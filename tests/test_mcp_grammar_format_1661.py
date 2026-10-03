@@ -32,6 +32,7 @@ def _result(arguments: dict) -> dict:
     result = response["result"]
     result["structuredContent"].pop("sessionState")
     return result
+    return response["result"]
 
 
 def test_no_arguments_is_still_the_prose_summary():
@@ -55,6 +56,7 @@ def test_category_defaults_to_program():
     assert payload["category"] == "program"
     assert payload["grammar"] == sg.render("lark", "program")
     assert payload["grammar"] == (ROOT / "grammar" / "revl.lark").read_text(encoding="utf-8")
+    assert payload["grammar"] == (ROOT / "grammar" / "revl.lark").read_text()
 
 
 @pytest.mark.parametrize("arguments, needle", [
@@ -71,6 +73,7 @@ def test_a_bad_argument_is_a_refusal_not_the_summary(arguments, needle):
 
 
 def test_the_schema_and_the_cli_offer_the_same_choices(all_mcp_tools):
+def test_the_schema_and_the_cli_offer_the_same_choices():
     listed = handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tool = next(t for t in listed["result"]["tools"] if t["name"] == "revl_grammar")
     props = tool["inputSchema"]["properties"]

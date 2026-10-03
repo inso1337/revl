@@ -17,6 +17,7 @@ on:
   # PR the root suite is still collected by the ungated `root-suite-affected`,
   # and the cordis-guarded part of that selection is executed by the advisory
   # `cordis-affected` below (issue #2642, option B).
+  # PR the root suite is still collected by the ungated `root-suite-affected`.
   # Until the queue is enabled in branch protection, those heavy jobs run only
   # after a merge, on push to main.
   #
@@ -710,6 +711,8 @@ jobs:
     # build (workflow_call). On a PR the root suite is still collected, by the
     # ungated `root-suite-affected` job. `conformance` and `formal` no longer
     # wait on this job (issue #3353); each carries the same `if:` of its own.
+    # ungated `root-suite-affected` job. `conformance` and `formal` need this
+    # job and carry the same `if:` of their own.
     if: ${{ github.event_name != 'pull_request' }}
     # Issue #3353: the root suite ran whole, once per Python version, about 100
     # minutes, and main's full run was bounded by it. It is now split four ways
@@ -850,13 +853,16 @@ jobs:
       # table renders blank and nobody notices.
       - run: python3 tools/conformance.py --check-readme
         if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       - run: python3 tools/selfhost_coverage.py --check
         if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # Issue #301: differential oracles only prove the constructs their corpus
       # spells. Keep a named reach report for every oracle, including lower_ir and
       # compile, so a new reference construct cannot hide behind a green oracle.
       - run: python3 tools/oracle_construct_reach.py --check
         if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # Roadmap item 542 / issue #1221: the census corpus and the emit corpora
       # are globbed, so a generated document enters them with no list to edit
       # and reads as evidence indistinguishable from a hand-written one. This
@@ -866,6 +872,7 @@ jobs:
       # scoring corpus below its declared independence floor.
       - run: python3 tools/corpus_provenance.py --check
         if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # issue #255: five docs carried source-derived content (the MCP verb
       # table, the CLI subcommand list, the guarantee tables, the DOC-STATUS
       # inventory, a test count) with nothing to keep them honest, and the one
@@ -885,6 +892,7 @@ jobs:
       # this line; regenerate it with `revl docs gen examples/user_cache.rvl`.
       - run: revl docs check examples/user_cache.rvl
         if: ${{ !cancelled() && steps.install.outcome == 'success' && matrix.shard == 1 }}
+        if: ${{ !cancelled() && steps.install.outcome == 'success' }}
       # roadmap 110c: the playground/site wheel freshness is NOT checked here,
       # and must not be. The wheel vendors the whole of src/revl, so a per-push
       # gate reddened CI on every source change to a bundled module (an outage
@@ -930,6 +938,10 @@ jobs:
     # `lint` still stops it, as `needs: [lint]` alone did.
     needs: [lint, changes]
     if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
+    # `needs: frontend` was pure ordering. Dropping it lets every backend run on
+    # EVERY PR without waiting on -- or being skipped by -- the frontend
+    # fast-path. `needs: [lint]` keeps the cheap-gate fail-fast.
+    needs: [lint]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1152,6 +1164,7 @@ jobs:
   # tools/cordis_half.py under the pinned runtime on every pull request, so a
   # guarded file that was only ever skipped here executes before the merge
   # decision.
+  # candidate before it lands, and on push to main.
   root-suite-affected:
     # Issue #1817: pull requests only. On every other event `frontend` runs the
     # whole root suite on 3.11, 3.12 and 3.13, and its 3.12 leg is this job's
@@ -1612,6 +1625,7 @@ jobs:
             --log "$log" \
             --pytest-exit "$rc" \
             --selection "$SEL_PYTEST"
+          pytest $SEL_PYTEST -q
 
   # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
   # work absent from `main`, because each was merged into a base branch that
@@ -1710,6 +1724,14 @@ jobs:
   # question that could not be asked has not been answered green. There is no
   # path here that scores against the in-tree corpus when the draw is
   # unavailable, which is the fail-open shape the item exists to prevent.
+  # Exit 2 on the fence is the one refusal that is not a failure of the check:
+  # the design's own words are that a candidate changing the scorer is making a
+  # semantic change, and REFUSED is the routing of that change to a human
+  # rather than a verdict about the candidate. Every other refusal means the
+  # question could not be asked, and a question that could not be asked has not
+  # been answered green. There is no path here that scores against the in-tree
+  # corpus when the draw is unavailable, which is the fail-open shape the item
+  # exists to prevent.
   held-out:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1754,6 +1776,9 @@ jobs:
           # discarded with the runner, so no digest survives the run. The value
           # is printed only on the failure path below, where a reproducer is
           # worth more than the draw.
+          # One seed, this run only, never written down. `set +x` is not needed
+          # because nothing traces here, and the value is printed only on the
+          # failure path below where a reproducer is worth more than the draw.
           seed="$(openssl rand -hex 32)"
           seed_dir="${RUNNER_TEMP:-/tmp}/heldout-seed-$$"
           mkdir -p "$seed_dir"
@@ -1763,6 +1788,7 @@ jobs:
           chmod 600 "$seed_file"
           status=0
           REVL_HELDOUT_SEED_FILE="$seed_file" python3 tools/heldout_scoring.py \
+          REVL_HELDOUT_SEED="$seed" python3 tools/heldout_scoring.py \
             --diff-base "$base" --count 200 --json /tmp/heldout.json || status=$?
           refusal="$(python3 -c "import json;print(json.load(open('/tmp/heldout.json')).get('refusal') or '')" 2>/dev/null || echo "")"
           if [ "$status" = "0" ]; then
@@ -1796,6 +1822,7 @@ jobs:
           repro="${RUNNER_TEMP:-/tmp}/heldout-repro-seed"
           echo "  printf %s '$seed' > \"$repro\" && chmod 600 \"$repro\""
           echo "  REVL_HELDOUT_SEED_FILE=\"$repro\" python3 tools/heldout_scoring.py \\"
+          echo "  REVL_HELDOUT_SEED=$seed python3 tools/heldout_scoring.py \\"
           echo "    --diff-base $base --count 200"
           exit 1
 
@@ -1803,6 +1830,9 @@ jobs:
   # #1768 the records in `docs/census-artifact/`, from which the report is
   # rendered) had drifted from main with nothing reporting it, because no step
   # ran its check. A check nobody runs reads as a pass.
+  # Issue #1572: the committed census artifact (`docs/census-artifact.{md,json}`,
+  # roadmap item 549) had drifted from main with nothing reporting it, because
+  # no step ran its check. A check nobody runs reads as a pass.
   #
   # This job keeps the committed copy CURRENT. On a pull request it asks
   # `census_artifact.py --moved-inputs` whether the diff moves an input of the
@@ -1814,6 +1844,9 @@ jobs:
   # program with no program missing, no report input moved and every record
   # file byte-identical to the run. The fix, and the resolution of a merge
   # conflict in the records, is `python3 tools/census_artifact.py --write`.
+  # seconds) and fails unless the committed file reproduces program by program
+  # with no program missing and no report input moved. The fix is to run
+  # `python3 tools/census_artifact.py --write` in the same pull request.
   #
   # A diff that moves no input is not checked, and says so. On every other
   # event (push to main, schedule, dispatch, and a merge_group candidate) it
@@ -1827,6 +1860,9 @@ jobs:
   # a pull request the `decide` step still runs and publishes `run`, it just
   # leaves the substantive steps skipped when the diff moved no input. That is
   # the precondition that makes requiring it safe.
+  # event (push to main, schedule, dispatch) it always checks, so a merge race
+  # between two regenerating pull requests shows up on main. The filter's exit
+  # 2 (it could not decide) runs the check, never skips it.
   census-artifact:
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -1836,6 +1872,7 @@ jobs:
       github.event_name == 'workflow_dispatch' ||
       github.event_name == 'schedule' ||
       github.event_name == 'merge_group'
+      github.event_name == 'schedule'
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
@@ -2106,6 +2143,8 @@ jobs:
     # `lint` still stops it, as `needs: [lint]` alone did.
     needs: [lint, changes]
     if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
@@ -2182,6 +2221,7 @@ jobs:
       # variable makes a missing engine a failure that says what to install
       # (Google Chrome or Chromium) or set (REVL_CHROME), rather than a silent
       # skip in the one job that can run it.
+      # unseen. Measured at ~2s for 42 tests, 0 skips with node present.
       - run: pytest backends/typescript/ -q
         env:
           REVL_BROWSER_REQUIRED: "1"
@@ -2248,6 +2288,8 @@ jobs:
     # `lint` still stops it, as `needs: [lint]` alone did.
     needs: [lint, changes]
     if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     # The cordis-wasm checkout this job provisions below. Declared as a JOB env
     # rather than exported into $GITHUB_ENV so that
     # tests/test_env_gated_skips_run_somewhere.py can read WHICH job sets it and
@@ -2356,6 +2398,7 @@ jobs:
           tests/test_wasm_crash_recovery.py
           tests/test_run_wasm_enforcement_3189.py
           -q --junitxml=/tmp/wasm-junit.xml
+      - run: pytest backends/wasm/ tests/test_wasm_backend.py -q --junitxml=/tmp/wasm-junit.xml
         env:
           # turns "wasmtime not installed" from a silent skip into a failure;
           # unset locally, so offline dev still skips cleanly
@@ -2423,6 +2466,8 @@ jobs:
     # `lint` still stops it, as `needs: [lint]` alone did.
     needs: [lint, changes]
     if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -2570,6 +2615,8 @@ jobs:
     # runners do the same for the tier-driven ones.
     env:
       REVL_REQUIRE_TIERS: "java"
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -2622,6 +2669,8 @@ jobs:
     # step (see the `frontend` job for why).
     env:
       REVL_REQUIRE_TIERS: "go"
+    # Decoupled from `frontend`; runs on every PR (see backend-python).
+    needs: [lint]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -2715,6 +2764,13 @@ jobs:
     # to be broken. Heavy job: never on a pull request, always on merge_group,
     # push, schedule, dispatch and workflow_call (issue #1678).
     needs: [lint]
+    # Fail fast: this job provisions six toolchains and runs for minutes, so
+    # skip it entirely when `lint` or `frontend` is red (see backend-python for
+    # the rationale; required context unchanged). Heavy job: never on a pull
+    # request, always on merge_group, push, schedule, dispatch and
+    # workflow_call (issue #1678). `frontend` is skipped on a PR too, so this
+    # `if:` states what the `needs:` would already imply.
+    needs: [lint, frontend]
     if: ${{ github.event_name != 'pull_request' }}
     # Issue #2264: this job installs go, so go is required on every pytest
     # step (see the `frontend` job for why).
@@ -2829,6 +2885,8 @@ jobs:
       # because a tier executes only where its toolchain is installed and
       # neither job runs `npm ci` or installs a JDK or a pinned rust toolchain.
       # This job installs all of them, so run the files HERE, where the skips actually go away.
+      # neither job installs node_modules, cargo or a JDK. This job installs
+      # all of them, so run the files HERE, where the skips actually go away.
       # test_time_coeffect.py is in the list because it carries the 17th
       # REVL_CROSS_TIER_SLOW gate (the rust async-timer lifecycle), which had
       # the same problem and is not in the cross-tier file.
@@ -2902,6 +2960,9 @@ jobs:
           # reads green. java/wasm are not required yet; the reasons are
           # enumerated in tests/test_env_gated_skips_run_somewhere.py.
           REVL_REQUIRE_TIERS: "py,ts,go,rust"
+          # rust/java/wasm/go are not required yet; the reasons are enumerated
+          # in tests/test_env_gated_skips_run_somewhere.py.
+          REVL_REQUIRE_TIERS: "py,ts"
       # The rest of the tier-execution suites, run where BOTH tiers exist.
       #
       # Issue #266: every one of these files calls `RUNNERS[tier]` and turns an
@@ -2959,6 +3020,7 @@ jobs:
           -q
         env:
           REVL_REQUIRE_TIERS: "py,ts,go,rust"
+          REVL_REQUIRE_TIERS: "py,ts"
       # ci/placement_smoke.sh boots examples/user_cache.rvl split py<->node,
       # py<->rust, py<->go and py<->java (`--once`: boot, cross the seam via a
       # probe, tear down, exit). It fails the build on a seam that will not come
@@ -3124,6 +3186,7 @@ jobs:
           done
           echo "the Temporal dev server never became healthy"; cat /tmp/temporal-dev.log; exit 1
       - run: pytest tests/test_temporal_exit_saga.py tests/test_saga_defect_temporal_2736.py backends/typescript/test_temporal_target.py -q
+      - run: pytest tests/test_temporal_exit_saga.py backends/typescript/test_temporal_target.py -q
         env:
           # The item-253 exit gate. Past it NOTHING skips: the test asserts on
           # node and the SDK install rather than skipping over them, so a
@@ -3147,6 +3210,11 @@ jobs:
     # a pull request, always on merge_group, push, schedule, dispatch and
     # workflow_call (issue #1678).
     needs: [lint]
+    # Fail fast: the Lean `lake build` is heavy, so skip it when `lint` or
+    # `frontend` is red (see backend-python for the rationale; required context
+    # unchanged). Heavy job: never on a pull request, always on merge_group,
+    # push, schedule, dispatch and workflow_call (issue #1678).
+    needs: [lint, frontend]
     if: ${{ github.event_name != 'pull_request' }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0

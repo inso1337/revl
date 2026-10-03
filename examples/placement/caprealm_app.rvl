@@ -52,6 +52,7 @@ component TenantAStore provides akv: Kv {
 component TenantAApp requires akv: Kv {
   isolate akv in realm("tenant_a")
   effect akv.set("who", "alice") undo akv.unset("who")
+  effect akv.set("who", "alice") undo akv.set("who", "")
 }
 
 component TenantBStore provides bkv: Kv {
@@ -70,4 +71,5 @@ component TenantBStore provides bkv: Kv {
 component TenantBApp requires bkv: Kv {
   isolate bkv in realm("tenant_b")
   effect bkv.set("who", "bob") undo bkv.unset("who")
+  effect bkv.set("who", "bob") undo bkv.set("who", "")
 }

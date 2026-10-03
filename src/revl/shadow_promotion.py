@@ -421,6 +421,8 @@ class ShadowPlan:
     because a default is how a gate ends up passing on evidence that was never
     supplied. `window_fresh` is the one member read as absent-false, and its
     absence only narrows what the verdict may claim.
+    is defaulted: an absent member is a refusal, because a default is how a
+    gate ends up passing on evidence that was never supplied.
 
     ``route_table`` is `revl.model_route.check()`'s return value verbatim,
     ``{component: {action: {origin: {role, residence}}}}``. Binding it by value
@@ -1462,6 +1464,7 @@ class Promotion:
     a selected window is not a random sample and 3/n is not a failure-rate
     bound below three draws. Any refusal, and any divergence, leaves both
     fields ``None``: the counts stand alone."""
+    and is zero on every path through this module."""
 
     kind: str
     version: str

@@ -84,9 +84,11 @@ _DECLS = (
     # reaches the `witnessed[fs]` extern, and a `Tool` implementation reaches
     # the `Ops` service it requires.
     "service Ops { emission[fs] fn stash(p: Str) }\n"
+    "service Ops { emission fn stash(p: Str) }\n"
     "service Tool {\n"
     "  fn describe() -> Str\n"
     "  emission[ops] fn run(p: Str)\n"
+    "  emission fn run(p: Str)\n"
     "}\n"
 )
 

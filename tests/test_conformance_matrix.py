@@ -283,6 +283,7 @@ def test_a_classified_refusal_is_still_published_as_a_limit():
     kinds = {tier: [row["emit_kind"][tier] for row in report["cases"]]
              for tier in conformance.TIERS}
     assert kinds["wasm"].count("limit") == 7
+    assert kinds["wasm"].count("limit") == 10
     assert kinds["java"].count("limit") == 1
     assert kinds["wasm"].count("refused") == 0
     assert kinds["java"].count("refused") == 0
@@ -294,11 +295,14 @@ def test_a_classification_expires_when_the_refusal_is_reworded():
     inheriting it, which is what stops this table becoming a place to silence
     a cell once and forget it."""
     case = "wasm::type/Map service"
+    case = "wasm::expr/true division"
     entry = conformance.tier_limits()[case]
     assert conformance.classify_refusal(
         "wasm", "type/Map service", entry["message_prefix"] + " ...") == "limit"
+        "wasm", "expr/true division", entry["message_prefix"] + " ...") == "limit"
     assert conformance.classify_refusal(
         "wasm", "type/Map service", "a completely different refusal") == "refused"
+        "wasm", "expr/true division", "a completely different refusal") == "refused"
 
 
 def test_every_classification_names_a_real_case_and_a_reason():

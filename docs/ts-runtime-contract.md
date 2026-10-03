@@ -4,6 +4,7 @@ What an emitted TypeScript module may assume about the environment it runs in,
 and how that assumption is gated (issue #295). The browser target (issue #3294)
 extends the same contract to a page: what it may assume there, which parts of
 the runtime and cordis are portable, and the browser-engine test that holds it.
+and how that assumption is gated (issue #295).
 
 ## Why this document exists
 
@@ -91,6 +92,10 @@ An emitted ts module runs as an **ES module on plain node**, from inside
    `@ts` extern body sits inside a function and cannot add a module-level
    `import`, so load a node builtin by calling `process.getBuiltinModule`
    synchronously with no import:
+   `__filename`. Reach for `import.meta.url` / `import.meta.dirname`. To load a
+   node builtin from inside a verbatim `@ts` extern body — which sits in a
+   function and cannot add a module-level `import` — call
+   `process.getBuiltinModule` synchronously with no import:
    `const fs = process.getBuiltinModule("node:fs")`. That works on plain node
    (>= 22.3) and under vitest alike. `createRequire` from `node:module` is the
    emitter-level machinery for a `@ts ref`, not something a body can reach:

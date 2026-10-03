@@ -76,6 +76,7 @@ def test_no_bypass_and_no_new_divergence(census, measured):
     claims, and must not diverge anywhere the baseline does not already say."""
     _, (buckets, details) = measured
     baseline = json.loads(census.BASELINE.read_text(encoding="utf-8"))
+    baseline = json.loads(census.BASELINE.read_text())
     problems = census.compare(buckets, baseline)
     if problems:
         report = "\n".join(f"  {line}" for line in problems[:40])
@@ -255,6 +256,10 @@ def test_the_line_ratchet_fails_in_all_three_directions(census):
 # exists to catch, while leaving a widening unfolded only re-opens the gap this
 # section records -- and `test_the_model_reach_spawn_corpus_is_decided_by_both`
 # below pins all six documents, so the two directions cannot be confused.
+# EMPTY: nothing on this list is open any more. It is spelled `set()` rather
+# than `{}` so the empty case stays a SET -- the comparisons below are set
+# differences, and an empty dict literal would make them a type error rather
+# than a measurement.
 KNOWN_BYPASSES: set[str] = set()
 
 
@@ -310,6 +315,7 @@ def test_every_authority_rule_after_a_block_is_refused_by_both(measured):
     wrong = []
     for doc in docs:
         case = doc.relative_to(ROOT).as_posix()
+        case = str(doc.relative_to(ROOT))
         want = _block_nesting_expected(doc.stem)
         if got.get(case) != want:
             wrong.append(f"{case}: {got.get(case)}, expected {want}")
@@ -1010,6 +1016,7 @@ def test_the_admission_mirror_matches_the_rust(census):
     # the surface id is computed by build.rs from the crate sources (#1768)
     assert ('concat!("admission-interface:", env!("REVL_GATE_IDENTITY"))'
             in admission_rs)
+    assert generator.admission_surface_id(generator.source_digest()) in admission_rs
 
 
 def test_the_frontier_mirror_matches_the_rust(census):
@@ -1018,6 +1025,7 @@ def test_the_frontier_mirror_matches_the_rust(census):
     imported from the generator, so only the scanning can drift — held here
     against the cases `frontier.rs`'s own unit tests state."""
     frontier = (ROOT / "crates" / "revl-gate" / "src" / "frontier.rs").read_text(encoding="utf-8")
+    frontier = (ROOT / "crates" / "revl-gate" / "src" / "frontier.rs").read_text()
     assert "fn strip_literals" in frontier, \
         "frontier.rs no longer has the scan this mirror was written against"
 

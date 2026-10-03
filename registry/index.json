@@ -43,6 +43,7 @@
         }
       },
       "sourceHash": "d5a2c3e07d132c5bfc1a5d8ce35d2fa678dfcd1421e465ef44b7724a3cdaf33b",
+      "sourceHash": "b782e70cb8f97cb523419bb68f5d113053983913601b837fc8831d92b51e6b06",
       "version": "1.0.0"
     },
     "mysql_database": {
@@ -83,6 +84,7 @@
         }
       },
       "sourceHash": "876422024770ed0d40e495daca4dfa77a7ffbc2de683bf7d35026913b0e8de5f",
+      "sourceHash": "a94e0bca91d45b3328c845b3a62ad23c1b9b29934bc08cee39445d7de264da69",
       "version": "1.0.0"
     },
     "pg_database": {
@@ -123,6 +125,7 @@
         }
       },
       "sourceHash": "7c73ea0f2be9455c4de8abb5c0de553edff6db9b0804ac2c784b17fa82ebfd71",
+      "sourceHash": "753b0a4ff8aecf01e0ad37cf0748c20ea7bab5aed6ea6d5381fb37ec1cd048cb",
       "version": "1.0.0"
     },
     "readonly_database": {
@@ -155,9 +158,11 @@
     "user_cache": {
       "capabilities": [
         "db"
+        "*"
       ],
       "emissions": 1,
       "manifestHash": "c5ab8e40d59cfaed6c808c7e76a156e6b5d526501b8b0a62413f50ea3dcd4efe",
+      "manifestHash": "339a2cc50d1277eac596fb03cdecc5cace0ea42cee9021749807407aaef428fe",
       "provides": {
         "cache": "Cache"
       },
@@ -199,8 +204,10 @@
         }
       },
       "sourceHash": "ec65e3edfb30b02232b5d4eba7e502422be96aecb0caf5de26c98355ca4493ec",
+      "sourceHash": "b882efdce4fb4930b5a20c65b65dcdc0d89642808b89d8ce807c9af1965c9c2e",
       "version": "1.0.0"
     }
   },
   "indexVersion": "3"
+  "indexVersion": "2"
 }

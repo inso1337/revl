@@ -42,6 +42,11 @@
 // inject a fault after each kind of write and assert the composition reverts
 // with nothing left behind; the file-backed teeth test in the suite observes
 // that the inverses actually ran, not merely that teardown reported clean.
+// derived inverse is the natural CRUD counterpart: `create` (an INSERT) carries
+// `undo` DELETE, so a row written during activation is removed in LIFO order on
+// teardown or ABORT — residue-free, on the new driver. The `abort` lifecycle
+// test below injects a fault after a write and asserts the composition reverts
+// with nothing left behind.
 
 // The declared model: one row type, keyed by a store-assigned `id`. Identical
 // to examples/model_store.rvl — the model does not change across the swap.
@@ -71,6 +76,9 @@ service Store {
 // connection handle (which carries the identifier check as `conn.ident`),
 // whose site-declared inverse closes it, so the resource is released on
 // teardown.
+// never in the model). `sq_open` is an `acquire` extern: it opens the embedded
+// database and returns the live connection handle, whose site-declared inverse
+// closes it, so the resource is released on teardown.
 extern acquire fn sq_open() -> Conn undo sq_close(result) = @py {
     import re
     import sqlite3
@@ -109,6 +117,9 @@ extern acquire fn sq_open() -> Conn undo sq_close(result) = @py {
     conn.execute("CREATE TABLE " + t + " (" + i + " TEXT PRIMARY KEY, " + b + " TEXT)")
     s, n = conn.ident("seq", "n")
     conn.execute("CREATE TABLE " + s + " (" + n + " INTEGER PRIMARY KEY AUTOINCREMENT)")
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE notes (id TEXT PRIMARY KEY, body TEXT)")
+    conn.execute("CREATE TABLE seq (n INTEGER PRIMARY KEY AUTOINCREMENT)")
     conn.commit()
     return conn
 }
@@ -124,9 +135,11 @@ extern pure fn sq_close(conn: Conn) -> Unit = @py {
 // file-backed store must keep its sequence across activations so a key is never
 // reused, while the `:memory:` example still starts at 0 because the connection
 // closes. (The memory driver's sequence is activation state and drops with it.)
+// its row is deleted.
 extern pure fn sq_next_id(conn: Conn) -> Str = @py {
     s = conn.ident("seq")[0]
     cur = conn.execute("INSERT INTO " + s + " DEFAULT VALUES")
+    cur = conn.execute("INSERT INTO seq DEFAULT VALUES")
     conn.commit()
     return "note-" + str(cur.lastrowid - 1)
 }
@@ -137,6 +150,7 @@ extern pure fn sq_get(conn: Conn, id: Str) -> Opt[Note] = @py {
     t, i, b = conn.ident("notes", "id", "body")
     row = conn.execute("SELECT " + i + ", " + b + " FROM " + t + " WHERE " + i + " = ?",
                        (id,)).fetchone()
+    row = conn.execute("SELECT id, body FROM notes WHERE id = ?", (id,)).fetchone()
     if row is None:
         return None
     return {"id": row[0], "body": row[1]}
@@ -147,6 +161,7 @@ extern pure fn sq_get(conn: Conn, id: Str) -> Opt[Note] = @py {
 extern pure fn sq_list(conn: Conn) -> List[Note] = @py {
     t, i, b = conn.ident("notes", "id", "body")
     rows = conn.execute("SELECT " + i + ", " + b + " FROM " + t + " ORDER BY " + i).fetchall()
+    rows = conn.execute("SELECT id, body FROM notes ORDER BY id").fetchall()
     return [{"id": r[0], "body": r[1]} for r in rows]
 }
 
@@ -155,6 +170,7 @@ extern pure fn sq_list(conn: Conn) -> List[Note] = @py {
 extern pure fn sq_insert(conn: Conn, id: Str, body: Str) -> Unit = @py {
     t, i, b = conn.ident("notes", "id", "body")
     conn.execute("INSERT INTO " + t + " (" + i + ", " + b + ") VALUES (?, ?)", (id, body))
+    conn.execute("INSERT INTO notes (id, body) VALUES (?, ?)", (id, body))
     conn.commit()
     return
 }
@@ -193,6 +209,7 @@ extern pure fn sq_restore(conn: Conn, id: Str, body: Str) -> Unit = @py {
 extern pure fn sq_delete(conn: Conn, id: Str) -> Unit = @py {
     t, i = conn.ident("notes", "id")
     conn.execute("DELETE FROM " + t + " WHERE " + i + " = ?", (id,))
+    conn.execute("DELETE FROM notes WHERE id = ?", (id,))
     conn.commit()
     return
 }
@@ -265,8 +282,10 @@ component SqliteStore provides store: Store {
 // ---------------------------------------------------------------- lifecycle
 
 // The first five assertions below have query bodies IDENTICAL to
+// The three assertions below have query bodies IDENTICAL to
 // examples/model_store.rvl's; only the `load`/`unload` target changed. That is
 // the whole memory -> sqlite swap: the model and the query code do not move.
+// the whole memory -> sqlite swap.
 
 lifecycle test "a created row is readable under its store-assigned key, and reverts residue-free" {
   load SqliteStore
@@ -333,6 +352,9 @@ lifecycle test "update and delete of an absent key are typed no-ops" {
 // The injected fault after each kind of write: a create, an overwrite and a
 // delete each register their inverse before the ABORT, so teardown replays
 // them LIFO and the composition reverts residue-free on the sqlite driver. The
+// The injected fault: write a row, then ABORT mid-activation. The `create`
+// effect's derived inverse (the DELETE) replays LIFO before the connection is
+// closed, so the composition reverts residue-free on the sqlite driver — the
 // same recovery story the memory driver gives, now over a real embedded store.
 lifecycle test "an aborted write reverts residue-free on the sqlite driver" {
   load SqliteStore

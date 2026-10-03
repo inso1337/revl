@@ -207,6 +207,7 @@ def test_under_trusted_authoring_the_ticket_says_what_it_carries(tmp_path):
     assert ticket["unreviewedHostCode"] == [host_body_entry(notify)]
     assert [{key: value for key, value in entry.items() if key != "digests"}
             for entry in ticket["unreviewedHostCode"]] == [
+    assert ticket["unreviewedHostCode"] == [
         {"extern": "notify", "classification": "emission", "backends": ["py"]}]
     assert "not a bound on what the bodies do" in \
         ticket["unreviewedHostCodeWarning"]

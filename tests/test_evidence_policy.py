@@ -408,6 +408,7 @@ def test_recompute_grades_a_fresh_dossier_marking_recomputed_vs_published():
     result = explain(policy, audit, origins={"CsvReader": "source"},
                      recompute=True, recompute_producer=recompute_component,
                      recompute_ir={"CsvReader": ir})
+                     recompute=True, recompute_ir={"CsvReader": ir})
     assert result["recomputed"] is True
     assert not result["refused"]
     clause = result["components"][0]["rules"][0]["clauses"][0]
@@ -428,6 +429,7 @@ def test_recompute_gauntlet_facet_is_operator_run_and_marked_recomputed():
     result = explain(policy, audit, mcp_components={"CsvReader"},
                      recompute=True, recompute_producer=recompute_component,
                      recompute_ir={"CsvReader": ir},
+                     recompute=True, recompute_ir={"CsvReader": ir},
                      recompute_gauntlet={"verdict": "admissible"})
     assert not result["refused"]
     clauses = result["components"][0]["rules"][0]["clauses"]
@@ -445,9 +447,11 @@ def test_recompute_leaves_the_verdict_agreeing_with_the_gate():
     violations = evaluate(policy, audit, origins={"CsvReader": "source"},
                           recompute=True, recompute_producer=recompute_component,
                      recompute_ir={"CsvReader": ir})
+                          recompute=True, recompute_ir={"CsvReader": ir})
     result = explain(policy, audit, origins={"CsvReader": "source"},
                      recompute=True, recompute_producer=recompute_component,
                      recompute_ir={"CsvReader": ir})
+                     recompute=True, recompute_ir={"CsvReader": ir})
     assert bool(violations) == result["refused"]
 
 
@@ -478,6 +482,7 @@ def test_cli_recompute_end_to_end(tmp_path):
             code = main(["policy", "evaluate", str(pol), str(prog),
                          "--json", "--recompute"])
     report = _json.loads(out.read_text(encoding="utf-8"))
+    report = _json.loads(out.read_text())
     assert code == 0            # recomputed inverse round-trip passes
     assert report["recomputed"] is True
     clause = report["components"][0]["rules"][0]["clauses"][0]

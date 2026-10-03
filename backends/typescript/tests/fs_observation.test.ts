@@ -125,6 +125,7 @@ describe('the observation entry points', () => {
     expect((r.value as { code: string; path: string }).code).toBe('EOUTSIDE')
     // the caller's own spelling, not the symlink target (#3184)
     expect((r.value as { path: string }).path).toBe('link_out')
+    expect((r.value as { path: string }).path).toBe(path.join(outside, 'secret.txt'))
   })
 
   it('refuse a name no filesystem can hold, as EINVAL not a TypeError', () => {

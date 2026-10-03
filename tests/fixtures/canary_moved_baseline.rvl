@@ -33,6 +33,7 @@ component TenantAStore provides kv: Kv {
 component TenantAApp requires kv: Kv {
   isolate kv in realm("tenant_a")
   effect kv.set("who", "A") undo kv.unset("who")
+  effect kv.set("who", "A") undo kv.set("who", "")
 }
 
 component TenantBStore provides kv: Kv {
@@ -51,6 +52,7 @@ component TenantBStore provides kv: Kv {
 component TenantBApp requires kv: Kv {
   isolate kv in realm("tenant_b")
   effect kv.set("who", "B") undo kv.unset("who")
+  effect kv.set("who", "B") undo kv.set("who", "")
 }
 
 component TenantCStore provides kv: Kv {
@@ -69,5 +71,6 @@ component TenantCStore provides kv: Kv {
 component TenantCApp requires kv: Kv {
   isolate kv in realm("tenant_c")
   effect kv.set("who", "C") undo kv.unset("who")
+  effect kv.set("who", "C") undo kv.set("who", "")
 }
 

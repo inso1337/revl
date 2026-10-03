@@ -114,6 +114,7 @@ capability-checked runtime.* Five capabilities have to exist for it to be true.
 Each is adjudicated here with the item that owns each side. Apply [the
 substrate-boundary rule](../substrate-boundary.md) to each host action before
 making the all-actions claim.
+Each is adjudicated here with the item that owns each side.
 
 ### 3.1 The model portfolio
 

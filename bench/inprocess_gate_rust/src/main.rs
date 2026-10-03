@@ -20,6 +20,10 @@
 //! verdict surface has **no admission arm at all**: the three verdicts are
 //! `Refused`, `NoObjection` and `OutsideFrontier`, and `to_json` reports
 //! `"admitted": false` on every one of them.
+//! failures as `BAD`). It runs NO type layer, so it has **no admission arm at
+//! all**: the three verdicts are `Refused`, `NoObjection` and
+//! `OutsideFrontier`, and `to_json` reports `"admitted": false` on every one of
+//! them.
 //!
 //! It DOES have a manifest arm (`revl_gate::admit_into`, issue #346): the same
 //! fold over the UNION of the running composition's provisions and the
@@ -28,6 +32,9 @@
 //! why-trace - and it still issues no admission on the verdict surface: the
 //! admission question is a separate type (`revl_gate::issue_admission_into`),
 //! asked separately and answered over a closed grammar.
+//! why-trace - and it still issues no admission: resolving the candidate's
+//! `requires` against a live provider and type-checking it is the reference
+//! type layer, which this gate does not run.
 //!
 //! So the rust harness is NOT a translation of the py harness's claim. The py
 //! harness proves an IDENTITY (`revl.gate.admit` is the reference admission
@@ -64,6 +71,13 @@
 //!    undeclared operation). The other three - an incomplete `provide`, a
 //!    genuine parse failure, a draft with an open hole - come back as
 //!    no-objections. Every one is in the tolerated
+//! 1. **The gate catches the composition layer and the component header, and
+//!    nothing else.** Of the seven batch candidates the py admission gate
+//!    REFUSES, this gate refuses three (`G2` provision conflict, `G4`
+//!    undeclared emission, and the `G1` header rule - a `requires`/`provides`
+//!    naming a service the text never declares). The other four - an incomplete
+//!    `provide`, a genuine parse failure, a draft with an open hole, a type
+//!    error - come back as no-objections. Every one is in the tolerated
 //!    direction (a no-objection is never an admission), and every one is a
 //!    reason a host may not treat a no-objection as a green.
 //! 2. **The manifest arm refuses what py refuses, and admits nothing.** The
@@ -84,6 +98,9 @@
 //!    crate's separate ADMISSION surface since docs/design/457 T6: it types the
 //!    provide-method body against the running `Store`'s declaration. The
 //!    verdict surface itself still issues no admission.
+//!    step further on `cache_layer` and ISSUES an admission. That last step is
+//!    the half of the question this gate does not answer, and it is reported as
+//!    a gap rather than as an agreement.
 //! 3. **The screen is not cheap, and its cost is super-linear in candidate
 //!    size.** The py in-process round-trip is tenths of a millisecond. This one
 //!    is milliseconds at 218 bytes and grows roughly with the SQUARE of the
@@ -97,10 +114,14 @@
 //! only been screened at the composition/guarantee layer and one slice of the
 //! type layer - it has not been fully type-checked, admitted, or confined, and
 //! no manifest parameter changes that:
+//! only been screened at the composition/guarantee layer - it has not been
+//! type-checked, admitted, or confined, and no manifest parameter changes that:
 //! on the manifest arm a non-refusal means "nothing in the running composition
 //! collides with this", not "this can join it". The verdict surface never
 //! issues `admitted` (only the separate `issue_admission` surface does), and
 //! even a py admission is not "safe to run unwitnessed": the
+//! collides with this", not "this can join it". `admitted` is not a thing this
+//! gate issues, and even a py admission is not "safe to run unwitnessed": the
 //! reversible-run half is item 334.
 //!
 //! # Usage
@@ -157,6 +178,7 @@ use std::time::Instant;
 /// different worlds.
 const HELD_MANIFEST: &str = "Kv/store/;App/app/;App<store;!services;\
 :Store,get(key:Str):Str,bump(n:Int):Int,put(key:Str|value:Str);:AppSvc,ping():Str";
+:Store,get(key:Str),bump(n:Int),put(key:Str|value:Str);:AppSvc,ping()";
 
 /// `bench/admission_latency.py::CANDIDATE_STANDALONE`, the py harness's
 /// `standalone_twin`: standalone-valid, `Store` inlined. py ADMITS it.
@@ -186,6 +208,14 @@ component CacheLayer requires store: Store provides cache: Cache {
 /// surface (`issue_admission_into`), and as of docs/design/457 T6 it says yes:
 /// the provide-method body is typed against the running `Store`'s declaration,
 /// which the manifest's service block now spells in full.
+/// The still-open half is the LAST step, ISSUING an admission, and the report
+/// now measures it rather than asserting it: the ADMISSION surface
+/// (`issue_admission_into`) is asked about this candidate too, and WITHHOLDS
+/// it, because `ADMITTED_LAYER` is interface declarations only and this source
+/// carries a component with a provide-method body. `FRESH_INTERFACE` below is
+/// the control that keeps that a bounded price rather than a blanket one: the
+/// same manifest, the same call, a real admission. What closes the remaining
+/// distance is docs/design/457 T0-T5 (the self-host type layer) and then T6.
 const CACHE_LAYER: &str = r#"
 service Cache { fn lookup(key: Str) -> Str }
 component CacheLayer requires store: Store provides cache: Cache {
@@ -201,6 +231,13 @@ component CacheLayer requires store: Store provides cache: Cache {
 /// call, the gate issues a green whose bytes equal `revl.gate.admit_into`'s for
 /// a candidate with no component at all, so the admission surface is measured
 /// on both shapes it covers.
+/// This is the control for the last open half of issue #346. Without it the
+/// report could say "rust withholds an admission for `cache_layer`" and a reader
+/// could not tell whether the surface withholds because of what `cache_layer` is
+/// or because the crate never admits anything into a manifest at all. With it
+/// the price is bounded and measured: on THIS wire, through THIS call, the gate
+/// issues a green whose bytes equal `revl.gate.admit_into`'s, and the one thing
+/// it will not issue a green for is a component with a provide-method body.
 const FRESH_INTERFACE: &str = r#"
 service Telemetry {
   fn record(name: Str, value: Int) -> Unit
@@ -237,6 +274,8 @@ component CacheMiss requires store: Store provides cache: Cache {
 /// the py harness's two manifest negatives exercise the A6/interface-drift
 /// refusals. This one is built to land on the plain G2 leg both tiers share,
 /// with no operation resolution involved.
+/// refusals, which live in the type layer this gate does not run. This one is
+/// built to land on the leg the two tiers DO share.
 const AMBIENT_PROVISION_CONFLICT: &str = r#"
 service Store {
   fn get(key: Str) -> Str
@@ -289,6 +328,9 @@ component C provides cache: Cache {
 /// A return-type mismatch: the REFERENCE refuses it `T1`, and so does this gate
 /// since the fn-body statement layer landed (docs/design/457 T3a). Its presence
 /// in the batch is the control showing that layer is decided natively.
+/// A program the REFERENCE refuses on the type layer and this gate cannot see.
+/// Its presence in the batch is the point: it is the shape a host must not read
+/// as an admission.
 const TYPE_LAYER_MISS: &str = "fn f() -> Int { return \"s\" }\n";
 
 /// A source the crate declines to decide because it is over the size bound.
@@ -461,6 +503,7 @@ impl Arm {
 
 /// The ADMISSION surface's answer to the same question, recorded beside the
 /// verdict rather than merged into it (issue #346; docs/design/457 T6).
+/// verdict rather than merged into it (issue #346, the last open half).
 ///
 /// `Verdict` answers "is there something here I can refuse" and has no admitting
 /// arm by design; `Admission` answers "may this run" and has exactly one. They
@@ -1163,6 +1206,8 @@ the reference verdict. **This harness cannot and does not claim that.**
 composition/guarantee layer plus the fn-body statement slice of the type layer
 (docs/design/457) and not the rest of it, so its VERDICT surface has no
 admission arm at all. Its three verdicts are `refused`, `no_objection` and
+composition/guarantee layer and runs NO type layer, so its VERDICT surface has
+no admission arm at all. Its three verdicts are `refused`, `no_objection` and
 `outside_frontier`, and the wire reports `"admitted": false` on every one of
 them.
 
@@ -1192,8 +1237,17 @@ declares). Everything outside that grammar is WITHHELD, including
 `standalone_twin`, which the py gate admits: its inlined `Store` declares an
 `emission`. That asymmetry is the surface being conservative, and it is the
 direction this crate is allowed to err in.
+The arm is confined to `ADMITTED_LAYER` - interface declarations only, over a
+closed scalar vocabulary - which is the region where the covered layer is the
+WHOLE question because the source carries no term the reference type layer
+decides. In this batch exactly one candidate is inside it, `fresh_interface`,
+and it is admitted both standalone and INTO the held composition. Everything
+with a `fn` body, a `component` or a `provide` is WITHHELD, including
+`standalone_twin`, which the py gate admits. That asymmetry is the surface
+being conservative, and it is the direction this crate is allowed to err in.
 
 ## The manifest arm (issue #346)
+## The manifest arm (issue #346): half of it closed here
 
 `revl_gate::admit_into(source, manifest)` is real as of issue #346: it folds
 G2/G3 over the UNION of the running composition's rows and the candidate, so a
@@ -1233,6 +1287,20 @@ What that closes and what it does not, against `held_manifest` =
   stays open is the refusal surface's type layer: the compatibility relation on
   a redeclaration, and every construct outside the admission surface's closed
   grammar.
+* **still open, and bounded** - ISSUING the admission FOR THIS SHAPE. py's
+  `admit_into` ADMITS `cache_layer` into the running manifest; the admission
+  surface WITHHOLDS it, because `ADMITTED_LAYER` is interface declarations only
+  and `cache_layer` carries a component with a provide-method body. The bound is
+  measured on the same wire: `fresh_interface` goes through
+  `issue_admission_into` against this very manifest and comes back ADMITTED,
+  byte-identically to `revl.gate.admit_into`. So what is open is not "rust
+  cannot issue a green" but "rust cannot issue one for a provide-method body".
+  Closing that is the self-host TYPE LAYER's remaining job (the provide method's
+  return, the delegated call's arity and argument types against the running
+  declaration - whose return type this wire does not yet carry - the
+  compatibility relation on a redeclaration, and the family scan that turns "no
+  objection" into "no reference family applies"), its own roadmap lane, and is
+  deliberately NOT attempted here.
 
 ## The batch, screened in-process
 
@@ -1245,6 +1313,7 @@ anything a host could read as an admission, and every refusal it did issue is a
 refusal the py admission gate also issues, with the same guarantee tag
 (`tests/test_inprocess_gate_rust.py`). The `admission` column is the other
 surface, and every green in it is a real reference admission, held to
+surface, and the one green in it is a real reference admission, held to
 `revl.gate` wire and all.
 
 Verdicts are order-independent: screening the batch in a fixed order and in a
@@ -1255,11 +1324,15 @@ BOTH arms ({order}), which is the property that proves the gate is stateless.
 
 Eight of these candidates are ones the py admission gate REFUSES. This gate
 refuses **five** of them: the `G2` provision conflict, the `G4` undeclared
+refuses **four** of them: the `G2` provision conflict, the `G4` undeclared
 emission, `cache_layer`'s `G1` header rule (a `requires` naming a service the
 text never declares - the same sentence py gives), `type_layer_miss`'s `T1`
 (a return-type mismatch, which the fn-body statement layer now decides), and,
 on the manifest arm, `calls_missing_method`'s `A6` (a call to an operation the
 running service does not declare). The other three come back as no-objections:
+text never declares - the same sentence py gives), and, on the manifest arm,
+`calls_missing_method`'s `A6` (a call to an operation the running service does
+not declare). The other four come back as no-objections:
 
 * `incomplete_provide` - a `provide` block missing a declared method;
 * `syntax_error` - a source the reference parser rejects outright. The crate
@@ -1267,8 +1340,11 @@ running service does not declare). The other three come back as no-objections:
   gets it), but the self-host parser is more permissive than the reference and
   this program walks through it;
 * `hole_draft` - a draft with an open typed hole (py refuses `T3`).
+* `hole_draft` - a draft with an open typed hole (py refuses `T3`);
+* `type_layer_miss` - a return-type mismatch (py refuses `T1`).
 
 Every one of those three is in the TOLERATED direction: a no-objection is never
+Every one of those four is in the TOLERATED direction: a no-objection is never
 an admission, so none of them is a false admit. Together they are the reason the
 crate has no `Admitted` arm, and the reason an embedder that reads a
 no-objection as a green ships an unsafe host. The one candidate this gate
@@ -1277,6 +1353,7 @@ ADMITS it, and rather than decide a construct it does not cover, the gate says
 so.
 
 ### The `admit_into` gap, closed
+### The `admit_into` gap, priced - and one leg of it closed
 
 Before #346 the realistic agent shape - admit a candidate AGAINST the running
 composition - was not available on rust at all. It now is for the ambient half:
@@ -1297,6 +1374,14 @@ surface is unchanged and still says only that it does not object, which is why
 both numbers are reported here rather than merged. What remains is the refusal
 surface's type layer, and this file is where that distance is measured, not
 smoothed over.
+proves it, refused `A6` where `cache_layer` is not. What py does that this gate
+still cannot is the step after that: ISSUING an admission for this shape. The
+VERDICT surface has no `Admitted` arm by design, and the ADMISSION surface
+withholds `cache_layer` because a component with a provide-method body is
+outside `ADMITTED_LAYER`. `fresh_interface` is the control that keeps this a
+price on one shape rather than on the whole question: same manifest, same call,
+a real admission. That last step is the rest of the self-host type layer, and
+this file is where the remaining distance is measured, not smoothed over.
 
 ## Fail closed
 
@@ -1375,6 +1460,10 @@ issues `admitted` - not standalone and not from the manifest arm, which is a
 refusal arm that reads the running composition, not an admission into it. An
 admission comes only from the separate admission surface (`issue_admission`),
 over its closed grammar. And even a py admission is not
+screened at the composition/guarantee layer ONLY: not type-checked, not
+admitted, not confined. `admitted` is not something this gate issues - not
+standalone and not from the manifest arm, which is a refusal arm that reads the
+running composition, not an admission into it. And even a py admission is not
 "safe to run unwitnessed" - the reversible-run half is item 334.
 
 ## Re-run

@@ -15,6 +15,7 @@ fn seed() -> Int {
 
 service Counter {
   fn bump(root: Int) -> Int
+  fn bump(n: Int) -> Int
   fn reset()
   fn ready(flag: Bool) -> Bool
 }
@@ -26,6 +27,7 @@ service Namer {
 component Registry provides count: Counter, name: Namer {
   provide count {
     fn bump(root) = root
+    fn bump(n) = n
     fn reset() { }
     fn ready(flag) = flag
   }

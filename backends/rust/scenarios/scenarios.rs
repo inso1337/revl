@@ -149,6 +149,8 @@ fn a1_concurrent_divert_leaves_no_torn_state() {
 fn realm_label_lowering_is_stable_and_collision_free() {
     // The emitted lowering `_revl_realm` must map a (realm, key) PAIR to a
     // STABLE cordis Isolation: equal pairs to one identity, distinct pairs to
+    // The emitted lowering `_revl_realm` must map a label string to a STABLE
+    // cordis Isolation: equal strings to one identity, distinct strings to
     // distinct identities, and never onto cordis's monotonic scope counter.
     const REALM_TAG: u64 = 0x8000_0000_0000_0000;
 
@@ -163,15 +165,20 @@ fn realm_label_lowering_is_stable_and_collision_free() {
     // tests/test_realm_key_labels_1543.py (two keys in ONE realm, on real
     // cordis-rs) and by test_emit_rust's registry-arms test; this fixture only
     // registers the one key `kv`, so it cannot assert that dimension here.
+    // Deterministic, value-stable: the same label lowers identically.
+    assert_eq!(_revl_realm("t"), _revl_realm("t"), "equal labels = one identity");
+    assert_ne!(_revl_realm("t"), _revl_realm("other"), "distinct labels = distinct identity");
 
     // Disjoint from the framework counter: realm labels live in the reserved
     // top-bit region; cordis mints scopes from 1 upward in the low region.
     assert_ne!(_revl_realm("t", "kv").as_raw() & REALM_TAG, 0, "realm labels are top-bit tagged");
+    assert_ne!(_revl_realm("t").as_raw() & REALM_TAG, 0, "realm labels are top-bit tagged");
     let root = cordis::Context::new();
     for _ in 0..8 {
         let framework = root.new_isolation();
         assert_eq!(framework.as_raw() & REALM_TAG, 0, "counter stays in the low region");
         assert_ne!(framework, _revl_realm("t", "kv"), "no framework scope equals a realm label");
+        assert_ne!(framework, _revl_realm("t"), "no framework scope equals a realm label");
     }
 }
 
@@ -193,6 +200,7 @@ fn realm_labels_share_within_and_separate_across() {
 
     // Same label => same isolation slot: the provision is visible.
     let same = root.isolate_with("kv", _revl_realm("t", "kv"));
+    let same = root.isolate_with("kv", _revl_realm("t"));
     let seen = same.get_relaxed::<Box<dyn Kv>>("kv").unwrap();
     assert!(
         seen.is_some(),
@@ -201,6 +209,7 @@ fn realm_labels_share_within_and_separate_across() {
 
     // Different label => disjoint slot: the provision is invisible.
     let other = root.isolate_with("kv", _revl_realm("other", "kv"));
+    let other = root.isolate_with("kv", _revl_realm("other"));
     let unseen = other.get_relaxed::<Box<dyn Kv>>("kv").unwrap();
     assert!(
         unseen.is_none(),

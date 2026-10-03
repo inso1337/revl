@@ -1216,6 +1216,7 @@ class _Generator:
                                       follow_redirects=self.follow_redirects,
                                       label=self.key, rest=self._rest,
                                       push=False)
+                                      label=self.key, rest=self._rest)
             externs.append(
                 f"extern emission[{self.card.net_cap}] fn {extern}({sig}) "
                 f"-> Untrusted[{ret}]\n  = @py {{\n    _args = [{', '.join(names)}]\n"

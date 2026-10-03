@@ -33,6 +33,7 @@ from dataclasses import dataclass, field
 
 from .compiler import compile_source
 from .mcp.fillspec import enrich, step_name, unfillable
+from .mcp.fillspec import enrich
 
 
 class ScaffoldError(Exception):
@@ -177,12 +178,14 @@ def build_spec(*, service: str, provides: str | None = None,
     """Validate the raw CLI strings into a `Spec`, filling defaults.
 
     The conservative refusals live here. An emission method with no wired
+    The one conservative refusal lives here: an emission method with no wired
     capability would have to be bound to nothing, which revl spells as bare
     `emission` — "any boundary". That is exactly the silent widening the
     generator exists to avoid, so it refuses instead. And a pure method
     returning `Unit` is refused unless the spec declares a resource: with no
     resource and no emission there is nothing in scope a fill could be (#1857),
     while with one the fill is a write on it (#1948)."""
+    generator exists to avoid, so it refuses instead."""
     service = _ident(service, "a service name")
     provides = _ident(provides or (service[:1].lower() + service[1:]),
                       "a provides key")
@@ -204,6 +207,8 @@ def build_spec(*, service: str, provides: str | None = None,
         resource_type=_type(resource_type or f"{service}Resource",
                             "a resource type"),
         resource_declared=bool(resource_type and resource_type.strip()),
+        resource_type=_ident(resource_type or f"{service}Resource",
+                              "a resource type"),
     )
 
     parsed = [parse_method(m, emits=False) for m in methods or []]
@@ -263,6 +268,7 @@ def _split_body(method: Method, names: str, bound: list[str]) -> str:
 def _provide_body(method: Method, unwired: list[str],
                   bound: list[str] | None = None,
                   resource: bool = False) -> str:
+def _provide_body(method: Method, unwired: list[str]) -> str:
     """A provide method: `fn m(p) = hole[R] "obligation"`. The message names the
     boundary a fill may cross, and flags any capability the spec asked for but
     did not inject — a gap the fill must not paper over by emitting."""
@@ -276,6 +282,7 @@ def _provide_body(method: Method, unwired: list[str],
         note = (" (the fill is the crossing: `emit` an operation of the declared"
                 " boundary that returns nothing, declared on its service first)")
     elif method.emits:
+    if method.emits:
         note = " (a fill here may emit through the declared boundary)"
     elif method.returns == "Unit" and resource:
         # #1948: not pure — a later read sees what it wrote. The fill is a call
@@ -339,16 +346,22 @@ def build_skeleton(spec: Spec) -> str:
         # would be inventing a call that need not exist (issue #1846).
         lines.append("  // The acquire/undo pairing is real; the resource and its"
                      " release are obligations.")
+        lines.append("  // The acquire/undo scaffolding is real; the resource"
+                     " it yields is an obligation.")
         lines.append(f"  let resource = effect hole[{spec.resource_type}] "
                      f"\"acquire the resource {spec.component} manages\"")
         lines.append("                 undo hole[Unit] \"release `resource` fully"
                      " (no residue): the inverse its acquisition declares\"")
+                     f"\"acquire the resource {spec.component} manages; the undo"
+                     " must fully release it (no residue)\"")
+        lines.append("                 undo resource.release()")
 
     lines.append("")
     lines.append(f"  provide {spec.provides} {{")
     for method in spec.methods:
         lines.append(_provide_body(method, unwired, wired,
                                    resource=spec.owns_resource()))
+        lines.append(_provide_body(method, unwired))
     lines.append("  }")
     lines.append("}")
     lines.append("")
@@ -369,11 +382,13 @@ def scaffold_document(spec: Spec, filename: str = "scaffold.rvl",
     holes = ir.get("holes") or []
     obligations = enrich(ir, untrusted=untrusted)
     document = {
+    return {
         "ok": True,
         "source": source,
         "holeCount": len(holes),
         "admissible": not holes,
         "obligations": obligations,
+        "obligations": enrich(ir, untrusted=untrusted),
     }
     # a hole this author can never fill is flagged up front rather than
     # handed out as work (fillspec `fillable`); absent when there is none

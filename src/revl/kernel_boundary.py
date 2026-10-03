@@ -54,6 +54,11 @@ defaulted:
   declarations, so the set is computed there (`lower._undeclared_elements`) and
   passed to `offending`. `_undeclared` says why, and what the three
   measurements of the namespace-wide arm disagreed about.
+* A `key:`-namespaced element - a boundary whose service method declares
+  `emission` with no capability list - is ALSO an undeclared reach, and it is
+  the one this slice does not refuse. `_undeclared` says what the measurement
+  was and §7 of the design carries it as the named residual. It is written
+  down rather than silently assumed away.
 
 WHAT IS ON THE KERNEL SIDE, AND WHY RETENTION IS
 ------------------------------------------------
@@ -63,6 +68,11 @@ gate crate, the census baseline with its `NEVER_BASELINED` list, and `formal/`.
 Every entry is asserted to exist in the tree by `tests/test_kernel_boundary_544.py`
 and `tests/test_evaluator_protocol.py`, because an enumeration naming a file that
 is not there protects nothing.
+`KERNEL_PATHS` is the enumeration: the admission decider, the attestation
+chain, the taint lattice, the retention discipline, the gate crate, the census
+baseline with its `NEVER_BASELINED` list, and `formal/`. Every entry is
+asserted to exist in the tree by `tests/test_kernel_boundary_544.py`, because
+an enumeration naming a file that is not there protects nothing.
 
 Retention is on this side, and it is the entry a reader will argue with. A loop
 permitted to "update indexes and retention policies" as ordinary behaviour
@@ -116,6 +126,16 @@ rather than in a module of their own because there is no new algebra and
 `kernel_boundary` is already the ruleset module `lower` reads. A path has ONE
 capability: the evaluator members stand for the evaluator paths that are not
 kernel paths. The undeclared reaches (`*` and `svc:`) stay the kernel arm's.
+ONE ENUMERATION, TWO CONSUMERS
+------------------------------
+`KERNEL_PATHS` here is the single list issue #1223 asks for. The diff-side
+consumer is `tools/evolution_controller.py`, whose own `KERNEL_PATHS` is the
+same tuple in the same order; when both land, that file imports this one rather
+than keeping a copy, which is what "enumerated in one place" has to mean if it
+is to mean anything. The capability-side consumer is `lower._check_kernel_
+boundary`, which is this module's reason for sitting under `src/revl/` rather
+than under `tools/`: the capability is enforced by the compiler, and the
+compiler cannot import from `tools/`.
 """
 
 from __future__ import annotations
@@ -146,6 +166,9 @@ KERNEL_NAMESPACE = "kernel"
 #: were. A path that drives two refusals appears ONCE: the census and its
 #: baseline are kernel paths and also decide the held-out draw's allowance, so
 #: they carry both tags.
+#: Tree paths, matched segment-wise as PREFIXES. This is the enumeration item
+#: 544 asks for in one file. It is the subject of an existence assertion in
+#: `tests/test_kernel_boundary_544.py`.
 #:
 #: What is NOT here matters as much as what is, and the reasoning is the one
 #: `tools/heldout_scoring.py` states for `HELD_OUT_FENCE`: `src/` at large,
@@ -187,6 +210,18 @@ _EVALUATOR: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("tests/test_evolution_progress.py", ("authority",)),
     ("tools/evaluator_protocol.py", ("held_out", "authority")),
     ("tests/test_evaluator_protocol.py", ("authority",)),
+#: loop. Fencing them would forbid the work the loop exists to produce.
+KERNEL_PATHS: tuple[str, ...] = (
+    "src/revl/admission.py",
+    "src/revl/admit_profile.py",
+    "src/revl/attest.py",
+    "src/revl/taint.py",
+    "src/revl/retention.py",
+    "src/revl/kernel_boundary.py",
+    "crates/revl-gate",
+    "formal",
+    "tools/gate_reference_census.py",
+    "tools/gate_reference_census_baseline.json",
 )
 
 #: Every file or tree the evaluator is made of, in one enumeration.
@@ -374,9 +409,16 @@ def is_kernel_token(token: str) -> bool:
 
 def _undeclared(cap, undeclared=()) -> bool:
     """Whether a fold element is an UNDECLARED reach rather than a declared one.
+def _undeclared(cap) -> bool:
+    """Whether a fold element is an UNNAMEABLE boundary rather than a named one.
 
     Two elements answer yes, and the second is the arm issue #1265's exit asked
     for (taken by issue #2105):
+    `*` is the whole of it: a host emission or a first-class dispatch that no
+    `requires` key can name. `cap_order.disjoint` already answers False for it,
+    by its own rule and not by anything invented here - "it may reach any
+    boundary, so it is never provably independent of anything" - and that is
+    exactly the reading the kernel question needs.
 
     * `*` - a host emission or a first-class dispatch that no `requires` key
       can name. `cap_order.disjoint` already answers False for it, by its own
@@ -399,10 +441,25 @@ def _undeclared(cap, undeclared=()) -> bool:
       measured the namespace-wide arm at 14 tests across 7 files and item 561
       re-measured 17 and then 9; the measurements disagreed because the
       namespace alone is not the rule.
+    It is also where an omitted `reaches [...]` clause on a `model role` lands:
+    `effective_from_model_reach` resolves `reach_declared: false` to `*` rather
+    than to the reach the record happens to render, so an absent declaration is
+    not read as a proof of narrowness. That is item 519's own resolution of the
+    same question, and `lower._spawn_emission_surface`'s precedent of mapping
+    `None` to `*` rather than `set()`.
 
     WHY THE SET IS A PARAMETER, and not read off the token. `lower._held_
     capabilities_pairs` builds a `svc:` element on TWO occasions and only one of
     them is an undeclared reach:
+    WHAT IS DELIBERATELY NOT HERE, measured rather than assumed. A
+    `svc:`-namespaced element - `lower._undeclared_cap`'s stand-in for a
+    boundary whose service method declares `emission` with no capability list -
+    is also an undeclared reach, and reading it as provably disjoint from the
+    kernel is the weaker answer. Item 561 moved that element off the consumer's
+    wiring key and onto the SERVICE the method is declared on, which changes
+    what it is named BY and not whether it is undeclared: it is a nameable
+    token either way, so `cap_order.disjoint` still answers True against every
+    kernel token and this arm still admits it.
 
     =======================================  ==============================
     a required service with a bare `emission`  an effect is declared, its reach
@@ -421,12 +478,26 @@ def _undeclared(cap, undeclared=()) -> bool:
     it is computed there (`lower._undeclared_elements`, where the service table
     is) and passed here. The default is empty, so a caller that has no
     declarations to consult gets the `*` arm and nothing else.
+    It is not refused in this slice, and the reason is a measurement, not a
+    preference: on this tree it is the ORDINARY spelling, so refusing it turns
+    tests red and changes what `mcp.session.admit` accepts on every turn whose
+    granted services spell `emission` bare. Item 545 measured 14 tests across 7
+    files; re-measured at item 561's head, after PR #1292 declared the shipped
+    compositions' tokens, it is 13 across the same 7. That is a
+    composition-side change - the operator's services are the ones that would
+    have to declare their tokens - and it is not this item's to make.
+    `docs/design/545-kernel-boundary-capability.md` §7 carries it as the named
+    residual, `docs/design/561-undeclared-emission-boundary.md` carries the
+    re-measurement, and `tests/test_kernel_boundary_544.py` pins it so it stays
+    visible.
     """
     return cap.token == "*" or cap.token in undeclared
+    return cap.token == "*"
 
 
 def offending(effective, *, undeclared_reaches_kernel: bool,
               undeclared=()) -> list:
+def offending(effective, *, undeclared_reaches_kernel: bool) -> list:
     """The kernel capabilities `effective` is NOT provably disjoint from.
 
     `effective` is a component's effective ceiling as `cap_order.Cap`s: what it
@@ -459,6 +530,7 @@ def offending(effective, *, undeclared_reaches_kernel: bool,
         member = BY_TOKEN.get(kernel_cap.token)
         for element in sorted(effective, key=lambda c: c.to_str()):
             if _undeclared(element, undeclared):
+            if _undeclared(element):
                 if undeclared_reaches_kernel:
                     hits.append((member, element))
                     break
@@ -666,6 +738,7 @@ def effective_from_model_reach(component: str, manifest: dict | None) -> list:
         for text in row.get("effective") or []:
             try:
                 extra.append(cap_order.parse_stored_cap(text))
+                extra.append(cap_order.parse_cap(text))
             except cap_order.CapError:
                 extra.append(cap_order.Cap("*", ()))
     return extra

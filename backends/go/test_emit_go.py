@@ -907,6 +907,7 @@ def test_v3_record_lowers_in_a_live_provide_method():
     _has(src, "return Person{Name: n, Age: a}")
     # Int `+` in a method body traps on overflow (issue #2259)
     _has(src, "return Person{Name: p.Name, Age: revlAdd(p.Age, 1)}")
+    _has(src, "return Person{Name: p.Name, Age: (p.Age + 1)}")
 
 
 def test_v3_provide_method_param_named_s_does_not_collide_with_receiver():
@@ -927,6 +928,7 @@ def test_v3_provide_method_param_named_s_does_not_collide_with_receiver():
     # so the operands widen to the int64 helper and the product narrows back
     _has(src, "return int(revlMul(int64(s), int64(s)))")
     _has(src, "func revlMul(a, b int64) int64 {")
+    _has(src, "return (s * s)")
     # the receiver name never leaks as a bare `func (s *` anywhere
     assert "func (s *" not in src
 
@@ -1855,6 +1857,8 @@ def test_a_pool_collision_still_renames_the_host_side():
 # `unload` step imported it unused and the package did not build. Since issue
 # #2505 every lifecycle test also waits in its leftover dispose, so `time` is
 # imported and used; the import must never be left unused.
+# The unload waits are the lifecycle's only use of `time`, so a test without an
+# `unload` step imported it unused and the package did not build.
 
 _NO_UNLOAD = """
 service S { fn bump(x: Int) -> Int }
@@ -1868,10 +1872,13 @@ lifecycle test "a call without an unload" {
 
 
 def test_a_lifecycle_test_without_unload_imports_time_only_with_a_use():
+def test_a_lifecycle_test_without_unload_does_not_import_time():
     from revl import compile_source  # noqa: PLC0415
     code = emit.emit(compile_source(_NO_UNLOAD, "no_unload.rvl"))
     assert '\t"time"' in code
     assert "time.Sleep(" in code.replace("runtime.", "")
+    assert '\t"time"' not in code
+    assert "time." not in code.replace("runtime.", "")
 
 
 @pytest.mark.skipif(shutil.which("go") is None, reason="go is not installed")

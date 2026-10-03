@@ -1,4 +1,5 @@
 # `revl fmt`: a formatter that proves itself
+# `revl fmt` — a formatter that proves itself
 
 `revl fmt <files>` produces a **canonical formatting** of revl source. Because
 agents write most revl and humans review the diffs, diff noise is a cost paid
@@ -50,12 +51,17 @@ revl fmt --migrate <files>  # §9: rewrite 1.x "$name" interpolation to `${name}
   `spawn` acquire does), so on a program where the split would move one of them
   the IR-equivalence gate refuses the split, and the formatter keeps the
   line-preserving layout for that file. The gate is never weakened.
+  moves a token onto a different logical line. Continuation lines (a wrapped
+  `undo`, `compensate`, …) are re-indented to their block, not visually aligned
+  under the effect above them.
 - **Horizontal spacing** is normalised to a single space between tokens:
   - tight around `.` / `?.`, and no space before `,` `:` `;` `)` `]`;
   - no space between a call/index and its bracket: `set(1, 2)`, `Opt[Str]`,
     `emission[db]`, `hole[Str]` (a keyword whose bracket is its own argument
     binds it tight, issue #1822), while a keyword keeps its space before
     anything else (`return (x)`, `if (c)`, `return [1, 2]`);
+  - no space between a call/index and its bracket — `set(1, 2)`, `Opt[Str]`,
+    `emission[db]` — while a keyword keeps its space (`return (x)`, `if (c)`);
   - one space after `,` and `:`; spaces around binary operators and `->`.
 - **Blank lines** collapse: at most one blank line between constructs, no
   leading or trailing blank lines, exactly one final newline.
@@ -79,6 +85,10 @@ numbers are excluded because the formatter collapses blank lines. Nothing
 downstream of the parser reads them, so everything else is compared exactly.
 Two sources with the same stream parse identically and therefore compile
 identically, so this is a proof, not a heuristic.
+numbers are excluded — the formatter collapses blank lines, and nothing
+downstream of the parser reads a line number — and everything else is compared
+exactly. Two sources with the same stream parse identically and therefore
+compile identically, so this is a proof, not a heuristic.
 
 It is also fail-closed at every step: an original that does not lex, an output
 that does not lex, or two streams that differ are each a **refusal**.
@@ -100,6 +110,9 @@ and canonicalises each IR document (`json.dumps(..., sort_keys=True)`) to a
 byte string. IR carries no source line numbers, so re-indentation can shift
 every line without perturbing it. A difference means the rewrite reached
 something the compiler lowers.
+byte string. IR carries no source line numbers, so re-indentation — which
+shifts every line — does not perturb it; a difference means the rewrite
+reached something the compiler lowers.
 
 When the file is on disk, both compiles go through `compile_files` with the
 text supplied in memory, so `use` imports **resolve** and the formatted
@@ -112,8 +125,11 @@ rewrites through.
 |----------|-----------|---------|
 | any | tokens differ, or either side does not lex | **refused** immediately; no later check is tried |
 | compiles | compiles, same IR | **admitted** with byte-identical IR (the headline proof) |
+| any | tokens differ, or either side does not lex | **refused** — before anything else is tried |
+| compiles | compiles, same IR | **admitted** — IR byte-identical (the headline proof) |
 | compiles | compiles, different IR | **refused** for a canonical format (the IR changed). **Admitted** under `--migrate`, whose whole job is that rewrite |
 | compiles | fails to compile | **refused** because the rewrite broke compilation |
+| compiles | fails to compile | **refused** — rewrite broke compilation |
 | does not compile (rejection example, unresolvable import) | — | **admitted** on the lexer token identity proven above |
 | fails (1.x legacy `$`) | compiles | `--migrate` admits it as **newly admissible** |
 
@@ -130,6 +146,9 @@ regrouped expression, a dropped or reordered statement, a mis-scanned literal.
 The formatter is designed never to do these. The gate turns that design into a
 per-file *proof*, and a future, more aggressive formatting pass (or migration)
 must pass the same check before shipping.
+The formatter is designed never to do these, but the gate is what makes that a
+*proof* per file rather than a claim — and it is exactly the check a future,
+more aggressive formatting pass (or migration) must pass before it ships.
 
 ## How comments survive without touching the parser
 
@@ -151,11 +170,14 @@ Reproducing those spans byte-for-byte, plus the fact that the only
 whitespace the lexer treats as significant is the space separating two adjacent
 word tokens, lets the formatter normalise all other whitespace. The gate then
 confirms per file that the output is unchanged.
+word tokens, is what lets the formatter normalise everything else while the
+gate confirms — for real, per file — that nothing changed.
 
 ### Documented limitation
 
 Apart from splitting `provide` members, the formatter does not re-flow
 statements across lines, and it does not reformat
+The formatter does not re-flow statements across lines, and it does not reformat
 the interior of backtick templates or `@host` blocks (those are verbatim). Line
 re-flowing would need statement-boundary information only the parser holds;
 rather than edit the off-limits parser, that is left out by design.

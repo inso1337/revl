@@ -30,6 +30,8 @@ than recorded: a record cannot claim one format and carry the other's bytes.
 | --- | --- | --- | --- |
 | `tdx-quote-v4-ecdsa-p256` | Intel TDX Quote v4, ECDSA-256-with-P-256 | NIST P-256, SHA-256 | `MRTD`, the TD's initial measurement, plus the runtime registers, TCB and quoting enclave a `TdxPolicy` names |
 | `sev-snp-report-v2-ecdsa-p384` | AMD SEV-SNP `ATTESTATION_REPORT` v2/v3/v5 | NIST P-384, SHA-384 | `MEASUREMENT`, the guest's launch measurement |
+| `tdx-quote-v4-ecdsa-p256` | Intel TDX Quote v4, ECDSA-256-with-P-256 | NIST P-256, SHA-256 | `MRTD`, the TD's initial measurement |
+| `sev-snp-report-v2-ecdsa-p384` | AMD SEV-SNP `ATTESTATION_REPORT` v2/v3 | NIST P-384, SHA-384 | `MEASUREMENT`, the guest's launch measurement |
 | `hmac-sha256` | the development verifier, NOT a root | none | whatever the record says |
 
 **TDX** is parsed at the real offsets: a 48-byte quote header (version, attestation
@@ -336,6 +338,10 @@ signs on demand for somebody else.
 and not a test: it picks messages whose nonce has few or many set bits and times
 both backends signing them. On one loaded machine it measured the pure path
 about 8% slower on the high-weight nonces and the backend within 0.3%.
+* scalar multiplication is not constant time, and deliberately so: every scalar
+  multiplied here is public (a verification scalar, or a fixture key that signs
+  nothing secret), so there is no secret to leak and no reason to hand-roll a
+  hardened ladder in a compiler.
 
 ## The fixtures
 

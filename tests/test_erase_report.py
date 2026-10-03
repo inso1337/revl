@@ -207,6 +207,7 @@ def test_star_widening_crossing_is_enumerated(realms_ir):
     # blind to the widening). The compiler refuses the source since issue
     # #2842, so the report is measured on the IR an earlier compiler emitted
     # (`tests/_legacy_emission_ir.py`).
+    # blind to the widening).
     from revl.compiler import compile_source
     from revl.errors import RevlError
     from revl.mcp.approval import ClassMap
@@ -216,6 +217,7 @@ def test_star_widening_crossing_is_enumerated(realms_ir):
         compile_source(_WIDENING_SOURCE, "erase_widening.rvl")
     with value_rule_off():
         ir = compile_source(_WIDENING_SOURCE, "erase_widening.rvl")
+    ir = compile_source(_WIDENING_SOURCE, "erase_widening.rvl")
     # ClassMap sees the widening as a class-(c) crossing capability `*`.
     reach = ClassMap(ir).classify_call("gw", "send")
     assert reach["class"] == "c" and "*" in reach["capabilities"]
@@ -295,6 +297,7 @@ def test_no_residue_proof_holds_over_a_real_teardown(realms_ir):
     assert all(residue["checks"].values())
     assert set(residue["checks"]) == {"registry", "provisions", "effects",
                                       "listeners", "hostResources"}  # issue #1859
+    assert set(residue["checks"]) == {"registry", "provisions", "effects", "listeners"}
     assert report["summary"]["stateGoneProven"] is True
 
 

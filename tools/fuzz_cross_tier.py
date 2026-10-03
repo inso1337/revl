@@ -25,6 +25,7 @@ same meaning across six runtimes". This harness turns that claim into evidence:
      an integer remainder by zero and an index past the end of a list. A tier
      that returns a value where the reference faults is a divergence, and so
      is one that faults with a different kind.
+     (a compiles-implies-runs violation) or it computed a different value.
   5. SHRINK the divergence to a minimal program (delta-debug the declarations,
      then simplify the probe expression) that still diverges on the same tier.
      A fault divergence is not shrunk: the generated fault probe is already
@@ -49,6 +50,7 @@ slice for components with emissions). Floats are rendered only when finite.
 A program the frontend rejects is discarded, never counted as a divergence.
 
 This is a BOUNDED harness: a bounded generator, a simple two-phase shrinker, and
+This is a FIRST CUT: a bounded generator, a simple two-phase shrinker, and
 py-plus-whatever-runs execution, all deterministic under `--seed`. It is not a
 property-testing framework. Honesty over coverage: the report states which
 tiers it could execute and how many programs it actually ran.
@@ -140,6 +142,9 @@ def reference_fault_kind(error: BaseException) -> str | None:
     if isinstance(error, OverflowError):
         return "overflow"
     return None
+    """The py reference could not produce a clean value for `probe` (a runtime
+    fault, or a value the literal renderer cannot represent). The program is
+    discarded, never counted as a divergence."""
 
 
 def reference_value(source: str):
@@ -155,6 +160,8 @@ def reference_value(source: str):
     except Exception as error:  # noqa: BLE001 — any reference fault -> discard/compare
         raise ReferenceFault(f"{type(error).__name__}: {error}",
                              kind=reference_fault_kind(error)) from error
+    except Exception as error:  # noqa: BLE001 — any reference fault -> discard
+        raise ReferenceFault(f"{type(error).__name__}: {error}") from error
     finally:
         sys.modules.pop("revl_fuzz_ref", None)
 
@@ -275,6 +282,7 @@ def _is_printable_scalar(text: str) -> bool:
         if not ch.isprintable() or 0xD800 <= ord(ch) <= 0xDFFF:
             return False
     return True
+_SAFE_STR = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789 "
 
 
 def render_literal(t, value) -> str:
@@ -299,9 +307,11 @@ def render_literal(t, value) -> str:
         return "true" if value else "false"
     if t == "Str":
         if not isinstance(value, str) or not _is_printable_scalar(value):
+        if not isinstance(value, str) or any(c not in _SAFE_STR for c in value):
             raise ReferenceFault(f"unsafe Str {value!r}")
         escaped = value.replace("\\", "\\\\").replace('"', '\\"')
         return f'"{escaped}"'
+        return f'"{value}"'
     head = t[0]
     if head == "List":
         if not isinstance(value, list):
@@ -370,6 +380,7 @@ class Generator:
         if self.rng.random() < 0.5:
             base += self.rng.choice(_NONASCII_STR_ATOMS)
         return '"' + base + '"'
+        return '"' + "".join(self.rng.choice(alpha) for _ in range(n)) + '"'
 
     def _nonzero_int_lit(self) -> str:
         return str(self.rng.choice([1, 2, 3, 4, 5, 6, 7, 8, 9]))
@@ -714,6 +725,7 @@ class Program:
 class Divergence:
     tier: str
     kind: str          # 'build' (compiles-implies-runs), 'value', or 'fault'
+    kind: str          # 'build' (compiles-implies-runs violation) or 'value'
     signature: str     # normalized root-cause fingerprint
     py_msg: str
     tier_msg: str
@@ -746,6 +758,7 @@ def assertion_source(program_src: str, ret, value) -> str | None:
 #   skip    — the tier's toolchain is absent (honest unavailability).
 #   refusal — the tier's EMITTER refused the construct at compile time. This is
 #             a DECLARED, LOUD capability boundary (e.g. wasm has no Map value
+#             a DECLARED, LOUD capability boundary (e.g. wasm has no Float value
 #             representation — docs/wasm-capabilities.md), tracked by the
 #             conformance matrix, not a silent wrong answer. A differential
 #             fuzzer must not cry "divergence" on a tier honestly saying "I do
@@ -768,6 +781,9 @@ _BUILD_ERROR_SIGNS = (
     "invalid operation", "does not compile", "error[e", "not a type", "no field",
     "expected i32", "expected i64", "expected f64", "compile error", "javac failed",
     "cannot be", "declared and not used", "is not lowerable",
+    "does not compile", "error[e", "not a type", "no field", "expected i32",
+    "expected i64", "expected f64", "compile error", "javac failed", "cannot be",
+    "declared and not used", "is not lowerable",
 )
 
 
@@ -1231,6 +1247,8 @@ def main(argv=None) -> int:
                     tier=tier, kind=kind, signature=sig,
                     py_msg=f"reference faulted ({fault.kind})",
                     tier_msg=tmsg, tier_stdout=tout, source=fault_src)
+        except ReferenceFault:
+            discarded_ref += 1
             continue
         aug = assertion_source(src, prog.probe_ret, value)
         if aug is None:
@@ -1297,6 +1315,7 @@ def main(argv=None) -> int:
 
     if not seen:
         say("no cross-tier VALUE/BUILD/FAULT divergence found in this batch.")
+        say("no cross-tier VALUE/BUILD divergence found in this batch.")
     else:
         say("")
         say("DIVERGENCES (a tier that ran but disagreed with the reference):")

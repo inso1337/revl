@@ -284,6 +284,7 @@ only narrow what the verdict may claim, because silence means no bound is
 quoted. `ShadowPlan` keeps a constructor default for `live` for older callers,
 but `plan_from_dict` requires that member because its default is the fail-open
 direction.
+Fail-closed, with no third value and no default anywhere:
 
 | shape | refusal |
 |---|---|

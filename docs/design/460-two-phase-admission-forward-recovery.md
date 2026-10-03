@@ -411,6 +411,7 @@ forward finalize now REQUIRES a restored `session` to run the content CAS
 against. A `revl recover --wal FILE --forward` with no `--restore` reaches
 `recover_forward_admissions` with `session=None` and can no longer finalize an
 advanced decision: it classifies it `unverified`, appends no `admit-finalized`,
+advanced decision — it classifies it `unverified`, appends no `admit-finalized`,
 and never reports a CAS that never ran. An `admit-applied` is historical applied
 state, not checked-current state; only a restored surface authorizes the forward
 finalize.

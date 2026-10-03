@@ -61,6 +61,7 @@ from revl.tee_attestation import (  # noqa: E402
 
 FIXTURES = ROOT / "tests" / "fixtures" / "tee"
 MANIFEST = json.loads((FIXTURES / "manifest.json").read_text(encoding="utf-8"))
+MANIFEST = json.loads((FIXTURES / "manifest.json").read_text())
 
 PEER_KEY = b"pool-shared-secret"
 PEER_ID = "peer-1"
@@ -108,6 +109,7 @@ def requirement(**overrides) -> TeeRequirement:
     fields = {"bundle": BUNDLE, "measurements": frozenset({MRTD}),
               "regions": frozenset({REGION}), "nonce": NONCE, "max_age_s": 120.0,
               "tdx": TdxPolicy(accept_mrtd_only=True)}
+              "regions": frozenset({REGION}), "nonce": NONCE, "max_age_s": 120.0}
     fields.update(overrides)
     return TeeRequirement(**fields)
 
@@ -166,6 +168,7 @@ def test_a_sev_snp_report_chained_to_a_pinned_root_is_admitted():
     ok, reason = admits(
         sev_proof(),
         requirement(measurements=frozenset({SEV_MEASUREMENT}), sev_min_tcb=0))
+        sev_proof(), requirement(measurements=frozenset({SEV_MEASUREMENT})))
     assert ok, reason
     assert q.DEV_ROOT_NOTE not in reason
 
@@ -517,6 +520,7 @@ def attest_table(**overrides) -> dict:
              # `tdx_proof()` builds a quote whose RTMRs are all zero, and a TDX
              # quote is refused unless the table permits the registers it read.
              "runtime_measurements": [["00" * 48] * 4]}
+             "measurements": [MRTD], "region": REGION, "nonce": NONCE}
     table.update(overrides)
     return table
 

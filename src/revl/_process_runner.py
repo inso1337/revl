@@ -17,6 +17,7 @@ composition, and brings it up on a cordis-py Context:
 While it holds, it also reads newline-delimited JSON *control* commands on
 stdin — the channel `revl swap <component> --to <backend>` uses to drive a
 live migration (docs/swap.md). The command it always understands:
+live migration (docs/swap.md). Today one command is understood:
 
   {"op": "repoint", "key": "<k>", "socket": "<successor.sock>"}
 
@@ -72,6 +73,7 @@ import uuid
 from pathlib import Path
 
 from ._paths import backends_root, python_backend_emitter
+from ._paths import backends_root
 
 
 # item 443: how often an ARMED process re-reads the latch, and the status it
@@ -377,6 +379,8 @@ def _load_module(ir: dict, wal: "_ProcessWal | None" = None) -> types.ModuleType
     # the python backend's own emitter, never whichever backend directory is
     # first on sys.path for the bare name `emit` (issues #1449, #2204)
     emit = python_backend_emitter()
+def _load_module(ir: dict) -> types.ModuleType:
+    import emit  # noqa: PLC0415  backend dir already on sys.path
 
     source = emit.emit(ir)
     module = types.ModuleType("revl_proc_mod")
@@ -907,6 +911,8 @@ async def run(spec: dict, spec_path=None) -> None:
     estop_latch = spec.get("estopLatch") or os.environ.get("REVL_ESTOP_LATCH")
     if estop_latch:
         runtime_mod.arm_estop_latch(estop_latch)
+        threading.Thread(target=_estop_watch, args=(name, runtime_mod),
+                         name="revl-estop", daemon=True).start()
 
     def log(channel: str, subject: str, detail: str = "") -> None:
         # issue #814: the funnel for every CHANNEL-format console line this
@@ -952,6 +958,7 @@ async def run(spec: dict, spec_path=None) -> None:
     # the body's `import` must resolve from sys.modules (src/revl/stdlib_hosts.py).
     from revl.stdlib_hosts import preload_stdlib_host_modules  # noqa: PLC0415
     preload_stdlib_host_modules()
+    module = _load_module(running_ir)
     # The backend directory is a trusted LOADER path for the runtime's own
     # first-party modules (`emit`, `runtime`, `bridge`), not an ambient import
     # capability for user-authored `@py` bodies. Keep it on sys.path through the
@@ -1244,6 +1251,7 @@ async def run(spec: dict, spec_path=None) -> None:
                 asyncio.run_coroutine_threadsafe(_commit_wal(), loop).result()
                 _funnel_line(f"[{name}] WAL COMMITTED")
             elif cmd.get("op") == "repoint":
+            if cmd.get("op") == "repoint":
                 # item 337: a repoint must pass the SAME admission gate as boot
                 # and `revl swap` before it can substitute a provider at this
                 # seam. `_apply_repoint` re-admits the named successor against

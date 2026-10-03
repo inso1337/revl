@@ -196,6 +196,7 @@ pub extern pure fn json_parse(s: Str) -> Any
       } else {
         fail("invalid number");
       }
+      digits();
       let float = false;
       if (s[i] === ".") {
         float = true; i++;
@@ -208,6 +209,8 @@ pub extern pure fn json_parse(s: Str) -> Any
         if (!isDigit(s[i])) fail("a number needs digits in the exponent");
         digits();
       }
+      if (s[i] === ".") { float = true; i++; digits(); }
+      if (s[i] === "e" || s[i] === "E") { float = true; i++; if (s[i] === "+" || s[i] === "-") i++; digits(); }
       const tok = s.slice(start, i);
       return float ? Number(tok) : BigInt(tok);
     }
@@ -230,6 +233,7 @@ pub extern pure fn json_parse(s: Str) -> Any
             if (!/^[0-9a-fA-F]{4}$/.test(hex)) fail("invalid unicode escape");
             out += String.fromCharCode(parseInt(hex, 16)); i += 4;
           }
+          else if (e === "u") { out += String.fromCharCode(parseInt(s.slice(i, i + 4), 16)); i += 4; }
           else fail("invalid escape");
         } else if (c < " ") {
           // RFC 8259 section 7: a raw character below U+0020 must be escaped.
@@ -425,6 +429,16 @@ pub extern pure fn json_stringify(v: Any) -> Str
       if (marks.length === 0) return wire;
       if (wire.split(prefix).length - 1 === marks.length) {
         return wire.replace(new RegExp('"' + prefix + "(\\d+)@@\"", "g"), (_m, i) => marks[Number(i)]);
+    const marks: string[] = [];
+    const wire = JSON.stringify(v, (_k, x) => {
+      // JSON.stringify maps a non-finite number to `null` — a SILENT
+      // substitution of a different value, not a refusal. A non-finite Float
+      // is reachable (`/` is IEEE true division: `1.0/0.0` is `inf` on every
+      // tier, docs/arithmetic.md) and has no JSON spelling (RFC 8259 section
+      // 6). Refuse, matching the py @py body's `allow_nan=False` and the
+      // frontend's existing refusal of a non-finite Float literal (item 312).
+      if (typeof x === "number" && !Number.isFinite(x)) {
+        throw new TypeError("json_stringify: a non-finite Float has no JSON representation (RFC 8259 section 6)");
       }
       if (pass === 1) throw new Error("json_stringify: could not pick a bigint placeholder the data does not spell");
       // The run lengths already spelled, in the data or by this pass. The
@@ -434,6 +448,9 @@ pub extern pure fn json_stringify(v: Any) -> Str
       zeros = 0;
       while (taken.has(zeros)) zeros++;
     }
+      return typeof x === "bigint" ? "@@revlBigInt:" + (marks.push(x.toString()) - 1) + "@@" : x;
+    });
+    return marks.length === 0 ? wire : wire.replace(/"@@revlBigInt:(\d+)@@"/g, (_m, i) => marks[Number(i)]);
   }
   = @rs { v.downcast::<serde_json::Value>().map(|j| serde_json::to_string(&*j).unwrap_or_default()).unwrap_or_default() }
   = @go {
