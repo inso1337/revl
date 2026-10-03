@@ -366,6 +366,10 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     "_grants_consumed",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
+    # The agent-loop axes (issue #1738). They count what the session did,
+    # refusals included, and a count that a failed load could take back would
+    # be one an agent can lower on demand.
+    "_loop_axes",
     # The event loop the load ran on. It is plumbing, not composition state, and
     # putting back `None` would orphan an open loop rather than undo anything.
     "_loop",
@@ -689,6 +693,14 @@ class Session:
         # at every load/swap so a call decided against a stale map is impossible.
         # None when nothing is loaded or the policy is off.
         self._class_map = None
+        # issue #1738: the agent-loop axes `state()` always reports. Cumulative
+        # for the whole MCP session, so `_reset` leaves them alone, and a failed
+        # load does not roll them back (`_SURVIVES_A_FAILED_LOAD`). The class map
+        # they classify a call against when the policy is off is built lazily
+        # per generation, `(generation, map)`.
+        from .loop_axes import LoopAxes  # noqa: PLC0415
+        self._loop_axes = LoopAxes()
+        self._loop_class_map: tuple | None = None
         # the outstanding-ticket table (Fix 8): every class-(c) ticket the server
         # issues, keyed by its hash. `revl_approve` refuses a hash not in here —
         # an approval can only be minted for a question the server actually asked.
@@ -3563,6 +3575,7 @@ class Session:
         result = owner.finalize_abort()            # aborted record (+ escrow Phase 2)
         self._close_wal()
         residue = self._surface_compensation_residue(owner)
+        self._loop_axes.record_abort(residue)      # issue #1738
         report = self._teardown_report(driver)
         prompts = dict(owner.prompts)
         self._reset()
@@ -4279,6 +4292,8 @@ class Session:
         # seeds the next owner from an entry still reading `consumed: False` and
         # a single-use approval re-arms across the unload.
         self._settle_approval_spend(self._owner)
+        # issue #1738: the commit session ends here; keep its prompt tally.
+        self._loop_axes.close_owner(self._owner)
         self._owner = None
         self.ir = None
         self.previous = None
@@ -4898,6 +4913,9 @@ class Session:
         # binds to THAT grant/approval (not any that could have covered).
         decision: dict | None = {} if cache_active else None
         self._approval_decide_call(key, method, args, record=decision)
+        # issue #1738: the call is decided and about to cross, so it counts
+        # toward the loop axes now, policy or not.
+        self._loop_axes.record_call(self._loop_call_class(key, method))
 
         async def invoke():
             result = target(*(args or []))
@@ -8673,7 +8691,8 @@ class Session:
         if self._driver is None:
             # even with nothing loaded, the workspace's active leases (item 61)
             # are visible — an agent can survey who holds what before it loads.
-            return {"loaded": False, "leases": self.leases.document()}
+            return {"loaded": False, "leases": self.leases.document(),
+                    "loopAxes": self.loop_axes()}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         paused_now = self.slo_paused()
@@ -8719,8 +8738,46 @@ class Session:
             # configured (off-policy `state()` is byte-identical).
             **({"approval": self.approval_metrics()}
                if self.approval_policy is not None else {}),
+            # issue #1738: the six agent-loop axes, always.
+            "loopAxes": self.loop_axes(),
             **({"trace": driver.drain_events()} if drain else {}),
         }
+
+    def loop_axes(self) -> dict:
+        """The agent-loop axes of issue #1738 (`revl.mcp.loop_axes`), each a
+        numerator, a denominator and their ratio, cumulative for the session."""
+        return self._loop_axes.document(self._owner)
+
+    def record_tool_call(self, name: str, arguments: dict, payload: dict,
+                         ir_before: dict | None) -> None:
+        """Feed one finished MCP tool call to the loop axes. `ir_before` is the
+        running composition before the handler ran; the components that differ
+        from it now are the ones the call touched."""
+        from .loop_axes import EDIT_TOOLS  # noqa: PLC0415
+        touched = None
+        if name in EDIT_TOOLS and self.ir is not ir_before:
+            from .operator import _changed_targets  # noqa: PLC0415
+            touched = [component for component, _ in
+                       _changed_targets(ir_before or {}, self.ir or {})]
+        self._loop_axes.record_tool(name, arguments, payload, touched)
+
+    def _loop_call_class(self, key: str, method: str):
+        """The class of a call's reach for the loop axes: the policy's own class
+        map when there is one, else a policy-independent one for the live
+        generation. `False` when the call cannot be classified."""
+        class_map = self._class_map
+        if class_map is None and self.ir is not None:
+            cached = self._loop_class_map
+            if cached is None or cached[0] is not self.ir:
+                from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
+                try:
+                    cached = (self.ir, ClassMap(self.ir))
+                except Exception:  # noqa: BLE001 — unclassifiable, counted as such
+                    cached = (self.ir, None)
+                self._loop_class_map = cached
+            class_map = cached[1]
+        reach = class_map.classify_call(key, method) if class_map is not None else None
+        return False if reach is None else reach["class"]
 
 
 def _decision_id_of(sources: dict, granted, base_manifest_hash: str | None,

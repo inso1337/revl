@@ -3291,7 +3291,12 @@ TOOLS = [
     {
         "name": "revl_state",
         "description": "What is loaded right now: fiber states, provided keys, whether "
-                       "a rollback is available, and the trace since the last call.",
+                       "a rollback is available, and the trace since the last call. "
+                       "Always carries `loopAxes`: reversibility rate, share "
+                       "auto-approved with proof, prompts per session, preflight "
+                       "coverage, violations caught before execution and residue "
+                       "after abort, each as numerator, denominator and value, "
+                       "cumulative for the session.",
         "inputSchema": {"type": "object", "properties": {}},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_state,
@@ -3834,6 +3839,7 @@ def handle(message: dict) -> dict | None:
             # server cannot".
             payload = _runtime_gate.refusal(name)
         else:
+            ir_before = getattr(SESSION, "ir", None)
             try:
                 payload = handler(arguments)
                 _remember_live_host_bodies()
@@ -3850,6 +3856,12 @@ def handle(message: dict) -> dict | None:
                 }]}
             if decision.gated and decision.allowed:
                 _stamp_authority(payload, decision)
+            # issue #1738: the loop axes read every call that reached a handler
+            # (preflight queries, composition edits, and refusals before and at
+            # run time).
+            record_tool_call = getattr(SESSION, "record_tool_call", None)
+            if record_tool_call is not None:
+                record_tool_call(name, arguments, payload, ir_before)
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),
