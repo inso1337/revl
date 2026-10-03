@@ -2723,6 +2723,7 @@ class _ComponentEmitter:
             for emission in emissions:
                 out.add(indent + 1,
                         self._emission_fire(emission.get("expr"), where))
+                self._timer_compensation(out, indent + 1, emission, where)
             out.add(indent, f"{handle} = {_runtime_ref(schedule)}({interval}, {fn})")
             out.add(indent, f"yield lambda: {handle}.cancel()")
             return
@@ -2749,6 +2750,7 @@ class _ComponentEmitter:
             else:
                 # a sync emission in a mixed body still runs inline
                 out.add(indent + 1, rendered)
+                self._timer_compensation(out, indent + 1, emission, where)
         out.add(indent, f"{handle} = {_runtime_ref(schedule)}({interval}, {fn})")
         cancel = f"{fn}_cancel"
         out.add(indent, f"def {cancel}():")
@@ -2756,6 +2758,23 @@ class _ComponentEmitter:
         out.add(indent + 1, f"for _revl_task in list({inflight}):")
         out.add(indent + 2, "_revl_task.cancel()")
         out.add(indent, f"yield {cancel}")
+
+    def _timer_compensation(self, out: _Lines, indent: int, emission: dict,
+                            where: str) -> None:
+        """Register the compensation an emitted extern DECLARES (item 254), once
+        per firing, after the fire. A timer body cannot spell `compensate`
+        itself (the parser refuses it), but an extern that owns its reversal is
+        emitted from a firing like any other site. The firing closure has no
+        generator to yield into, so the entry goes through
+        `Frame.compensation_method`, the provide-method form: discharged on a
+        clean commit, run in Phase 2 of an abort, WAL descriptor at
+        registration. The activation-body site registers the same entry with
+        `yield _revl_frame.compensation(...)`; the timer path dropped it."""
+        ext_comp = self._compensated_extern(emission.get("expr"))
+        if ext_comp is None:
+            return
+        out.add(indent, "_revl_frame.compensation_method(lambda: "
+                        f"{self._expr(ext_comp['compensate'], where)})")
 
     def _provide(self, out: _Lines, indent: int, step: dict, where: str) -> None:
         name = _ident(step.get("name"), f"{where}: provide key")

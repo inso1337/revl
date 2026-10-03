@@ -341,7 +341,9 @@ def apply_edit(session, arguments: dict) -> dict:
 
     # (2) open holes -> checked, not admissible. Advance the working buffer so
     # the next edit builds on it (fill holes one at a time), but swap nothing.
-    holes = fillspec.enrich(ir) if ir.get("holes") else []
+    from .server import _untrusted_author  # noqa: PLC0415 - no import cycle
+    holes = (fillspec.enrich(ir, untrusted=_untrusted_author())
+             if ir.get("holes") else [])
     if holes:
         session.draft = vs
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
