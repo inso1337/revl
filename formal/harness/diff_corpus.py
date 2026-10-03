@@ -126,6 +126,8 @@ from revl.wal import WAL_GUARANTEE, WAL_VERSION
 # restated: the scope an `Approval[C]` type carries, and whether a scope
 # covers a token. The reference's `AP` verdicts are the shipped ones.
 from revl.lower import _approval_covers, _approval_scope_of
+# The host families the checker resolves by name, for the G1 row (#1807).
+from revl.lower import _HOST_CALLABLES
 import runtime as _rt  # backends/python/runtime.py — the reference teardown
 from revl.parser import (
     EffectStmt,
@@ -1421,6 +1423,121 @@ def approval_rows(rel: str, comp, ctx: _ApprovalCtx, svc_objs: dict,
     return rows
 
 
+# ---------------------------------------- declared access (issue #1807)
+#
+# The checker refuses a call head whose root names no declared requirement
+# (G1, "`db` is not a declared requirement of C"). The model states the rule
+# over a component's ACCESS roots (`RevL.G1Access.AccessOK`); the exporter
+# carries them, one `GA <file> <comp> <root>` row each: every call head's
+# root, at every nesting depth, less the roots the checker resolves without a
+# requirement. The requirements themselves are NOT dropped here, so the
+# model is what checks a root against the declared ones.
+
+#: The builtin constructors every program can name.
+_BUILTIN_CTORS = frozenset({"Ok", "Err", "Some", "None"})
+
+#: Binding forms whose `name`/`bind` puts a local in view.
+_BINDING_NODES = ("LetStmt", "LetEffect", "ForStmt", "LetApprovalStmt",
+                  "StreamIterStmt", "CallStmt")
+
+
+def _component_locals(comp) -> set[str]:
+    """Every name a binding puts in view anywhere in the component: `let`,
+    `var`, `let ... = effect`, a loop or stream binder, an approval, a
+    provide method's parameters, an arrow's parameters and a `match` arm's
+    binder. Read component-wide, not per scope (see `G1_KeyAccess.lean`)."""
+    out: set[str] = set()
+
+    def walk(node) -> None:
+        if node is None or isinstance(node, (str, int, float, bool)):
+            return
+        kind = type(node).__name__
+        if kind in _BINDING_NODES:
+            for attr in ("name", "bind"):
+                value = getattr(node, attr, None)
+                if isinstance(value, str):
+                    out.add(value)
+        if kind == "LetPatternStmt":
+            _pattern_names(getattr(node, "pattern", None), out)
+        if isinstance(node, ExprArrow):
+            out.update(node.params)
+        if isinstance(node, ExprMatch):
+            for arm in node.arms:
+                if len(arm) > 1 and isinstance(arm[1], str):
+                    out.add(arm[1])
+        if isinstance(node, ProvideStmt):
+            for pm in node.methods:
+                out.update(pm.params)
+        if dataclasses.is_dataclass(node) and not isinstance(node, type):
+            for f in dataclasses.fields(node):
+                walk(getattr(node, f.name))
+        elif isinstance(node, (list, tuple)):
+            for x in node:
+                walk(x)
+
+    walk(comp.body)
+    return out
+
+
+def _pattern_names(pattern, out: set[str]) -> None:
+    """The names a destructuring pattern binds."""
+    if isinstance(pattern, str):
+        out.add(pattern)
+    elif dataclasses.is_dataclass(pattern) and not isinstance(pattern, type):
+        for f in dataclasses.fields(pattern):
+            _pattern_names(getattr(pattern, f.name), out)
+    elif isinstance(pattern, (list, tuple)):
+        for x in pattern:
+            _pattern_names(x, out)
+
+
+def _file_resolved_names(prog) -> set[str]:
+    """The roots a call head may name without a requirement, file-wide: a
+    module `fn` or `extern`, a name or namespace a `use` imports, a host
+    family, and a type or variant constructor."""
+    names = {f.name for f in prog.fn_decls} | {e.name for e in prog.externs}
+    for use in prog.uses:
+        names.update(use.names or ())
+        if use.alias:
+            names.add(use.alias)
+    for td in prog.type_decls:
+        names.add(td.name)
+        names.update(case.name for case in td.cases or ())
+    return names | set(_HOST_CALLABLES) | _BUILTIN_CTORS
+
+
+#: Per component, which kinds of root the export dropped: `(file, comp) ->
+#: set of "local" / "callable" / "host"`. Read by `access_coverage`.
+_ACCESS_DROPPED: dict = {}
+
+
+def access_rows(rel: str, comp, roots: set[str], resolved: set[str],
+                callables: set[str]) -> list[str]:
+    """The `GA` rows of one component from the call-head roots it makes."""
+    local = _component_locals(comp)
+    provided = {key for key, _svc, _line in comp.provides}
+    access: set[str] = set()
+    dropped: set[str] = set()
+    for root in roots:
+        if not root or root.startswith("@"):
+            continue  # a receiver written in place: its own heads are walked
+        if root in local:
+            dropped.add("local")
+        elif root in callables:
+            dropped.add("callable")
+        elif root in _HOST_CALLABLES:
+            dropped.add("host")
+        elif root not in resolved:
+            access.add(root)
+    for stmt in comp.body:
+        if type(stmt).__name__ == "InterceptStmt" and stmt.key not in provided:
+            # an `intercept` target is a dependency key (Def. 30); one on a
+            # provision is a different refusal (issue #1809)
+            access.add(stmt.key)
+    _ACCESS_DROPPED[(rel, comp.name)] = dropped
+    return ["\t".join(["GA", rel, comp.name, root]) for root in sorted(access)]
+
+
 # ------------------------------------ binding uniqueness (issue #1812)
 #
 # The checker's G6 `binding` refusal (`Env.bind_local` in the activation body,
@@ -2159,6 +2276,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                     for name, vals in fn_values.items()}
         tsv.append("\t".join(["PG", rel, str(len(prog.fn_decls))]))
         extern_class_of = {e.name: e.classification for e in prog.externs}
+        resolved_names = _file_resolved_names(prog)
+        file_callables = {f.name for f in prog.fn_decls} \
+            | {e.name for e in prog.externs}
         # The service operations a bracket inverse READS as a value
         # (`undo dispatch1(w.task.run)`, issue #1792), each declared in the
         # `Prog` below as an `emission` boundary named `<Service>.<op>`. No
@@ -2354,6 +2474,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
             calls: list[tuple[str, str, str, str]] = []
             kinds: list[str] = []
             terms: list[tuple[int, str, list[str], list[str]]] = []
+            head_roots: set[str] = set()
 
             def _term_heads(node: object, ctx: str = "plain") -> list[str]:
                 found: list[tuple[str, str, str]] = []
@@ -2416,6 +2537,7 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
 
             def _record(local_calls: list[tuple[str, str, str]]) -> bool:
                 saw_raw = False
+                head_roots.update(root for root, _chain, _ctx in local_calls)
                 for root, chain, ctx in local_calls:
                     res = _resolve_emission(root, chain, require_map, handles,
                                             psvc, aliases)
@@ -2472,6 +2594,9 @@ def export() -> tuple[list[str], dict[str, dict], dict[str, object]]:
                         for inner in pm.body:
                             classify_stmt(inner)
             tsv.extend(f"T\t{rel}\t{c.name}\t{k}" for k in kinds)
+            # declared-access facts (GA, issue #1807)
+            tsv.extend(access_rows(rel, c, head_roots, resolved_names,
+                                   file_callables))
             for idx, kind, heads, inverse in terms:
                 tsv.append("\t".join(["I", rel, c.name, str(idx), kind,
                                        ",".join(heads), ",".join(inverse)]))
@@ -3406,6 +3531,45 @@ def approval_coverage() -> list[str]:
     return findings
 
 
+#: What the REFERENCE decided for each component's access: (admitted, access
+#: roots). Filled by `reference_from_tsv`, read by `access_coverage`.
+_ACCESS_ROWS: dict = {}
+
+
+def access_coverage() -> list[str]:
+    """The non-vacuity ratchet for the `G1` row (issue #1807).
+
+    A row that only ever saw requirement roots could not tell the rule from
+    "every head is a requirement". The corpus must carry:
+
+      * a component REFUSED for an undeclared access root
+        (`examples/rejections/g1_undeclared_access.rvl`);
+      * an ADMITTED component with an access root that is declared;
+      * an ADMITTED component whose dropped roots include a local, a module
+        callable and a host family, so each exclusion is exercised where the
+        checker admits.
+
+    Returns findings, treated as gate failures."""
+    witnesses = {"refused": None, "declared": None, "excluded": None}
+    for key, (ok, roots) in sorted(_ACCESS_ROWS.items()):
+        if not ok:
+            witnesses["refused"] = witnesses["refused"] or key
+        if ok and roots:
+            witnesses["declared"] = witnesses["declared"] or key
+        if ok and {"local", "callable", "host"} <= _ACCESS_DROPPED.get(key, set()):
+            witnesses["excluded"] = witnesses["excluded"] or key
+    labels = {"refused": "a component refused for an undeclared access root",
+              "declared": "an admitted component with a declared access root",
+              "excluded": "an admitted component dropping a local, a callable "
+                          "and a host family"}
+    findings = [f"access coverage: NO witness of {labels[k]} — the G1 row "
+                "would agree vacuously" for k, w in witnesses.items() if w is None]
+    if not findings:
+        print(f"access coverage: {len(_ACCESS_ROWS)} components; "
+              + " ".join(f"{k}={w}" for k, w in witnesses.items()))
+    return findings
+
+
 #: What the REFERENCE decided for each binding scope: (admitted, binds,
 #: opens a block). Filled by `reference_from_tsv`, read by `binding_coverage`.
 _BINDING_ROWS: dict = {}
@@ -3474,7 +3638,8 @@ class Verdicts(NamedTuple):
     `approvals` AP rows (the G4 approval floor: every approval-required token
     a marked crossing reaches is covered by its `with` edge, issue #1455),
     `bindings` BU rows (G6 binding uniqueness: no binding reuses a name in
-    view, issue #1812)."""
+    view, issue #1812), `access` G1 rows (G1 declared access: every access
+    root is a declared requirement, issue #1807)."""
     files: dict[str, tuple[str, str, str]]
     comps: dict[tuple[str, str], str]
     providers: dict[tuple[str, str, str, str, str], str]
@@ -3492,6 +3657,7 @@ class Verdicts(NamedTuple):
     deferred: dict[str, str]
     approvals: dict[tuple[str, str, str], str]
     bindings: dict[tuple[str, str, str], str]
+    access: dict[tuple[str, str], str]
 
     def total(self) -> int:
         return (len(self.files) + len(self.comps) + len(self.providers)
@@ -3501,7 +3667,8 @@ class Verdicts(NamedTuple):
 
                 + len(self.g5reg) + len(self.a9) + len(self.configs)
                 + len(self.a2) + len(self.deferred)
-                + len(self.approvals) + len(self.bindings))
+                + len(self.approvals) + len(self.bindings)
+                + len(self.access))
 
 
 
@@ -3530,6 +3697,7 @@ def parse_verdicts(text: str) -> Verdicts:
     deferred: dict[str, str] = {}
     approvals: dict[tuple[str, str, str], str] = {}
     bindings: dict[tuple[str, str, str], str] = {}
+    access: dict[tuple[str, str], str] = {}
 
     for line in text.splitlines():
         parts = line.split("\t")
@@ -3605,6 +3773,9 @@ def parse_verdicts(text: str) -> Verdicts:
             # The approval floor: (file, comp, crossing ord) -> ok|fail.
             approvals[(parts[1], parts[2], parts[3])] = \
                 parts[4].split("=", 1)[1]
+        elif parts[0] == "G1" and len(parts) == 4:
+            # G1 declared access: (file, comp) -> ok|fail.
+            access[(parts[1], parts[2])] = parts[3].split("=", 1)[1]
         elif parts[0] == "BU" and len(parts) == 5:
             # G6 binding uniqueness: (file, comp, scope) -> ok|fail.
             bindings[(parts[1], parts[2], parts[3])] = \
@@ -3613,7 +3784,7 @@ def parse_verdicts(text: str) -> Verdicts:
             raise SystemExit(f"differential oracle: malformed verdict row {line!r}")
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
                     recoveries, confinements, g8surface, g5reg, a9, configs,
-                    a2, deferred, approvals, bindings)
+                    a2, deferred, approvals, bindings, access)
 
 
 
@@ -4037,6 +4208,7 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
     _APPROVAL_ROWS.clear()
     approvals: dict[tuple[str, str, str], str] = {}
     bindings: dict[tuple[str, str, str], str] = {}
+    access: dict[tuple[str, str], str] = {}
     for key, tokens in crossing_tokens.items():
         needed = tokens & required_by_file.get(key[0], set())
         edge = crossing_edge.get(key)
@@ -4061,10 +4233,25 @@ def reference_from_tsv(tsv: list[str]) -> Verdicts:
         _BINDING_ROWS[key] = (ok, sum(1 for k, _n in events if k == "bind"),
                               any(k == "enter" for k, _n in events))
 
+    # G1 verdicts (declared access, issue #1807), recomputed from the M and
+    # GA rows: every access root of a component is one of its requires.
+    access_roots: dict[tuple[str, str], set[str]] = {}
+    for r in rows:
+        if r and r[0] == "GA" and len(r) == 4:
+            access_roots.setdefault((r[1], r[2]), set()).add(r[3])
+    _ACCESS_ROWS.clear()
+    for r in mrows:
+        key = (r[1], r[2])
+        declared = {x for x in r[3].split(",") if x}
+        roots = access_roots.get(key, set())
+        ok = roots <= declared
+        access[key] = "ok" if ok else "fail"
+        _ACCESS_ROWS[key] = (ok, len(roots))
+
     return Verdicts(files, comps, providers, spawns, refused, dispositions,
 
                     recoveries, confinements, g8surface, g5reg, a9,
-                    configs, a2, deferred, approvals, bindings)
+                    configs, a2, deferred, approvals, bindings, access)
 
 
 #: What the REFERENCE decided for each config field, for the CD row's
@@ -4183,8 +4370,8 @@ def a9_coverage() -> list[str]:
 # about that other language. Both are 0 on the corpus, so both are fatal; a
 # genuine fragment gap has `out-of-fragment*` to land in, which is the bucket
 # that says "the model has no fact here" rather than "the model disagrees".
-FATAL_BUCKETS = ("missed-G4", "missed-G2", "missed-G5", "missed-G6",
-                 "missed-A9", "missed-A2", "formal-strict",
+FATAL_BUCKETS = ("missed-G1", "missed-G4", "missed-G2", "missed-G5",
+                 "missed-G6", "missed-A9", "missed-A2", "formal-strict",
                  "formal-found-other")
 
 
@@ -4337,6 +4524,8 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         # The BU row is G6 binding uniqueness (issue #1812): checker-visible
         # in both directions, like A2.
         bu_fail = any(x == "fail" for k, x in v.bindings.items() if k[0] == rel)
+        # The G1 row is declared access (issue #1807), checker-visible both ways.
+        g1_fail = any(x == "fail" for k, x in v.access.items() if k[0] == rel)
         g4_rows = comp_rows + prov_rows + spawn_rows + cfg_rows + ap_rows
         # The A2 row (issue 1166) is checker-visible: `lower._dispatch_action`
         # refuses the shape with code A2, so a model `fail` on an accepted
@@ -4350,7 +4539,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
         df_fail = v.deferred.get(rel, "ok") == "fail"
         formal_clean = vrow[0] == "ok" and vrow[2] == "ok" and all(
             x == "ok" for _, x in g4_rows + a9_rows + a2_rows) \
-            and not df_fail and not bu_fail
+            and not df_fail and not bu_fail and not g1_fail
         a2_found = any(x == "fail" for _, x in a2_rows)
         raw_found = any(x == "fail" for _, x in g4_rows)
 
@@ -4411,6 +4600,11 @@ def checker_alignment(file_facts: dict, componentless: list[str],
                 # counted nothing: that IS the model being weaker than the
                 # checker, and fatal.
                 record("missed-G5", rel)
+        elif code == "G1":
+            # Declared access (issue #1807): the `G1` row decides
+            # `RevL.G1Access` over the component's access roots, so a G1
+            # refusal the row admits is the model being weaker, and fatal.
+            record("agree-G1" if g1_fail else "missed-G1", rel)
         elif code == "G6":
             # DELIBERATELY not an `agree-G6` on a `C` row fail, which is what
             # issue #1169 F4 proposed. revl's G6 is "purity outside effect
@@ -4530,7 +4724,7 @@ def checker_alignment(file_facts: dict, componentless: list[str],
 # diff hunk.
 #
 # NOT extended to the generic `out-of-fragment` bucket, deliberately. That
-# one collects every checker code the model states no row about at all (G1,
+# one collects every checker code the model states no row about at all (A1,
 # G7, T1, REVL, HOST-METHOD, ...) and grows with any new type-error fixture
 # anywhere in revl, so a ratchet there would red the formal gate on work
 # that never touched the formal layer. G5 and G6 are different in kind: the
@@ -4689,6 +4883,7 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         f"{len(ref.deferred)} deferred-position files",
         f"{len(ref.approvals)} approval crossings",
         f"{len(ref.bindings)} binding scopes",
+        f"{len(ref.access)} access components",
     ]
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
@@ -4862,7 +5057,8 @@ def main() -> int:
             ("a2", ref.a2, formal.a2),
             ("deferred", ref.deferred, formal.deferred),
             ("approval", ref.approvals, formal.approvals),
-            ("binding", ref.bindings, formal.bindings)):
+            ("binding", ref.bindings, formal.bindings),
+            ("access", ref.access, formal.access)):
 
         for key, want in refmap.items():
             got = gotmap.get(key)
@@ -4886,7 +5082,8 @@ def main() -> int:
         f"{len(ref.a2)} a2 bodies + "
         f"{len(ref.deferred)} deferred-position files + "
         f"{len(ref.approvals)} approval crossings + "
-        f"{len(ref.bindings)} binding scopes) — "
+        f"{len(ref.bindings)} binding scopes + "
+        f"{len(ref.access)} access components) — "
 
         f"{compared - len(mismatches)} agree, {len(mismatches)} mismatch(es)"
     )
@@ -4902,6 +5099,7 @@ def main() -> int:
     mismatches.extend(deferred_coverage())
     mismatches.extend(approval_coverage())
     mismatches.extend(binding_coverage())
+    mismatches.extend(access_coverage())
 
     for m in mismatches[:10]:
         print(f"  MISMATCH {m}")
