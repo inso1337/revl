@@ -1882,7 +1882,46 @@ class Session:
                 loop.close()
         if self._loop is None:
             self._loop = asyncio.new_event_loop()
+            # a session dropped while still loaded never reaches `_reset`;
+            # close its loop when it is collected rather than leave that to
+            # the loop's own finalizer and its ResourceWarning (issue #1720)
+            weakref.finalize(self, _close_abandoned_loop, self._loop)
         return self._loop.run_until_complete(coro)
+
+    def _close_loop(self) -> None:
+        """Close the event loop a torn-down session ran on (issue #1720).
+
+        An event loop holds descriptors (its selector and the self-pipe socket
+        pair), and nothing closed this one: every Session that ever loaded kept
+        three open for the life of the process. A long-running server that loads
+        and unloads, and the test suite, grew by three per session. The next
+        `load` opens a fresh loop through `_run`. Pending tasks are cancelled
+        first: with nothing loaded there is nothing for them to finish, and a
+        later `_run` would otherwise resume them against the next generation.
+        A loop still running (a teardown offloaded to a thread that has not
+        returned) is left alone; it is not ours to close yet."""
+        loop = self._loop
+        if loop is None or loop.is_closed() or loop.is_running():
+            return
+        pending = [task for task in asyncio.all_tasks(loop) if not task.done()]
+        if asyncio._get_running_loop() is not None:
+            # torn down from a coroutine on the HOST loop (`aclose`, `aabort`):
+            # this thread cannot drive a second loop, so a loop with work
+            # still pending is left to the finalizer, and an idle one closes
+            if not pending:
+                self._loop = None
+                loop.close()
+            return
+        self._loop = None
+        try:
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(
+                    asyncio.gather(*pending, return_exceptions=True))
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        finally:
+            loop.close()
 
     @property
     def loaded(self) -> bool:
