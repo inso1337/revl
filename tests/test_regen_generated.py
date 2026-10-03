@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -516,3 +517,136 @@ def test_the_real_provenance_generator_feeds_the_census():
             assert names.index(fed) > names.index(group["name"]), (group["name"], fed)
     provenance = next(g for g in tool.REGISTRY if g["name"] == "provenance")
     assert "census" in provenance["feeds"]
+
+
+# ---------------------------------------------- missing tools (issue #1864)
+
+def _plain_repo(tmp_path) -> Path:
+    repo = tmp_path / "plain"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    return repo
+
+
+def _one_group(repo: Path, group: dict) -> Path:
+    path = repo.parent / "registry.json"
+    path.write_text(json.dumps({"registry": [group]}), encoding="utf-8")
+    return path
+
+
+def _bare_env(home: Path) -> dict:
+    """An environment whose PATH has git and this python and nothing that
+    could hold a real `lake`, with HOME pointed at `home`."""
+    pybin = home / "pybin"
+    pybin.mkdir(exist_ok=True)
+    for name in ("python3", "python"):
+        link = pybin / name
+        if not link.exists():
+            link.symlink_to(sys.executable)
+    env = {k: v for k, v in os.environ.items()
+           if not k.startswith(("GIT_", "VIRTUAL_ENV"))}
+    env["HOME"] = str(home)
+    env["PATH"] = os.pathsep.join([str(pybin), "/usr/bin", "/bin"])
+    return env
+
+
+def _fake_lake(home: Path, marker: Path, code: int = 0) -> None:
+    elan = home / ".elan" / "bin"
+    elan.mkdir(parents=True)
+    lake = elan / "lake"
+    lake.write_text(f"#!/bin/sh\necho fake lake \"$@\" >> {marker}\nexit {code}\n",
+                    encoding="utf-8")
+    lake.chmod(0o755)
+
+
+@pytest.mark.skipif(shutil.which("lake", path="/usr/bin:/bin") is not None,
+                    reason="a system lake would be found on the bare PATH")
+def test_lake_in_the_elan_home_is_found_when_path_lacks_it(tmp_path):
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = tmp_path / "lake-ran"
+    _fake_lake(home, marker)
+    repo = _plain_repo(tmp_path)
+    probe = ("import shutil, sys; "
+             "sys.exit(0 if shutil.which('lake') else 7)")
+    registry = _one_group(repo, {
+        "name": "formalish", "paths": ["STATUS.md"], "merge": "three-way",
+        "requires": ["lake"],
+        "write": [{"run": ["lake", "build"]},
+                  # a generator that shells out to lake itself finds it too
+                  {"run": ["{python}", "-c", probe]}],
+        "check": [{"run": ["lake", "build"]}]})
+    result = subprocess.run([sys.executable, str(TOOL), "--registry", str(registry),
+                             "--all"], cwd=repo, capture_output=True, text=True,
+                            env=_bare_env(home))
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "SKIPPED" not in result.stdout
+    assert marker.read_text().count("fake lake build") == 2   # write + check
+
+
+def test_a_generator_skipped_for_a_missing_tool_fails_the_run(tmp_path):
+    repo = _plain_repo(tmp_path)
+    registry = _one_group(repo, {
+        "name": "needs-tool", "paths": ["never.txt"], "merge": "theirs",
+        "requires": ["definitely-not-a-real-tool-1864"],
+        "write": [{"run": ["definitely-not-a-real-tool-1864"]}],
+        "check": [{"run": ["definitely-not-a-real-tool-1864", "--check"]}]})
+    result = _tool(repo, registry, "--all")
+    assert result.returncode == 1, result.stdout
+    assert "SKIPPED" in result.stdout
+    assert "UNCHECKED, so this run fails" in result.stdout
+    assert "every check passes" not in result.stdout
+
+
+def test_allow_skip_accepts_the_skip_and_keeps_the_banner(tmp_path):
+    repo = _plain_repo(tmp_path)
+    registry = _one_group(repo, {
+        "name": "needs-tool", "paths": ["never.txt"], "merge": "theirs",
+        "requires": ["definitely-not-a-real-tool-1864"],
+        "write": [{"run": ["definitely-not-a-real-tool-1864"]}],
+        "check": [{"run": ["definitely-not-a-real-tool-1864", "--check"]}]})
+    result = _tool(repo, registry, "--all", "--allow-skip")
+    assert result.returncode == 0, result.stdout
+    assert "SKIPPED" in result.stdout
+    assert "UNCHECKED" not in result.stdout
+
+
+def test_a_missing_tool_on_one_step_fails_the_run(tmp_path):
+    """A step-level `requires` (the census's cargo step) counts as well."""
+    repo = _plain_repo(tmp_path)
+    registry = _one_group(repo, {
+        "name": "census-ish", "paths": ["out.txt"], "merge": "theirs",
+        "write": [{"run": ["definitely-not-a-real-tool-1864"],
+                   "requires": ["definitely-not-a-real-tool-1864"]}],
+        "check": [{"run": ["{python}", "-c", "pass"]}]})
+    result = _tool(repo, registry, "--all")
+    assert result.returncode == 1, result.stdout
+    assert "census-ish write (definitely-not-a-real-tool-1864)" in result.stdout
+
+
+def test_a_fast_skip_is_the_callers_choice_and_does_not_fail(tmp_path):
+    repo = _plain_repo(tmp_path)
+    registry = _one_group(repo, {
+        "name": "slowish", "paths": ["out.txt"], "merge": "theirs",
+        "write": [{"run": ["{python}", "-c", "raise SystemExit(5)"], "slow": True}],
+        "check": [{"run": ["{python}", "-c", "pass"]}]})
+    result = _tool(repo, registry, "--all", "--fast")
+    assert result.returncode == 0, result.stdout
+    assert "--fast, so the slow step" in result.stdout
+
+
+@pytest.mark.skipif(shutil.which("lake", path="/usr/bin:/bin") is not None,
+                    reason="a system lake would be found on the bare PATH")
+def test_run_gate_finds_lake_in_the_elan_home(tmp_path):
+    """formal/scripts/run_gate.sh used `command -v lake` alone, so a machine
+    with elan installed and not sourced printed the not-installed SKIP. The
+    fake lake fails, which proves the script got past its guard to call it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    marker = tmp_path / "lake-ran"
+    _fake_lake(home, marker, code=3)
+    result = subprocess.run(["sh", str(ROOT / "formal" / "scripts" / "run_gate.sh")],
+                            capture_output=True, text=True, env=_bare_env(home))
+    assert "SKIP (loud)" not in result.stdout, result.stdout
+    assert marker.read_text().startswith("fake lake build"), result.stdout + result.stderr
+    assert result.returncode != 0

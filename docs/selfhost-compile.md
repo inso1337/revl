@@ -79,12 +79,12 @@ Measured over each tier's own emitter corpus, the enumerated document list
 | ts   |     76 |                   76 (100%) |             60 (78.9%) |
 | go   |     47 |                   47 (100%) |             43 (91.5%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
-| rust |     40 |                   40 (100%) |             38 (95.0%) |
+| rust |     41 |                   41 (100%) |             39 (95.1%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **302** | **302 (100%)** | **274 (90.7%)** |
+| **total** | **303** | **303 (100%)** | **275 (90.8%)** |
 
-Every one of the 302 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 274 of
+Every one of the 303 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 275 of
 them survive the **fully-native** chain, so all 28 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.

@@ -185,7 +185,10 @@ QUERY_TOOLS = [
         "description":
             "WHAT CHANGES IF A SERVICE GAINS OR LOSES A METHOD? Interface "
             "drift: which providers must implement or drop it, and which call "
-            "sites stop resolving. Called with no `gains`/`loses` it reports "
+            "sites stop resolving. With `gains`/`loses`, the top-level "
+            "`callSites` and `impacted` cover only the named methods, and "
+            "`existingCallSites` keeps every existing site. Called with no "
+            "`gains`/`loses` it reports "
             "the current per-method provider and call-site map. EXACT for the "
             "compiled composition — this is the list the admission gate would "
             "flag, not a promise the edit is otherwise safe.",
