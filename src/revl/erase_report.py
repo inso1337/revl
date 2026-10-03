@@ -320,6 +320,12 @@ def _ui_residue_section(all_cross: list[dict]) -> dict | None:
     return report
 
 
+def _relayed_emissions(index: Composition) -> dict:
+    """The approval class map's relaxed service emissions, over this index."""
+    from .mcp.approval import ClassMap  # noqa: PLC0415 - lazy, avoids a cycle
+    return ClassMap(index.ir, index=index).relayed_emissions()
+
+
 def _crossings(index: Composition, members: list[str],
                residue: list | None = None) -> dict:
     """Aggregate the G8 boundary surface of the realm's members: every
@@ -337,6 +343,14 @@ def _crossings(index: Composition, members: list[str],
     externs: list[dict] = []
     witnessed: list[dict] = []
     widenings: list[dict] = []
+    relayed: list[dict] = []
+    seen_relay: set = set()
+    # issue #1707: the service emissions the approval class map relaxed to
+    # their target's class (a class-preserving relay). They cross no boundary
+    # themselves, the target's crossings are listed where they land, so they
+    # are listed apart and kept out of the irreversible totals. Read from the
+    # class map itself, so the two folds cannot disagree about a relay.
+    relays = _relayed_emissions(index)
     seen_emit: set = set()
     seen_host: set = set()
     seen_witnessed: set = set()
@@ -370,6 +384,18 @@ def _crossings(index: Composition, members: list[str],
                 })
             for fact in facts["emissions"]:
                 mark = (name, fact["key"], fact["method"])
+                relay_cls = relays.get((scope_id, fact["key"], fact["method"]))
+                if relay_cls is not None:
+                    if mark not in seen_relay:
+                        seen_relay.add(mark)
+                        relayed.append({
+                            "component": name, "scope": scope["kind"],
+                            "key": fact["key"], "method": fact["method"],
+                            "label": f"{fact['key']}.{fact['method']}",
+                            "actionClass": relay_cls, "relay": True,
+                            "token": f"relay:{name}:{fact['key']}.{fact['method']}",
+                        })
+                    continue
                 if mark in seen_emit:
                     continue
                 seen_emit.add(mark)
@@ -443,6 +469,7 @@ def _crossings(index: Composition, members: list[str],
                     "token": f"host:{name}:{fact['name']}",
                 })
     emissions.sort(key=lambda e: (e["component"], e["label"]))
+    relayed.sort(key=lambda e: (e["component"], e["label"]))
     externs.sort(key=lambda e: (e["component"], e["name"]))
     witnessed.sort(key=lambda e: (e["component"], e["name"]))
     widenings.sort(key=lambda e: (e["component"], e["scope"]))
@@ -485,6 +512,9 @@ def _crossings(index: Composition, members: list[str],
         # here so a reader can find the widening crossings on their own. Empty
         # (and the totals unchanged) for a realm that widens nothing.
         "widenings": widenings,
+        # issue #1707: class-preserving relays, listed and never counted. Only
+        # present when there is one, so a relay-free report is byte-identical.
+        **({"relayed": relayed} if relayed else {}),
         "total": len(all_cross),
         # `compensatedCount` counts crossings with an offset ATTACHED (the
         # static compile-time judgment), unchanged for back-compat. The runtime
@@ -788,6 +818,11 @@ def render(report: dict) -> str:
                    "crossing (fully revertible, G8)")
     for c in cross["emissions"]:
         out.append(f"      {_tag(c):<14} {c['component']}  emit {c['label']}")
+    # issue #1707: a class-preserving relay, named but not counted above.
+    for c in cross.get("relayed") or []:
+        out.append(f"      {'[RELAY (' + c['actionClass'] + ')]':<14} {c['component']}  "
+                   f"emit {c['label']}  (forwards; its target's crossings are "
+                   "listed where they land)")
     for c in cross["externs"]:
         # item 254: an emission extern that owns a `compensate` slot is
         # compensated, not bare (the network compensate-grade case).

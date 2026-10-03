@@ -155,6 +155,7 @@
   ],
   "emit_rust": [
     "bind=_",
+    "class=emission",
     "class=witnessed",
     "interp_type=Float",
     "kind=format",

@@ -1,0 +1,7 @@
+{
+  "task": "commerce-withdraw-mail",
+  "arm": "typescript",
+  "final": "withdraw-mail-ts-attempt.ts",
+  "turns": 4,
+  "tokensWritten": 610
+}
