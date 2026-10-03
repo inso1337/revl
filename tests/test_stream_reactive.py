@@ -673,7 +673,10 @@ def test_replay_may_not_be_declared_twice_on_a_subscribe():
 
 
 # ---------------------------------------------------------------------------
-# Replay emission: py lowers it; every other tier REFUSES BY NAME (§4.5, §4.9)
+# Replay emission: py, ts, go and java lower the last-n backlog (rust refuses
+# it by name until its lowering lands with a gate-crate regeneration); the
+# durable cursor is py's alone, and every other tier REFUSES IT BY NAME
+# (§4.5, §4.9)
 # ---------------------------------------------------------------------------
 
 def test_python_emits_the_declaration_the_request_and_the_durable_disposer():
@@ -701,51 +704,95 @@ def test_a_last_n_request_keeps_the_ordinary_closure_bracket():
     assert "durable_undo" not in code
 
 
-@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
-@pytest.mark.parametrize("head", ["", "replay(2)"])
-def test_every_other_tier_refuses_replay_by_name(tier, head):
-    """Both ends refuse: the provider's declaration (a backlog this tier does
-    not hold) and the consumer's request. A tier that emitted either while
-    silently dropping it would deliver only live items and call it replay —
-    exactly the run-and-quietly-disagree outcome item 130 refuses."""
+#: tier -> (the provider's `replay(4)` declaration, the consumer's `replay(2)`
+#: request), each in that tier's own spelling of the call the emitter makes.
+_LAST_N_SPELLING = {
+    "typescript": ("host.Stream.source({ replay: 4 })",
+                   'host.Stream.subscribe(src, "error", ctx, { replay: 2 })'),
+    "go": ("StreamSource(4)", 'StreamSubscribeReplay(src, 2, "error", 0)'),
+    "java": ("Stream.source(4)", 'Stream.subscribeReplay(src, 2, "error", 0)'),
+}
+
+
+@pytest.mark.parametrize("tier", sorted(_LAST_N_SPELLING))
+def test_the_last_n_backlog_lowers_on_both_ends(tier):
+    """§4.5's last-n form is an in-memory backlog the provider holds, and the py
+    reference makes no recovery claim for it (its bracket is the ordinary
+    closure-only one). So a tier can give the reference's answer, and these
+    do: the declaration sizes the provider's held backlog and the request
+    delivers the newest k of it ahead of any live item. What each tier's
+    runtime then DOES with those calls is pinned by running it, in that tier's
+    own stream suite."""
+    declaration, request = _LAST_N_SPELLING[tier]
+    code = _tier_emit(tier).emit(compile_source(
+        _declared("replay(4)", "replay(2)"), "s.rvl"))
+    assert declaration in code
+    assert request in code
+
+
+@pytest.mark.parametrize("tier", sorted(_LAST_N_SPELLING))
+def test_a_declaration_nobody_requests_still_sizes_the_provider(tier):
+    """The declaration is lowered on its own, not only when a request reads it:
+    a provider that declares a backlog holds it whether or not this component
+    asks, exactly as the reference's `Stream.source(replay=…)` does."""
+    declaration, _ = _LAST_N_SPELLING[tier]
+    code = _tier_emit(tier).emit(compile_source(_declared("replay(4)", ""), "s.rvl"))
+    assert declaration in code
+
+
+@pytest.mark.parametrize("tier", sorted(_LAST_N_SPELLING))
+@pytest.mark.parametrize("head", ["", 'replay(from: "orders")'])
+def test_every_other_tier_refuses_the_durable_cursor_by_name(tier, head):
+    """Both ends refuse: the provider's declaration (a cursor this tier cannot
+    resume across a crash) and the consumer's request. A tier that resumed an
+    in-memory position and called it durable would run and quietly disagree
+    with the reference after the first restart, which is the outcome item 130
+    refuses."""
     emit = _tier_emit(tier)
-    ir = compile_source(_declared("replay(4)", head), "s.rvl")
+    ir = compile_source(_declared('replay(from: "orders")', head), "s.rvl")
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(ir)
     msg = str(excinfo.value)
-    assert "`replay(…)` is not lowered" in msg
+    assert "durable stream `replay(from: …)` cursor is not lowered" in msg
     assert "§4.5" in msg and "§4.9" in msg and "backend py" in msg
 
 
-@pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
+@pytest.mark.parametrize("tier", sorted(_LAST_N_SPELLING))
 @pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
-def test_replay_is_refused_beside_a_policy_the_tier_now_lowers(tier, policy):
-    """The combination neither landing had. Since #1042 these tiers LOWER the
-    three non-default §4.4 policies, so a `subscribe` carrying both a lossy
-    policy and a `replay(…)` is the first shape where one half of a head is
-    emittable and the other is not.
+def test_a_last_n_backlog_lowers_beside_a_policy_the_tier_lowers(tier, policy):
+    """A head carrying both a §4.4 policy and a last-n `replay(…)` lowers BOTH:
+    the replayed items ride the same forward path, so the policy applies to them
+    exactly as to live items. Dropping either half would emit a program that
+    runs and disagrees with the reference, so both must be in the call."""
+    code = _tier_emit(tier).emit(compile_source(
+        _declared("replay(4)", f"policy {policy} buffer 2 replay(2)"), "s.rvl"))
+    assert (f'"{policy}", 2' in code                       # go / java / rust
+            or f'"{policy}", ctx, {{ capacity: 2, replay: 2 }}' in code)  # ts
+    assert ("StreamSubscribeReplay(src, 2," in code
+            or "Stream.subscribeReplay(src, 2," in code
+            or "replay: 2 }" in code)
 
-    The refusal must win. A tier that lowered the policy and let the backlog
-    fall off the end would emit a program that runs, drops items by a rule the
-    author declared, and never replays anything the author also declared — the
-    run-and-quietly-disagree outcome, with a durability claim as the casualty.
-    Asserted on the message, so a future landing that lowers replay has to
-    delete this test rather than let it pass vacuously."""
+
+@pytest.mark.parametrize("tier", sorted(_LAST_N_SPELLING))
+def test_the_durable_cursor_is_refused_beside_a_policy_the_tier_lowers(tier):
+    """The refusal must still win over a head it shares: `block` is the one
+    policy the frontend admits beside a cursor, and these tiers lower it, so a
+    tier that lowered the policy and let the cursor fall off the end would
+    resume nothing after a restart and never say so."""
     emit = _tier_emit(tier)
-    head = f"policy {policy} buffer 2 replay(2)"
+    head = 'policy block buffer 2 replay(from: "orders")'
     with pytest.raises(emit.EmitError) as excinfo:
-        emit.emit(compile_source(_declared("replay(4)", head), "s.rvl"))
-    assert "`replay(…)` is not lowered" in str(excinfo.value)
+        emit.emit(compile_source(
+            _declared('replay(from: "orders")', head), "s.rvl"))
+    assert "`replay(from: …)` cursor is not lowered" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("tier", ["go", "rust", "java", "typescript"])
 @pytest.mark.parametrize("policy", ["drop_newest", "drop_oldest", "block"])
 def test_the_same_head_without_replay_still_lowers_its_policy(tier, policy):
-    """The control for the refusal above, and the thing that keeps it honest:
-    drop the `replay` and the identical head EMITS, carrying the declared policy
-    as the subscription's own argument. So the refusal is about replay, not a
-    blanket refusal of the head it appears in, and this tier's #1042 policy
-    lowering is untouched by this branch."""
+    """The control for the replay cases above: drop the `replay` and the
+    identical head EMITS, carrying the declared policy as the subscription's own
+    argument, through the plain `subscribe` call."""
     code = _tier_emit(tier).emit(compile_source(
         "component C {\n"
         "  let src = effect Stream.source() undo src.close()\n"
@@ -758,25 +805,65 @@ def test_the_same_head_without_replay_still_lowers_its_policy(tier, policy):
             or f'"{policy}", ctx, {{ capacity: 2 }}' in code)  # ts
 
 
-@pytest.mark.parametrize("tier", ["go", "rust", "java"])
-def test_replay_outranks_the_drain_refusal_on_a_blocking_tier(tier):
+@pytest.mark.parametrize("tier", ["go", "java"])
+def test_the_cursor_refusal_outranks_the_drain_refusal_on_a_blocking_tier(tier):
     """A durable cursor (§4.5) and a `drain` window (§8) on one head.
 
-    On rust and java both halves are unlowered and either message would be
-    honest, so the point is that WHICH one is stable: the two refusals are about
-    different things — the window about the clock, replay about the recovery
-    surface — and a silent flip would send an author to fix the wrong half of
-    their `subscribe`. On go only replay is left to refuse, and the same
-    assertion holds for the plainer reason that the window lowers there; keeping
-    go in the list is what would catch a regression that brought its window
-    refusal back."""
+    On java both halves are unlowered and either message would be honest, so
+    the point is that WHICH one is stable: the two refusals are about different
+    things (the window about the clock, the cursor about the recovery surface),
+    and a silent flip would send an author to fix the wrong half of their
+    `subscribe`. On go only the cursor is left to refuse, and the same assertion
+    holds for the plainer reason that the window lowers there; keeping go in the
+    list is what would catch a regression that brought its window refusal back.
+    rust holds the same order under its own message, pinned in
+    `test_rust_still_refuses_both_replay_forms_by_name`."""
     emit = _tier_emit(tier)
     head = 'policy block buffer 2 drain 10ms replay(from: "orders")'
     with pytest.raises(emit.EmitError) as excinfo:
         emit.emit(compile_source(
             _declared('replay(from: "orders")', head), "s.rvl"))
     message = str(excinfo.value)
-    assert "`replay(…)` is not lowered" in message
+    assert "`replay(from: …)` cursor is not lowered" in message
+    assert "`drain` window is not lowered" not in message
+
+
+@pytest.mark.parametrize("tier", ["java"])
+def test_a_last_n_backlog_does_not_hide_the_drain_refusal(tier):
+    """With the backlog lowered, a head carrying a last-n `replay(…)` and a
+    `drain` window on a tier with no shared clock is refused for the WINDOW,
+    by name. Lowering the replay must not turn the window's refusal into a
+    silent drop."""
+    emit = _tier_emit(tier)
+    head = "policy block buffer 2 drain 10ms replay(2)"
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_declared("replay(4)", head), "s.rvl"))
+    assert "`drain` window is not lowered" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("decl, head", [
+    ("replay(4)", "replay(2)"),
+    ("replay(4)", ""),
+    ("replay(4)", "policy drop_oldest buffer 2 replay(2)"),
+    ("replay(4)", "policy block buffer 2 drain 10ms replay(2)"),
+    ('replay(from: "orders")', 'replay(from: "orders")'),
+    ('replay(from: "orders")', 'policy block buffer 2 drain 10ms replay(from: "orders")'),
+])
+def test_rust_still_refuses_both_replay_forms_by_name(decl, head):
+    """cordis-rs is the one emitting tier this landing leaves on its refusal.
+    Its emitter, `backends/rust/emit.py`, is a digest input of the native gate
+    crate (`tools/build_gate_crate.py`), so lowering the last-n backlog there
+    moves the crate's digest and lands together with a crate regeneration.
+    Until then the tier refuses BOTH forms by name, at the declaration and at
+    the request, and the refusal wins over a head it shares: a lowered policy
+    must not carry the program past a backlog it then drops, and the replay
+    refusal outranks the `drain` one so an author is sent to the same half of
+    their `subscribe` every time."""
+    emit = _tier_emit("rust")
+    with pytest.raises(emit.EmitError) as excinfo:
+        emit.emit(compile_source(_declared(decl, head), "s.rvl"))
+    message = str(excinfo.value)
+    assert "a stream `replay(…)` is not lowered on the cordis-rs tier" in message
     assert "`drain` window is not lowered" not in message
 
 
@@ -3182,11 +3269,14 @@ def test_the_undeclared_refusal_still_names_the_source_for_a_local_stream():
 # it, or the tier REFUSES IT BY NAME. Nothing is silently dropped."
 #
 # Everything the surfaces below assert is already asserted one cell at a time
-# somewhere above. What was missing is the CLOSURE: nothing said that those
-# cells are all of them, so a tenth surface, or a seventh tier, or a surface
+# somewhere above. The quoted exit counts nine surfaces; the table carries ten
+# since §4.5's replay row split into the last-n backlog (lowered on every
+# emitting tier) and the durable cursor (py only), each with its own answer.
+# What was missing is the CLOSURE: nothing said that those
+# cells are all of them, so a new surface, or a seventh tier, or a surface
 # that quietly stopped being refused, cost nothing. The table is the closure --
-# it enumerates the nine surfaces and the six tiers and requires every one of
-# the 54 cells to be one of the two admitted answers, with the refusals pinned
+# it enumerates the surfaces and the six tiers and requires every cell to be
+# one of the two admitted answers, with the refusals pinned
 # to the word they refuse BY. A refusal that stops naming its surface reds here
 # even though it is still a refusal, because "refuses by name" is the half of
 # the exit that a bare `EmitError` does not deliver.
@@ -3208,8 +3298,20 @@ component C {
 }
 """
 
-#: surface -> the program that carries it. The nine of design §1 plus the two
-#: durability surfaces §4.5/§6c, which the exit holds to the same rule.
+_REPLAY_CURSOR = """
+component C {
+  let src = effect Stream.source() replay(from: "orders") undo src.close()
+  let sub = subscribe src replay(from: "orders") undo sub.close()
+  await sub.next()
+}
+"""
+
+#: surface -> the program that carries it. The seven of design §1 plus the
+#: three durability surfaces (§4.5's last-n backlog, §4.5/§4.9's durable
+#: cursor, and §6c's required coeffect), which the exit holds to the same rule.
+#: §4.5 was one row, "replay declaration", until its two forms parted: the
+#: last-n backlog lowers on py, ts, go and java, and the durable cursor is still
+#: the py reference tier's alone, so one row could no longer name one answer.
 _EXIT_SURFACES = {
     "subscription bracket": _CONSUMER,
     "map/filter/take chain": _CHAIN_HEAD,
@@ -3218,7 +3320,8 @@ _EXIT_SURFACES = {
     "drain window": None,          # built from _DRAIN_HEAD below
     "every..in iteration": _ITER,
     "on..as typed event": _EVENT,
-    "replay declaration": _REPLAY_DECLARED,
+    "last-n replay": _REPLAY_DECLARED,
+    "durable replay cursor": _REPLAY_CURSOR,
     "required Stream[T] coeffect": _COEFFECT,
 }
 
@@ -3235,9 +3338,16 @@ _EXIT_REFUSALS = {
     # §8: rust's clock is thread-local, java has no `advance` lowering.
     ("rust", "drain window"): "a `drain` window is not lowered",
     ("java", "drain window"): "a `drain` window is not lowered",
-    # §4.5/§4.9: the durability claim whose recovery surface is the WAL's.
-    **{(tier, "replay declaration"): "a stream `replay(…)` is not lowered"
-       for tier in ("typescript", "go", "rust", "java")},
+    # §4.5/§4.9: the durable cursor, whose recovery surface is the WAL's. The
+    # last-n backlog lowers on py, ts, go and java.
+    **{(tier, "durable replay cursor"):
+       "a durable stream `replay(from: …)` cursor is not lowered"
+       for tier in ("typescript", "go", "java")},
+    # rust refuses both §4.5 forms under its older message until its last-n
+    # lowering lands with a gate-crate regeneration (its emitter is a digest
+    # input of crates/revl-gate).
+    ("rust", "last-n replay"): "a stream `replay(…)` is not lowered",
+    ("rust", "durable replay cursor"): "a stream `replay(…)` is not lowered",
     # §6b: a requirement resolves against a SERVICE on every non-reference tier.
     **{(tier, "required Stream[T] coeffect"):
        "a required `Stream[T]` coeffect is not lowered"
@@ -3280,14 +3390,14 @@ def test_every_stream_surface_lowers_or_refuses_by_name_on_every_tier(tier, surf
 
 def test_the_exit_table_covers_the_whole_named_surface_and_nothing_else():
     """The table's own closure. A surface added to design §1 without a row here
-    would leave the exit asserting nine of ten cells per tier and calling it
+    would leave the exit asserting ten of eleven cells per tier and calling it
     complete, which is how this item carried two wrong tier lists before."""
-    assert len(_EXIT_SURFACES) == 9
+    assert len(_EXIT_SURFACES) == 10
     assert len(_EXIT_TIERS) == 6
     unknown = {cell for cell in _EXIT_REFUSALS
                if cell[0] not in _EXIT_TIERS or cell[1] not in _EXIT_SURFACES}
     assert not unknown, f"refusal recorded for a cell outside the table: {unknown}"
     assert not [s for s in _EXIT_SURFACES
                 if ("python", s) in _EXIT_REFUSALS], (
-        "py is the reference tier and lowers all nine (design §4.6)"
+        "py is the reference tier and lowers every surface (design §4.6)"
     )
