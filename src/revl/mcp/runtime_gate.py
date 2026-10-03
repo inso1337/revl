@@ -39,6 +39,7 @@ import sys
 from pathlib import Path
 
 from .._paths import backends_root
+from . import remedy
 
 #: Verbs that need a live composition, which only the runtime can boot.
 RUNTIME_VERBS = frozenset({
@@ -66,10 +67,20 @@ NO_REEXEC_ENV = "REVL_MCP_NO_REEXEC"
 
 
 def cordis_importable() -> bool:
+    """Whether `import cordis` succeeds here. Finding the package is not
+    enough: an install that is present but fails on import (the pinned fork's
+    `cordis.hmr` raises a TypeError when its optional `watchdog` extra is
+    absent) would otherwise read as a runtime this server can boot."""
     try:
-        return importlib.util.find_spec("cordis") is not None
+        if importlib.util.find_spec("cordis") is None:
+            return False
     except (ImportError, ValueError):
         return False
+    try:
+        importlib.import_module("cordis")
+    except Exception:  # noqa: BLE001 - any failure to import is "not importable"
+        return False
+    return True
 
 
 def setup_command() -> str:
@@ -109,7 +120,9 @@ def refusal(name: str) -> dict:
         "ok": False,
         "refused": True,
         "unavailable": "cordis-py runtime",
-        "next": fix,
+        # one `next` schema across every refusal (issue #1691): no MCP call
+        # installs a runtime, so this remedy is an operator step
+        "next": remedy.operator_step(fix),
         "diagnostics": [{
             "severity": "error", "code": "REVL", "category": "runtime",
             "message": (f"`{name}` needs the cordis-py runtime, which this "

@@ -70,8 +70,11 @@ import re
 from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
+from . import effect_classes as _effect_classes
 from . import fillspec
 from .authoring_loop import blast_radius
+from .persist import (ORIGIN_FILES, ORIGIN_FILES_CONTENT, ORIGIN_MODULES,
+                      ORIGIN_SOURCE)
 
 _WORD_HOLE = re.compile(r"\bhole\b")
 
@@ -109,12 +112,12 @@ def virtual_source(session) -> dict:
 
 
 def _files_source(origin: dict) -> dict:
-    files = list(origin["files"])
-    held = origin.get("files_content") or {}
-    return {"source": None, "files": files,
-            "files_content": {path: held[path] if path in held else _read_disk(path)
+    files = list(origin[ORIGIN_FILES])
+    held = origin.get(ORIGIN_FILES_CONTENT) or {}
+    return {ORIGIN_SOURCE: None, ORIGIN_FILES: files,
+            ORIGIN_FILES_CONTENT: {path: held[path] if path in held else _read_disk(path)
                               for path in files},
-            "modules": dict(origin.get("modules") or {})}
+            ORIGIN_MODULES: dict(origin.get(ORIGIN_MODULES) or {})}
 
 
 def _read_disk(path: str) -> str | None:
@@ -633,13 +636,13 @@ def candidate_arguments(vs: dict, replacing: tuple = ()) -> dict:
 
 def _origin_from(vs: dict) -> dict:
     origin: dict = {}
-    if vs.get("source") is not None:
-        origin["source"] = vs["source"]
-    if vs.get("files"):
-        origin["files"] = list(vs["files"])
-        origin["files_content"] = dict(vs.get("files_content") or {})
-    if vs.get("modules"):
-        origin["modules"] = dict(vs["modules"])
+    if vs.get(ORIGIN_SOURCE) is not None:
+        origin[ORIGIN_SOURCE] = vs[ORIGIN_SOURCE]
+    if vs.get(ORIGIN_FILES):
+        origin[ORIGIN_FILES] = list(vs[ORIGIN_FILES])
+        origin[ORIGIN_FILES_CONTENT] = dict(vs.get(ORIGIN_FILES_CONTENT) or {})
+    if vs.get(ORIGIN_MODULES):
+        origin[ORIGIN_MODULES] = dict(vs[ORIGIN_MODULES])
     return origin
 
 
@@ -715,12 +718,14 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
                     "speculative": True, "_proposal": vs, "applied": applied,
                     "touched": _touched(before, vs), "holes": holes,
                     "blastRadius": blast_radius(session.ir, ir), **_summary(ir),
+                    **_effect_classes.report(ir, session.ir, against=True),
                     "note": f"proposed with {len(holes)} open hole(s); fill them "
                             "before it can commit"}
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
                 "applied": applied, "touched": _touched(before, vs), "holes": holes,
                 "blastRadius": blast_radius(session.ir, ir),
                 **_summary(ir),
+                **_effect_classes.report(ir, session.ir, against=True),
                 "note": f"{len(holes)} open hole(s) remain — the edit was applied "
                         "to the server-side source and it compiles, but a hole may "
                         "not enter a running composition; fill them, then it swaps"}
@@ -772,12 +777,14 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     # issue #1704: the cascade of what this edit replaces, read off the
     # composition that is running now, so preflight comes with the change. A
     # proposal carries it too: that is where preflight is worth the most.
-    radius = blast_radius(session.ir, ir)
+    running = session.ir
+    radius = blast_radius(running, ir)
+    classes = _effect_classes.report(ir, running, against=True)
     if not commit:
         return {"ok": True, "edited": True, "admitted": True, "swapped": False,
                 "speculative": True, "_proposal": vs, "applied": applied,
                 "touched": _touched(before, vs), "blastRadius": radius,
-                **_summary(ir),
+                **_summary(ir), **classes,
                 "note": "proposed and verified: admission and every gate passed "
                         "against the running composition, which is unchanged. "
                         "Commit it, or discard it"}
@@ -785,7 +792,7 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),
-            "blastRadius": radius, **_summary(ir), **state}
+            "blastRadius": radius, **_summary(ir), **state, **classes}
 
 
 def running_source(session) -> dict:

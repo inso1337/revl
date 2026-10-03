@@ -1448,6 +1448,51 @@ def test_a_construction_in_a_true_value_position_is_still_a_named_limit():
             "}"), package="emitted")
 
 
+# issue #1627: the CONSUMER side of the same limit. An Opt value outside a
+# `return` has no form in this component world, and the provider side already
+# refused a `Some(x)` there by name. A `None` argument, a `None` record field
+# or list element, and `rec.field ?? d` over a record's Opt field emitted Go
+# that `go build` refused (`undefined: None`, `RevlOpt[string]` vs nil). They
+# refuse by name now, with the provider side's sentence.
+
+_CONSUMER_HEAD = (
+    "type Box = { name: Opt[Str] }\n"
+    "service S {\n"
+    "  fn find(k: Str) -> Opt[Str]\n"
+    "  fn echo(o: Opt[Str]) -> Str\n"
+    "  fn wrap(k: Str) -> Box\n"
+    "  fn boxname(b: Box) -> Str\n"
+    "  fn names(k: Str) -> List[Opt[Str]]\n"
+    "  fn first(xs: List[Opt[Str]]) -> Str\n"
+    "}\n"
+    "service Ops { fn go(k: Str) -> Str }\n")
+
+
+def _consumer(body: str) -> dict:
+    return _compile(_CONSUMER_HEAD + "component C requires s: S provides ops: Ops {\n"
+                    "  provide ops {\n    fn go(k) { " + body + " }\n  }\n}\n")
+
+
+@pytest.mark.parametrize("body", [
+    "return s.echo(None)",
+    "return s.boxname({ name: None })",
+    "return s.first([None])",
+    'return s.wrap(k).name ?? "none"',
+], ids=["none-argument", "none-record-field", "none-list-element", "opt-field-default"])
+def test_a_consumer_opt_outside_a_return_is_refused_by_name(body):
+    with pytest.raises(emit.EmitError, match="only supported in return position"):
+        emit.emit_placement(_consumer(body), package="emitted")
+
+
+@pytest.mark.parametrize("body", [
+    'return s.find(k) ?? "none"',
+    'return s.names(k)[0] ?? "none"',
+], ids=["reply-default", "list-element-default"])
+def test_a_consumer_opt_this_tier_can_hold_still_emits(body):
+    src = emit.emit_placement(_consumer(body), package="emitted")
+    _has(src, "revlSelf.s.")
+
+
 def test_nullish_in_a_method_let_binds_the_payload_not_the_opt():
     """Found behind the #1376 refusal: `_comp_infer` took the LEFT operand's
     type for every binary operator, so `let a = bus.maybe(x) ?? 0` inferred

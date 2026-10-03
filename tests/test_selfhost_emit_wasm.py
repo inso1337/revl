@@ -454,7 +454,7 @@ def test_reference_refuses_a_bodyless_extern_by_name(reference, tmp_path, body, 
     above, and it cannot be a CORPUS document: the corpus is documents the
     reference EMITS and holds byte-identical against the port, while every input
     reaching this arm raises. That is why the arm is carried in
-    tests/fixtures/selfhost_uncovered_lines.json, and this test is what keeps it
+    tests/fixtures/selfhost_uncovered_lines/, and this test is what keeps it
     honest in the meantime."""
     path = tmp_path / "bodyless.rvl"
     path.write_text("extern pure fn peek(p: Str) -> Str = @py { return p }\n" + body)

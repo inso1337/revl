@@ -93,6 +93,7 @@ PLAN: dict[str, tuple[dict, dict | None]] = {
     "revl_replay_bisect": ({"assert": "true", "component": "C"}, None),
     "revl_replay_forward": ({"from": 1, "component": "C"}, None),
     "revl_grammar": ({}, None),
+    "revl_idiom": ({"name": "provide-method"}, None),
     "revl_scaffold": ({"service": "S"}, None),
     "revl_fmt": ({"source": SOURCE}, None),
     "revl_explain": ({"code": "A1"}, None),

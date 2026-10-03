@@ -223,3 +223,21 @@ def test_a_speculative_fill_does_not_boot_a_draft_until_commit(clean_session):
     booted = _call("revl_change", {"commit": True})
     assert booted["committed"] is True, booted
     assert _call("revl_call", {"key": "greeter", "method": "greet"})["result"] == "hi"
+
+
+# ------------------------------------------------ the undo each verb carries (#1703)
+
+
+def test_a_committed_change_undoes_to_the_generation_before_it(files_loaded):
+    committed = _set_now(9, commit=True)
+    assert committed["committed"] is True, committed
+    assert _now() == 9
+    assert committed["undo"]["tool"] == "revl_undo", committed
+    assert _call(committed["undo"]["tool"], committed["undo"]["arguments"])["ok"] is True
+    assert _now() == 7
+
+
+def test_an_export_says_it_has_no_inverse(files_loaded):
+    exported = _call("revl_export", {})
+    assert exported["ok"] is True, exported
+    assert exported["undo"] is None and "disk" in exported["undoReason"]

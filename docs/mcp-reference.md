@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 58 verbs below, one section each.
+The advertised list is exactly the 59 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -63,6 +63,33 @@ that admits, so an agent gets rule + call-chain + fix in one response, never a
 second round-trip. A rejected candidate never deploys: the compile runs before
 the transition, so the running system keeps serving.
 
+**Refusals carry their next call.** A refusal with a known remedy returns it as
+data in `next`, beside the prose (issue #1691):
+
+```json
+"next": {"tool": "revl_load", "arguments": {"files": ["app.rvl"]}, "ready": true}
+```
+
+`tool` is the verb to call and `arguments` its arguments, pre-filled from what
+the session holds. `ready` is true when `arguments`, sent as-is, are expected to
+succeed. When it is false, `needs` says what the caller must add. Where several
+remedies exist, `next` is a list in preference order. A remedy no MCP call can
+perform (an operator has to act outside the session) is an operator step
+instead, `{"operator": "<what to do>", "ready": false}`. The refusal's message
+ends with the same remedy in words, so the two never disagree. Remedies today:
+
+| Refusal | `next` |
+| ------- | ------ |
+| nothing is loaded (any verb that acts on the running composition) | `revl_load` with the `source`/`files`/`modules` this session last ran, `ready`; or with nothing, not ready, when it never ran one |
+| `revl_edit` on a composition loaded from one file, when the session no longer holds its buffer | `revl_swap` with your patch applied to that file's text as inline `source`. `ready` only if that swap would admit. The file on disk is not changed |
+| `revl_swap` with no source, when the session no longer holds a files-loaded composition's buffers | `revl_swap` with those `files` |
+
+A files-loaded composition does not reach either of the last two in the
+ordinary course: each loaded file is a buffer, so `revl_edit` patches it and a
+name-only `revl_swap` re-admits it (issue #1690). They answer only a session
+whose held working set has lost the files.
+| a runtime verb on a server whose interpreter cannot import cordis (below) | an operator step: run `backends/python/setup.sh`, then restart the server |
+
 **Verbs that need the cordis-py runtime.** Every verb under "Drive a live
 session" and the record/replay and halt verbs act on a live composition, and
 only `revl_load` can boot one, which needs `cordis`. If the server's interpreter
@@ -72,12 +99,63 @@ import cordis, the server re-executes under it and says so on stderr. Otherwise
 it starts, names the unavailable verbs on stderr and in the `initialize`
 instructions, and each of those verbs answers with
 `{"ok": false, "refused": true, "unavailable": "cordis-py runtime", "next": ...}`,
-`next` being the fix. A few verbs keep working with less: `revl_ship` cannot
+`next` being the operator step that fixes it. A few verbs keep working with less: `revl_ship` cannot
 `apply`, `revl_gauntlet` and `revl_quarantine` skip their substrate battery,
 and the history verbs answer only from an inline `timeline`/`trace`. The lists
 live in `src/revl/mcp/runtime_gate.py`, and `revl doctor` reports which case
 applies (the `mcp server runtime` line). Set `REVL_MCP_NO_REEXEC=1` to stay on
 the current interpreter (issue #1692).
+
+**Every response says what the session holds.** Each `tools/call` result, on
+success and refusal alike, ends with the same footer (issue #1693):
+
+```json
+"sessionState": {"loaded": true, "generation": 2, "components": ["MemCache"],
+                 "dirty": false, "draft": false}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `loaded` | a composition is running |
+| `generation` | the running generation: 1 after `revl_load`, plus one per swap, edit that swaps, rollback or undo; `null` when nothing is loaded |
+| `components` | the running components' names, in load order |
+| `dirty` | the server-side working source (what `revl_edit` patches) differs from the source the running generation was admitted from |
+| `draft` | an edit with open holes is pending; the working source cannot swap until they are filled |
+
+The footer is computed after the verb ran, so it describes the state the call
+left behind. It is named `sessionState` because several verbs already return a
+top-level `state` (fiber states). A refusal that changed nothing returns the
+same footer as the call before it.
+
+**A repeated refusal is never the same twice.** The server remembers the last
+refused call, by verb and a digest of its arguments (key order does not
+matter). When the very next call is that same call and it is refused again,
+the refusal changes (issue #1694):
+
+- its first diagnostic reads `attempt N of this same call, refused again for
+  the same reason: <the reason>. The session now: <the footer in words>`;
+- it carries `"repeat": {"attempt": N, "bound": 3}`, and keeps its `next` call;
+- from attempt 3 on, it leads with a diagnostic of code `REPEATED_REFUSAL`,
+  which says that sending the call unchanged will be refused again and what to
+  do instead: send `next`; or, when `next` is an operator step, that an operator
+  has to act first; or, with no `next`, change the arguments or the state the
+  refusal names.
+
+Different arguments, a different verb, or a call that succeeds resets the count.
+A successful response is never rewritten.
+
+**Changes carry their undo.** Since issue #1703, a successful call to a verb
+that mutates the session answers with `undo: {tool, arguments}`: the one call
+that returns the session to where it was, byte for byte (the snapshot's
+`sources` and `manifest`). A load's undo is `revl_unload`, an unload's is a
+`revl_restore` of what ran, and a swap, edit, committed `revl_change`, undo,
+rollback, restore or applied ship/repair answers with `revl_undo` back to the
+earlier generation; a fresh `revl_lease` claim answers with its release. A verb
+with no exact inverse says so: `undo: null` and an `undoReason` (an emission
+cannot be un-emitted, a halt or an approval is recorded evidence, and
+`revl_export` keeps no copy of the disk contents it replaced). `undoDepth` is how many changes
+`revl_step_back` with no arguments can still revert. A refused call changed
+nothing and carries no undo field.
 
 ## The verb set at a glance
 
@@ -125,10 +203,11 @@ the current interpreter (issue #1692).
 | `revl_restore` | no | no | `snapshot` |
 | `revl_timeline` | yes | no | - |
 | `revl_inspect_step` | yes | no | `at` |
-| `revl_step_back` | no | yes | `to` |
+| `revl_step_back` | no | yes | - |
 | `revl_replay_bisect` | yes | no | `assert` |
 | `revl_replay_forward` | no | yes | `from` |
 | `revl_grammar` | yes | no | - |
+| `revl_idiom` | yes | no | - |
 | `revl_scaffold` | yes | no | `service` |
 | `revl_fmt` | yes | no | `source` |
 | `revl_explain` | yes | no | `code` |
@@ -145,6 +224,35 @@ the current interpreter (issue #1692).
 <!-- docgen:mcp-verbs end -->
 
 ---
+
+## Effect classes in compile, admit and edit answers
+
+The approval policy decides each call on its checked effect class, the worst
+over the call's whole reach (see the class table in
+[harness-gate-guide.md](harness-gate-guide.md)). Every verb that compiles,
+admits or edits reports it, so a change of class is never discovered by the
+first `approvalRequired`:
+
+- `effectClasses` (on `revl_check`, `revl_admit`, `revl_plan`, `revl_ship`,
+  `revl_load`, `revl_swap` and `revl_edit`): one entry per provided operation,
+  `{key, method, component, class, raisedBy}`. `class` is `a`, `b`, `c`, or
+  null for an operation that touches no boundary. `raisedBy` lists the
+  crossings at that class, each with a `text` such as
+  ``"`emit stage.stage` in Agent"``.
+- `effectClassChanges` (on `revl_admit`, `revl_plan`, `revl_ship`, `revl_swap`
+  and `revl_edit`): every operation whose class differs from the running
+  composition, `{key, method, component, before, after}`. An operation added
+  by the candidate has `before: null`; one it withdraws has `after: null`.
+- `effectClassWarnings` (same verbs): one `EFFECT_CLASS_ROSE` entry for every
+  operation whose class ROSE, with `before`, `after`, the `crossings` that
+  raised it (the ones at the new class the old reach did not have) and a
+  `message`. A class that stays the same or falls is not warned about.
+
+`revl_admit` and `revl_plan` measure the diff against `manifest` (`revl_plan`
+falls back to the loaded session); `revl_swap` and `revl_edit` measure it
+against the running composition. The report reads the same class map the
+per-call decision reads, so the two cannot disagree, and it is computed whether
+or not an approval policy is on.
 
 ## Author and admit
 
@@ -281,6 +389,19 @@ context while generating. With no inputs it returns that prose summary
   filling a hole can constrain its decoder to that slot (each hole's
   `fillSpec.grammarCategory` names it). `category` without
   `format`, or a value outside these lists, is refused.
+
+### `revl_idiom`
+
+The minimal admitted example of one construct, with the one or two rules that
+make it correct (issue #1701). Every hole's `fillSpec` already carries the
+idiom of its construct (`construct`, `idiom`; [holes.md](holes.md) §8), so
+this tool is for asking about a construct before there is a hole in it.
+
+- Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`
+  or `spawn`, returns `{ok, idiom: {name, summary, rules, fill, example}}`.
+  With no `name` it returns `{ok, idioms: [{name, summary}]}`. An unknown name
+  is refused, listing the idioms. The same table is printed by
+  [`revl idiom`](commands-reference.md#revl-idiom).
 
 ---
 
@@ -757,6 +878,25 @@ grant, so n prompts become one. Gated by the `approve` operator verb: who may
 say yes is scoped in the same profile grammar as who may commit. Class (a)
 (witnessed-revertible) and class (b) (deferred) crossings never reach here.
 
+The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
+asks about, the crossing component's item-260 crossing ceiling, read from
+`revl audit`'s cardinality analysis
+([260-emission-cardinality-bounds.md](design/260-emission-cardinality-bounds.md)):
+
+    "ceilings": {"charge": {"verdict": "bounded-symbolic",
+                            "ceiling": "config.max_steps",
+                            "reason": "..."}}
+
+`verdict` is `bounded` (`ceiling` is the proved count), `bounded-symbolic`
+(`ceiling` is the fuel expression, `"k * expr"` when an iteration crosses `k`
+times) or `unbounded` (`ceiling` is null and `reason` says why). The ceiling is
+per activation of the crossing component, not a count for this one call: it is
+the worst case to size a standing grant's `uses` against. A capability with no
+recorded row reads `unbounded`. The field lands after the ticket `hash`, so the
+hash is unchanged. Under the boundary-policy line `approvals require bounded
+crossings` (off by default), a call whose capability is `unbounded` is refused
+by name instead of ticketed.
+
 When the crossing's approval rule demands a QUORUM (`capability payments.refund
 requires approval require 2 of {finance.oncall, fraud.oncall, cs.lead}`), a bare
 `hash` is not an answer: the ticket takes a VOTE. Pass `vote` (`approve` or
@@ -1092,13 +1232,22 @@ emissions at or before k.
 
 ### `revl_step_back`
 
-Unwind the accumulator to step k by running the registered inverses from the top
-down, newest first - leaving the component LIVE, not torn down. Refuses if the
-range crosses an emission with no `compensate`; `force` crosses anyway and
-reports what was crossed. The guarantee is "the inverses ran in order", never
-"state was restored".
+With no arguments, revert the last change this session made, by running the
+exact `undo` that change's response carried (issue #1703). Each further call
+reverts the change before it; a change that answered `undo: null` is not on the
+stack, so it is skipped rather than half-undone. The answer names the reverted
+change, the undo it ran (`via`, through the same gates as any call) and the
+`redo` call, with `undoDepth` left. With nothing left to revert it is a refusal
+with `undoDepth: 0`.
 
-- Inputs: `to` (required; `-1` unwinds everything); `component`; `force`.
+With `to`, unwind the accumulator to step k by running the registered inverses
+from the top down, newest first - leaving the component LIVE, not torn down.
+Refuses if the range crosses an emission with no `compensate`; `force` crosses
+anyway and reports what was crossed. The guarantee is "the inverses ran in
+order", never "state was restored".
+
+- Inputs: none (revert the last change); or `to` (`-1` unwinds everything),
+  `component`, `force`.
 
 ### `revl_replay_bisect`
 
