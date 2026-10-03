@@ -123,6 +123,33 @@ for _name in REPOSITORY_LOCAL_GIT_ENV + HOOK_COMMIT_IDENTITY_ENV:
     os.environ.pop(_name, None)
 del _name
 
+# Issue #1771: the suite wrote approval WALs into the developer's real state
+# directory (`~/Library/Application Support/revl/approval-wal/`, or the XDG
+# one), 71 files for three test files and tens of thousands over time.
+# `revl.wal.default_wal_dir()` resolves `$REVL_WAL_DIR` first, so it defaults
+# here to a directory owned by this test session, set before any test module
+# is imported so every child process inherits it too. A caller who already set
+# it keeps theirs. Tests that assert the platform default `delenv` it and
+# point `HOME` at their own `tmp_path` (tests/test_wal_integrity.py,
+# tests/test_doctor.py); tests/test_wal_dir_isolated_1771.py pins both halves.
+#
+# Only the process that made the directory removes it: a pytest a test starts
+# inherits `REVL_WAL_DIR` and must not delete its parent's.
+_OWNED_WAL_DIR = None
+if not os.environ.get("REVL_WAL_DIR"):
+    import tempfile as _tempfile
+
+    _OWNED_WAL_DIR = _tempfile.mkdtemp(prefix="revl-test-wal-")
+    os.environ["REVL_WAL_DIR"] = _OWNED_WAL_DIR
+    del _tempfile
+
+
+def pytest_unconfigure(config):
+    if _OWNED_WAL_DIR is not None:
+        import shutil  # noqa: PLC0415
+        shutil.rmtree(_OWNED_WAL_DIR, ignore_errors=True)
+
+
 def pytest_configure(config):
     # tools/hooks/pre-commit runs with pytest-timeout's `--timeout=60`. A test
     # that is slow by nature (not re-deriving anything a session could share)
