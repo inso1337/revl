@@ -1789,6 +1789,18 @@ the server whose verbs are documented in [mcp-reference.md](mcp-reference.md).
   its `mcp` sandbox bounds admitted agent code, and `leases enforced` refuses a
   swap that would replace a component another operator leases (item 61). Omit
   for advisory-only leases.
+- `--approval-policy {auto, advisory, off}` - the effect-class approval gate (item 246,
+  [harness-gate-guide.md](harness-gate-guide.md)). `auto` is the default:
+  - class (a) witnessed crossings with an inverse proceed;
+  - class (b) deferred emissions wait for commit;
+  - class (c) emissions return a ticket and fire nothing;
+  - the identity that raised a ticket cannot approve it (issue #1706), so with
+    no operator profile the session raises tickets but cannot answer them.
+
+  `advisory` runs the same gate but lets the raiser approve its own ticket, so
+  the prompt is advisory; this is what `auto` meant before issue #1706, and the
+  server says so at startup. `off` turns the gate off, the default before issue
+  #1706, and says so with a startup warning.
 - `--http HOST:PORT` - serve MCP 2026-07-28 Streamable HTTP at
   `http(s)://HOST:PORT/mcp` instead of stdio, one operator per request
   ([mcp-http-transport.md](mcp-http-transport.md)). Needs `--operator-profile`

@@ -284,7 +284,8 @@ states, provided keys, and the lifecycle trace.
 - Inputs: `source` / `files` / `modules`; `config` (per-component config
   tables); `record` (record the effect accumulator so the composition can be
   stepped backwards - must be set at load, recording is installed before
-  activation).
+  activation). With the approval gate on (the `revl mcp serve` default since
+  issue #1706) an omitted `record` records, and `record: false` is refused.
 
 ### `revl_call`
 
@@ -470,6 +471,15 @@ and/or `uses`/`ttlMs` INSTEAD of a bare hash to mint a session-scoped standing
 grant, so n prompts become one. Gated by the `approve` operator verb: who may
 say yes is scoped in the same profile grammar as who may commit. Class (a)
 (witnessed-revertible) and class (b) (deferred) crossings never reach here.
+
+Under `revl mcp serve` (the gate is on by default since issue #1706, and
+unless it is served `--approval-policy advisory`) the identity that raised a
+ticket cannot approve it, nor mint a standing grant from
+it, and a proactive `capability` grant is refused with no operator profile bound
+or to an operator that may itself `call`. A stdio session with no profile can
+therefore raise tickets but not answer them: a human approves as a separate
+operator over `--http` with `--operator-profile`
+([harness-gate-guide.md](harness-gate-guide.md)).
 
 When the crossing's approval rule demands a QUORUM (`capability payments.refund
 requires approval require 2 of {finance.oncall, fraud.oncall, cs.lead}`), a bare

@@ -95,6 +95,58 @@ def _run_fmt(args: argparse.Namespace) -> int:
     return exit_code
 
 
+#: `revl mcp serve --approval-policy` values (issue #1706) -> the session's
+#: (`approval_policy`, `approval_separation`). `auto` is the default: the gate,
+#: and the identity that raised a ticket cannot approve it. `advisory` is what
+#: `--approval-policy auto` meant before #1706: the gate, but the raiser may
+#: answer its own ticket. `off` is the pre-#1706 default: no policy.
+SERVE_APPROVAL_MODES = {"auto": ("auto", True), "advisory": ("auto", False),
+                        "off": (None, False)}
+
+
+def _resolve_serve_approval_mode(args) -> None:
+    """Issue #1706: `revl mcp serve` runs the effect-class gate by default, with
+    separation of duties, and says which mode it is in on stderr. `revl mcp
+    proxy` does not pass through here: it always runs `auto` and keeps its own
+    approval wiring."""
+    mode = getattr(args, "approval_policy", None) or "auto"
+    args.approval_policy, args.approval_separation = SERVE_APPROVAL_MODES[mode]
+    if mode == "advisory":
+        print("approval gate: advisory (--approval-policy advisory). Class (c) "
+              "emissions return a ticket and fire nothing until approved, but "
+              "the identity that raised a ticket may approve it (the behaviour "
+              "of --approval-policy auto before issue #1706). Omit the flag for "
+              "a gate the agent cannot answer itself", file=sys.stderr)
+        return
+    if args.approval_policy is None:
+        print("warning: --approval-policy off: the approval gate is OFF. A "
+              "class-(c) crossing (an irreversible emission with no checked "
+              "inverse) fires unprompted and no ticket is raised, so nothing "
+              "this agent does waits for a human (the behaviour before issue "
+              "#1706). Omit the flag to run the gate", file=sys.stderr)
+        return
+    if getattr(args, "http", None):
+        how = ("each HTTP request is its own operator, so approve as an "
+               "operator granted `approve` in --operator-profile, separate from "
+               "the operator that makes the call")
+    elif getattr(args, "operator_profile", None):
+        how = ("this session runs as one operator and cannot answer its own "
+               "tickets; to approve, serve with --http HOST:PORT and approve as "
+               "a separate operator granted `approve` in --operator-profile")
+    else:
+        how = ("with no operator profile this session can raise tickets but not "
+               "answer them; to approve, serve with --http HOST:PORT "
+               "--operator-profile PROFILE and grant `approve` only to the "
+               "human's operator")
+    print(f"approval gate: on (--approval-policy auto). Class (a) witnessed "
+          f"crossings with an inverse proceed, class (b) deferred emissions wait "
+          f"for commit, class (c) emissions return a ticket and fire nothing. "
+          f"The identity that raised a ticket cannot approve it: {how} "
+          f"(docs/harness-gate-guide.md). --approval-policy advisory lets the "
+          f"raiser approve; --approval-policy off turns the gate off.",
+          file=sys.stderr)
+
+
 def _bind_session_authority(args) -> int | None:
     """Bind the operator profile, boundary policy and approval policy named
     on the command line to the compiler server's session. Shared by
@@ -162,6 +214,12 @@ def _bind_session_authority(args) -> int | None:
         from ..mcp.server import SESSION
 
         SESSION.approval_policy = args.approval_policy
+        SESSION.approval_separation = bool(getattr(args, "approval_separation",
+                                                   False))
+    if getattr(args, "approval_policy", None) \
+            and not getattr(args, "approval_separation", False):
+        from ..mcp.server import SESSION
+
         operator = getattr(SESSION, "operator", None)
         self_approvable = operator is None or any(
             g.allow and g.covers_verb("approve")
@@ -276,6 +334,7 @@ def _run_mcp(args) -> int:
             exposure, code = _http_exposure(args)
             if exposure is None:
                 return code
+        _resolve_serve_approval_mode(args)
         refused = _bind_session_authority(args)
         if refused is not None:
             return refused

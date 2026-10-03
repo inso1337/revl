@@ -364,6 +364,10 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # so restoring it would hand a failed load a fresh budget every time.
     "_tickets", "_ticket_rounds", "_ticket_refusals", "_ledger", "_grants",
     "_grants_consumed",
+    # issue #1706: who raised each ticket. A ticket the failed load raised
+    # stays answerable, so its raiser has to stay known, or the raiser could
+    # approve it.
+    "_ticket_proposers",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
     # The event loop the load ran on. It is plumbing, not composition state, and
@@ -663,6 +667,17 @@ class Session:
         # call via the ticket two-step. Set at serve time
         # (`revl mcp serve --approval-policy auto`).
         self.approval_policy = None
+        # issue #1706: separation of duties for a single-approver ticket. When
+        # set, the identity that raised a ticket (`_operator_token()` at the
+        # asking) cannot approve it: with no operator profile both are the
+        # session itself, so the session can raise tickets but never answer
+        # them. `revl mcp serve` sets it whenever its gate is on; a quorum
+        # ticket already refuses its proposer (`_cast_vote`).
+        self.approval_separation = False
+        # issue #1706: ticket hash -> every identity that has raised it. A
+        # ticket hash repeats whenever the same call is asked again, so each
+        # asker is kept, not only the latest
+        self._ticket_proposers: dict = {}
         # roadmap 425 F3 / 427 F5: whether a CALLER-SUPPLIED resource valuation
         # may be written into the durable, cross-session approval WAL when a
         # crossing is approved. "withheld" (the DEFAULT) records it as UNRECORDED
@@ -1761,6 +1776,7 @@ class Session:
         self._surface_epoch += 1
         self._tickets = {}
         self._ticket_refusals = {}
+        self._ticket_proposers = {}
         # item 251 Slice 2: re-materialize the distilled rules against the new
         # generation. The H1 review bind (`_auto_reviewed`) persists across the
         # swap, so a component the swap moves INTO a rule's glob that was not in the
@@ -4122,6 +4138,7 @@ class Session:
         # 6. mint the branch identity over the (now rewound) shared workspace.
         branch = Session()
         branch.approval_policy = self.approval_policy
+        branch.approval_separation = self.approval_separation
         # the durability posture rides with the policy: a fork must not become a
         # session where an approved caller value is recorded that the parent's
         # operator had withheld.
@@ -4308,6 +4325,7 @@ class Session:
         self._class_map = None
         self._tickets = {}
         self._ticket_refusals = {}
+        self._ticket_proposers = {}
         self._ticket_rounds = {}   # indexes `_ledger`; dies with it
         self._ledger = []
         self._grants = []
@@ -5976,6 +5994,7 @@ class Session:
                 raise SessionError(
                     f"cannot decide `{ticket.get('component')}`: {shortfall}")
         self._tickets[h] = ticket
+        self._ticket_proposers.setdefault(h, set()).add(self._operator_token())
         if self._spendable_entry_for_ticket(h) is None \
                 and not self._quorum_pending(h):
             self._ticket_rounds[h] = self._ticket_rounds.get(h, 0) + 1
@@ -7120,10 +7139,39 @@ class Session:
                     f"be approved")
             if existing is not None:
                 return self._ticket_response(existing)
+            self._refuse_self_approval(ticket_hash)
             self._mint_ticket_entry(ticket)
             return self._ticket_response(ticket)
         return self._cast_vote(ticket, rule, vote=vote, as_token=as_token,
                                as_secret=as_secret, as_proof=as_proof)
+
+    def _refuse_self_approval(self, ticket_hash: str) -> None:
+        """Issue #1706: under `approval_separation`, the identity that raised a
+        ticket cannot be the one that approves it. The identity is the bound
+        operator's token, which over `revl mcp serve --http` is the
+        authenticated caller of each request; with no operator profile it is the
+        session itself, which therefore can never answer its own ticket."""
+        if not self.approval_separation:
+            return
+        approver = self._operator_token()
+        raisers = self._ticket_proposers.get(ticket_hash)
+        if raisers is None:
+            # every ticket is issued through `_issue_ticket`, which names its
+            # raiser; one that is not named cannot be shown to be someone else's
+            raise SessionError(
+                f"ticket {ticket_hash} has no recorded raiser, so it cannot be "
+                f"shown that this identity did not raise it (issue #1706). "
+                f"Re-issue the call for a fresh ticket")
+        if approver not in raisers:
+            return
+        who = f"operator `{approver}`" if approver else \
+            "this session (no operator profile is bound)"
+        raise SessionError(
+            f"ticket {ticket_hash} was raised by {who}, and the identity that "
+            f"raised a ticket cannot approve it (issue #1706, separation of "
+            f"duties). Approval needs a separate operator identity: serve with "
+            f"`--http HOST:PORT --operator-profile PROFILE` and approve as an "
+            f"operator granted `approve` (docs/harness-gate-guide.md)")
 
     # -- item 344: session-scoped standing capability grants ----------------
 
@@ -7744,8 +7792,39 @@ class Session:
         SATISFIED decision for that very ticket (`_decision_authorizes_grant`),
         and never off anything an operator sent. This verb passes no `decision`,
         so the public mint can never take that route."""
+        self._refuse_self_grant(ticket_hash)
         return self._mint_grant(ticket_hash=ticket_hash, capability=capability,
                                 uses=uses, ttl_ms=ttl_ms)
+
+    def _refuse_self_grant(self, ticket_hash: str | None) -> None:
+        """Issue #1706: under `approval_separation` a standing grant is the
+        same yes as an approval, so it follows the same rule. A grant named
+        from a ticket cannot be minted by the identity that raised that ticket,
+        and a proactive grant cannot be minted with no operator profile bound:
+        the only identity then is the session whose crossings it would admit."""
+        if not self.approval_separation:
+            return
+        if ticket_hash is not None:
+            self._refuse_self_approval(ticket_hash)
+            return
+        operator = getattr(self, "operator", None)
+        if operator is not None and any(
+                g.allow and g.covers_verb("call")
+                for g in getattr(operator, "grants", ())):
+            raise SessionError(
+                f"operator `{operator.token}` may make calls, so a standing "
+                f"grant it mints proactively would approve its own class-(c) "
+                f"crossings (issue #1706, separation of duties). Mint it as an "
+                f"operator granted `approve` but not `call`, or name the ticket "
+                f"`hash` another operator raised")
+        if not self._operator_token():
+            raise SessionError(
+                "no operator profile is bound, so a standing grant minted here "
+                "would let this session approve its own class-(c) crossings "
+                "(issue #1706, separation of duties). Mint it as a separate "
+                "operator: serve with `--http HOST:PORT --operator-profile "
+                "PROFILE` and grant `approve` to that operator "
+                "(docs/harness-gate-guide.md)")
 
     def _mint_grant(self, *, ticket_hash: str | None = None,
                     capability: str | None = None, uses: int | None = None,

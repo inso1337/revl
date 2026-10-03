@@ -827,8 +827,14 @@ def _tool_load(arguments: dict) -> dict:
         return report(error)
     authored = _authored_host_bodies(ir, source, modules)
     try:
+        # issue #1706: the gate is on by default and its spend must be durable,
+        # so a load that does not say otherwise records; an explicit
+        # `record: false` under the gate is still refused by `Session.load`.
+        record = arguments.get("record")
+        if record is None:
+            record = SESSION.approval_policy is not None
         state = SESSION.load(ir, arguments.get("config"),
-                             record=bool(arguments.get("record")),
+                             record=bool(record),
                              origin=_origin(arguments))
     except SessionError as error:
         return _session_error(str(error))
@@ -1209,6 +1215,23 @@ def _host_code_fields(bodies: list) -> dict:
             f"`--author-trust trusted`; the default refuses agent-authored "
             f"host code outright."),
     }
+
+def _approval_instructions() -> str:
+    """The `initialize` instructions' sentence on the approval gate (issue
+    #1706), true of this session's mode."""
+    if SESSION.approval_policy is None:
+        return ("No approval gate is configured: a class-(c) crossing fires "
+                "when called.")
+    text = ("The approval gate is on: a witnessed crossing with an inverse "
+            "proceeds, a deferred emission waits for commit, and any other "
+            "emission returns approvalRequired with a ticket and fires nothing. "
+            "Relay the ticket to a human and re-issue the identical call once "
+            "it is approved.")
+    if getattr(SESSION, "approval_separation", False):
+        text += (" You cannot approve a ticket you raised: revl_approve must "
+                 "come from a separate operator identity.")
+    return text
+
 
 def _tool_approve(arguments: dict) -> dict:
     """Say YES to a class-(c) crossing (item 246 / roadmap item 344). Two shapes,
@@ -3784,8 +3807,10 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": _INSTRUCTIONS if runtime_available()
-                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
+            "instructions": f"{_INSTRUCTIONS} {_approval_instructions()}"
+                            if runtime_available()
+                            else f"{_INSTRUCTIONS} {_approval_instructions()} "
+                                 f"{_runtime_gate.announcement()}",
         }
     elif method == "tools/list":
         result = {"tools": _ADVERTISED}
