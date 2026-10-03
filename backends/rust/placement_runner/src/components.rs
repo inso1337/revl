@@ -330,11 +330,11 @@ impl Database for DatabaseProxy {
         _v.as_i64().unwrap_or(0)
     }
 }
-fn _revl_dispatch_database(svc: &dyn Database, method: &str, args: &[serde_json::Value]) -> serde_json::Value {
+fn _revl_dispatch_database(svc: &dyn Database, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {
     match method {
-        "query" => { let _r = svc.query(args[0].as_str().unwrap_or("").to_string()); serde_json::json!(_r.iter().map(|v| v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default()).collect::<Vec<_>>()) },
-        "execute" => serde_json::json!(svc.execute(args[0].as_str().unwrap_or("").to_string())),
-        _ => serde_json::Value::Null,
+        "query" => Ok({ let _r = svc.query(args[0].as_str().unwrap_or("").to_string()); serde_json::json!(_r.iter().map(|v| v.downcast::<String>().map(|s| (*s).clone()).unwrap_or_default()).collect::<Vec<_>>()) }),
+        "execute" => Ok(serde_json::json!(svc.execute(args[0].as_str().unwrap_or("").to_string()))),
+        _ => Err(format!("method '{method}' is not exported for service Database")),
     }
 }
 
@@ -349,11 +349,11 @@ impl Cache for CacheProxy {
         { let _ = _v; }
     }
 }
-fn _revl_dispatch_cache(svc: &dyn Cache, method: &str, args: &[serde_json::Value]) -> serde_json::Value {
+fn _revl_dispatch_cache(svc: &dyn Cache, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {
     match method {
-        "get" => serde_json::json!(svc.get(args[0].as_str().unwrap_or("").to_string())),
-        "put" => { svc.put(args[0].as_str().unwrap_or("").to_string(), args[1].as_str().unwrap_or("").to_string()); serde_json::Value::Null },
-        _ => serde_json::Value::Null,
+        "get" => Ok(serde_json::json!(svc.get(args[0].as_str().unwrap_or("").to_string()))),
+        "put" => Ok({ svc.put(args[0].as_str().unwrap_or("").to_string(), args[1].as_str().unwrap_or("").to_string()); serde_json::Value::Null }),
+        _ => Err(format!("method '{method}' is not exported for service Cache")),
     }
 }
 
@@ -390,17 +390,17 @@ pub fn _revl_proxy_plugin(key: &str, service: &str, socket: String) -> Option<co
     }
 }
 
-pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> serde_json::Value {
+pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {
     match key {
         "db" => match ctx.require::<Box<dyn Database>>("db") {
             Ok(svc) => _revl_dispatch_database(&**svc, method, args),
-            Err(_) => serde_json::Value::Null,
+            Err(_) => Err("no provider for key 'db' right now".to_string()),
         },
         "cache" => match ctx.require::<Box<dyn Cache>>("cache") {
             Ok(svc) => _revl_dispatch_cache(&**svc, method, args),
-            Err(_) => serde_json::Value::Null,
+            Err(_) => Err("no provider for key 'cache' right now".to_string()),
         },
-        _ => serde_json::Value::Null,
+        _ => Err(format!("key '{key}' is not provided by this process")),
     }
 }
 
