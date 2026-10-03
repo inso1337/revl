@@ -214,9 +214,11 @@ class ClassMap:
     body — from the checked reach facts. The per-call decision is then a
     dictionary lookup; nothing is compiled or re-derived on the hot path."""
 
-    def __init__(self, ir: dict) -> None:
+    def __init__(self, ir: dict, index: Composition | None = None) -> None:
+        """`index` is an already-built `query.Composition` over the SAME `ir`,
+        for a caller that holds one (`erase_report._crossings`)."""
         self.ir = ir
-        self.index = Composition(ir)
+        self.index = index if index is not None else Composition(ir)
         self._semantic = {c["name"]: _semantic(c)
                           for c in ir.get("components") or []}
         # direct (non-transitive) classification per scope, with every
@@ -453,14 +455,23 @@ class ClassMap:
                 scope, {(k, m): c for (s, k, m), c in relayed.items() if s == sid})
                 for sid, scope in scopes.items()}
             if not targets:
+                self._relayed = relayed
                 return direct
             reach = self._fold_all(direct)
             nxt = {mark: reach[target]["class"]
                    for mark, target in targets.items()
                    if reach[target]["class"] in _RELAYABLE}
             if nxt == relayed:
+                self._relayed = relayed
                 return direct
             relayed = nxt
+
+    def relayed_emissions(self) -> dict:
+        """`(scope id, key, method) -> class` for every service emission this
+        map relaxed to its target's class: the one resolver for "does this
+        `emit` cross anything itself". The erase report reads it so it counts
+        a class-preserving relay the way the per-call decision does."""
+        return dict(self._relayed)
 
     def _fold_all(self, direct: dict) -> dict:
         return {sid: self._fold_closure(sid, direct) for sid in self.index.scopes}
