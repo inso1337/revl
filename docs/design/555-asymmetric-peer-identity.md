@@ -312,11 +312,14 @@ NOT verified, stated rather than left to be discovered:
   `tests/test_ecdsa_vectors.py`, `tests/test_ecdsa_adversarial.py` and
   `tests/test_ecdsa_differential.py`. This item added no coverage there and
   claims none.
-* **No side-channel claim.** The P-256 scalar multiplication in `tee_quote` is a
-  straightforward double-and-add over Python integers and is not constant time.
-  For VERIFICATION that is irrelevant, because the inputs are public. For
-  SIGNING on a host an attacker can measure, it is a real limitation and this
-  item does not address it.
+* **No side-channel claim for the pure path.** The P-256 scalar multiplication in
+  `tee_quote` is a straightforward double-and-add over Python integers and is
+  not constant time. For VERIFICATION that is irrelevant, because the inputs are
+  public. For SIGNING on a host an attacker can measure it is a real limitation,
+  and issue #1460 addressed it after this item: signing goes through
+  `cryptography` when the `revl[crypto]` extra is installed (byte-compatible,
+  RFC 6979 on both), and a network-exposed signer refuses without it. See
+  `docs/tee-attestation-root.md`, "Signing: the `revl[crypto]` extra".
 * **The charter and the admit receipt are still MAC'd.** Both are the operator's
   own records, read by parties that already hold the operator key, and neither
   is a peer's claim about itself. Moving them to key pairs is a separate change

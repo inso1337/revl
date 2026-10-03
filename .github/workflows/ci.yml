@@ -146,6 +146,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       frontend: ${{ steps.detect.outputs.frontend }}
+      backends: ${{ steps.backends.outputs.backends }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262  # v4.4.0
         with:
@@ -153,6 +154,38 @@ jobs:
           # locally; the explicit base fetch below is the belt-and-braces guard
           # that a shallow checkout still works.
           fetch-depth: 0
+      # Issue #1817: whether a pull request runs the six `backend-*` jobs.
+      # `tools/affected_tests.py --ci-backends` answers all six or none; the
+      # soundness argument (deny by default, which paths no backend job can
+      # observe) is beside `ci_backends` there and pinned by
+      # tests/test_ci_backend_gate.py. Every event that is not a pull request
+      # answers 'true'. It fails OPEN: the backend jobs skip only on the exact
+      # answer 'false', so a selector crash (this step continues on error and
+      # sets nothing) runs them. It comes before `detect`, whose `--depth=1`
+      # base fetch would graft the full clone shallow and leave the selector's
+      # three-dot diff without a merge base.
+      - id: backends
+        continue-on-error: true
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" != "pull_request" ]; then
+            echo "backends=true" >> "$GITHUB_OUTPUT"
+            echo "non-PR event ($EVENT_NAME): all six backend jobs"
+            exit 0
+          fi
+          git fetch --no-tags origin \
+            "+refs/heads/${BASE_REF}:refs/remotes/origin/${BASE_REF}"
+          out=$(python3 tools/affected_tests.py --ci-backends --base "origin/${BASE_REF}")
+          echo "$out"
+          if [ "$out" = "CI_BACKENDS" ]; then
+            echo "backends=false" >> "$GITHUB_OUTPUT"
+            echo "no changed path is one a backend job can observe: backend jobs skip"
+          else
+            echo "backends=true" >> "$GITHUB_OUTPUT"
+          fi
       - id: detect
         env:
           # a branch name is attacker-controllable text, so it goes through
@@ -595,10 +628,18 @@ jobs:
     runs-on: ubuntu-latest
     # Decoupled from `frontend` (approved CI-topology change): the backends
     # import revl directly and self-contain their frontend usage, so the old
-    # `needs: frontend` was pure ordering. Dropping it lets every backend run on
-    # EVERY PR without waiting on -- or being skipped by -- the frontend
-    # fast-path. `needs: [lint]` keeps the cheap-gate fail-fast.
-    needs: [lint]
+    # `needs: frontend` was pure ordering. Dropping it lets every backend run
+    # without waiting on -- or being skipped by -- the frontend fast-path.
+    # `needs: [lint]` keeps the cheap-gate fail-fast.
+    # Issue #1817: on a pull request, skipped when `changes` reports that no
+    # changed path is one a backend job can observe (all six or none; the
+    # rule is `ci_backends`, named in the `changes` job). Every other event
+    # runs it.
+    # `!cancelled()` replaces the implicit `success()`, so a failed `changes`
+    # job (no output, so not 'false') runs it rather than skipping it; a failed
+    # `lint` still stops it, as `needs: [lint]` alone did.
+    needs: [lint, changes]
+    if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -759,7 +800,26 @@ jobs:
   # are not measured on a pull request at all; they run on the merge-queue
   # candidate before it lands, and on push to main.
   root-suite-affected:
+    # Issue #1817: pull requests only. On every other event `frontend` runs the
+    # whole root suite on 3.11, 3.12 and 3.13, and its 3.12 leg is this job's
+    # FULL selection (same interpreter, same go and java pins), which is what a
+    # push to main selected on 31 of 40 measured commits. On a pull request the
+    # condition is always true, so this job still never reports `skipping`
+    # there (issue #854); tests/test_root_suite_coverage_is_unconditional.py
+    # pins both halves.
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: ubuntu-latest
+    # Issue #1774: four shards. Every shard runs the same selection; a FULL
+    # selection (and any selection of 40 or more files) is then split by test
+    # file across the four (`REVL_TEST_SHARD`, tests/_shard.py), so a full
+    # fallback takes about a quarter of the ~70 minutes it took as one job. A
+    # smaller selection runs whole in shard 1 and the other three say so and
+    # stop. Together the shards run every selected test exactly once
+    # (tests/test_root_suite_shards_1774.py).
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
         with:
@@ -836,16 +896,42 @@ jobs:
             echo "affected selection: pytest $nodes"
           fi
           echo "pytest=$nodes" >> "$GITHUB_OUTPUT"
+          full=$(printf '%s\n' "$out" | sed -n 's/^FULL //p' | head -n 1)
+          echo "full=${full:-0}" >> "$GITHUB_OUTPUT"
       - name: root suite (affected nodes)
         env:
           # diff paths are the author's, and this list is derived from them, so
           # it arrives as a variable and is only ever word-split into pytest
           # arguments; it is never re-parsed as shell source.
           SEL_PYTEST: ${{ steps.select.outputs.pytest }}
+          SEL_FULL: ${{ steps.select.outputs.full }}
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: 4
         run: |
           set -euo pipefail
           set -f
-          pytest $SEL_PYTEST -q
+          # the node count, by the shell's own word split (`set -f` is on, so no
+          # path in the list is globbed)
+          set -- $SEL_PYTEST
+          count=$#
+          if [ "$SEL_FULL" = "1" ] || [ "$SEL_PYTEST" = "tests/" ] || [ "$count" -ge 40 ]; then
+            export REVL_TEST_SHARD="${SHARD_INDEX}/${SHARD_TOTAL}"
+            echo "sharded: this job runs shard ${REVL_TEST_SHARD} of the selection"
+          elif [ "$SHARD_INDEX" != "1" ]; then
+            echo "a selection of ${count} node(s) runs whole in shard 1; nothing for shard ${SHARD_INDEX}"
+            exit 0
+          fi
+          rc=0
+          pytest $SEL_PYTEST -q || rc=$?
+          if [ "$rc" = "5" ] && [ -n "${REVL_TEST_SHARD:-}" ]; then
+            # pytest's "no tests collected": a shard can be handed no file when
+            # the selection has fewer files than shards. The other shards ran
+            # them, and the partition is pinned by
+            # tests/test_root_suite_shards_1774.py.
+            echo "shard ${REVL_TEST_SHARD} was assigned no test file"
+            rc=0
+          fi
+          exit "$rc"
 
   # Issue #1342. Four pull requests read MERGED in the GitHub UI with their
   # work absent from `main`, because each was merged into a base branch that
@@ -1006,9 +1092,10 @@ jobs:
           echo "    --diff-base $base --count 200"
           exit 1
 
-  # Issue #1572: the committed census artifact (`docs/census-artifact.{md,json}`,
-  # roadmap item 549) had drifted from main with nothing reporting it, because
-  # no step ran its check. A check nobody runs reads as a pass.
+  # Issue #1572: the committed census artifact (roadmap item 549; since issue
+  # #1768 the records in `docs/census-artifact/`, from which the report is
+  # rendered) had drifted from main with nothing reporting it, because no step
+  # ran its check. A check nobody runs reads as a pass.
   #
   # This job keeps the committed copy CURRENT. On a pull request it asks
   # `census_artifact.py --moved-inputs` whether the diff moves an input of the
@@ -1016,9 +1103,10 @@ jobs:
   # census run opens, a report input), a program it carries, a new `.rvl` under
   # a census directory, a gate crate source, or the tool and the artifact
   # themselves. If one moved, `--verify --strict` re-runs the census (about 20
-  # seconds) and fails unless the committed file reproduces program by program
-  # with no program missing and no report input moved. The fix is to run
-  # `python3 tools/census_artifact.py --write` in the same pull request.
+  # seconds) and fails unless the committed records reproduce program by
+  # program with no program missing, no report input moved and every record
+  # file byte-identical to the run. The fix, and the resolution of a merge
+  # conflict in the records, is `python3 tools/census_artifact.py --write`.
   #
   # A diff that moves no input is not checked, and says so. On every other
   # event (push to main, schedule, dispatch) it always checks, so a merge race
@@ -1250,8 +1338,16 @@ jobs:
 
   backend-typescript:
     runs-on: ubuntu-latest
-    # Decoupled from `frontend`; runs on every PR (see backend-python).
-    needs: [lint]
+    # Decoupled from `frontend` (see backend-python).
+    # Issue #1817: on a pull request, skipped when `changes` reports that no
+    # changed path is one a backend job can observe (all six or none; the
+    # rule is `ci_backends`, named in the `changes` job). Every other event
+    # runs it.
+    # `!cancelled()` replaces the implicit `success()`, so a failed `changes`
+    # job (no output, so not 'false') runs it rather than skipping it; a failed
+    # `lint` still stops it, as `needs: [lint]` alone did.
+    needs: [lint, changes]
+    if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444  # v5.0.0
@@ -1367,8 +1463,16 @@ jobs:
 
   backend-wasm:
     runs-on: ubuntu-latest
-    # Decoupled from `frontend`; runs on every PR (see backend-python).
-    needs: [lint]
+    # Decoupled from `frontend` (see backend-python).
+    # Issue #1817: on a pull request, skipped when `changes` reports that no
+    # changed path is one a backend job can observe (all six or none; the
+    # rule is `ci_backends`, named in the `changes` job). Every other event
+    # runs it.
+    # `!cancelled()` replaces the implicit `success()`, so a failed `changes`
+    # job (no output, so not 'false') runs it rather than skipping it; a failed
+    # `lint` still stops it, as `needs: [lint]` alone did.
+    needs: [lint, changes]
+    if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
     # The cordis-wasm checkout this job provisions below. Declared as a JOB env
     # rather than exported into $GITHUB_ENV so that
     # tests/test_env_gated_skips_run_somewhere.py can read WHICH job sets it and
@@ -1509,8 +1613,16 @@ jobs:
 
   backend-rust:
     runs-on: ubuntu-latest
-    # Decoupled from `frontend`; runs on every PR (see backend-python).
-    needs: [lint]
+    # Decoupled from `frontend` (see backend-python).
+    # Issue #1817: on a pull request, skipped when `changes` reports that no
+    # changed path is one a backend job can observe (all six or none; the
+    # rule is `ci_backends`, named in the `changes` job). Every other event
+    # runs it.
+    # `!cancelled()` replaces the implicit `success()`, so a failed `changes`
+    # job (no output, so not 'false') runs it rather than skipping it; a failed
+    # `lint` still stops it, as `needs: [lint]` alone did.
+    needs: [lint, changes]
+    if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1639,8 +1751,16 @@ jobs:
 
   backend-java:
     runs-on: ubuntu-latest
-    # Decoupled from `frontend`; runs on every PR (see backend-python).
-    needs: [lint]
+    # Decoupled from `frontend` (see backend-python).
+    # Issue #1817: on a pull request, skipped when `changes` reports that no
+    # changed path is one a backend job can observe (all six or none; the
+    # rule is `ci_backends`, named in the `changes` job). Every other event
+    # runs it.
+    # `!cancelled()` replaces the implicit `success()`, so a failed `changes`
+    # job (no output, so not 'false') runs it rather than skipping it; a failed
+    # `lint` still stops it, as `needs: [lint]` alone did.
+    needs: [lint, changes]
+    if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0
@@ -1678,8 +1798,16 @@ jobs:
 
   backend-go:
     runs-on: ubuntu-latest
-    # Decoupled from `frontend`; runs on every PR (see backend-python).
-    needs: [lint]
+    # Decoupled from `frontend` (see backend-python).
+    # Issue #1817: on a pull request, skipped when `changes` reports that no
+    # changed path is one a backend job can observe (all six or none; the
+    # rule is `ci_backends`, named in the `changes` job). Every other event
+    # runs it.
+    # `!cancelled()` replaces the implicit `success()`, so a failed `changes`
+    # job (no output, so not 'false') runs it rather than skipping it; a failed
+    # `lint` still stops it, as `needs: [lint]` alone did.
+    needs: [lint, changes]
+    if: ${{ !cancelled() && needs.lint.result == 'success' && (github.event_name != 'pull_request' || needs.changes.outputs.backends != 'false') }}
     steps:
       - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09  # v5.1.0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1  # v6.3.0

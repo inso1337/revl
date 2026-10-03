@@ -1,0 +1,105 @@
+["decides_verdicts", "backends/python/emit.py"]
+
+["decides_verdicts", "tests/test_selfhost_lower.py"]
+
+["decides_verdicts", "tools/build_gate_crate.py"]
+
+["decides_verdicts", "tools/gate_reference_census.py"]
+
+["reference", "src/revl/__init__.py"]
+
+["reference", "src/revl/_paths.py"]
+
+["reference", "src/revl/admission.py"]
+
+["reference", "src/revl/admit_profile.py"]
+
+["reference", "src/revl/attest.py"]
+
+["reference", "src/revl/boundary.py"]
+
+["reference", "src/revl/cap_order.py"]
+
+["reference", "src/revl/cardinality.py"]
+
+["reference", "src/revl/compiler.py"]
+
+["reference", "src/revl/decode_grammar.py"]
+
+["reference", "src/revl/diagnostics.py"]
+
+["reference", "src/revl/emission_analysis.py"]
+
+["reference", "src/revl/errors.py"]
+
+["reference", "src/revl/fmt.py"]
+
+["reference", "src/revl/holes.py"]
+
+["reference", "src/revl/hostfile.py"]
+
+["reference", "src/revl/hostref.py"]
+
+["reference", "src/revl/kernel_boundary.py"]
+
+["reference", "src/revl/lexer.py"]
+
+["reference", "src/revl/lower.py"]
+
+["reference", "src/revl/manifest.py"]
+
+["reference", "src/revl/mcp/__init__.py"]
+
+["reference", "src/revl/mcp/schema.py"]
+
+["reference", "src/revl/model_answer.py"]
+
+["reference", "src/revl/model_council.py"]
+
+["reference", "src/revl/model_profile.py"]
+
+["reference", "src/revl/model_route.py"]
+
+["reference", "src/revl/navigate.py"]
+
+["reference", "src/revl/ownership.py"]
+
+["reference", "src/revl/parallel.py"]
+
+["reference", "src/revl/parser.py"]
+
+["reference", "src/revl/policy.py"]
+
+["reference", "src/revl/resources.py"]
+
+["reference", "src/revl/retention.py"]
+
+["reference", "src/revl/taint.py"]
+
+["reference", "src/revl/typecheck.py"]
+
+["reference", "src/revl/ui_family.py"]
+
+["reference", "src/revl/why.py"]
+
+["report_inputs", "crates/revl-gate/Cargo.toml"]
+
+["report_inputs", "crates/revl-gate/src/admission.rs"]
+
+["report_inputs", "crates/revl-gate/src/frontier.rs"]
+
+["report_inputs", "crates/revl-gate/src/ir.rs"]
+
+["report_inputs", "crates/revl-gate/src/lib.rs"]
+
+["report_inputs", "crates/revl-gate/src/selfhost.rs"]
+
+["report_inputs", "crates/revl-gate/src/session.rs"]
+
+["report_inputs", "crates/revl-gate/src/symbols.rs"]
+
+["report_inputs", "tests/fixtures/census_crate_reproduction.json"]
+
+["report_inputs", "tests/fixtures/corpus_provenance.json"]
+
+["report_inputs", "tools/gate_reference_census_baseline.json"]
