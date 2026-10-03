@@ -1,0 +1,187 @@
+["reason", "activation-dispatcher-residuals-component-step-enters-witnes", "Activation dispatcher residuals: `_component_step` enters `_witnessed_step` for a witnessed effect, rejects a provide absent from or mismatched with the header (including a cordis Context-member collision), and rejects return/unknown steps. Ordinary and async effects, call/host/generic-expression compensation, valid provide, guards, fail, sync and async timers and the item-130 `stream-iter` step are covered (issue #106); witnessed transactions are the declared port boundary"]
+
+["function", "activation-dispatcher-residuals-component-step-enters-witnes", "_component_step", 12, 12]
+
+["reason", "backends-typescript-emit-py-reject-service-key-refuses", "backends/typescript/emit.py::_reject_service_key: refuses a provide/require key that would collide with a cordis Context member, an inherited JS prototype member, or the reserved _-prefixed namespace (a loud host-safety error over a silent wrong resolution). Every corpus key is host-safe, so _is_reserved_service_key returns early and the refusal body with its per-case messages never runs."]
+
+["function", "backends-typescript-emit-py-reject-service-key-refuses", "_reject_service_key", 8, 8]
+
+["reason", "canonical-type-parser-fallbacks-split-fn-type-rejects", "Canonical type parser fallbacks: `_split_fn_type` rejects missing arrows/unclosed parameter lists; `_split_ts_types` tracks nested generic bracket depth; `_ts_type` and `_ts_v3_type` erase unknown nominal/generic arguments; `_v3_surface_type` retains legacy unstamped literal/name inference. Frontend canonical type strings and stamped expressions exercise the supported paths, including the #957 `Map` subscript's declared value type"]
+
+["function", "canonical-type-parser-fallbacks-split-fn-type-rejects", "_split_fn_type", 2, 2]
+
+["function", "canonical-type-parser-fallbacks-split-fn-type-rejects", "_split_ts_types", 2, 2]
+
+["function", "canonical-type-parser-fallbacks-split-fn-type-rejects", "_ts_type", 1, 1]
+
+["function", "canonical-type-parser-fallbacks-split-fn-type-rejects", "_ts_v3_type", 2, 2]
+
+["function", "canonical-type-parser-fallbacks-split-fn-type-rejects", "_v3_surface_type", 7, 7]
+
+["reason", "component-header-refusals-component-rejects-an-unknown-servi", "Component header refusals: `_component` rejects an unknown service behind a requirement or provision, and an isolate, intercept or routed key the header does not declare; `_context_augmentation` rejects one Context key bound to conflicting services; `_provide_impl` rejects unknown services, undeclared methods and arity mismatch. The frontend enforces these relationships, and routed requires are covered (issue #106)"]
+
+["function", "component-header-refusals-component-rejects-an-unknown-servi", "_component", 5, 5]
+
+["function", "component-header-refusals-component-rejects-an-unknown-servi", "_context_augmentation", 2, 2]
+
+["function", "component-header-refusals-component-rejects-an-unknown-servi", "_provide_impl", 3, 3]
+
+["reason", "do-expression-refusals-and-one-annotation-v3-do", "`do` expression refusals and one annotation: `_v3_do_expr` rejects a `do` block outside a component/method body and a non-`let` statement in one, and annotates an empty-list binding inside the block. The frontend lowers `do` only in method bodies and only with `let` statements, and no corpus block binds `[]`. The block itself is covered (issue #106)"]
+
+["function", "do-expression-refusals-and-one-annotation-v3-do", "_v3_do_expr", 3, 3]
+
+["reason", "emission-and-match-helper-false-branches-v3-emission", "Emission and match helper false branches: `_v3_emission_call_node` rejects non-call, targeted-call and unknown-callee shapes; `_v3_match_expr` retains the `undefined` optional-payload guard. Covered emission calls and exhaustive Some/None/Result/variant matches take the normal branches"]
+
+["function", "emission-and-match-helper-false-branches-v3-emission", "_v3_emission_call_node", 3, 3]
+
+["function", "emission-and-match-helper-false-branches-v3-emission", "_v3_match_expr", 1, 1]
+
+["reason", "explicit-refusal-adapters-refuse-holes-walks-formats-truncat", "Explicit refusal adapters: `_refuse_holes` walks, formats/truncates locations and rejects unresolved holes; `_refuse_missing_host_root` rejects host calls without a declared root. These inputs cannot produce positive oracle bytes. (`_refuse_fault_tests` is reached by tests/fixtures/emit_ts_refusals/fault_test_section.rvl.)"]
+
+["function", "explicit-refusal-adapters-refuse-holes-walks-formats-truncat", "_refuse_holes", 4, 4]
+
+["function", "explicit-refusal-adapters-refuse-holes-walks-formats-truncat", "_refuse_holes.walk", 1, 1]
+
+["function", "explicit-refusal-adapters-refuse-holes-walks-formats-truncat", "_refuse_missing_host_root", 1, 1]
+
+["reason", "expression-residuals-expr-rejects-a-malformed-node-async", "Expression residuals: `_expr` rejects a malformed node, async callable in sync context, component-only node without component scope, unbound component name, undeclared config/requirement, invalid host name, unknown unary/binary/kind, malformed spawn target/instance key, and out-of-range or non-string legacy format. Its positive residuals are a non-atomic legacy component call target, legacy-format `$$`, and the top-level `stream-merge` arm: the frontend produces a `stream-merge` only as a `subscribe`'s stream, which `_stream_head` renders directly. `_fn_call` rejects unknown functions or async calls in sync context; `_ts_builtin` rejects an unknown method. The routed requirement proxy, the `Map` subscript, the `do` block and the `subscribe` lowering are covered (issue #106)"]
+
+["function", "expression-residuals-expr-rejects-a-malformed-node-async", "_expr", 17, 17]
+
+["function", "expression-residuals-expr-rejects-a-malformed-node-async", "_fn_call", 2, 2]
+
+["function", "expression-residuals-expr-rejects-a-malformed-node-async", "_ts_builtin", 1, 1]
+
+["reason", "extern-declared-compensate-item-254-issue-1592-as", "Extern-declared compensate (item 254, issue #1592): `_as_fn_call` re-spells an extern's declared `compensate` slot, lowered in the pure-expression call dialect, as a component `fn` node. Its fall-through returns any other shape unchanged. The frontend lowers every declared slot to a bare named call, so no corpus document can reach that return. selfhost/emit_ts.rvl mirrors the rest of the path (emit_ts_corpus/extern_compensate.rvl)."]
+
+["function", "extern-declared-compensate-item-254-issue-1592-as", "_as_fn_call", 1, 1]
+
+["reason", "extern-declared-compensations-issue-1511-declared-call-rende", "Extern-declared compensations (issue #1511): `_declared_call` renders a call to an extern that declares its own `compensate` as `Frame.declared(..)` in any non-statement position inside a provide method (a `let`, a `return`, an argument, a nested operand), renders an `emit` statement's own call bare (the statement registers it, issue #1592; `_emit_ctx` and `_Ctx.with_declared_statement` mark that node), and refuses any other component position by name; `_reaches_declared` walks a method body for such a call so the component builds a Frame. The ts corpus document tests/fixtures/emit_ts_corpus/extern_compensate.rvl (issue #1592) reaches only the `emit`-statement path, the call rendered bare, which selfhost/emit_ts.rvl ports. The non-statement positions stay unreached: no corpus document crosses one, and one that did would flip the byte-agreement oracle RED, because selfhost/emit_ts.rvl does not port `Frame.declared`. The behaviour is pinned and executed against real cordis by backends/typescript/tests/declared_compensate.test.ts."]
+
+["function", "extern-declared-compensations-issue-1511-declared-call-rende", "_declared_call", 13, 13]
+
+["function", "extern-declared-compensations-issue-1511-declared-call-rende", "_reaches_declared", 7, 7]
+
+["reason", "extern-residuals-emit-ts-externs-rejects-an-extern", "Extern residuals: `_emit_ts_externs` rejects an extern with neither a @ts body nor a @ts ref, and writes the empty-body comment for an async extern whose @ts body is empty. Verbatim bodies, `@ts ref` thunks, config scaffolding and binding, and Secret result marking are covered (issue #106)"]
+
+["function", "extern-residuals-emit-ts-externs-rejects-an-extern", "_emit_ts_externs", 2, 2]
+
+["reason", "frame-allocation-invariants-and-declared-transaction-paths-b", "Frame allocation invariants and declared transaction paths: `_bracket_yield`'s bare-arrow branch requires a bracket while `_has_bracket` reported false, which cannot occur for lowered activation effects; `_guard_frame_neutral_loop` rejects frame-owning loop steps, but G6 keeps activation effects out of source loop bodies. `_has_bracket.walk`'s recursive true return requires an effect or timer inside a component guard, which G6 rejects. `_needs_frame.walk`'s remaining true returns require a witnessed acquisition or compensation nested in such a guard; `_method_body_needs_frame`'s remaining true return requires a witnessed method acquisition. Witnessed transactions are explicitly refused by the port"]
+
+["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_bracket_yield", 1, 1]
+
+["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_guard_frame_neutral_loop", 1, 1]
+
+["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_has_bracket.walk", 2, 2]
+
+["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_method_body_needs_frame", 1, 1]
+
+["function", "frame-allocation-invariants-and-declared-transaction-paths-b", "_needs_frame.walk", 2, 2]
+
+["reason", "in-file-test-pass-over-emit-ts-tests", "In-file test pass-over: `_emit_ts_tests` skips a lifecycle test and `_emit_ts_lifecycle_tests` skips a plain one, but `_emit_v3` splits the list before calling either, so neither `continue` has an input. Both drivers are otherwise covered (issue #106)"]
+
+["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_lifecycle_tests", 1, 1]
+
+["function", "in-file-test-pass-over-emit-ts-tests", "_emit_ts_tests", 1, 1]
+
+["reason", "item-130-4-5-replay-refusal-backends-typescript", "Item 130 §4.5 replay refusal: backends/typescript/emit.py::_refuse_unlowered_replay refuses a `replay(…)` declaration or request this tier does not lower. It is a refusal, so no successful corpus document can reach it — a document that did would fail to emit rather than compare bytes. Pinned by tests/test_stream_reactive.py."]
+
+["function", "item-130-4-5-replay-refusal-backends-typescript", "_refuse_unlowered_replay", 1, 1]
+
+["reason", "literal-and-float-shape-invariants-finite-float-rejects", "Literal and Float-shape invariants: `_finite_float` rejects NaN/Infinity; `_float_literal` returns None for non-float values; `_is_float_expr`'s unstamped literal/unary inference handles legacy IR; `_literal` maps null and rejects foreign Python values. Typed finite source literals carry canonical stamps and are covered"]
+
+["function", "literal-and-float-shape-invariants-finite-float-rejects", "_finite_float", 1, 1]
+
+["function", "literal-and-float-shape-invariants-finite-float-rejects", "_float_literal", 1, 1]
+
+["function", "literal-and-float-shape-invariants-finite-float-rejects", "_is_float_expr", 3, 3]
+
+["function", "literal-and-float-shape-invariants-finite-float-rejects", "_literal", 2, 2]
+
+["reason", "malformed-binding-and-identifier-guards-scope-bind-rejects", "Malformed binding and identifier guards: `_Scope.bind` rejects rebinding; `_ident` and `_raw_field` reject empty/non-string or emitter-reserved names. Frontend-lowered bindings and record fields satisfy those invariants; reserved TypeScript words are valid and exercised through mangling/quoted properties"]
+
+["function", "malformed-binding-and-identifier-guards-scope-bind-rejects", "_Scope.bind", 1, 1]
+
+["function", "malformed-binding-and-identifier-guards-scope-bind-rejects", "_ident", 2, 2]
+
+["function", "malformed-binding-and-identifier-guards-scope-bind-rejects", "_raw_field", 2, 2]
+
+["reason", "module-v3-residuals-emit-v3-rejects-an-empty", "Module-v3 residuals: `_emit_v3` rejects an empty document and a duplicate component name. The frontend produces neither; the conditional vitest, lifecycle, ref-runtime and config branches are covered (issue #106)"]
+
+["function", "module-v3-residuals-emit-v3-rejects-an-empty", "_emit_v3", 2, 2]
+
+["reason", "owned-write-malformed-shape-returns-ts-inplace-write", "Owned-write malformed-shape returns: `_ts_inplace_write` declines assignment nodes without a supported owned list/map operation or valid target/value dictionaries. The corpus covers admitted unique list/map set/remove/push updates; these None returns preserve fallback to ordinary assignment"]
+
+["function", "owned-write-malformed-shape-returns-ts-inplace-write", "_ts_inplace_write", 3, 3]
+
+["reason", "provide-method-residuals-method-body-retains-witnessed-acqui", "Provide-method residuals: `_method_body` retains witnessed acquisition, generic non-call compensation snapshots, empty-list `any[]` fallback, nested-provide rejection and unknown-step rejection. Mutable/immutable locals, returns, await, Map CAS and call compensation are covered; witnessed transactions remain the named boundary"]
+
+["function", "provide-method-residuals-method-body-retains-witnessed-acqui", "_method_body", 12, 12]
+
+["reason", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "`_refuse_deferred_emissions` and `_refuse_validated_emissions` in backends/typescript/emit.py are the same wrapper around a shared refusal in `revl.session_commit` and `revl.validated_boundary`. The 8 statements left in each are the `except ModuleNotFoundError` standalone-import bootstrap, which puts src/ on sys.path and imports `revl` again. It runs only when emit.py is executed as a script with `revl` not importable. That is an invocation mode, not an input, so no corpus document and no refusal document can reach it, and these 16 statements stay recorded by design rather than as backlog. The RevlError-to-EmitError translation in both wrappers used to be recorded here too and is reached now, by tests/fixtures/emit_ts_refusals/deferred_emission_call.rvl and validated_emission_operation.rvl (issue #1431). Measured 10 -> 8 in each wrapper."]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_deferred_emissions", 8, 8]
+
+["function", "refuse-deferred-emissions-and-refuse-validated-emissions-in", "_refuse_validated_emissions", 8, 8]
+
+["reason", "standalone-transport-only-module-calls-main-main-parses", "Standalone transport only: `<module>` calls `_main`; `_main` parses `--runtime`, stdin/file JSON, usage and missing-argument errors, then writes `emit`. The oracle imports and calls `emit` directly, so these statements do not represent an emitter branch"]
+
+["function", "standalone-transport-only-module-calls-main-main-parses", "<module>", 1, 1]
+
+["function", "standalone-transport-only-module-calls-main-main-parses", "_main", 22, 22]
+
+["reason", "statement-renderer-rejection-v3-stmt-raises-on-an", "Statement-renderer rejection: `_v3_stmt` raises on an unknown step. The frontend lowers only the mirrored steps; the test-mode `assert` forms are covered (issue #106)"]
+
+["function", "statement-renderer-rejection-v3-stmt-raises-on-an", "_v3_stmt", 1, 1]
+
+["reason", "temporal-backend-delegation-emit-temporal-adjusts-import-pat", "Temporal backend delegation: `_emit_temporal` adjusts import paths, installs an `emit` proxy, imports `emit_temporal`, delegates the document, and then restores both process-global bindings (`sys.modules[\"emit\"]` and the backend directory on `sys.path`) that it borrowed. Temporal IR is rejected from mixed v3 emission and is not implemented by the self-host TypeScript emitter, so no byte-agreement document reaches any of this, the restoring half included. The restore is pinned instead by tests/test_emit_temporal_leaves_no_global_state.py"]
+
+["function", "temporal-backend-delegation-emit-temporal-adjusts-import-pat", "_emit_temporal", 23, 23]
+
+["reason", "the-278-302-install-tree-reach-refusal-diagnostic", "The #278/#302 install-tree-reach refusal diagnostic: `_reject_install_tree_reach`, its `_door` closure, and the `_strip_ts_comments` scrubber it runs first (so a token named only in a comment is not read as a reach) refuse a verbatim @ts body that loads an install-tree host module. No corpus document reaches them because such a document is refused by this very check, and selfhost/emit_ts.rvl does not port the diagnostic."]
+
+["function", "the-278-302-install-tree-reach-refusal-diagnostic", "_reject_install_tree_reach", 5, 5]
+
+["function", "the-278-302-install-tree-reach-refusal-diagnostic", "_reject_install_tree_reach._door", 1, 1]
+
+["function", "the-278-302-install-tree-reach-refusal-diagnostic", "_strip_ts_comments", 9, 9]
+
+["reason", "top-level-emitter-dispatch-emit-rejects-non-object", "Top-level emitter dispatch: `emit` rejects non-object/unsupported versions, delegates temporal IR, and rejects mixed temporal documents. The corpus supplies valid v1/v2/v3 objects; temporal delegation is a declared separate backend"]
+
+["function", "top-level-emitter-dispatch-emit-rejects-non-object", "emit", 4, 4]
+
+["reason", "ts-reactive-tier-refusals-item-130-stream-iter", "ts reactive tier refusals (item 130): `_stream_iter` rejects a non-positive dedup window, `_raw_ident` an invalid event name or key, and `_refuse_required_stream` a component that declares `requires <k>: Stream[T]`, which this tier does not lower. The frontend bounds the window and validates the identifiers; the required-stream refusal is pinned by tests/test_stream_reactive.py. The stream lowering itself (`subscribe`, `merge`, `every ... in`, `on ... as`) is covered (issue #106)"]
+
+["function", "ts-reactive-tier-refusals-item-130-stream-iter", "_raw_ident", 1, 1]
+
+["function", "ts-reactive-tier-refusals-item-130-stream-iter", "_refuse_required_stream", 1, 1]
+
+["function", "ts-reactive-tier-refusals-item-130-stream-iter", "_stream_iter", 1, 1]
+
+["reason", "unselected-async-call-shapes-is-async-fn-type", "Unselected async-call shapes: `_is_async_fn_type` returns false for non-string legacy types; `_ts_emission_is_async` returns false for a call whose target is not a requirement and tests a variable callee. A timer body admits only emissions, and each lowers to a requirement-target `call` or a component-dialect `fn` node; an async extern reached from a timer is refused earlier (\"called outside an async context\")"]
+
+["function", "unselected-async-call-shapes-is-async-fn-type", "_is_async_fn_type", 1, 1]
+
+["function", "unselected-async-call-shapes-is-async-fn-type", "_ts_emission_is_async", 3, 3]
+
+["reason", "v1-v2-live-component-routing-is-selected-before", "v1/v2 live-component routing is selected before the v3 emitter mirrored by `selfhost/emit_ts.rvl`; the remaining statements are the legacy runtime branch"]
+
+["function", "v1-v2-live-component-routing-is-selected-before", "_emit_v1", 5, 5]
+
+["reason", "witness-call-decoding-fallbacks-bind-call-temps-returns", "Witness-call decoding fallbacks: `_bind_call_temps` returns None for a non-object compensation expression; `_call_method_name` falls back to `undo` for malformed host/fn/call nodes; `_crossing_key_name` uses `?` for absent name/var identifiers; `_replay_call` rejects a foreign node after its call/fn/host arms. Legal witnessed inputs are the separately excluded witnessed transaction family; call, fn, host and generic expression compensation are covered"]
+
+["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_bind_call_temps", 1, 1]
+
+["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_call_method_name", 4, 4]
+
+["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_crossing_key_name", 5, 5]
+
+["function", "witness-call-decoding-fallbacks-bind-call-temps-returns", "_replay_call", 1, 1]
+
+["reason", "witnessed-transaction-boundary-witnessed-extern-looks-up-dec", "Witnessed transaction boundary: `_witnessed_extern` looks up declared witnessed fn acquisitions; `_witnessed_step` and `_method_witnessed_step` bind call arguments, replay acquisition, test Result.Ok, register undo crossings and optionally bind the result. The self-host emitter refuses `class=witnessed` instead of emitting partial frame semantics"]
+
+["function", "witnessed-transaction-boundary-witnessed-extern-looks-up-dec", "_method_witnessed_step", 19, 19]
+
+["function", "witnessed-transaction-boundary-witnessed-extern-looks-up-dec", "_witnessed_extern", 3, 3]
+
+["function", "witnessed-transaction-boundary-witnessed-extern-looks-up-dec", "_witnessed_step", 19, 19]

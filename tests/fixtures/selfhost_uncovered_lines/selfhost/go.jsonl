@@ -1,0 +1,163 @@
+["reason", "a-wildcard-arm-that-binds-the-scrutinee-is", "A wildcard arm that binds the scrutinee is compatibility IR (the parser's `_` pattern takes no binder), so `wild_arm_lines` and `render_match` never take their bind arms. `render_match` also keeps the `any` result type for arms whose type cannot be inferred and the case lookup for a scrutinee of unknown type. The Opt/Result two-value matches and the user-variant type switch are in the corpus."]
+
+["function", "a-wildcard-arm-that-binds-the-scrutinee-is", "render_match", 5, 5]
+
+["function", "a-wildcard-arm-that-binds-the-scrutinee-is", "wild_arm_lines", 3, 3]
+
+["reason", "context-builder-used-only-by-emit-go-rvl", "Context builder used only by emit_go.rvl's own unit tests; emit_src builds the production context directly. This is not an unsupported emitted construct."]
+
+["function", "context-builder-used-only-by-emit-go-rvl", "typed_ctx", 9, 9]
+
+["reason", "generated-python-inlines-these-tiny-rvl-helpers-into", "Generated Python inlines these tiny RVL helpers into emitter call sites; their substituted bodies execute while the retained definitions do not. Any residual named calls occur only in the RVL file's own unit-test functions, which are outside the corpus emitter entry point."]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "flags_or", 1, 1]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "has_bind", 1, 1]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_addsubmul", 1, 1]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_builtin_ctor", 1, 1]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_checked_div", 3, 3]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_eq_op", 1, 1]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_negated_eq", 1, 1]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "is_scalar", 1, 1]
+
+["function", "generated-python-inlines-these-tiny-rvl-helpers-into", "json_tag", 1, 1]
+
+["reason", "has-any-word-tests-the-neighbours-of-an", "`has_any_word` tests the neighbours of an `any` only when the left one is not a word character; an erased `any` is always inside brackets and a user type name that contains the letters starts with a capital, so the empty neighbour and a digit right after a non-word left neighbour do not occur."]
+
+["function", "has-any-word-tests-the-neighbours-of-an", "is_word_char", 2, 2]
+
+["reason", "issue-106-go-combined-path", "Issue #106, the v3 combined path (`_emit_v3_combined`), first three slices. The decline checks (`combined_ok`, `component_ok`, `provide_method_ok`, `comp_expr_ok`, `comp_match_ok`) are written as one boolean per arm, so a declined document costs no branch of its own. What no carried document reaches: in `comp_expr_ok` and `comp_expr_bare`, a `var` reference (a v3 provide body spells a name as `name`); in `comp_expr_bare`, a callee-field method call and the Int negation through `revlSub` (the frontend sets no `operands` on a provide body's `-`); in `comp_expr`, the `widen` marker, which the frontend does not set in a provide body (issue #1838); in `emit_module`, the fall-back to the pure path for an aliased `strings` import, a `//revl:import` or the sealed Result form; in `call_head_ok`, a method call whose callee is a field; in `comp_name_ref`, a required key referenced as a bare name; in `case_variant_of`, a case resolved through the layout because neither the node nor the scrutinee names its variant; in `comp_infer`, a `match` whose type is inferred (both emitters render Go that does not build there, issue #1834); in `meta_literal`, a null in an intercept's metadata. A declined document is one the port answers with `<<UNSUPPORTED-COMPONENT:..>>` while the reference carries it, so it cannot be a byte-agreement corpus document; the decline is pinned by tests/test_selfhost_emit_go.py (the config-carrying component in test_an_observable_component_on_the_pure_path_is_named_by_the_port and test_a_witness_token_both_sides_emit_is_rejected)."]
+
+["function", "issue-106-go-combined-path", "call_head_ok", 1, 1]
+
+["function", "issue-106-go-combined-path", "case_variant_of", 1, 1]
+
+["function", "issue-106-go-combined-path", "comp_expr", 1, 1]
+
+["function", "issue-106-go-combined-path", "comp_expr_bare", 4, 4]
+
+["function", "issue-106-go-combined-path", "comp_expr_ok", 1, 1]
+
+["function", "issue-106-go-combined-path", "comp_infer", 1, 1]
+
+["function", "issue-106-go-combined-path", "comp_name_ref", 1, 1]
+
+["function", "issue-106-go-combined-path", "emit_module", 1, 1]
+
+["function", "issue-106-go-combined-path", "meta_literal", 1, 1]
+
+["reason", "issue-1631-the-arity-guard-in-v3-fill", "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus."]
+
+["function", "issue-1631-the-arity-guard-in-v3-fill", "fill_erased", 1, 1]
+
+["reason", "item-130-issue-81-issue-1321-the-marker", "Item 130 / issue #81 / issue #1321: the marker the port emits for each `components` entry this pure typed-core port does not carry, and the guard that suppresses it. The naming arm is REACHED now, by both documents in tests/fixtures/emit_go_refusals/ (issue #1431): the reference refuses each by name and the port answers its component with `<<UNSUPPORTED-COMPONENT:Agent>>`. So `component_is_observable` is fully covered and the rest dropped 17 -> 4. Still unreached: the suppressing arm (`uncarried_components` returning no markers, and `any_component_is_observable` returning False). The `functions` and `types` arms of `carries_pure_declarations` are reached now, by the combined path's corpus documents (issue #106). No emit_go_corpus document declares a component: a components-only one is answered by the reference with a whole stc-go module the port has none of (40502 bytes against 144 on backends/go/testdata/stream_130.rvl), so it would flip the byte-agreement oracle RED. The suppressing arm is pinned instead by tests/test_selfhost_emit_go.py::test_an_incidental_component_on_the_pure_path_is_not_marked, and the naming arms by test_a_components_only_document_names_every_component and test_an_observable_component_on_the_pure_path_is_named_by_the_port."]
+
+["function", "item-130-issue-81-issue-1321-the-marker", "any_component_is_observable", 1, 1]
+
+["function", "item-130-issue-81-issue-1321-the-marker", "uncarried_components", 1, 1]
+
+["reason", "named-marker-fallbacks-and-guards-of-the-pure", "Named-marker fallbacks and guards of the pure-path port that the frontend never feeds (issue #106), each the mirror of a reference refusal or fallback recorded on the reference half: the unknown builtin (`builtin_call`, `builtin_text_tail`, which also keeps the `to_str` row for an Int32 receiver the checker rejects), a `lookup` on a receiver that is not a Map (`builtin_ret_type`), a config default that is not a scalar literal (`go_literal`), an optional-chaining receiver that is not an Opt (`render_optchain`), an unpinned `Map.empty()` (`render_maplit`), a field call that is not on a host root (`host_constructor`), `.length` with arguments (`len_receiver`), a `body` list on a statement that is not a loop (`own_continue`), the three guards of the item 445 destructive rebind (`self_rebind`), a constructor with the wrong arity, an ambiguous or unknown constructor and the `any` fallbacks for a type argument that renders empty (`render_construct`), a scrutinee typed exactly `any` (`is_interface`), and the non-exhaustive panics the checker keeps out of an admitted document (`match_two_value`)."]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "builtin_call", 1, 1]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "builtin_ret_type", 1, 1]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "builtin_text_tail", 2, 2]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "go_literal", 1, 1]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "host_constructor", 3, 3]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "is_interface", 1, 1]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "len_receiver", 1, 1]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "match_two_value", 2, 2]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "own_continue", 1, 1]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "render_construct", 9, 9]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "render_maplit", 2, 2]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "render_optchain", 1, 1]
+
+["function", "named-marker-fallbacks-and-guards-of-the-pure", "self_rebind", 3, 3]
+
+["reason", "only-the-any-result-type-of-a-conditional", "Only the `any` result type of a conditional whose branches cannot be typed remains; typed conditionals are covered, and the unknown-kind marker is reached by the record-update refusal document."]
+
+["function", "only-the-any-result-type-of-a-conditional", "render_inner", 1, 1]
+
+["reason", "only-the-let-shadow-guard-remains-the-frontend", "Only the let-shadow guard remains: the frontend rejects redeclaring an already-live accumulator name. Append-self and recursive appended-piece rejection are covered, preventing unsafe builder rewrites."]
+
+["function", "only-the-let-shadow-guard-remains-the-frontend", "builder_safe", 1, 1]
+
+["reason", "only-the-name-postfix-arm-remains-a-legacy", "Only the `name` postfix arm remains: a legacy reference spelling the canonical v3 IR does not carry. Literal and call receivers are covered."]
+
+["function", "only-the-name-postfix-arm-remains-a-legacy", "is_atomic", 1, 1]
+
+["reason", "only-the-unknown-operator-marker-remains-and-structural", "Only the unknown-operator marker remains; `??` and structural equality through `revlEq` are ported and in the corpus (issue #106)."]
+
+["function", "only-the-unknown-operator-marker-remains-and-structural", "render_bin", 1, 1]
+
+["reason", "remaining-assignments-mark-duplicate-record-field-sets-or", "Remaining assignments mark duplicate record field sets or duplicate variant case names as ambiguous; accepted oracle records/constructors resolve uniquely."]
+
+["function", "remaining-assignments-mark-duplicate-record-field-sets-or", "build_type_tables", 2, 2]
+
+["reason", "remaining-branches-handle-null-malformed-unresolved-inferenc", "Remaining branches handle null/malformed/unresolved inference, missing List element/index type, nonreference callees, an unknown left + operand, unknown operators/conditional branches, ambiguous records and unresolved constructors. The late Float % fallback is frontend-rejected; supported Int32 complement and Float arithmetic are covered."]
+
+["function", "remaining-branches-handle-null-malformed-unresolved-inferenc", "infer_type", 10, 10]
+
+["reason", "remaining-branches-mark-a-component-style-call-with", "Remaining branches mark a component-style call with no callee and read the payload type of a user constructor in call shape; the frontend lowers user constructors as `adt`, and a component call only appears in a document already refused by its component marker."]
+
+["function", "remaining-branches-mark-a-component-style-call-with", "render_call", 2, 2]
+
+["reason", "remaining-branches-mark-null-and-unsupported-literal-value", "Remaining branches mark null and unsupported literal-value IR; accepted scalar source literals use the covered paths."]
+
+["function", "remaining-branches-mark-null-and-unsupported-literal-value", "go_v3_lit", 2, 2]
+
+["reason", "remaining-defer-marker-reports-a-record-field-set", "Remaining defer marker reports a record field set without a unique declared layout; successful typed record corpus cases have one."]
+
+["function", "remaining-defer-marker-reports-a-record-field-set", "record_type_for_fields", 1, 1]
+
+["reason", "remaining-equality-aliases-are-normalized-by-the-frontend", "Remaining equality aliases ===/!== are normalized by the frontend to ==/!=; final empty return is the unknown-operator fallback, not missing ordinary equality."]
+
+["function", "remaining-equality-aliases-are-normalized-by-the-frontend", "go_bin_op", 3, 3]
+
+["reason", "remaining-fallback-emits-an-unsupported-step-marker-effectfu", "Remaining fallback emits an unsupported-step marker; effectful/component steps are outside the pure function module port."]
+
+["function", "remaining-fallback-emits-an-unsupported-step-marker-effectfu", "v3_stmt", 1, 1]
+
+["reason", "remaining-fallback-handles-a-function-type-string-without", "Remaining fallback handles a function-type string without canonical opening parenthesis; frontend signatures are parenthesized."]
+
+["function", "remaining-fallback-handles-a-function-type-string-without", "split_fn_type", 1, 1]
+
+["reason", "remaining-fallback-marks-an-unsupported-declared-type-kind", "Remaining fallback marks an unsupported declared type kind; supported record/variant definitions take the covered branches."]
+
+["function", "remaining-fallback-marks-an-unsupported-declared-type-kind", "emit_v3_types", 1, 1]
+
+["reason", "remaining-guards-mark-a-missing-go-body-the", "Remaining guards mark a missing @go body (the reference raises) and a body whose line separators Python `splitlines()` reads differently from a plain LF split. Config externs and the `//revl:import` hoist are ported and in the corpus (issue #106)."]
+
+["function", "remaining-guards-mark-a-missing-go-body-the", "emit_externs", 4, 4]
+
+["function", "remaining-guards-mark-a-missing-go-body-the", "has_extra_linebreak", 1, 1]
+
+["function", "remaining-guards-mark-a-missing-go-body-the", "is_extra_linebreak", 3, 3]
+
+["reason", "remaining-id-lookup-is-compatibility-with-older-reference", "Remaining id lookup is compatibility with older reference-node encoding; canonical v3 source references carry name."]
+
+["function", "remaining-id-lookup-is-compatibility-with-older-reference", "ref_name", 1, 1]
+
+["reason", "remaining-marker-rejects-an-unsupported-unary-operator-canon", "Remaining marker rejects an unsupported unary operator; canonical negation/not/Int32 complement lowering is implemented."]
+
+["function", "remaining-marker-rejects-an-unsupported-unary-operator-canon", "render_un", 1, 1]
+
+["reason", "the-item-388-colour-erased-extern-clone-x", "The item 388 colour-erased extern clone (`X_revl_sync` beside `X` with the same bodies), which the reference collapses by rewriting the IR and this port names instead. A clone needs an async caller, which only a component's async provide method is, so a document carrying one is already refused by its component marker and no pure corpus document can hold one."]
+
+["function", "the-item-388-colour-erased-extern-clone-x", "colour_clone_markers", 4, 4]

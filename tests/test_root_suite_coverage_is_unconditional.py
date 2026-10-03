@@ -38,7 +38,9 @@ Issue #1678 moved the matrix pair off pull requests entirely: `frontend` and
 `frontend-cordis` carry `if: github.event_name != 'pull_request'` and run on the
 merge-queue candidate, push to main, nightly, dispatch and the tag build. On a
 pull request the root suite is collected by `root-suite-affected` alone, which
-is why that job is ungated. The model below reads both kinds of gate.
+is why that job runs on every pull request. Since issue #1817 it runs on pull
+requests ONLY: everywhere else `frontend` runs the whole suite, its 3.12 leg
+being this job's FULL selection. The model below reads both kinds of gate.
 
 Hermetic: one real YAML parse of the workflow plus control assertions that keep
 the scan from passing vacuously.
@@ -592,10 +594,13 @@ def test_the_unconditional_job_cannot_report_skipping():
     away from the suite."""
     jobs = _jobs()
     spec = _spec(jobs, JOB)
-    assert "if" not in spec, (
+    # Issue #1817: the one condition allowed is "a pull request", which is true
+    # for every pull request, so the job still cannot report `skipping` on one.
+    # On every other event `frontend` runs the whole suite (pinned below).
+    assert spec.get("if") in (None, PR_ONLY_IF), (
         f"{JOB} carries `if: {spec.get('if')!r}`; a skipped job reads as a "
-        "passing one to branch protection, so the coverage job must be "
-        "unconditional"
+        "passing one to branch protection, so the coverage job must run on "
+        "every pull request"
     )
     skipped_prone = {j for j in jobs
                      if _routed_on_the_fast_path(_spec(jobs, j))
@@ -612,6 +617,27 @@ def test_the_unconditional_job_cannot_report_skipping():
         f"{JOB} has step-level condition(s) {step_ifs!r}; a step that does not "
         "run leaves the same hole as a job that does not run"
     )
+
+
+PR_ONLY_IF = "${{ github.event_name == 'pull_request' }}"
+
+
+def test_off_a_pull_request_the_matrix_runs_what_this_job_would():
+    """Issue #1817: `root-suite-affected` runs on pull requests only. On every
+    other event its FULL selection, `pytest tests/` on 3.12 with the go and java
+    pins, is what `frontend`'s 3.12 leg runs, so skipping it there loses no
+    test. Pin that `frontend` runs on exactly the events this job does not, has
+    the 3.12 leg, the same toolchain actions and a plain `pytest tests/` step."""
+    jobs = _jobs()
+    assert _spec(jobs, JOB).get("if") == PR_ONLY_IF
+    frontend = _spec(jobs, "frontend")
+    assert frontend.get("if") == "${{ github.event_name != 'pull_request' }}"
+    assert "3.12" in frontend["strategy"]["matrix"]["python"]
+    uses = {str(s.get("uses", "")).split("@")[0] for s in _steps(jobs, "frontend")}
+    for action in {str(s.get("uses", "")).split("@")[0] for s in _steps(jobs, JOB)} - {""}:
+        assert action in uses, f"frontend does not set up {action}, which {JOB} does"
+    assert any(str(s.get("run", "")).strip().startswith("pytest tests/ -q")
+               for s in _steps(jobs, "frontend")), "frontend no longer runs `pytest tests/`"
 
 
 def test_the_job_runs_the_suite_even_when_the_selection_is_empty():
