@@ -69,10 +69,13 @@ Pipeline (formal/STATUS.md, "differential oracle"):
    shrinks only, and a file joining one without a line in it fails the
    gate. Only `agree-*` and the generic `out-of-fragment` are purely
    informational.
-5. render the census and those buckets into `formal/STATUS.md` between the
+5. render those buckets into `formal/STATUS.md` between the
    `GENERATED alignment` markers, and fail the gate when the checked-in
    block is not what this run produced. The document's "0 formal-strict"
    is then this run's own output rather than a sentence somebody typed.
+   The block names the files in every failing or ratcheted bucket and
+   stores no count that moves with the corpus (issue #1768); the census
+   totals are printed by the run.
 
 Nothing is skipped. A parse-time REFUSAL is a verdict (revl rejecting the
 file IS the answer) and is carried through as an `X` row; a parsed file
@@ -3582,27 +3585,33 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
                  mismatches: int = 0) -> str:
     """The generated census + alignment section of `formal/STATUS.md`.
 
-    `mismatches` is the differential's own count, which only `main` has (it
-    needs the Lean side). `--write-status` renders 0, and that is not a claim
-    it measured: the gate returns non-zero on ANY mismatch, so a census can
-    only reach a green main saying zero, and a `main` run with a mismatch
-    renders the real number and reports the drift as well."""
-    parts = [
-        f"{len(ref.files)} files", f"{len(ref.comps)} components",
-        f"{len(ref.providers)} provide methods", f"{len(ref.spawns)} spawn edges",
-        f"{len(ref.refused)} parse refusals",
-        f"{len(ref.dispositions)} teardown scenarios",
-        f"{len(ref.recoveries)} recoveries",
-        f"{len(ref.confinements)} confinements", f"{len(ref.g8surface)} surfaces",
-        f"{len(ref.g5reg)} teardowns",
-        f"{len(ref.a9)} provide-clause components",
-        f"{len(ref.configs)} config fields", f"{len(ref.a2)} A2 bodies",
-    ]
+    It names every file in a bucket that fails or ratchets the gate, and it
+    carries NO count that moves with the corpus (issue #1768). The census
+    totals and the per-bucket file counts are printed by every gate run, and
+    they used to be rendered here too, so every pull request that added a
+    `.rvl` anywhere in the census directories rewrote the same lines of this
+    block and conflicted with every other one, and resolving that took a real
+    `lake build`. A count that is a function of the corpus is checked by the
+    gate that computes it; storing it here only added a line every pull
+    request rewrote. What stays is what a reader cannot get from the run's
+    summary at a glance and what only moves when the model's relation to a
+    named file moves: the bucket names, their gate class, and the named
+    members. The FATAL rows keep their count because it is zero on every run
+    that passes the gate, so it never churns, and a non-zero one is a red gate
+    with its files named below. The ratcheted rows keep theirs because it is
+    the size of a membership ledger that only shrinks: it moves only in a
+    diff that edits `formal/out_of_fragment_ledger.json` too.
+
+    `census`, `file_facts`, `componentless`, `refusals`, `ref` and
+    `mismatches` are still accepted, because the gate's own printout renders
+    them; this block deliberately does not."""
+    del census, file_facts, componentless, refusals, ref, mismatches
+
     def para(text: str) -> str:
         # The document is hand-wrapped at 72; a generated block that is not
-        # would show up as a wall of diff noise every time the corpus grows.
-        # `break_on_hyphens` off, or `out-of-fragment*` splits mid-token and
-        # markdown stops reading the code span.
+        # would show up as a wall of diff noise. `break_on_hyphens` off, or
+        # `out-of-fragment*` splits mid-token and markdown stops reading the
+        # code span.
         return textwrap.fill(" ".join(text.split()), width=72,
                              break_on_hyphens=False, break_long_words=False)
 
@@ -3610,15 +3619,16 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         STATUS_BEGIN,
         "",
         para(
-            f"**{census['files']} .rvl files -> {census['components']} "
-            f"components -> {census['statements']} statements = "
-            f"{len(file_facts)} modeled + {len(componentless)} componentless "
-            f"+ {len(refusals)} refused at parse**, and **{ref.total()} "
-            f"verdicts compared ({' + '.join(parts)}), "
-            f"{ref.total() - mismatches} agree, {mismatches} mismatches**."),
+            "The census totals (files, components, statements, verdicts "
+            "compared and agreeing) and the file count of every informational "
+            "bucket are printed by every gate run, `make formal` and `python3 "
+            "formal/harness/diff_corpus.py`, and are not stored here: a count "
+            "that moves with the corpus made every pull request that added a "
+            "`.rvl` rewrite this block (issue #1768). The block changes only "
+            "when a named file joins or leaves a bucket below."),
         "",
         para(
-            f"Checker alignment over the {len(file_facts)} modeled files. "
+            "Checker alignment over the modeled files. "
             "Every bucket recording a DISAGREEMENT fails the gate, in both "
             "directions: `missed-*` is the model weaker than the checker, "
             "`formal-strict` and `formal-found-other` are the model stricter "
@@ -3643,9 +3653,12 @@ def status_block(census: dict, file_facts: dict, componentless: list[str],
         "| --- | --- | --- |",
     ]
     for k in sorted(set(align) | set(FATAL_BUCKETS)):
-        gate = ("**FATAL**" if k in FATAL_BUCKETS else
-                "ratcheted" if k in OOF_RATCHET_BUCKETS else "informational")
-        lines.append(f"| `{k}` | {align.get(k, 0)} | {gate} |")
+        if k in FATAL_BUCKETS:
+            lines.append(f"| `{k}` | {align.get(k, 0)} | **FATAL** |")
+        elif k in OOF_RATCHET_BUCKETS:
+            lines.append(f"| `{k}` | {align.get(k, 0)} | ratcheted |")
+        else:
+            lines.append(f"| `{k}` | printed by the gate | informational |")
     lines.append("")
     named = [(k, rel)
              for k in (*OOF_RATCHET_BUCKETS, *FATAL_BUCKETS)
@@ -3822,8 +3835,38 @@ def main() -> int:
     return 1 if (mismatches or fatal) else 0
 
 
+def census_json() -> int:
+    """`--census-json`: the oracle census, as one JSON object on stdout.
+
+    This is the source `revl.cert` reads for the component certificate's
+    oracle requirement (issue #1768). The census used to be read back out of
+    the counts this harness rendered into `formal/STATUS.md`; the block no
+    longer stores counts that move with the corpus, so the certificate asks
+    the run that computes them. Reference side only, like `--write-status`:
+    `verdicts_compared` is every verdict the differential compares, and the
+    agreement half is the gate's (`make formal` fails on any mismatch)."""
+    import contextlib  # noqa: PLC0415
+    import io  # noqa: PLC0415
+    import warnings  # noqa: PLC0415
+
+    with warnings.catch_warnings(), contextlib.redirect_stdout(io.StringIO()):
+        warnings.simplefilter("ignore")
+        tsv, _facts, census = export()
+        if not tsv:
+            print("nothing extracted: no oracle census", file=sys.stderr)
+            return 1
+        ref = reference_from_tsv(tsv)
+    json.dump({"files": census["files"], "components": census["components"],
+               "statements": census["statements"],
+               "verdicts_compared": ref.total()}, sys.stdout, sort_keys=True)
+    sys.stdout.write("\n")
+    return 0
+
+
 if __name__ == "__main__":
     _argv = sys.argv[1:]
+    if "--census-json" in _argv:
+        sys.exit(census_json())
     if "--write-ledger" in _argv:
         sys.exit(write_status(ledger=True))
     sys.exit(write_status() if "--write-status" in _argv else main())

@@ -132,6 +132,12 @@ def _formal_copy(tmp_path) -> Path:
         target = root / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         shutil.copyfile(ROOT / "formal" / rel, target)
+    # The oracle census is computed by the harness over the corpus (issue
+    # #1768), not read from a copied document. The harness locates the tree by
+    # its own resolved path, so a link to the checkout's harness measures the
+    # checkout's corpus, which is the census the copied ledger describes.
+    (root / "harness").symlink_to(ROOT / "formal" / "harness",
+                                  target_is_directory=True)
     return root
 
 
@@ -1355,3 +1361,63 @@ def test_the_console_script_signs_and_verifies_a_certificate(tmp_path):
     assert verified.returncode == 0, verified.stdout + verified.stderr
     assert "VALID" in verified.stdout
     assert "composition matches" in verified.stdout
+
+
+# --- the oracle census is computed, not read back (issue #1768) ------------- #
+
+def _oracle_requirement(cert: dict) -> dict:
+    found = [r for r in cert["requirements"] if r["kind"] == C.REQ_ORACLE]
+    assert len(found) == 1, found
+    return found[0]
+
+
+def test_the_oracle_census_is_the_harness_run_not_a_document(tmp_path):
+    """`formal/STATUS.md` no longer stores the census counts, because every
+    pull request that added a `.rvl` rewrote them and conflicted with every
+    other one. The certificate asks the run that computes them, so the numbers
+    it signs are the gate's own (`diff_corpus.py --census-json` prints what
+    `make formal` prints), and a census sentence typed into the ledger cannot
+    move them."""
+    run = subprocess.run(
+        [sys.executable, str(ROOT / "formal" / "harness" / "diff_corpus.py"),
+         "--census-json"], capture_output=True, text=True, check=True)
+    measured = json.loads(run.stdout)
+    cert = _cert(tmp_path)
+    detail = _oracle_requirement(cert)["detail"]
+    assert detail == (
+        f"{measured['files']} files, {measured['components']} components, "
+        f"{measured['statements']} statements; "
+        f"{measured['verdicts_compared']} verdicts compared, "
+        f"{measured['verdicts_compared']} agree, 0 mismatches")
+    assert _oracle_requirement(cert)["source"] == "formal/harness/diff_corpus.py"
+
+    formal = _formal_copy(tmp_path)
+    path = formal / "STATUS.md"
+    path.write_text(path.read_text(encoding="utf-8") + (
+        "\n**9 .rvl files -> 9 components -> 9 statements**, and **9 verdicts "
+        "compared, 9 agree, 0 mismatches**.\n"), encoding="utf-8")
+    assert _oracle_requirement(_cert(tmp_path, formal=formal))["detail"] == detail
+
+
+def test_a_package_with_no_oracle_harness_is_refused(tmp_path):
+    """As strict as the document reading it replaced: no census, no
+    certificate, rather than a certificate silent about the oracle."""
+    formal = _formal_copy(tmp_path)
+    (formal / "harness").unlink()
+    with pytest.raises(C.CertError) as excinfo:
+        _cert(tmp_path, formal=formal)
+    assert "no readable oracle census" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("output", ["", "{}", '{"files": 0, "components": 1, '
+                                    '"statements": 1, "verdicts_compared": 1}'])
+def test_a_harness_that_measures_nothing_is_refused(tmp_path, output):
+    """A run that extracted nothing is a refusal, not a census of zero."""
+    formal = _formal_copy(tmp_path)
+    (formal / "harness").unlink()
+    (formal / "harness").mkdir()
+    (formal / "harness" / "diff_corpus.py").write_text(
+        f"import sys\nsys.stdout.write({output!r})\n", encoding="utf-8")
+    with pytest.raises(C.CertError) as excinfo:
+        _cert(tmp_path, formal=formal)
+    assert "no readable oracle census" in str(excinfo.value)

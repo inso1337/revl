@@ -1814,15 +1814,15 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 |------|-------:|----------------------------:|-----------------------:|
 | py   |     59 |                   59 (100%) |             53 (89.8%) |
 | ts   |     76 |                   76 (100%) |             60 (78.9%) |
-| go   |     38 |                   38 (100%) |             35 (92.1%) |
+| go   |     47 |                   47 (100%) |             43 (91.5%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
 | rust |     40 |                   40 (100%) |             38 (95.0%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **293** | **293 (100%)** | **266 (90.8%)** |
+| **total** | **302** | **302 (100%)** | **274 (90.7%)** |
 
-Every one of the 293 documents is reproduced byte-for-byte by its
-self-host emitter when the emitter is fed the **reference** IR. 266 of
-them survive the **fully-native** chain, so all 27 residual documents
+Every one of the 302 documents is reproduced byte-for-byte by its
+self-host emitter when the emitter is fed the **reference** IR. 274 of
+them survive the **fully-native** chain, so all 28 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1880,11 +1880,12 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 - `ref_externs.rvl`
 - `extern_compensate.rvl`
 
-`go`, 3 residual of 38:
+`go`, 4 residual of 47:
 
 - `in_file_tests.rvl`
 - `../../../backends/go/testdata/opt_gaps_280.rvl`
 - `../../../backends/go/testdata/result_erased_1631.rvl`
+- `comp_provide_pure.rvl`
 
 `java`, 0 residual of 59:
 
