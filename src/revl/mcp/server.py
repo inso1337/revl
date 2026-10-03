@@ -76,6 +76,7 @@ from .. import grammar_summary as _grammar_summary
 from .. import source_grammar as _source_grammar
 from . import fillspec
 from . import edit as _edit
+from . import effect_classes as _effect_classes
 from . import leases as _leases
 from . import operator as _operator
 from ..errors import RevlError
@@ -85,16 +86,21 @@ from . import quorum as _quorum
 from . import repair as _repair
 from . import runtime_gate as _runtime_gate
 from . import ship as _ship
+from . import undo_record as _undo_record
 from . import deploy as _mcp_deploy
-from .persist import RestoreError
+from .persist import RestoreError, admitted_name as _admitted_name
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
+from ..plan import _merge_resulting_ir
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
 from .schema import tools_from_ir
-from .session import Session, SessionError
+from . import ambient as _ambient
+from . import remedy as _remedy
+from . import repeat as _repeat
+from .session import NothingLoaded, Session, SessionError
 
 PROTOCOL_VERSION = "2024-11-05"
 SERVER_INFO = {"name": "revl", "version": "2.0"}
@@ -650,13 +656,22 @@ def _boundary_of(ir: dict) -> dict:
 # ---------------------------------------------------------------- tools
 
 SESSION = Session()
+# issue #1703: the session's reversible changes, newest last. Every successful
+# mutating call that has an exact inverse pushes its `undo` here, and
+# `revl_step_back` with no arguments runs the last one.
+UNDO_STACK = _undo_record.UndoStack()
 
 
-def _session_error(message: str, **extra) -> dict:
-    return {"ok": False, "diagnostics": [{
-        "severity": "error", "code": "REVL", "category": "session",
+def _session_error(message: str | BaseException, category: str = "session",
+                   **extra) -> dict:
+    """A session refusal. `message` is the prose, or the exception that
+    refused. Its next call, when it has one (issue #1691), is resolved and
+    attached by `remedy`, which also names it at the end of the message."""
+    message, remedy = _remedy.resolve(message, extra)
+    return _remedy.attach({"ok": False, "diagnostics": [{
+        "severity": "error", "code": "REVL", "category": category,
         "message": message,
-    }], **extra}
+    }], **extra}, remedy)
 
 
 # -- operator capabilities (roadmap item 55, docs/operator-capabilities.md) ---
@@ -765,7 +780,7 @@ def _tool_lease(arguments: dict) -> dict:
         else:
             book.claim(component, holder, arguments.get("ttl"))
     except _leases.LeaseError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     events = book.drain_events()
     _record_lease_trace(events)
     payload = {
@@ -832,12 +847,12 @@ def _tool_load(arguments: dict) -> dict:
                              record=bool(arguments.get("record")),
                              origin=_origin(arguments))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired as exc:
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, **_summary(ir), **state}
+    return {"ok": True, **_summary(ir), **state, **_effect_classes.report(ir)}
 
 
 def _tool_call(arguments: dict) -> dict:
@@ -848,7 +863,7 @@ def _tool_call(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.call(key, method, arguments.get("args") or [])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired:
         # item 246: the class-(c) ticket two-step is a RESULT, shaped by
         # `handle`. Re-raised past the catch-all below, which used to swallow it
@@ -872,7 +887,7 @@ def _tool_swap(arguments: dict) -> dict:
     source is still accepted, unchanged.
     """
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — call revl_load first")
+        return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     replacing = tuple(arguments.get("replacing") or ())
 
     # component leases (item 61): under a policy that enforces leases, refuse a
@@ -925,17 +940,19 @@ def _tool_swap(arguments: dict) -> dict:
                             "its own — pass the full source set to swap")
         return rejected
     authored = _authored_host_bodies(full, source, modules)
+    running = SESSION.ir
     try:
         state = SESSION.swap(full, origin=_origin(arguments))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except ApprovalRequired as exc:
         # the candidate's own host bodies: a yes admits the candidate, so its
         # ticket names the candidate's host code, never the running one's
         return _approval_required(exc, host_bodies=authored)
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
-    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state}
+    return {"ok": True, "admitted": True, "swapped": True, **_summary(full), **state,
+            **_effect_classes.report(full, running, against=True)}
 
 
 def _swap_server_side(replacing: tuple) -> dict:
@@ -943,9 +960,10 @@ def _swap_server_side(replacing: tuple) -> dict:
     vs = _edit.virtual_source(SESSION)
     if vs.get("source") is None:
         return _session_error(
-            "no server-side source to swap by name — this composition was not "
-            "loaded from inline source, so there is nothing the session can "
-            "re-admit without you passing `source`/`files`")
+            "no server-side source to swap by name — this composition was "
+            "loaded from files, so the session holds no inline source to "
+            "re-admit; swap the files themselves",
+            next=_remedy.swap_files_next(SESSION.origin, replacing))
     try:
         _edit.compile_virtual(vs, manifest=SESSION.ir, replacing=replacing)
     except RevlError as error:
@@ -963,12 +981,14 @@ def _swap_server_side(replacing: tuple) -> dict:
         rejected["note"] = ("the server-side source admits but is not a complete "
                             "composition on its own")
         return rejected
+    running = SESSION.ir
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
-            "fromServerSide": True, **_summary(full), **state}
+            "fromServerSide": True, **_summary(full), **state,
+            **_effect_classes.report(full, running, against=True)}
 
 
 def _tool_edit(arguments: dict) -> dict:
@@ -977,16 +997,66 @@ def _tool_edit(arguments: dict) -> dict:
     try:
         return _edit.apply_edit(SESSION, arguments)
     except _edit.EditError as error:
-        return _session_error(str(error), edited=False, swapped=False)
+        return _edit_refusal(error, arguments)
     except SessionError as error:
-        return _session_error(str(error))
+        if not SESSION.loaded:
+            return _session_error(NothingLoaded(str(error)))
+        return _session_error(error)
+
+
+def _edit_refusal(error, arguments: dict) -> dict:
+    """A `revl_edit` refusal. When the composition was loaded from files, so
+    there is no inline buffer to patch, the refusal carries the patch applied
+    to the file as a ready `revl_swap` (issue #1691)."""
+    if not _files_loaded_without_buffer(arguments):
+        return _session_error(error, edited=False, swapped=False)
+    try:
+        nxt = _remedy.edit_as_swap(SESSION, arguments, _swap_would_refuse)
+    except _edit.EditError as patch_error:
+        return _session_error(patch_error, edited=False, swapped=False)
+    except OSError:
+        nxt = None
+    if nxt is None:
+        return _session_error(error, edited=False, swapped=False)
+    name = os.path.basename(str(SESSION.origin["files"][0]))
+    return _session_error(
+        f"this composition was loaded from files ({name}), and revl_edit "
+        f"patches only inline source, so there is no buffer to patch. `next` "
+        f"is your patch applied to {name} as a revl_swap with inline `source`; "
+        f"after it, revl_edit patches that source directly",
+        next=nxt, edited=False, swapped=False)
+
+
+def _files_loaded_without_buffer(arguments: dict) -> bool:
+    if arguments.get("target") not in (None, "source"):
+        return False
+    vs = _edit.virtual_source(SESSION)
+    return vs.get("source") is None and bool((SESSION.origin or {}).get("files"))
+
+
+def _swap_would_refuse(arguments: dict) -> str | None:
+    """Whether `revl_swap(arguments)` would refuse before swapping: the
+    authoring gate, admission against the running composition, then the whole
+    composition on its own. None when it would not; else the first reason."""
+    gate = _authoring_refusal(arguments)
+    if gate is not None:
+        return gate["diagnostics"][0]["message"]
+    source, files, modules = _candidate_of(arguments)
+    replacing = tuple(arguments.get("replacing") or ())
+    try:
+        compile_under_authoring(source, files, modules=modules,
+                                manifest=SESSION.ir, replacing=replacing)
+        compile_under_authoring(source, files, modules=modules)
+    except RevlError as error:
+        return report(error)["diagnostics"][0]["message"]
+    return None
 
 
 def _tool_rollback(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.rollback()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_undo(arguments: dict) -> dict:
@@ -1003,11 +1073,11 @@ def _tool_undo(arguments: dict) -> dict:
     boundary crossings no undo can un-emit — rides along either way
     (docs/generation-history.md)."""
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — call revl_load first")
+        return _session_error(NothingLoaded("nothing is loaded — call revl_load first"))
     try:
         result = SESSION.undo(arguments.get("to"))
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     # a gate refusal is a result, not an error: surface it as ok:False with the
     # diagnostic, matching how revl_restore reports a rejected re-admission.
     if result.get("refused"):
@@ -1027,7 +1097,7 @@ def _tool_unload(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.unload()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_commit(_arguments: dict) -> dict:
@@ -1037,7 +1107,7 @@ def _tool_commit(_arguments: dict) -> dict:
     try:
         return {"ok": True, "manifest": SESSION.commit()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_commit_confirm(arguments: dict) -> dict:
@@ -1057,7 +1127,7 @@ def _tool_commit_confirm(arguments: dict) -> dict:
     try:
         result = SESSION.commit_confirm(manifest_hash)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     if result.get("refused"):
         return {"ok": False, **result}
     return {"ok": True, **result}
@@ -1078,7 +1148,7 @@ def _tool_fork(arguments: dict) -> dict:
     except SessionError as error:
         # a refused fork (a KIND_OPAQUE tail, a non-idempotent span, a committed
         # boundary below k) is a RESULT the caller reads, not a crash
-        return _session_error(str(error), refused=True)
+        return _session_error(error, refused=True)
 
 
 def _tool_fork_confirm(arguments: dict) -> dict:
@@ -1094,7 +1164,7 @@ def _tool_fork_confirm(arguments: dict) -> dict:
     try:
         result = SESSION.fork_confirm(fork_hash)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     if result.get("refused"):
         return {"ok": False, **{k: v for k, v in result.items()
                                 if k != "branchSession"}}
@@ -1256,7 +1326,7 @@ def _tool_approve(arguments: dict) -> dict:
                 ticket_hash=ticket_hash, capability=capability,
                 uses=uses, ttl_ms=ttl_ms)}
         except SessionError as error:
-            return _session_error(str(error))
+            return _session_error(error)
     if not ticket_hash:
         return _session_error("provide `hash` — the ticket hash from the "
                               "approvalRequired response — or a `capability` "
@@ -1266,7 +1336,7 @@ def _tool_approve(arguments: dict) -> dict:
             ticket_hash, vote=vote or "approve", as_token=as_token,
             as_secret=as_secret, as_proof=as_proof)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_revoke(arguments: dict) -> dict:
@@ -1298,9 +1368,9 @@ def _tool_revoke(arguments: dict) -> dict:
         return {"ok": True, **SESSION.revoke_standing_grant(
             capability=capability, request_id=request_id)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_escalate(arguments: dict) -> dict:
@@ -1321,9 +1391,9 @@ def _tool_escalate(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.escalate(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_override(arguments: dict) -> dict:
@@ -1346,9 +1416,9 @@ def _tool_override(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.override(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_quorum(arguments: dict) -> dict:
@@ -1364,9 +1434,9 @@ def _tool_quorum(arguments: dict) -> dict:
     try:
         return {"ok": True, **_quorum.decision_report(SESSION, arguments)}
     except ValueError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_distillation_offers(_arguments: dict) -> dict:
@@ -1376,7 +1446,7 @@ def _tool_distillation_offers(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.distillation_offers()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_apply_distillation(arguments: dict) -> dict:
@@ -1391,7 +1461,7 @@ def _tool_apply_distillation(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.apply_distillation(offer_id)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_revoke_distillation(arguments: dict) -> dict:
@@ -1405,7 +1475,7 @@ def _tool_revoke_distillation(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.revoke_distillation(rule)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_abort(arguments: dict) -> dict:
@@ -1420,7 +1490,7 @@ def _tool_abort(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.abort()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_estop(arguments: dict) -> dict:
@@ -1436,7 +1506,7 @@ def _tool_estop(arguments: dict) -> dict:
             arguments.get("operator") or getattr(
                 getattr(SESSION, "operator", None), "token", None))}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_estop_report(_arguments: dict) -> dict:
@@ -1444,7 +1514,7 @@ def _tool_estop_report(_arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.estop_report()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_state(_arguments: dict) -> dict:
@@ -1524,7 +1594,7 @@ def _tool_snapshot(_arguments: dict) -> dict:
     try:
         return {"ok": True, "snapshot": SESSION.snapshot()}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _restore_authoring_refusal(snap) -> dict | None:
@@ -1543,7 +1613,7 @@ def _restore_authoring_refusal(snap) -> dict | None:
     try:
         source = sources.get("source")
         if source is not None:
-            compile_source(source, "<snapshot>.rvl",
+            compile_source(source, _admitted_name(snap),
                            modules=sources.get("modules") or None, profile=profile)
         elif sources.get("files"):
             virtual = {os.path.abspath(path): text for path, text
@@ -1603,7 +1673,7 @@ def _tool_restore(arguments: dict) -> dict:
                 "message": str(error)}]
         return payload
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 # -- backwards replay (docs/replay.md) ------------------------------------
@@ -1612,7 +1682,7 @@ def _tool_timeline(arguments: dict) -> dict:
     try:
         return {"ok": True, **SESSION.timeline(arguments.get("component"))}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_inspect_step(arguments: dict) -> dict:
@@ -1622,12 +1692,16 @@ def _tool_inspect_step(arguments: dict) -> dict:
         return {"ok": True, **SESSION.inspect_step(arguments.get("component"),
                                                    arguments["at"])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_step_back(arguments: dict) -> dict:
+    if not arguments:
+        return _step_back_last_change()
     if "to" not in arguments:
-        return _session_error("`to` is required (-1 unwinds everything recorded)")
+        return _session_error("`to` is required (-1 unwinds everything recorded); "
+                              "with no arguments at all, step_back reverts the "
+                              "last change this session made")
     try:
         return {"ok": True, **SESSION.step_back(arguments.get("component"),
                                                 arguments["to"],
@@ -1635,7 +1709,38 @@ def _tool_step_back(arguments: dict) -> dict:
     except SessionError as error:
         # a refused unwind is a *result*, not a crash: it means the range
         # contains an emission that cannot be undone
-        return _session_error(str(error), refused=True)
+        return _session_error(error, refused=True)
+
+
+def _step_back_last_change() -> dict:
+    """`revl_step_back` with no arguments (issue #1703): revert the last
+    reversible change this session made, by running the exact undo that
+    change's response carried. The undo goes through the same gates as any
+    call, and is not itself pushed on the stack, so a second step back reverts
+    the change before it. The answer names what was reverted and carries the
+    call that would redo it."""
+    entry = UNDO_STACK.last()
+    if entry is None:
+        return _session_error(
+            "nothing to step back: this session has made no change with an exact "
+            "undo (a response with `undo: null` says why it has none)",
+            refused=True, undoDepth=0)
+    undo = entry["undo"]
+    result = _call_tool(undo["tool"], dict(undo["arguments"]), record=False)
+    if not result.get("ok"):
+        return {"ok": False, "steppedBack": False, "change": _change_of(entry),
+                "via": undo, "result": result, "undoDepth": UNDO_STACK.depth}
+    UNDO_STACK.pop()
+    return {"ok": True, "steppedBack": True, "change": _change_of(entry),
+            "via": undo, "result": result,
+            "redo": {"tool": entry["tool"], "arguments": entry["arguments"]},
+            "undo": None,
+            "undoReason": "a step back is reverted by its `redo` call",
+            "undoDepth": UNDO_STACK.depth}
+
+
+def _change_of(entry: dict) -> dict:
+    return {"tool": entry["tool"], "arguments": entry["arguments"]}
 
 
 def _tool_replay_bisect(arguments: dict) -> dict:
@@ -1648,7 +1753,7 @@ def _tool_replay_bisect(arguments: dict) -> dict:
         return {"ok": True, **SESSION.bisect(arguments.get("component"),
                                              predicate)}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 def _tool_replay_forward(arguments: dict) -> dict:
@@ -1658,7 +1763,7 @@ def _tool_replay_forward(arguments: dict) -> dict:
         return {"ok": True, **SESSION.replay_forward(arguments.get("component"),
                                                      arguments["from"])}
     except SessionError as error:
-        return _session_error(str(error))
+        return _session_error(error)
 
 
 # -- verified canary (docs/verified-canary.md, roadmap item 59) ------------
@@ -1696,8 +1801,9 @@ def _tool_live_query(arguments: dict) -> dict:
     """The five query verbs, answered against the LIVE session's post-swap
     state instead of a compiled-from-source IR (query.live_query)."""
     if not SESSION.loaded:
-        return _session_error("nothing is loaded — a live query answers against "
-                              "the running composition; call revl_load first")
+        return _session_error(NothingLoaded(
+            "nothing is loaded — a live query answers against the running "
+            "composition; call revl_load first"))
     verb = arguments.get("verb")
     if verb not in Q._VERB_FN:
         return _session_error(f"unknown verb {verb!r}; one of "
@@ -1732,7 +1838,7 @@ def _tool_history_emitted_between(arguments: dict) -> dict:
         try:
             timeline = SESSION.timeline(None)
         except SessionError as error:
-            return _session_error(str(error))
+            return _session_error(error)
     return Q.emitted_between(timeline, frm, to, arguments.get("component"))
 
 
@@ -1782,9 +1888,14 @@ def _tool_check(arguments: dict) -> dict:
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
-    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": holes,
-            "selfCheck": _authoring_loop.self_check(None, holes)}
+    result = {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
+              "holes": holes, **_effect_classes.report(ir),
+              "selfCheck": _authoring_loop.self_check(None, holes)}
+    blocked = fillspec.unfillable(holes)
+    if blocked:
+        # flagged, not handed out: holes this author can never fill
+        result["unfillable"] = blocked
+    return result
 
 
 def _untrusted_author() -> bool:
@@ -1830,6 +1941,8 @@ def _tool_admit(arguments: dict) -> dict:
                 "G2/G3 hold across both and no interface drifted",
         **_summary(ir),
         "boundary": _boundary_of(ir),
+        **_effect_classes.report(_merge_resulting_ir(running, ir, set(replacing)),
+                                 running, against=True),
     }
 
 
@@ -1858,7 +1971,13 @@ def _tool_plan(arguments: dict) -> dict:
         manifest=running,
         modules=arguments.get("modules"),
         replacing=tuple(arguments.get("replacing") or ()),
+        include_ir=True,
     )
+    # issue #1707: the class diff reads the resulting composition; the IR
+    # itself is not part of a plan's answer.
+    resulting = result.pop("resultingIR", None)
+    if resulting is not None:
+        result.update(_effect_classes.report(resulting, running, against=True))
     # component leases (item 61): advise — never block — when this swap would
     # replace a component another operator leases. Surfaced so an agent sees
     # the race before it swaps; the plan itself is unchanged.
@@ -2105,6 +2224,24 @@ _GRAMMAR_FORMATS = _source_grammar.FORMATS
 _GRAMMAR_CATEGORIES = tuple(_source_grammar.CATEGORIES)
 
 
+def _tool_idiom(arguments: dict) -> dict:
+    """revl_idiom (issue #1701): the minimal admitted example of one construct
+    with the rules that make it correct, by name; with no `name`, the list of
+    idioms. A hole's fillSpec already carries the idiom of its construct, so
+    this is for asking about a construct before there is a hole in it."""
+    from .. import idioms  # noqa: PLC0415 - reads the idiom files on first use
+
+    name = arguments.get("name")
+    if name is None:
+        return {"ok": True, "idioms": [
+            {"name": n, "summary": idioms.get(n)["summary"]} for n in idioms.names()]}
+    entry = idioms.get(str(name))
+    if entry is None:
+        return _session_error(
+            f"no idiom named {name!r}; the idioms are {', '.join(idioms.names())}")
+    return {"ok": True, "idiom": idioms.served(entry)}
+
+
 def _tool_grammar(arguments: dict) -> dict:
     """revl_grammar: the prose summary by default; with `format`, the grammar
     of revl source derived from the parser (issue #1661, the MCP twin of
@@ -2161,7 +2298,7 @@ def _tool_scaffold(arguments: dict) -> dict:
             resource_type=arguments.get("resource"),
         )
     except ScaffoldError as error:
-        return _session_error(str(error))
+        return _session_error(error)
     filename = arguments.get("filename") or f"{spec.component}.rvl"
     return scaffold_document(spec, filename, untrusted=_untrusted_author())
 
@@ -2242,7 +2379,9 @@ TOOLS = [
                        "each with file, line, expected type and message) on success, "
                        "or structured diagnostics (code, guarantee, expected/actual, "
                        "fix hint) on rejection. A draft with holes compiles; it is "
-                       "refused at admission until every hole is filled.",
+                       "refused at admission until every hole is filled. "
+                       "`effectClasses` gives each provided operation's effect class "
+                       "(a/b/c) and the crossings that set it.",
         "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
@@ -2469,7 +2608,10 @@ TOOLS = [
                        "NONE of those and swap re-admits the source the server already "
                        "holds for the running composition — so an agent that edited "
                        "server-side with revl_edit, or wants to re-admit the running "
-                       "generation, need not re-serialize the whole file.",
+                       "generation, need not re-serialize the whole file. The answer "
+                       "carries `effectClassChanges` against the running composition and "
+                       "an `effectClassWarnings` entry for every operation whose effect "
+                       "class rose, naming the crossing that raised it.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -2499,7 +2641,9 @@ TOOLS = [
                        "hot-swapped in; one that still has open holes advances the "
                        "server-side source (so the next edit builds on it) but swaps "
                        "nothing. Returns the admission verdict / holes / diagnostic — "
-                       "never the whole source.",
+                       "never the whole source — plus `effectClassChanges` and "
+                       "`effectClassWarnings` against the running composition, as "
+                       "revl_swap does.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -3407,23 +3551,28 @@ TOOLS = [
     },
     {
         "name": "revl_step_back",
-        "description": "Unwind the accumulator to step k by running the registered "
-                       "inverses from the top down, newest first — leaving the "
-                       "component LIVE, not torn down. Refuses if the range crosses "
-                       "an emission with no `compensate` (an emission cannot be "
-                       "undone); `force` crosses anyway and reports what was crossed. "
-                       "The guarantee is 'the inverses ran in order', never 'state "
-                       "was restored'.",
+        "description": "With NO arguments: revert the last change this session "
+                       "made, by running the exact `undo` that change's response "
+                       "carried (issue #1703); each further call reverts the "
+                       "change before it, and the answer carries the `redo` call. "
+                       "With `to`: unwind the accumulator to step k by running the "
+                       "registered inverses from the top down, newest first — "
+                       "leaving the component LIVE, not torn down. Refuses if the "
+                       "range crosses an emission with no `compensate` (an "
+                       "emission cannot be undone); `force` crosses anyway and "
+                       "reports what was crossed. The guarantee is 'the inverses "
+                       "ran in order', never 'state was restored'.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "component": {"type": "string"},
                 "to": {"type": "integer",
-                       "description": "unwind down to this step; -1 unwinds everything"},
+                       "description": "unwind down to this step; -1 unwinds "
+                                      "everything. Omit every argument to revert "
+                                      "the last change instead"},
                 "force": {"type": "boolean",
                           "description": "cross uncompensated emissions anyway"},
             },
-            "required": ["to"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_step_back,
@@ -3494,6 +3643,26 @@ TOOLS = [
         },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_grammar,
+    },
+    {
+        "name": "revl_idiom",
+        "description": "The minimal admitted example of one construct (a "
+                       "provide method, an emission method, an effect's "
+                       "acquisition or inverse, a spawn, a subscription, ...) "
+                       "with the one or two rules that make it correct. Every "
+                       "hole's fillSpec already carries the idiom of its "
+                       "construct; ask by `name` for any other, or omit it for "
+                       "the list.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string",
+                         "description": "the idiom (construct) name, e.g. "
+                                        "`emission-method`; omit to list them"},
+            },
+        },
+        "annotations": {"readOnlyHint": True, "destructiveHint": False},
+        "handler": _tool_idiom,
     },
 ]
 
@@ -3812,56 +3981,15 @@ def handle(message: dict) -> dict | None:
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")
-        handler = _HANDLERS.get(name)
-        if handler is None:
+        if _HANDLERS.get(name) is None:
             return _error(request_id, -32602, f"unknown tool: {name}")
-        arguments = params.get("arguments") or {}
-        # the path jail and the authoring gate run BEFORE the operator gate and
-        # before any handler: a refusal here has read nothing, compiled nothing
-        # and run nothing, so neither can be used as an oracle.
-        payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
-        # operator capabilities (roadmap item 55): gate a mutating management
-        # verb against the session's bound operator before it can run. No
-        # profile bound -> ungated, today's behaviour unchanged. Skipped when the
-        # call is already refused, so a refused path is never even resolved
-        # against an operator's grants.
-        decision = None if payload is not None \
-            else _operator.decide(SESSION, name, arguments)
-        if payload is not None:
-            pass                    # refused above; the handler never runs
-        elif decision.gated and not decision.allowed:
-            payload = _refused_by_operator(decision)
-        elif not runtime_available() and _runtime_gate.is_refused(name, arguments):
-            # issue #1692: a verb that needs a live composition, on an
-            # interpreter that cannot boot one, refuses by name with the fix in
-            # `next`, instead of failing on an import error or on "nothing is
-            # loaded". After the operator gate: "you may not" outranks "this
-            # server cannot".
-            payload = _runtime_gate.refusal(name)
-        else:
-            ir_before = getattr(SESSION, "ir", None)
-            try:
-                payload = handler(arguments)
-                _remember_live_host_bodies()
-            except ApprovalRequired as exc:
-                # item 246: a class-(c) crossing the decision inside Session.call
-                # (or the activation gate in load/swap) refused. This is a result,
-                # not an error — shape the ticket two-step. Caught before the
-                # generic handler so it never reads as an internal fault.
-                payload = _approval_required(exc)
-            except Exception as exc:  # a tool failure is a result, not a transport error
-                payload = {"ok": False, "diagnostics": [{
-                    "severity": "error", "code": "REVL", "category": "internal",
-                    "message": f"{type(exc).__name__}: {exc}",
-                }]}
-            if decision.gated and decision.allowed:
-                _stamp_authority(payload, decision)
-            # issue #1738: the loop axes read every call that reached a handler
-            # (preflight queries, composition edits, and refusals before and at
-            # run time).
-            record_tool_call = getattr(SESSION, "record_tool_call", None)
-            if record_tool_call is not None:
-                record_tool_call(name, arguments, payload, ir_before)
+        payload = _call_tool(name, params.get("arguments") or {})
+        # issue #1693: every response, success or refusal, says what the
+        # session holds now; issue #1694: a refusal of the same call as the
+        # refusal just before it says so instead of repeating byte for byte
+        state = _ambient.footer(SESSION)
+        payload = _repeat.observe(name, params.get("arguments") or {}, payload, state)
+        payload = _ambient.stamp(payload, state)
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),
@@ -3879,6 +4007,99 @@ def handle(message: dict) -> dict | None:
     if request_id is None:
         return None
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
+    """One gated tool call -> its payload. `handle` runs it for `tools/call`;
+    `revl_step_back` with no arguments runs an undo through it, so the undo
+    passes the same jail, authoring and operator gates any call does. With
+    `record`, a successful mutating call's exact undo is attached to the
+    payload and pushed on the session's undo stack (issue #1703)."""
+    # the path jail and the authoring gate run BEFORE the operator gate and
+    # before any handler: a refusal here has read nothing, compiled nothing
+    # and run nothing, so neither can be used as an oracle.
+    payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
+    if payload is not None:
+        return payload
+    # operator capabilities (roadmap item 55): gate a mutating management
+    # verb against the session's bound operator before it can run. No
+    # profile bound -> ungated, today's behaviour unchanged. Skipped when the
+    # call is already refused, so a refused path is never even resolved
+    # against an operator's grants.
+    decision = _operator.decide(SESSION, name, arguments)
+    if decision.gated and not decision.allowed:
+        return _refused_by_operator(decision)
+    if not runtime_available() and _runtime_gate.is_refused(name, arguments):
+        # issue #1692: a verb that needs a live composition, on an
+        # interpreter that cannot boot one, refuses by name with the fix in
+        # `next`, instead of failing on an import error or on "nothing is
+        # loaded". After the operator gate: "you may not" outranks "this
+        # server cannot".
+        return _runtime_gate.refusal(name)
+    pre = _capture_undo_state(name, arguments)
+    ir_before = getattr(SESSION, "ir", None)
+    payload = _run_handler(name, arguments)
+    if decision.gated and decision.allowed:
+        _stamp_authority(payload, decision)
+    if payload.get("ok"):
+        _attach_undo(name, arguments, pre, payload, record)
+    # issue #1738: the loop axes read every call that reached a handler
+    # (preflight queries, composition edits, and refusals before and at
+    # run time).
+    record_tool_call = getattr(SESSION, "record_tool_call", None)
+    if record_tool_call is not None:
+        record_tool_call(name, arguments, payload, ir_before)
+    return payload
+
+
+def _capture_undo_state(name: str, arguments: dict):
+    """The pre-call state an undo is derived from; a failure to read it never
+    stops the call (the undo then names why it is missing)."""
+    try:
+        return _undo_record.capture(SESSION, name, arguments)
+    except Exception:  # noqa: BLE001 - see `_attach_undo`
+        return None
+
+
+def _run_handler(name: str, arguments: dict) -> dict:
+    """The handler itself; a failure is a result, never a transport error."""
+    try:
+        payload = _HANDLERS[name](arguments)
+        _remember_live_host_bodies()
+        _remedy.remember(SESSION)   # issue #1691: what a later reload offers
+        return payload
+    except ApprovalRequired as exc:
+        # item 246: a class-(c) crossing the decision inside Session.call
+        # (or the activation gate in load/swap) refused. This is a result,
+        # not an error — shape the ticket two-step. Caught before the
+        # generic handler so it never reads as an internal fault.
+        return _approval_required(exc)
+    except Exception as exc:  # a tool failure is a result, not a transport error
+        return _session_error(f"{type(exc).__name__}: {exc}", category="internal")
+
+
+def _attach_undo(name: str, arguments: dict, pre, payload: dict,
+                 record: bool) -> None:
+    """Issue #1703: a successful mutating call answers with the one call that
+    reverts it (`undo: {tool, arguments}`), or `undo: null` with the reason
+    when no exact inverse exists. A reversible change is pushed on the undo
+    stack `revl_step_back` with no arguments pops; an undo run BY that step
+    back is not (`record=False`), so repeated step backs walk further back
+    instead of toggling."""
+    if "undo" in payload:          # the handler answered for itself (step back)
+        return
+    try:
+        fields = _undo_record.describe(SESSION, name, arguments, pre)
+    except Exception as exc:  # noqa: BLE001 - an undo is advice; the call stands
+        fields = {"undo": None,
+                  "undoReason": f"the undo could not be derived "
+                                f"({type(exc).__name__}: {exc})"}
+    if fields is None:
+        return
+    payload.update(fields)
+    if record and fields.get("undo") is not None:
+        UNDO_STACK.record(name, arguments, fields["undo"])
+    payload["undoDepth"] = UNDO_STACK.depth
 
 
 def _error(request_id, code: int, message: str) -> dict:

@@ -210,6 +210,45 @@ def model_decisions(records: list) -> dict:
     return out
 
 
+#: The approval spend and its emission, as ``replay.WriteAheadLog`` writes them.
+RECORD_APPROVAL_CONSUMED = "approval-consumed"
+RECORD_APPROVAL_EMISSION = "approval-emission"
+
+
+def approval_spends(records: list) -> list:
+    """Every approval spend on a WAL, in recorded order, each joined to its
+    emission (issue #1781). Returns ``[{requestId, use, fired}]``.
+
+    A spend and an emission join on ``(requestId, use)``. The session's
+    per-call path and the activation gate write ``use``. The runtime path for
+    an approval threaded into an emission writes none, and its spends join in
+    order on ``requestId`` alone.
+
+    ``fired`` is True only when the matching ``approval-emission`` is on the
+    record. False means the spend was made and the crossing never returned:
+    not fired, raised mid-crossing, or cut by a crash. A reader must treat it as
+    owed or ambiguous. An activation-gate spend is always False here, because
+    its crossing is recorded by ``activation-complete``, not by an emission.
+
+    An audit reader only: recovery and the gate read no approval record, so
+    nothing here can grant authority."""
+    emitted: dict = {}
+    for record in records:
+        if record.get("record") == RECORD_APPROVAL_EMISSION:
+            key = (record.get("requestId"), record.get("use"))
+            emitted[key] = emitted.get(key, 0) + 1
+    out = []
+    for record in records:
+        if record.get("record") != RECORD_APPROVAL_CONSUMED:
+            continue
+        key = (record.get("requestId"), record.get("use"))
+        fired = emitted.get(key, 0) > 0
+        if fired:
+            emitted[key] -= 1
+        out.append({"requestId": key[0], "use": key[1], "fired": fired})
+    return out
+
+
 def read_wal(path: str) -> dict:
     """Load a WAL from disk into ``{header, records, complete, torn}``.
 

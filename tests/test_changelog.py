@@ -349,19 +349,23 @@ def _resolvable_facts(before_ir: dict, after_ir: dict) -> set[str]:
         facts.add(f"component.added:{name}")
     for name in delta["components"]["removed"]:
         facts.add(f"component.removed:{name}")
+    def key(record):  # `db`, or `db@b` for a realm-scoped key (issue #1848)
+        return (f"{record['key']}@{record['realm']}" if record.get("realm")
+                else record["key"])
+
     for prov in delta["providers"]["changed"]:
-        facts.add(f"provider.changed:{prov['key']}")
-        facts.add(f"provider.swapped:{prov['key']}")
+        facts.add(f"provider.changed:{key(prov)}")
+        facts.add(f"provider.swapped:{key(prov)}")
     for prov in delta["providers"]["added"]:
-        facts.add(f"provider.added:{prov['key']}")
+        facts.add(f"provider.added:{key(prov)}")
     for prov in delta["providers"]["removed"]:
-        facts.add(f"provider.removed:{prov['key']}")
+        facts.add(f"provider.removed:{key(prov)}")
     for edge in delta["requires"]["added"]:
-        facts.add(f"require.added:{edge['component']}:{edge['key']}")
+        facts.add(f"require.added:{edge['component']}:{key(edge)}")
     for edge in delta["requires"]["removed"]:
-        facts.add(f"require.removed:{edge['component']}:{edge['key']}")
+        facts.add(f"require.removed:{edge['component']}:{key(edge)}")
     for edge in delta["requires"]["broken"]:
-        facts.add(f"require.broken:{edge['component']}:{edge['key']}")
+        facts.add(f"require.broken:{edge['component']}:{key(edge)}")
     try:
         vr = version.derive(before_ir, after_ir, None)
         for change in vr["changes"]:
