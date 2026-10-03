@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Context } from 'cordis'
 
 import { decodeAs, encodeValue, makeProxy, serve, signatureOf } from './bridge.ts'
-import { assertNoResidue, fiberStateName, redactText, snapshotRuntime } from './runtime.ts'
+import { assertNoResidue, fiberStateName, plug, realmLabel, redactText, snapshotRuntime } from './runtime.ts'
 
 // The uncaught-failure funnel (issue #814, the ts half of the same rule the py
 // driver, the java runners and the go runner follow).
@@ -258,27 +258,70 @@ for (const [key, info] of Object.entries<any>(spec.proxies || {})) {
   log('proxy', key, `-> ${where}`)
 }
 
-// 2. this process's own components, in IR load order
+// 2. this process's own components, in IR load order.
+//
+// A faulting activation (a `fail` step, or the fault sweep's injected one)
+// rejects the fiber's promise. The emitted apply() has already unwound its own
+// effects and run its frame's Phase-2 compensations by then. Record the load
+// error and go on to the LIFO teardown and the no-residue proof, as the go,
+// java and rust runners do; letting the rejection escape made it FATAL, so the
+// ts tier could not drive a faulting activation at all and the cross-tier
+// sweep skipped it.
 for (const cname of spec.components as string[]) {
   const config = (spec.config || {})[cname]
-  const fiber = config ? ctx.plugin(mod[cname], config) : ctx.plugin(mod[cname])
-  await fiber
+  // issue #1567: `plug` applies the component's `isolate` placements before
+  // plugging. `ctx.plugin` dropped them, so an isolated provision landed in
+  // the shared realm and two tenants of one key collided in one process.
+  const fiber = config ? plug(ctx, mod[cname], config) : plug(ctx, mod[cname])
+  try {
+    await fiber
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    log('load', cname, `load error: ${detail}`)
+  }
   fibers.push([cname, fiber])
   log('load', cname, `state=${fiberStateName(fiber.state)}`)
 }
+
+// Issue #1567: a served or probed key resolves in the py tier's `resolve_key`
+// order, off the spec's `placements` (key -> this process's provisions of it,
+// each with the realm an `isolate` publishes it in): the shared realm when the
+// key is provided there, or when this process does not provide it (a proxy);
+// else its one isolated realm, read strictly; a key isolated in two or more
+// realms is refused naming each provider and realm.
+const placements: Record<string, Array<{ component: string; realm: string | null }>> =
+  spec.placements || {}
+function resolveKey(key: string): unknown {
+  const at = placements[key] || []
+  if (at.length === 0 || at.some((p) => p.realm == null)) return (ctx as any)[key]
+  if (at.length === 1) {
+    // labels are per (realm, key) since issue #1543, as `plug` mints them
+    return (ctx as any).isolate(key, realmLabel(at[0].realm as string, key)).reflect.get(key)
+  }
+  const where = at.map((p) => `\`${p.component}\` in realm \`${p.realm}\``).join(', ')
+  throw new Error(
+    `key '${key}' is provided in ${at.length} realms (${where}); a call names a key, ` +
+      `not a realm, so it has no single provider to reach`,
+  )
+}
+// `serve` and the probe scope index their context by key; this view answers
+// each index through `resolveKey`.
+const resolved = new Proxy({}, { get: (_target, key) => resolveKey(String(key)) }) as any
 
 // 3. serve keys other processes need
 let server: import('node:net').Server | undefined
 if (spec.serve) {
   // `methods` (key -> declared operations) is the stub's allowlist; fall back
   // to the bare key list for a spec written before it existed.
-  server = await serve(ctx, spec.serve.methods ?? spec.serve.keys, spec.serve.socket, typing)
+  server = await serve(resolved, spec.serve.methods ?? spec.serve.keys, spec.serve.socket, typing)
   log('serve', spec.serve.keys.join(', '), `-> ${spec.serve.socket}`)
 }
 
 // 4. probes: call provided services (may cross a seam), print results
 const scope: Record<string, unknown> = {}
-for (const key of (spec.provides || []) as string[]) scope[key] = (ctx as any)[key]
+for (const key of (spec.provides || []) as string[]) {
+  Object.defineProperty(scope, key, { enumerable: true, get: () => resolved[key] })
+}
 for (const key of Object.keys(spec.proxies || {})) scope[key] = (ctx as any)[key]
 for (const expr of (spec.probe || []) as string[]) {
   try {

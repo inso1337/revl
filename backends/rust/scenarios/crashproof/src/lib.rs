@@ -352,10 +352,10 @@ impl Noop for NoopProxy {
         _v.as_str().unwrap_or("").to_string()
     }
 }
-fn _revl_dispatch_noop(svc: &dyn Noop, method: &str, args: &[serde_json::Value]) -> serde_json::Value {
+fn _revl_dispatch_noop(svc: &dyn Noop, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {
     match method {
-        "ping" => serde_json::json!(svc.ping()),
-        _ => serde_json::Value::Null,
+        "ping" => Ok(serde_json::json!(svc.ping())),
+        _ => Err(format!("method '{method}' is not exported for service Noop")),
     }
 }
 
@@ -381,9 +381,9 @@ pub fn _revl_proxy_plugin(key: &str, service: &str, socket: String) -> Option<co
     }
 }
 
-pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> serde_json::Value {
+pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {
     match key {
-        _ => serde_json::Value::Null,
+        _ => Err(format!("key '{key}' is not provided by this process")),
     }
 }
 

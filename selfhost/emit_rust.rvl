@@ -1713,8 +1713,10 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
       // needle path below never applies to it; the two are disjoint.
       let iplace = strip_index_clone(a, r)
       if (iplace != "") { r = iplace }
-      if (method == "indexOf" && recv_type.startsWith("List[") && ctx.bp.has(ref_name(a))) {
-        // The List overload needs &String rather than the string overload's &str.
+      if (method == "indexOf" && recv_type != "Str" && ctx.bp.has(ref_name(a))) {
+        // The List overload needs &String rather than the string overload's &str;
+        // any receiver not known to be a Str (a bare `List` literal type, an
+        // untyped field or call) takes it, as the reference does.
         r = `${r}.to_string()`
       }
       let lit = borrowed_str_lit(a)
@@ -5293,7 +5295,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
     }
     out = out.push("}")
     // provider-side dispatch
-    out = out.push(`fn _revl_dispatch_${snake(sname)}(svc: &dyn ${sname}, method: &str, args: &[serde_json::Value]) -> serde_json::Value {`)
+    out = out.push(`fn _revl_dispatch_${snake(sname)}(svc: &dyn ${sname}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {`)
     out = out.push("    match method {")
     for (mn of value_keys(methods)) {
       let method = value_field(methods, mn)
@@ -5311,12 +5313,12 @@ fn emit_bridge(ir: Any) -> List[Str] {
         idx = idx + 1
       }
       if (any_none) {
-        out = out.push(`        "${mn}" => serde_json::Value::Null, // unmarshalled param type`)
+        out = out.push(`        "${mn}" => Err("${sname}.${mn} cannot be called across a seam: a parameter type has no wire form".to_string()),`)
       } else {
-        out = out.push(`        "${mn}" => ${bridge_ret_ser(`svc.${mname(mn)}(${extracts.join(", ")})`, ret)},`)
+        out = out.push(`        "${mn}" => Ok(${bridge_ret_ser(`svc.${mname(mn)}(${extracts.join(", ")})`, ret)}),`)
       }
     }
-    out = out.push("        _ => serde_json::Value::Null,")
+    out = out.push(`        _ => Err(format!("method '{method}' is not exported for service ${sname}")),`)
     out = out.push("    }")
     out = out.push("}")
     out = out.push("")
@@ -5356,7 +5358,7 @@ fn emit_bridge(ir: Any) -> List[Str] {
   out = out.push("")
 
   // provider/probe: require a locally-provided key and dispatch to it
-  out = out.push("pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> serde_json::Value {")
+  out = out.push("pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
   out = out.push("    match key {")
   pi = 0
   while (pi < pkeys.length()) {
@@ -5364,11 +5366,11 @@ fn emit_bridge(ir: Any) -> List[Str] {
     let srv = psvcs[pi]
     out = out.push(`        "${key}" => match ctx.require::<Box<dyn ${srv}>>("${key}") {`)
     out = out.push(`            Ok(svc) => _revl_dispatch_${snake(srv)}(&**svc, method, args),`)
-    out = out.push("            Err(_) => serde_json::Value::Null,")
+    out = out.push(`            Err(_) => Err("no provider for key '${key}' right now".to_string()),`)
     out = out.push("        },")
     pi = pi + 1
   }
-  out = out.push("        _ => serde_json::Value::Null,")
+  out = out.push("        _ => Err(format!(\"key '{key}' is not provided by this process\")),")
   out = out.push("    }")
   out = out.push("}")
   out = out.push("")

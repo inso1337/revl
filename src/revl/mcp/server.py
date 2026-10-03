@@ -73,6 +73,7 @@ from ..admit_profile import AdmissionProfile
 from ..compiler import compile_files, compile_source, escaping_use_path
 from ..diagnostics import FIXES, GUARANTEES, explain, report
 from .. import grammar_summary as _grammar_summary
+from .. import source_grammar as _source_grammar
 from . import fillspec
 from . import edit as _edit
 from . import leases as _leases
@@ -82,6 +83,7 @@ from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
 from . import quorum as _quorum
 from . import repair as _repair
+from . import runtime_gate as _runtime_gate
 from . import ship as _ship
 from . import deploy as _mcp_deploy
 from .persist import RestoreError
@@ -1279,7 +1281,9 @@ def _tool_revoke(arguments: dict) -> dict:
       * `hash` (item 471 Slice 2) withdraws a PENDING multi-party QUESTION — a
         different object from a minted grant, so it is a different branch and not
         a third spelling of one. The votes cast so far stop counting, no approval
-        is minted, and the decision graph records who closed it and why.
+        is minted, and the decision graph records who closed it and why. For a
+        single-party ticket the same `hash` is the operator's NO (issue #1553):
+        the re-issue the ticket holds is refused once and fires nothing.
 
     Revoking a capability/id with no live grant is a clean typed no-op
     (`count: 0`), not an error — idempotent. Gated by the `approve` operator verb
@@ -1769,9 +1773,23 @@ def _tool_check(arguments: dict) -> dict:
     # `fillSpec` — the expected type, the emission upper bound, the in-scope
     # bindings and the reachable service signatures the checker already knew at
     # that position — so the hole can be filled directly (docs/holes.md §8).
-    holes = fillspec.enrich(ir) if ir.get("holes") else []
+    source, _files, modules = _candidate_of(arguments)
+    inline = source is not None or bool(modules)
+    holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
+             if ir.get("holes") else [])
     return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
             "holes": holes}
+
+
+def _untrusted_author() -> bool:
+    """Whether text the agent on this transport writes compiles under the
+    untrusted-author profile, so a fillSpec offers it no extern
+    (`fillspec.enrich`). Text the agent carries is what the profile governs:
+    `compile_under_authoring` compiles a jailed `files` candidate with no
+    transport-carried text as operator-authored, so `_tool_check` asks only
+    for an inline candidate. A hole's FILL is always text the agent writes,
+    which is why `revl_scaffold` and `revl_edit` ask unconditionally."""
+    return AUTHORING.profile() is not None
 
 
 def _tool_admit(arguments: dict) -> dict:
@@ -2075,12 +2093,34 @@ def _tool_resolve(arguments: dict) -> dict:
         return report(error)
 
 
-def _tool_grammar(_arguments: dict) -> dict:
-    # `fixes` is the `revl explain` payload: for every guarantee, the rewrite
-    # that satisfies it — so an agent that gets a code back can act without
-    # a second round trip
-    return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES,
-            "fixes": FIXES}
+# the derivation itself is lazy (`render` reads the parser's source on call);
+# importing the module costs nothing and keeps the enums one list
+_GRAMMAR_FORMATS = _source_grammar.FORMATS
+_GRAMMAR_CATEGORIES = tuple(_source_grammar.CATEGORIES)
+
+
+def _tool_grammar(arguments: dict) -> dict:
+    """revl_grammar: the prose summary by default; with `format`, the grammar
+    of revl source derived from the parser (issue #1661, the MCP twin of
+    `revl grammar --format/--category`), for a grammar-constrained decoder."""
+    fmt = arguments.get("format")
+    category = arguments.get("category")
+    if fmt is None and category is None:
+        # `fixes` is the `revl explain` payload: for every guarantee, the
+        # rewrite that satisfies it, so an agent that gets a code back can act
+        # without a second round trip
+        return {"ok": True, "grammar": _GRAMMAR, "guarantees": GUARANTEES,
+                "fixes": FIXES}
+    if fmt not in _GRAMMAR_FORMATS:
+        return _session_error(
+            f"`format` must be one of {', '.join(_GRAMMAR_FORMATS)}"
+            + ("" if fmt is not None else " when `category` is given"))
+    category = "program" if category is None else category
+    if category not in _GRAMMAR_CATEGORIES:
+        return _session_error(
+            f"`category` must be one of {', '.join(_GRAMMAR_CATEGORIES)}")
+    return {"ok": True, "format": fmt, "category": category,
+            "grammar": _source_grammar.render(fmt, category)}
 
 
 # -- the authoring toolbox as MCP tools (roadmap item 345) -------------------
@@ -2117,7 +2157,7 @@ def _tool_scaffold(arguments: dict) -> dict:
     except ScaffoldError as error:
         return _session_error(str(error))
     filename = arguments.get("filename") or f"{spec.component}.rvl"
-    return scaffold_document(spec, filename)
+    return scaffold_document(spec, filename, untrusted=_untrusted_author())
 
 
 def _tool_fmt(arguments: dict) -> dict:
@@ -2940,7 +2980,11 @@ TOOLS = [
                                         "minted grant). The votes cast so far "
                                         "stop counting and no approval is minted. "
                                         "Only the proposer or an approver the rule "
-                                        "names may close it"},
+                                        "names may close it. Issue #1553: a "
+                                        "single-party ticket's hash answers it NO: "
+                                        "the re-issue it holds is refused once "
+                                        "and fires nothing, and a yes minted for "
+                                        "it and not yet spent is withdrawn"},
                 "reason": {"type": "string",
                            "description": "item 471: why the question is being "
                                           "withdrawn, recorded on the "
@@ -3413,8 +3457,22 @@ TOOLS = [
     {
         "name": "revl_grammar",
         "description": "The revl surface syntax and the rules that reject code — "
-                       "small enough to keep in context while generating.",
-        "inputSchema": {"type": "object", "properties": {}},
+                       "small enough to keep in context while generating. With "
+                       "`format`, instead a grammar of revl source derived from "
+                       "the parser, for a grammar-constrained decoder: `lark` "
+                       "(llguidance), `gbnf` (llama.cpp server, XGrammar) or "
+                       "`ebnf`; `category` scopes it to one hole's slot.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "enum": list(_GRAMMAR_FORMATS),
+                           "description": "return the derived source grammar in "
+                                          "this format instead of the summary"},
+                "category": {"type": "string", "enum": list(_GRAMMAR_CATEGORIES),
+                             "description": "with `format`: the syntactic slot "
+                                            "to constrain to (default `program`)"},
+            },
+        },
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_grammar,
     },
@@ -3691,6 +3749,28 @@ for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
+# issue #1692: whether this interpreter can boot a composition at all. Probed
+# once, on first use; `set_runtime_available` overrides it (tests, transports).
+_RUNTIME_AVAILABLE: bool | None = None
+
+
+def runtime_available() -> bool:
+    global _RUNTIME_AVAILABLE
+    if _RUNTIME_AVAILABLE is None:
+        _RUNTIME_AVAILABLE = _runtime_gate.cordis_importable()
+    return _RUNTIME_AVAILABLE
+
+
+def set_runtime_available(available: bool | None) -> None:
+    """Pin the probe (`None` re-probes on next use)."""
+    global _RUNTIME_AVAILABLE
+    _RUNTIME_AVAILABLE = available
+
+
+_INSTRUCTIONS = ("Compile revl components before proposing them; use "
+                 "revl_admit against the running manifest before a swap, "
+                 "and revl_plan to see what that swap would do first.")
+
 
 # ---------------------------------------------------------------- protocol
 
@@ -3704,9 +3784,8 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": "Compile revl components before proposing them; use "
-                            "revl_admit against the running manifest before a swap, "
-                            "and revl_plan to see what that swap would do first.",
+            "instructions": _INSTRUCTIONS if runtime_available()
+                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
         }
     elif method == "tools/list":
         result = {"tools": _ADVERTISED}
@@ -3732,6 +3811,13 @@ def handle(message: dict) -> dict | None:
             pass                    # refused above; the handler never runs
         elif decision.gated and not decision.allowed:
             payload = _refused_by_operator(decision)
+        elif not runtime_available() and _runtime_gate.is_refused(name, arguments):
+            # issue #1692: a verb that needs a live composition, on an
+            # interpreter that cannot boot one, refuses by name with the fix in
+            # `next`, instead of failing on an import error or on "nothing is
+            # loaded". After the operator gate: "you may not" outranks "this
+            # server cannot".
+            payload = _runtime_gate.refusal(name)
         else:
             try:
                 payload = handler(arguments)
@@ -3773,8 +3859,13 @@ def _error(request_id, code: int, message: str) -> dict:
             "error": {"code": code, "message": message}}
 
 
-def serve(stdin=None, stdout=None) -> int:
-    """Read newline-delimited JSON-RPC from stdin until EOF."""
+def serve(stdin=None, stdout=None, before=None) -> int:
+    """Read newline-delimited JSON-RPC from stdin until EOF.
+
+    `before(message)`, when given, runs before each message and returns None to
+    go on or a reason to refuse that message (issue #1463:
+    `live_profile.StdioBinding` re-binds the session to the operator profile
+    file as it is now)."""
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for line in stdin:
@@ -3786,6 +3877,12 @@ def serve(stdin=None, stdout=None) -> int:
         except json.JSONDecodeError:
             stdout.write(json.dumps(_error(None, -32700, "parse error")) + "\n")
             stdout.flush()
+            continue
+        refusal = before(message) if before is not None else None
+        if refusal is not None:
+            if isinstance(message, dict) and message.get("id") is not None:
+                stdout.write(json.dumps(_error(message["id"], -32603, refusal)) + "\n")
+                stdout.flush()
             continue
         response = handle(message)
         if response is not None:

@@ -51,6 +51,27 @@ class SessionError(RuntimeError):
         self.code = code
 
 
+class ApprovalRefused(SessionError):
+    """A class-(c) crossing whose pending ticket an operator answered NO
+    (`revl_revoke` with the ticket `hash`, issue #1553). Raised once, on the
+    re-issue that question was holding, and fired nothing. A `SessionError`, so
+    every surface that already reports a session refusal reports this one; the
+    HTTP face names it (`approvalRefused`) because an app caller has to tell
+    "no" apart from "not yet"."""
+
+    def __init__(self, ticket: dict, refusal: dict) -> None:
+        by = refusal.get("by") or "an operator"
+        why = refusal.get("reason") or ""
+        super().__init__(
+            f"`{ticket.get('key')}.{ticket.get('method')}` was refused: {by} "
+            f"revoked its pending ticket {ticket.get('hash')}"
+            + (f" ({why})" if why else "")
+            + ". Nothing fired. Asking again opens a new question",
+            code="APPROVAL_REFUSED")
+        self.ticket = ticket
+        self.refusal = dict(refusal)
+
+
 @dataclasses.dataclass(frozen=True)
 class VerdictReview:
     """The review half of the item 483 exact-state verdict protocol, returned by
@@ -341,7 +362,8 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # crossed. Rolling these back would refund a yes that was used.
     # `_auto_spend` in particular is created on a rule's first materialization,
     # so restoring it would hand a failed load a fresh budget every time.
-    "_tickets", "_ticket_rounds", "_ledger", "_grants", "_grants_consumed",
+    "_tickets", "_ticket_rounds", "_ticket_refusals", "_ledger", "_grants",
+    "_grants_consumed",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
     # The event loop the load ran on. It is plumbing, not composition state, and
@@ -673,6 +695,11 @@ class Session:
         # Replaced atomically with the class map at swap (a ticket from a previous
         # generation is gone, not stale).
         self._tickets: dict = {}
+        # issue #1553: the NO an operator gave a pending single-party ticket
+        # (`revoke_ticket`), keyed by its hash, until the re-issue it answers
+        # consumes it (`_approval_decide_call`). One no refuses one re-issue, as
+        # one yes fires one; asking again after that is a new question.
+        self._ticket_refusals: dict = {}
         # the ANSWER ROUND each ticket is currently on, keyed by its hash. A
         # ticket hash is the deterministic identity of a QUESTION (component +
         # reach-closure candidate hash + kind + args digest), so the SAME
@@ -1733,6 +1760,7 @@ class Session:
         # each of them moves the epoch exactly once here.
         self._surface_epoch += 1
         self._tickets = {}
+        self._ticket_refusals = {}
         # item 251 Slice 2: re-materialize the distilled rules against the new
         # generation. The H1 review bind (`_auto_reviewed`) persists across the
         # swap, so a component the swap moves INTO a rule's glob that was not in the
@@ -4279,6 +4307,7 @@ class Session:
         # deliberately NOT reset here.
         self._class_map = None
         self._tickets = {}
+        self._ticket_refusals = {}
         self._ticket_rounds = {}   # indexes `_ledger`; dies with it
         self._ledger = []
         self._grants = []
@@ -5540,6 +5569,11 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         ticket = self._class_map.build_ticket(
             reach, args, record_values=self.approval_record_values)
+        # issue #1553: an operator's NO to this question refuses the re-issue it
+        # was holding, once, before anything could cover it
+        refusal = self._ticket_refusals.pop(ticket["hash"], None)
+        if refusal is not None:
+            raise ApprovalRefused(ticket, refusal)
         standing = self._find_standing_approval(ticket)
         if standing is not None:
             self._consume_approval(standing)   # durable spend before the fire
@@ -6352,7 +6386,10 @@ class Session:
                                        vote=vote),
             now_ms=self._now_ms(),
             bound=getattr(self, "operator", None),
-            registry=getattr(self, "operator_registry", None))
+            registry=getattr(self, "operator_registry", None),
+            # issue #1463: "transport" when the HTTP transport authenticated the
+            # bound operator for this request; the label is the only difference
+            bound_by=getattr(self, "operator_bound_by", "session"))
         if isinstance(outcome, _quorum.UnboundCast):
             self._record_quorum("quorum-refused", {
                 **self._refusal_row(record, action, outcome.reason,
@@ -6755,14 +6792,26 @@ class Session:
         names can also close the question, which is a veto. Either way the votes
         cast so far stop counting and no approval is minted, and the record names
         who closed it and why. A bystander cannot: the same fail-closed membership
-        check escalation uses."""
+        check escalation uses.
+
+        A ticket no rule names approvers for is answered by one operator, so its
+        revoke is that operator's NO (issue #1553, `_refuse_single_party_ticket`):
+        the re-issue the ticket holds is refused once and fires nothing."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
                 f"unknown ticket hash {ticket_hash!r} - the server never issued it "
                 f"(roadmap item 471, the outstanding-ticket table)")
         rule = self._ticket_approval_shape(ticket)
-        if rule is None or not rule.is_quorum():
+        if rule is None:
+            if as_token is not None or as_secret is not None \
+                    or as_proof is not None:
+                raise SessionError(
+                    f"ticket {ticket_hash} names no approver set, so it is "
+                    f"answered by the calling operator, not cast as anyone: "
+                    f"revoke it plainly (issue #1553)")
+            return self._refuse_single_party_ticket(ticket, reason)
+        if not rule.is_quorum():
             raise SessionError(
                 f"ticket {ticket_hash} does not demand a quorum, so it cannot be "
                 f"revoked as one: revoke the standing grant instead (roadmap item "
@@ -6801,6 +6850,40 @@ class Session:
                 "candidateHash": ticket["candidateHash"],
                 "component": ticket["component"], "requestId": record["requestId"],
                 "by": actor, "withdrewVotes": withdrawn, "outcome": "revoked"}
+
+    def _refuse_single_party_ticket(self, ticket: dict,
+                                    reason: str | None) -> dict:
+        """Answer a pending single-party ticket NO (issue #1553).
+
+        A ticket no rule names approvers for is answered by one operator: yes
+        through `approve_ticket`, and now no through the same `revl_revoke` verb
+        that closes a multi-party question. The no is held until the re-issue it
+        answers (`_approval_decide_call`), which is refused and fires nothing.
+        A yes already minted for this round and not yet spent is withdrawn with
+        it (`approval-revoked`, as a standing grant's early revoke is). The
+        revoke closes the round: `approve_ticket` refuses it from then on, and
+        the next asking of the crossing opens a new one."""
+        ticket_hash = ticket["hash"]
+        by = getattr(getattr(self, "operator", None), "token", None) or ""
+        withdrawn = None
+        entry = self._ledger_entry_for_ticket(ticket_hash)
+        if entry is not None and not entry["consumed"]:
+            entry["consumed"] = True
+            entry["revoked"] = True
+            withdrawn = entry["requestId"]
+            wal = self._approval_wal()
+            if wal is not None:
+                wal.record_approval_revoked(withdrawn)
+        self._ticket_refusals[ticket_hash] = {
+            "by": by, "reason": (str(reason).strip() if reason else ""),
+            "round": self._ticket_rounds.get(ticket_hash, 1),
+            "at": self._now_ms()}
+        return {"revoked": True, "hash": ticket_hash,
+                "candidateHash": ticket.get("candidateHash"),
+                "component": ticket.get("component"), "by": by,
+                "outcome": "refused", "withdrewApproval": withdrawn,
+                "note": ("the re-issue this ticket is holding is refused once "
+                         "and fires nothing; asking again opens a new question")}
 
     def quorum_state(self, ticket_hash: str) -> dict:
         """The decision graph of an outstanding multi-party ticket, read-only: the
@@ -7027,6 +7110,14 @@ class Session:
                     f"quorum, so it cannot be answered with a vote: approve it "
                     f"plainly (roadmap item 471)")
             existing = self._ledger_entry_for_ticket(ticket_hash)
+            if ticket_hash in self._ticket_refusals \
+                    or (existing is not None and existing.get("revoked")):
+                # issue #1553: a revoke closed this round, so no yes follows it
+                raise SessionError(
+                    f"ticket {ticket_hash} was revoked in this round, so it "
+                    f"cannot be approved: the re-issue it holds is refused. The "
+                    f"next asking of the crossing opens a new round, which can "
+                    f"be approved")
             if existing is not None:
                 return self._ticket_response(existing)
             self._mint_ticket_entry(ticket)

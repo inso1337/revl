@@ -3,7 +3,8 @@
 Roadmap: item 515 (issue #1189), from the 2026-09-19 external review. Slice 1
 is LANDED with this note. Slice S4, the scheduler against a host's DECLARED
 devices, is LANDED and described in section 10. Slice S5, each role's binding
-recorded on the placement side, is LANDED in section 10.6. Slices 2 and 3 are
+recorded on the placement side, is LANDED in section 10.6. Slice S2, the
+provision keyed by role, is LANDED and described in section 11. Slice 3 is
 designed here and not written.
 
 Number 539 was taken because 531 to 538 are claimed: 531 merged (PR #1220,
@@ -484,13 +485,14 @@ Each slice is independently landable and carries its oracle in the same PR.
 section 2, the candidate set, the ten decisions of section 3, the
 `placement_digest` definition of section 5, no IR.
 
-**S2. The provision, keyed by role.** A `model role` becomes bindable to a
-provision key, so two components injecting one role share one loaded member
-rather than loading twice. This is the issue's second sentence and it is where
-the existing lifetime machinery does the work: item 243's witness pair for
-acquire and release, the G5/G7 teardown contract for unloading once, the
-handoff rule for a member passed between components. The exit evidence the
-issue names belongs to this slice, not to S1: a teardown that unloads once for
+**S2. The provision, keyed by role. LANDED (section 11).** A `model role`
+becomes bindable to a provision key, so two components injecting one role
+share one loaded member rather than loading twice. This is the issue's second
+sentence and it is where the existing lifetime machinery does the work: item
+243's witness pair for acquire and release, the G5/G7 teardown contract for
+unloading once, the handoff rule for a member passed between components
+(section 11.3 says which of the three was used). The exit evidence the issue
+names belongs to this slice, not to S1: a teardown that unloads once for
 N consumers with `no_residue`.
 
 **S3. Residency, and the load cost.** "The small model is resident here" is a
@@ -513,7 +515,8 @@ chooses within a placement rather than about one.
 configuration, which is what item 538 means by "a role is declared once and
 bound to a member by configuration". It lands in the placement-side record,
 not in the compiler IR's composition manifest, for the reason 10.6 gives. S2's
-provision key will read the same binding.
+provision (section 11) loads on the same decision, read through
+`revl.model_placement` in the child rather than from this record.
 
 ---
 
@@ -610,10 +613,10 @@ a device fit is decided later, against a file the compiler never reads.
 ### 10.4 What S4 does not do, and which slice owns it
 
 * **Nothing is loaded.** The decision reaches the child and is enforced on
-  the questions the child is asked (section 10.5), but nothing in revl loads a
-  member. The provision keyed by role, with one load, one unload and
-  `no_residue` for N consumers, is S2, built on the provider adapters another
-  lane is writing. The issue's exit evidence is S2's and is not claimed here.
+  the questions the child is asked (section 10.5), but S4 loads no member.
+  The provision keyed by role, with one load, one unload and `no_residue` for
+  N consumers, is S2 (section 11). The issue's exit evidence is S2's and is
+  not claimed here.
 * **No cost model.** Candidates rank by written order, not by load cost or
   residency over time. S3 owns both.
 * **No published profile.** The declared supply is not checked against what a
@@ -662,7 +665,8 @@ differs between runs, which is concurrency and not this change.
 What 10.5 does not close: host code that never asks is not refused, and an
 edit that rewrites the devices and the decision in a spec together is a
 self-consistent declaration the child cannot tell from the conductor's. The
-first is S2's to close by making the provider adapters ask on every load.
+first is closed by S2 for a managed role: its provision asks on every load
+and every call (section 11).
 
 **The second is a stated limit, accepted.** The spec is not signed. Its
 `modelSchedule` entry gets exactly the trust the runner already gives
@@ -733,3 +737,119 @@ What 10.6 does not do: the record is printed, not persisted or signed, and a
 composition DOCUMENT argument to `revl audit` gets a one-line note instead of
 the rows, because the view reads modules and a composition's rows are
 resolved rather than parsed.
+
+## 11. S2: the provision, keyed by role
+
+`src/revl/providers/provision.py`, over the adapters of issue #1461.
+`docs/providers-ollama.md` is the user-facing page and
+`tests/test_model_provision_515.py` the executable spec.
+
+### 11.1 What is provisioned, and by whom
+
+A role is provisioned when its binding is MANAGED, which today means
+`provider = "ollama"`: the one wire in the tree that can load a model onto a
+chosen device, report what the server holds, and unload it. Every other
+binding's endpoint manages its own residency, so its role has no provision and
+revl sends it completions only. That is a statement about the endpoints, not a
+rule of the item; a second managed wire adds a `load_request`,
+`unload_request`, `residency_request` and `resident_entry` and nothing else.
+
+The consumers are the model hosts (`revl.providers.host`), one per model
+`requires` key. Every host `build_hosts` returns shares one `Provisions`, keyed
+by role, so two keys that route to `small` hold one provision. Components that
+inject the same key share its host through the ordinary provision, so they
+share the load one level further down. The exit test has three components on
+two keys and one role: one load, one unload.
+
+### 11.2 The decisions
+
+| # | The decision | Direction |
+| - | ------------ | --------- |
+| 27 | a managed role is loaded on the device `model_placement.device_for` answers, with the binding's load options for that device | closed: the schedule's decision is the adapter's |
+| 28 | no schedule installed: the first managed role refuses, nothing is loaded | closed: no "any free device" at load time either |
+| 29 | a role the schedule placed on another host is not loaded here, and a call on it refuses by name | closed |
+| 30 | a scheduled device the binding names no load options for is refused, at plan time and at boot | closed |
+| 31 | after the load the server is asked; a model it does not report, or reports on the wrong device class, is unloaded and the boot refused | closed: demand checked against what the server says, for the class only |
+| 32 | the first acquire loads, the last release unloads; a second acquire or an unpaired release by one consumer is refused | the count of holders is the count of consumers |
+| 33 | every completion carries the load's device options and `keep_alive: -1`, and a completion before the load refuses | closed: a request cannot reload the member elsewhere |
+| 34 | teardown releases after every component is disposed and the hosts withdrawn; the residue proof asks the server whether it still holds the model | the G7 consumers-before-providers order; residue is what the server says |
+
+Decision 31 is the one place revl compares a demand with a supply, and it is
+narrow on purpose: the server's `size_vram / size`, rounded as `ollama ps`
+rounds it, must read 0% for a `cpu` device and 100% for a `gpu` device, and
+nothing else is inferred. The rounding is measured, not taste: the first live
+run compared `size_vram` with zero and refused a correct CPU load, because
+Ollama 0.34.4 keeps 64 MiB of a 22 GB model in GPU memory for the compute
+graph even with `num_gpu: 0`, and prints that load as "100% CPU". Which GPU, and whether the memory matches the
+declared `memory`, stay item 538's.
+
+### 11.3 How this maps to section 8's sketch
+
+Section 8 named three pieces of lifetime machinery. Measured against what
+landed:
+
+* **Item 243's witness pair.** Not used. The pair here is the provision's own
+  acquire and release, refused when unpaired (decision 32), and the witness is
+  the server's `/api/ps` answer after each half. A witnessed extern is a
+  crossing with a registered inverse inside a component's body; a model load
+  happens before any component body runs, so there is no crossing to register
+  one on.
+* **The G5/G7 teardown contract.** Used as it stands. The hosts are ambient
+  provisions (single-process) or provisions made before any component
+  activates (placement child), so they are withdrawn after every consumer, and
+  the release follows the withdrawal. The residue proof gains one check,
+  `models`, next to `registry`, `provisions` and `effects`.
+* **The handoff rule for a member passed between components.** Does not
+  arise. A member is never passed: components reach it through a key, and the
+  key's host is the consumer.
+
+### 11.4 Where it runs
+
+`revl run --placement P --providers F`: the conductor checks the configuration
+against the program and the schedule before anything spawns (decisions 30 and
+the tier and no-schedule refusals), stops treating a model key as "provided by
+no process", and hands each process that requires one the configuration's
+path. The child re-derives its model keys from its own components, checks the
+configuration again, and opens the hosts before wiring any proxy or
+activating any component, so a refused load is a refused boot with nothing up.
+
+`revl run --providers F` without a placement is unchanged for unmanaged roles.
+A managed role refuses the boot there (decision 28), because a single-process
+run declares no host and so has no schedule.
+
+### 11.5 What S2 does not do
+
+* **Any wire but Ollama's.** vLLM, SGLang and llama.cpp fix the device when the
+  server starts; revl cannot move a model there, only check the process that
+  was started, which is item 538's published profile.
+* **Memory.** The declared `memory` is not compared with the server's `size`.
+* **Other clients of the same server.** Another program can load or unload the
+  same model on the same Ollama. The residue proof reports what the server
+  holds, not who caused it.
+* **A reload after an eviction by the server.** Every completion carries the
+  scheduled options, so such a reload lands on the same device class, but the
+  provision does not count it.
+* **Tiers other than py.** A model key required on another tier is refused at
+  plan time when `--providers` is given.
+
+### 11.6 S3, measured against what S2 records
+
+Each provision keeps a `timeline`: every load with its device, its monotonic
+time, the wall time revl waited, and the server's own `load_duration`; every
+unload with its time. That is the raw load cost and the residency interval per
+role per host, which is what section 8 says S3 needs. What S3 still needs, and
+is not built:
+
+1. **A reader.** The scheduler runs in the conductor at plan time; the
+   timeline lives in the child. Either the child reports it (a new line or
+   spec channel back to the conductor), or the conductor asks each managed
+   binding's server `/api/ps` at plan time for what is resident now.
+2. **A ranking rule.** Decision 12 makes the written order the preference.
+   Letting residency or load cost reorder candidates is a change to that
+   decision, and whether a resident fallback should beat a cold first choice
+   is a program author's question, so it needs its own surface (a per-arm
+   opt-in, for example), not a default.
+3. **A cost on the profile.** The declared profile has no load-cost field. A
+   measured cost is a provider fact (item 538); a declared one would be a
+   fourth clause after `device`, `memory` and `quant`, which S1's grammar
+   would have to admit and the self-host gate would have to read.
