@@ -30453,6 +30453,12 @@ fn a_name_the_block_arm_statement_binds_is_a_g6_rebind() {
 }
 
 #[test]
+fn an_unmarked_crossing_through_a_block_arm_s_value_is_refused() {
+    let v = admit_src(String::from("extern emission[production.payment] fn charge(cents: Int) -> Int requires approval = @py { return 1 }\nservice Pay { emission[production.payment] fn charge(cents: Int) -> Int }\nservice Till { emission fn go(n: Int) -> Int }\ncomponent Worker provides pay: Pay {\n  provide pay { fn charge(cents) = 1 }\n}\ncomponent Register provides till: Till {\n  provide till {\n    fn go(n: Int) {\n      let w = effect spawn Worker with { } undo w.dispose()\n      let o = Some(n)\n      let x = (match o {\n        Some(v) => {\n          let z = v\n          w.pay\n        },\n        None => w.pay\n      }).charge(n)\n      return x\n    }\n  }\n}"));
+    assert!((v == "G4|call to emission `charge` must be marked `emit` (G4)"));
+}
+
+#[test]
 fn lexes_a_component_header() {
     let toks = lex_src(String::from("component C requires kv: Kv {}"));
     assert!(((toks)[(0i64) as usize].kind == "kw"));
