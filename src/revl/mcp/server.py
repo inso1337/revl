@@ -2818,8 +2818,9 @@ TOOLS = [
                        "is never written. With nothing loaded, pass `files` or `source` "
                        "and this loads it first, then edits it. {symbol, replacement} "
                        "replaces one top-level declaration by name (read it first with "
-                       "revl_source). A response that edited lists the `touched` "
-                       "symbols.",
+                       "revl_source); {append} adds new declarations at the end of "
+                       "the buffer, refusing a name already declared. A response "
+                       "that edited lists the `touched` symbols.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -2854,6 +2855,11 @@ TOOLS = [
                                                       "whole top-level declaration "
                                                       "this names (as revl_source "
                                                       "addresses it)"},
+                            "append": {"type": "string",
+                                       "description": "new top-level declarations to "
+                                                      "add at the end of the buffer "
+                                                      "(no offset; a name already "
+                                                      "declared is refused)"},
                         },
                     },
                 },
@@ -2925,7 +2931,10 @@ TOOLS = [
                        "{withdraw: {component, cascade: true}} (remove a component; "
                        "the plan reports the cascade of dependents that would lose "
                        "a provider, and without `cascade: true` admission refuses "
-                       "it). Returns `committed`, `verified`, the `plan`, the "
+                       "it); {add: {source, target?}} (new declarations appended "
+                       "to the only buffer, or `target`; a name already declared "
+                       "is refused). Returns `committed`, `verified` (admission, "
+                       "and `guarantees`: the G1-G9 self-check), the `plan`, the "
                        "`touched` symbols and every `component` the change touched. "
                        "A failed verification commits nothing and says why.",
         "inputSchema": {
@@ -2936,6 +2945,9 @@ TOOLS = [
                 "replace": {"type": "object",
                             "description": "{component, source}: the declaration's "
                                            "name and its whole new text"},
+                "add": {"type": "object",
+                        "description": "{source, target?}: new declarations to "
+                                       "append to the only buffer, or `target`"},
                 "withdraw": {"description": "a component name, or {component, "
                                             "cascade?: true}"},
                 "gauntlet": {"type": "boolean",

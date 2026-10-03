@@ -25,15 +25,22 @@ the draft handling are the ones `revl_edit` already runs. The intents:
   withdrawn from the running composition. A withdrawal whose cascade is not
   empty is refused by admission (a dependent would lose its provider) unless
   `cascade: true`, which withdraws the whole cascade with it.
+* ``{add: {source, target?}}``: new declarations appended to a buffer (the
+  only one, or `target`), refused if a name is already declared.
+
+`verified.guarantees` reports the G1-G9 self-check of the verification
+compile (#1731's `self_check`), so "verifies the guarantees" is visible per
+guarantee, not only as an admission verdict.
 """
 
 from __future__ import annotations
 
 from .. import query as _query
 from ..errors import RevlError
+from . import authoring_loop as _authoring_loop
 from . import edit as _edit
 
-INTENTS = ("edit", "replace", "withdraw")
+INTENTS = ("edit", "replace", "withdraw", "add")
 
 
 class ChangeError(ValueError):
@@ -43,8 +50,8 @@ class ChangeError(ValueError):
 def intent_of(arguments: dict) -> str:
     named = [name for name in INTENTS if arguments.get(name) is not None]
     if len(named) != 1:
-        raise ChangeError("name exactly one intent: `edit`, `replace` or "
-                          "`withdraw`" + (f" (got {', '.join(named)})" if named else ""))
+        raise ChangeError("name exactly one intent: `edit`, `replace`, "
+                          "`withdraw` or `add`" + (f" (got {', '.join(named)})" if named else ""))
     return named[0]
 
 
@@ -103,6 +110,14 @@ def edit_arguments(intent: str, arguments: dict, plan: dict | None) -> dict:
             raise ChangeError("`replace` is {component, source}: the component's "
                               "name and its whole new declaration")
         edit = {"symbol": value["component"], "replacement": value["source"]}
+        if value.get("target"):
+            edit["target"] = value["target"]
+        return {**carried, "edits": [edit]}
+    if intent == "add":
+        if not isinstance(value, dict) or not isinstance(value.get("source"), str):
+            raise ChangeError("`add` is {source, target?}: the new declarations, "
+                              "and which buffer to append them to")
+        edit = {"append": value["source"]}
         if value.get("target"):
             edit["target"] = value["target"]
         return {**carried, "edits": [edit]}
@@ -166,6 +181,9 @@ def shape(intent: str, result: dict, plan: dict | None, withdrawn: list[str],
     committed = bool(result.get("swapped") or result.get("booted"))
     verified = {"admission": "passed" if committed or result.get("admitted")
                 else "refused" if result.get("ok") is False else "not reached"}
+    guarantees = _guarantees(verified["admission"], result)
+    if guarantees is not None:
+        verified["guarantees"] = guarantees
     if verifier is not None:
         verified["gauntlet"] = ("passed" if verifier.dossier is not None
                                 else "failed" if result.get("gauntlet")
@@ -187,6 +205,30 @@ def shape(intent: str, result: dict, plan: dict | None, withdrawn: list[str],
         out["note"] = (result.get("note") or "the change was not committed") \
             + "; the running composition is unchanged"
     return out
+
+
+def _guarantees(admission: str, result: dict) -> dict | None:
+    """The G1-G9 self-check of the verification compile, when it ran: every
+    guarantee passes once admitted, and a refusal names the one that failed
+    (with its fix). None when verification was not reached."""
+    if admission == "passed":
+        return _authoring_loop.self_check(None, result.get("holes"))
+    diagnostics = result.get("diagnostics") or []
+    if admission == "refused" and any(map(_from_a_compile, diagnostics)):
+        return _authoring_loop.self_check(diagnostics)
+    return None
+
+
+#: Refusals made before any compile judged the candidate: a malformed or
+#: impossible edit (`session`), the plan-level cascade refusal (`admission`
+#: under the generic code), an internal fault.
+_NOT_A_COMPILE = ("session", "admission", "internal")
+
+
+def _from_a_compile(diagnostic: dict) -> bool:
+    code = str(diagnostic.get("code") or "")
+    return (code.startswith("G") and code[1:].isdigit()) \
+        or diagnostic.get("category") not in _NOT_A_COMPILE
 
 
 def withdrawn_names(edit_args: dict) -> list[str]:
