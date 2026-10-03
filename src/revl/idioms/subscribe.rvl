@@ -1,0 +1,10 @@
+// idiom: subscribe
+// summary: subscribe to a stream at activation; the subscription closes on teardown
+// rule: G4: a subscription is an acquisition, so it carries its inverse: `undo <sub>.close()`
+// rule: the source is itself acquired first, with its own inverse
+// fill: subscribe src undo sub.close()
+
+component Consumer {
+  let src = effect Stream.source() undo src.close()
+  let sub = subscribe src undo sub.close()
+}
