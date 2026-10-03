@@ -7,11 +7,43 @@
   "revlState": {
     "ok": true,
     "loaded": true,
-    "approval": {
-      "policy": "auto-approve-unless-irreversible",
-      "approvals": {"silent": 3, "atCommit": 0, "prompted": 1},
-      "percentAutoApproved": 75.0,
-      "promptsPerSession": 1
+    "loopAxes": {
+      "reversibilityRate": {
+        "numerator": 3,
+        "denominator": 4,
+        "value": 0.75
+      },
+      "autoApprovedWithProof": {
+        "numerator": 3,
+        "denominator": 4,
+        "value": 0.75
+      },
+      "promptsPerSession": {
+        "numerator": 1,
+        "denominator": 1,
+        "value": 1.0
+      },
+      "preflightCoverage": {
+        "numerator": 1,
+        "denominator": 2,
+        "value": 0.5
+      },
+      "violationsCaughtBeforeExecution": {
+        "numerator": 2,
+        "denominator": 2,
+        "value": 1.0
+      },
+      "residueAfterAbort": {
+        "numerator": 0,
+        "denominator": 0,
+        "value": null
+      },
+      "boundaryCalls": {
+        "a": 3,
+        "b": 0,
+        "c": 1,
+        "unclassified": 0
+      }
     }
   }
 }
