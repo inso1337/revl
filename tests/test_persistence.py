@@ -69,6 +69,19 @@ def _fresh_server_session():
         server_mod.SESSION.unload()
 
 
+@pytest.fixture(autouse=True)
+def _runtime_gate_open():
+    """These tests pin what each handler answers by itself (an argument check,
+    an empty session, a rejected snapshot), so they hold the issue #1692
+    runtime gate open. A cordis-less server refuses those verbs before the
+    handler runs; tests/test_mcp_runtime_gate_1692.py tests that."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_runtime_available(True)
+    yield
+    server_mod.set_runtime_available(None)
+
+
 # ---------------------------------------------------- the gate-replay invariant
 #
 # These need no runtime: a component the current checker rejects fails at

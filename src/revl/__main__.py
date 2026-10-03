@@ -1261,6 +1261,9 @@ def _run_analyze(args) -> int:
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    # the raw arguments, for a command that re-executes itself under another
+    # interpreter (`revl mcp serve`, issue #1692)
+    args.raw_argv = list(sys.argv[1:] if argv is None else argv)
 
     if args.command == "truc":
         from .truc import main as _truc_main  # noqa: PLC0415 — lazy, pulls cordis
