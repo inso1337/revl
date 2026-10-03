@@ -142,8 +142,9 @@ NOT_REQUIRED_CHECKS = {
     # `frontend-cordis` are the fast path for the 3-version matrix, and a diff
     # that misses the fast-path filter used to leave the root suite collected by
     # no job at all. This one runs the selection `tools/affected_tests.py`
-    # computes, on one interpreter, for every diff, and has no `if:` so it can
-    # never report `skipping`. Kept out of branch protection on purpose for now:
+    # computes, on one interpreter, for every diff, and on a pull request it
+    # can never report `skipping` (since issue #1817 it runs on pull requests
+    # only; `frontend` covers every other event). Kept out of branch protection on purpose for now:
     # it is coverage insurance rather than the gate itself, and a required
     # context must already exist on `main` before it can be required (requiring
     # it before this merges blocks every PR forever on a check no run reports).
