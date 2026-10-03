@@ -750,13 +750,18 @@ def load_evidence_bundle(entry_dir: str | os.PathLike) -> EvidenceBundle:
 KNOWLEDGE_DIRNAME = "knowledge"
 
 
-def load_knowledge(entry_dir: str | os.PathLike) -> dict | None:
+def load_knowledge(entry_dir: str | os.PathLike, *,
+                   regular_only: bool = False) -> dict | None:
     """An entry's knowledge records as one document, sorted by id so its hash
-    is a function of the records alone, or None when it ships none."""
+    is a function of the records alone, or None when it ships none.
+    `regular_only` reads no symlinked directory or record, for a copy whose
+    bytes have to be the ones on disk (a vendored truc, issue #1769)."""
     directory = Path(entry_dir) / KNOWLEDGE_DIRNAME
-    if not directory.is_dir():
+    if not directory.is_dir() or (regular_only and directory.is_symlink()):
         return None
-    records = [doc for doc in (_read_json(p) for p in sorted(directory.glob("*.json")))
+    paths = [p for p in sorted(directory.glob("*.json"))
+             if not regular_only or (p.is_file() and not p.is_symlink())]
+    records = [doc for doc in (_read_json(p) for p in paths)
                if isinstance(doc, dict) and isinstance(doc.get("id"), str)]
     if not records:
         return None

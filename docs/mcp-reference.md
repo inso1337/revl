@@ -500,7 +500,8 @@ it first. After an export, the files on disk equal `revl_snapshot`'s
 
 `with_knowledge: true` also writes the session's notes: each live note as a
 marked comment above its anchor, and every record not yet in the sidecar
-(`revl_knowledge`).
+(`revl_knowledge`). A vendored truc's records and its `component.rvl` are left
+alone (issue #1769, see docs/registry.md §1.4).
 
 - Inputs: `path` and `overwrite` (inline compositions); `with_knowledge`.
 
@@ -588,6 +589,10 @@ field.
 records of their own), one JSON file each under `<composition
 dir>/.revl/knowledge/<id>.json`, so two sessions never write the same file.
 `revl_load` reads them; only `revl_export {with_knowledge: true}` writes them.
+A loaded `trucs/<name>/component.rvl` also brings the records `truc add`
+vendored beside it, marked `vendored: <name>` and trusted as the publisher's
+only when the add measured a signature over them and nothing changed since
+(docs/registry.md §1.4).
 
 **Round trip.** `revl_export {with_knowledge: true}` also writes each live note
 into its file as a marked comment directly above its anchor:

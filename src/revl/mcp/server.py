@@ -842,6 +842,7 @@ def _ride_knowledge(name: str, payload, arguments: dict | None = None) -> None:
         if name == "revl_load" and payload.get("ok"):
             _notes.load_sidecar(SESSION, vs)
             _notes.import_marked(SESSION, vs)
+            _notes.load_vendored(SESSION, vs)
         if moved or name == "revl_load":
             _notes.refresh(SESSION, vs)
         landed = payload.get("swapped") or payload.get("committed") \
@@ -1312,11 +1313,17 @@ def _export_plan(held: dict, arguments: dict) -> list[tuple[str, str]]:
     roots = _file_roots()
     if held.get("files"):
         with_knowledge = arguments.get("with_knowledge") is True
-        all_notes = list(_notes.notes(SESSION).values()) if with_knowledge else []
+        # a vendored truc's records are the vendor's: never rendered, never
+        # copied into the project's sidecar. Nothing is rendered INTO a vendored
+        # component either, since its bytes are what truc.lock pins; a note
+        # about it stays in the sidecar (issue #1769)
+        all_notes = ([n for n in _notes.notes(SESSION).values() if not n.get("vendored")]
+                     if with_knowledge else [])
+        vendored = {path for _n, path, _p in _notes.vendored_trucs(held)}
         targets = []
         for path in held["files"]:
             text = held["files_content"].get(path)
-            if text is not None and with_knowledge:
+            if text is not None and with_knowledge and path not in vendored:
                 text = _notes.render(text, path, [n for n in all_notes
                                                    if n["anchor"]["path"] == path])
             targets.append((path, text))

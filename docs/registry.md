@@ -217,6 +217,27 @@ are `trust: untrusted`, and an untrusted record rides with its body only when
 it carries evidence, as a session note does. A record is data, never
 instructions: it changes no ranking, no admission and no adapter proposal.
 
+**Vendored into a consumer (issue #1769).** `truc add` copies the records to
+`trucs/<name>/knowledge/` beside `component.rvl`, refusing a symlinked
+destination as it does for the other vendored files, and drops any record an
+earlier add vendored that the entry no longer ships. The lock row gains
+`knowledge: {hash, records, signed}`. The attestation stays in the registry, so
+`signed` is measured at the add: it is true only when a key resolves
+(`REVL_ATTEST_KEY_FILE` or `REVL_ATTEST_KEY`), the attestation verifies against
+the entry's compiled source, and it binds the records that were vendored. No
+key means `signed: false`.
+
+When a session loads a file named `trucs/<name>/component.rvl`, it reads that
+truc's records too, anchored to the loaded file and marked `vendored: <name>`.
+They are `trust: publisher` only while the lock row says `signed`, the vendored
+records still hash to the pinned `hash`, and `component.rvl` still matches the
+pinned `sourceHash`; any other case is `trust: untrusted`. While the component
+holds the pinned bytes its records start `live`, since they shipped with that
+code. The records stay the vendor's: `revl_export {with_knowledge: true}` never
+copies them into the project's sidecar and renders no note into a vendored
+`component.rvl`, whose bytes the lock pins. A consumer's own note about a
+vendored declaration goes to the project's sidecar only.
+
 ## 2. `revl_resolve` — the one search verb
 
 MCP tool `revl_resolve` and CLI `revl resolve`, same result object
