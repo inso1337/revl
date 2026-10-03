@@ -7,7 +7,7 @@ placement could neither probe it nor serve it over a seam: both answered
 `no provider for revl.Components$Kv under key "kv"`. (`RealPlacementRunner`
 had the same gap; issue #1581 closed it there.)
 
-WHAT IT DOES NOW. `placement._java_placements` hands each java process the
+WHAT IT DOES NOW. `placement._process_placements` hands each java process the
 realm of every provision it makes, and the stub runner resolves a key in the
 py tier's `resolve_key` order: the shared realm when the key is provided
 there, else its one isolated realm (a strict single-realm read). A key
@@ -119,9 +119,9 @@ def _probe(out: str, expr: str) -> str:
 
 
 def test_every_provision_carries_its_realm():
-    from revl.placement import _java_placements  # noqa: PLC0415
+    from revl.placement import _process_placements  # noqa: PLC0415
     ir = compile_source(ISOLATED + TWO_REALMS.split("\n", 1)[1], "p.rvl")
-    assert _java_placements(ir, ["Walled", "StoreA", "StoreB"]) == {
+    assert _process_placements(ir, ["Walled", "StoreA", "StoreB"]) == {
         "kv": [{"component": "Walled", "realm": "wa"},
                {"component": "StoreA", "realm": "tenant_a"},
                {"component": "StoreB", "realm": "tenant_b"}],
