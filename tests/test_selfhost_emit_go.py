@@ -168,6 +168,13 @@ CORPUS = [
     "../emit_java_corpus/component_format.rvl",
     "../emit_rust_corpus/config.rvl",
     "../emit_ts_corpus/property_edges.rvl",
+    # ... and `emit` steps in provide bodies, a site `compensate` clause parked
+    # on the activation frame included
+    "comp_provide_emit.rvl",
+    "../../../backends/java/scenarios/runtime_values.rvl",
+    "../../../bench/results/rerun-deepseek-v4-pro-20260826/06-audit-logger/v2/attempt-1.rvl",
+    "../../../bench/results/rerun-deepseek-v4-pro-20260826/12-replicator/v2/attempt-1.rvl",
+    "../../../bench/results/rerun-deepseek-v4-pro-20260826/17-billing-ledger/v2/attempt-1.rvl",
 ]
 
 # The combined-path documents, which import stc-go and are built against it.

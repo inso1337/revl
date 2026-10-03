@@ -729,6 +729,7 @@
    "tests/fixtures/emit_go_corpus/calls.rvl",
    "tests/fixtures/emit_go_corpus/comp_provide_builtins.rvl",
    "tests/fixtures/emit_go_corpus/comp_provide_config.rvl",
+   "tests/fixtures/emit_go_corpus/comp_provide_emit.rvl",
    "tests/fixtures/emit_go_corpus/comp_provide_pure.rvl",
    "tests/fixtures/emit_go_corpus/comp_provide_records.rvl",
    "tests/fixtures/emit_go_corpus/control.rvl",
