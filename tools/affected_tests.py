@@ -1268,6 +1268,16 @@ def select(changed, root) -> dict:
             pytest_nodes.add("tests/test_docgen_doc_status_shape.py")
             reasons.append("tools/check_vision_claims.py")
             continue
+        # issue #1774: the shard weights only balance root-suite-affected's
+        # shards; they never decide which tests run (the shards partition the
+        # collection whatever the weights say, which
+        # tests/test_root_suite_shards_1774.py pins). A refresh of them, or of
+        # the tool that writes them, selects that test alone instead of a FULL
+        # run across four shards. tests/_shard.py itself stays FULL.
+        if f in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
+            pytest_nodes.add("tests/test_root_suite_shards_1774.py")
+            reasons.append(f"{f} (shard balance only)")
+            continue
         # issue #1233: the roadmap claim gate's covering test is named for the
         # DOCUMENT it reads, so the generic tools/*.py rule below looks for a
         # `test_check_roadmap_claims.py` that does not exist and falls back to

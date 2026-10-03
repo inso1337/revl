@@ -285,7 +285,10 @@ file with `REVL_TEST_SHARD=k/4`, balanced by the per-file seconds in
 `tests/shard_weights.json`. A smaller selection runs whole in shard 1. The
 shards run every selected test exactly once, which
 `tests/test_root_suite_shards_1774.py` pins. A stale weight only makes the
-shards uneven. To run one shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
+shards uneven. A sharded run ends by printing `REVL_SHARD_SECONDS <seconds> <file>`
+for each file it ran; `python tools/refresh_shard_weights.py --run <run id> --write`
+reads those lines from a FULL run's four job logs into the weights file. To run one
+shard locally: `REVL_TEST_SHARD=2/4 pytest tests/ -q`.
 
 The heavy jobs never run on a pull request (issue #1678): `frontend` (the
 3.11/3.12/3.13 matrix), `frontend-cordis`, `conformance`, `formal`,

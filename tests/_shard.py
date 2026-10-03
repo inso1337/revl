@@ -22,6 +22,10 @@ from pathlib import Path
 
 WEIGHTS = Path(__file__).with_name("shard_weights.json")
 ENV = "REVL_TEST_SHARD"
+# A sharded run ends by printing one `REVL_SHARD_SECONDS <seconds> <file>` line
+# per file it ran (tests/conftest.py); tools/refresh_shard_weights.py reads
+# them back out of the CI job logs into shard_weights.json.
+SECONDS_TAG = "REVL_SHARD_SECONDS"
 
 
 def parse(spec: str) -> tuple[int, int]:
@@ -70,3 +74,33 @@ def loads(files, weights: dict, n: int) -> list:
     for f, i in assign(files, weights, n).items():
         out[i] += weights.get(f, default)
     return out
+
+
+def seconds_lines(per_file: dict) -> list:
+    """The lines a sharded run prints: setup + call + teardown seconds per file."""
+    return [f"{SECONDS_TAG} {per_file[f]:.2f} {f}" for f in sorted(per_file)]
+
+
+def parse_seconds(text: str) -> dict:
+    """file -> seconds from log text holding `seconds_lines` output. A CI log
+    prefixes each line with a timestamp, so the tag is searched, not anchored."""
+    out = {}
+    for line in text.splitlines():
+        _, tag, rest = line.partition(SECONDS_TAG + " ")
+        if not tag:
+            continue
+        secs, _, name = rest.strip().partition(" ")
+        try:
+            out[name.strip()] = float(secs)
+        except ValueError:
+            continue
+    return out
+
+
+def refreshed(doc: dict, measured: dict, note: str, keep=lambda f: True) -> dict:
+    """`doc` with `measured` seconds written over the old ones. A file `keep`
+    rejects (one that no longer exists) is dropped; one the run did not time
+    keeps its old weight."""
+    seconds = {f: v for f, v in (doc.get("seconds") or {}).items() if keep(f)}
+    seconds.update({f: round(v, 2) for f, v in measured.items() if keep(f)})
+    return {"//": note, "seconds": dict(sorted(seconds.items()))}

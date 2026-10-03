@@ -121,6 +121,58 @@ def test_a_pytest_started_by_a_test_runs_its_whole_collection():
     assert _shard.ENV not in os.environ
 
 
+# ------------------------------------------ the per-file seconds, for weights
+
+def test_a_sharded_run_prints_the_seconds_of_every_file_it_ran(tmp_path):
+    for i in range(3):
+        (tmp_path / f"test_case_{i}.py").write_text(
+            _CASE.format(count=2), encoding="utf-8")
+    env = dict(os.environ, PYTHONPATH=os.pathsep.join(
+        [str(ROOT / "tests"), str(ROOT / "src"), os.environ.get("PYTHONPATH", "")]))
+    out = {}
+    for spec in (None, "1/1"):
+        env.pop(_shard.ENV, None)
+        if spec:
+            env[_shard.ENV] = spec
+        proc = subprocess.run(
+            [sys.executable, "-m", "pytest", str(tmp_path), "-q",
+             "-p", "no:cacheprovider", "-p", "conftest", "--rootdir", str(tmp_path)],
+            cwd=tmp_path, env=env, capture_output=True, text=True, timeout=300,
+            check=False)
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        out[spec] = _shard.parse_seconds(proc.stdout)
+    assert out[None] == {}, "an unsharded run printed shard seconds"
+    assert sorted(out["1/1"]) == [f"test_case_{i}.py" for i in range(3)]
+    assert all(v >= 0 for v in out["1/1"].values())
+
+
+def test_seconds_read_back_through_a_ci_timestamp_prefix():
+    lines = _shard.seconds_lines({"tests/test_b.py": 1.234, "tests/test_a.py": 60.0})
+    log = "\n".join(f"2026-10-03T14:05:16.8019169Z {line}" for line in lines)
+    assert _shard.parse_seconds(log + "\nunrelated line\n") == {
+        "tests/test_a.py": 60.0, "tests/test_b.py": 1.23}
+
+
+def test_a_refresh_overwrites_measured_files_and_drops_removed_ones():
+    doc = {"//": "old", "seconds": {"tests/a.py": 1.0, "tests/b.py": 2.0, "tests/gone.py": 3.0}}
+    new = _shard.refreshed(doc, {"tests/b.py": 9.876, "tests/c.py": 0.5}, "note",
+                           keep=lambda f: f != "tests/gone.py")
+    assert new == {"//": "note", "seconds": {
+        "tests/a.py": 1.0, "tests/b.py": 9.88, "tests/c.py": 0.5}}
+
+
+def test_a_weights_refresh_is_not_a_full_run():
+    """A refreshed weights file changes shard balance only, so the affected
+    selection for it (and for the tool that writes it) is this file alone."""
+    sys.path.insert(0, str(ROOT / "tools"))
+    import affected_tests  # noqa: PLC0415
+    for changed in ("tests/shard_weights.json", "tools/refresh_shard_weights.py"):
+        sel = affected_tests.select([changed], ROOT)
+        assert not sel["full"], sel["reason"]
+        assert sel["pytest"] == ["tests/test_root_suite_shards_1774.py"], sel
+    assert affected_tests.select(["tests/_shard.py"], ROOT)["full"]
+
+
 # --------------------------------------------------------------- the CI job
 
 def _job():

@@ -187,6 +187,24 @@ def pytest_collection_modifyitems(config, items):
           f"of {len(keep) + len(drop)} collected")
 
 
+# A sharded run times each file it runs and prints the totals at the end, so
+# tests/shard_weights.json can be refreshed from CI's own durations
+# (tools/refresh_shard_weights.py). An unsharded run prints nothing extra.
+_SHARD_SECONDS: dict = {}
+
+
+def pytest_runtest_logreport(report):
+    if _SHARD_SPEC:
+        name = report.nodeid.split("::", 1)[0]
+        _SHARD_SECONDS[name] = _SHARD_SECONDS.get(name, 0.0) + report.duration
+
+
+def pytest_terminal_summary(terminalreporter):
+    if _SHARD_SPEC and _SHARD_SECONDS:
+        terminalreporter.write_line("")
+        for line in _shard_module().seconds_lines(_SHARD_SECONDS):
+            terminalreporter.write_line(line)
+
 
 def pytest_configure(config):
     # tools/hooks/pre-commit runs with pytest-timeout's `--timeout=60`. A test
