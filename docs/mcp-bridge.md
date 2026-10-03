@@ -575,6 +575,12 @@ revl serve --http --port 8080 examples/app/notes.rvl
 # POST /revl/store/get  [...]     -> 404: not on the public surface
 ```
 
+Requests are served **one at a time** (issue #1488). The composition runs in
+one live session, which drives a single event loop, so the face serializes
+dispatch with the same lock the MCP HTTP transport uses. Concurrent requests all
+complete, each with its own answer, but a slow operation delays every request
+queued behind it: throughput is one call at a time.
+
 The reply shape is the placement bridge's own, `{"ok": true, "value":
 <encoded>}`, so a value marshals the same bytes here as over the placement seam,
 and a `revl export client` TS client (whose types *are* that encoding) reads it
@@ -587,6 +593,33 @@ no gate over anything it in turn reaches: it is LOCAL contract only, makes no
 safety claim about a callee (D-424c.8, no verified-remote badge), and binds
 loopback by default. `--http` shares the identical compile/admit/config
 preflight as `--mcp`; only the transport differs.
+
+### Operators of an `--http` face: the operator listener
+
+The face's callers are the application's users, so the face itself serves no
+operator verb (design 569, option B). An operator reaches the same session on a
+second address (option C2, issue #1553):
+
+```bash
+revl serve --http examples/app/notes.rvl --approval-policy auto \
+    --operator-listen 127.0.0.1:8471 --operator-profile ops.profile
+```
+
+The operator listener is the MCP HTTP transport
+([mcp-http-transport.md](mcp-http-transport.md)) at `/mcp`, sharing the face's
+session and dispatch lock, authenticating every request against the profile,
+and refusing any request with an `Origin` header. With `--approval-policy auto`
+a class-(c) crossing an app request reaches is held: the app caller gets `403`
+`pending_approval` with the ticket id only, an operator answers it with
+`revl_approve` or `revl_revoke` and that `hash`, and the app's identical
+re-issue then runs once or is refused (`approval_refused`). `revl_estop` on the
+operator listener halts the face: the request in flight is refused at its next
+crossing seam that reads the latch (item 443, extended to every crossing by
+issue #1504), and the face answers `503` `halted` to every request after, including
+one queued behind it. Without a policy, `--refuse-ungated-emissions` (opt-in)
+refuses such an app request by name (`403` `ungated_emission`) instead of
+letting it fire. The options are listed under `revl serve` in
+[commands-reference.md](commands-reference.md).
 
 ### Import + serve close the loop
 

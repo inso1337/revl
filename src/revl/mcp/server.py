@@ -1280,7 +1280,9 @@ def _tool_revoke(arguments: dict) -> dict:
       * `hash` (item 471 Slice 2) withdraws a PENDING multi-party QUESTION — a
         different object from a minted grant, so it is a different branch and not
         a third spelling of one. The votes cast so far stop counting, no approval
-        is minted, and the decision graph records who closed it and why.
+        is minted, and the decision graph records who closed it and why. For a
+        single-party ticket the same `hash` is the operator's NO (issue #1553):
+        the re-issue the ticket holds is refused once and fires nothing.
 
     Revoking a capability/id with no live grant is a clean typed no-op
     (`count: 0`), not an error — idempotent. Gated by the `approve` operator verb
@@ -2982,7 +2984,11 @@ TOOLS = [
                                         "minted grant). The votes cast so far "
                                         "stop counting and no approval is minted. "
                                         "Only the proposer or an approver the rule "
-                                        "names may close it"},
+                                        "names may close it. Issue #1553: a "
+                                        "single-party ticket's hash answers it NO: "
+                                        "the re-issue it holds is refused once "
+                                        "and fires nothing, and a yes minted for "
+                                        "it and not yet spent is withdrawn"},
                 "reason": {"type": "string",
                            "description": "item 471: why the question is being "
                                           "withdrawn, recorded on the "
@@ -3829,8 +3835,13 @@ def _error(request_id, code: int, message: str) -> dict:
             "error": {"code": code, "message": message}}
 
 
-def serve(stdin=None, stdout=None) -> int:
-    """Read newline-delimited JSON-RPC from stdin until EOF."""
+def serve(stdin=None, stdout=None, before=None) -> int:
+    """Read newline-delimited JSON-RPC from stdin until EOF.
+
+    `before(message)`, when given, runs before each message and returns None to
+    go on or a reason to refuse that message (issue #1463:
+    `live_profile.StdioBinding` re-binds the session to the operator profile
+    file as it is now)."""
     stdin = stdin or sys.stdin
     stdout = stdout or sys.stdout
     for line in stdin:
@@ -3842,6 +3853,12 @@ def serve(stdin=None, stdout=None) -> int:
         except json.JSONDecodeError:
             stdout.write(json.dumps(_error(None, -32700, "parse error")) + "\n")
             stdout.flush()
+            continue
+        refusal = before(message) if before is not None else None
+        if refusal is not None:
+            if isinstance(message, dict) and message.get("id") is not None:
+                stdout.write(json.dumps(_error(message["id"], -32603, refusal)) + "\n")
+                stdout.flush()
             continue
         response = handle(message)
         if response is not None:
