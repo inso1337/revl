@@ -970,6 +970,7 @@ def ship_context(project_dir: str) -> str:
             pathlib.Path(project_dir, ev_rel))
 
     tags = ship.get("tags") or []
+    _remember_ship_knowledge(project_dir)
     return json.dumps({
         "source": source,
         "description": str(ship.get("description", "")),
@@ -981,6 +982,28 @@ def ship_context(project_dir: str) -> str:
         "evidenceVerdict": verdict,
         "evidenceLifecycle": lifecycle,
     })
+
+
+#: the knowledge records of the project `ship_context` last read, for `publish`
+#: in the same `truc ship` run (knowledge slice 4, issue #1762). They travel
+#: here rather than through the pure Shipper's plan because the Shipper decides
+#: nothing about them: the registry's write path checks their anchors itself.
+_SHIP_KNOWLEDGE: list | None = None
+
+
+def _remember_ship_knowledge(project_dir: str) -> None:
+    global _SHIP_KNOWLEDGE
+    directory = pathlib.Path(project_dir, ".revl", "knowledge")
+    records = []
+    if directory.is_dir():
+        for path in sorted(directory.glob("*.json")):
+            try:
+                record = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                continue
+            if isinstance(record, dict) and isinstance(record.get("id"), str):
+                records.append(record)
+    _SHIP_KNOWLEDGE = records or None
 
 
 def gauntlet_evidence(source: str) -> str:
@@ -1052,7 +1075,8 @@ def publish(plan_json: str) -> str:
         description=plan.get("description", ""),
         tags=plan.get("tags") or [],
         dossier_text=(plan["dossierText"] if plan.get("stampDossier")
-                      and plan.get("dossierText") else None))
+                      and plan.get("dossierText") else None),
+        knowledge=_SHIP_KNOWLEDGE)
     return "published"
 
 

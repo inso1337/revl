@@ -74,8 +74,17 @@ def notes(session) -> dict:
     `stale` from the last `refresh`."""
     folded = _fold(session)
     stale = getattr(session, "note_stale", None) or set()
-    return {i: ({**n, "status": "stale"} if i in stale and n["status"] == "live" else n)
-            for i, n in folded.items()}
+    refuted = getattr(session, "note_refuted", None) or set()
+
+    def status(note_id: str, note: dict) -> dict:
+        if note["status"] != "live":
+            return note
+        if note_id in refuted:
+            return {**note, "status": "refuted"}
+        if note_id in stale:
+            return {**note, "status": "stale"}
+        return note
+    return {i: status(i, n) for i, n in folded.items()}
 
 
 def _fold(session) -> dict:
@@ -105,6 +114,8 @@ def _fold(session) -> dict:
 def clear(session) -> None:
     session.note_records = {}
     session.note_stale = set()
+    session.note_refuted = set()
+    session.note_rebased = {}
 
 
 def _store(session, record: dict) -> dict:
@@ -143,6 +154,104 @@ def _trust(session) -> dict:
             "trust": "untrusted" if AUTHORING.profile() is not None else "operator"}
 
 
+# ---------------------------------------------------------------- evidence (slice 4)
+
+#: the static query verbs a `query` evidence may name: read-only by construction
+QUERY_VERBS = {"emits-to": ("target", "emitters"), "withdraw": ("component", "withdrawal"),
+               "depends-on": ("target", "dependents"), "reaches": ("component", "reach"),
+               "drift": ("service", "drift")}
+#: evidence the server re-runs; `test` and `issue` are citations
+RERUNNABLE = ("diagnostic", "query", "audit")
+
+
+def _validate_evidence(item) -> None:
+    if not isinstance(item, dict) or item.get("kind") not in EVIDENCE_KINDS:
+        raise NoteError("evidence is a list of {kind, ...} with kind one of "
+                        f"{', '.join(EVIDENCE_KINDS)}: read-only checks the "
+                        "server may run, never a call or a swap")
+    kind = item["kind"]
+    if kind == "query":
+        if item.get("verb") not in QUERY_VERBS:
+            raise NoteError("a `query` evidence names one of the read-only query "
+                            f"verbs ({', '.join(QUERY_VERBS)}); "
+                            f"{item.get('verb')!r} is not one")
+        arg = QUERY_VERBS[item["verb"]][0]
+        if not isinstance((item.get("args") or {}).get(arg), str):
+            raise NoteError(f"a `{item['verb']}` query evidence needs `args.{arg}`")
+        if not isinstance(item.get("expect"), dict) or not item["expect"]:
+            raise NoteError("a `query` evidence needs `expect`: the fields of the "
+                            "query's answer it asserts, e.g. {cascade: [...]}")
+    elif kind == "diagnostic":
+        expect = item.get("expect")
+        if not isinstance(item.get("source"), str) or not isinstance(expect, dict) \
+                or not isinstance(expect.get("code"), str):
+            raise NoteError("a `diagnostic` evidence is {source, expect: {code}}: "
+                            "inline source the compiler refuses with that code")
+    elif kind == "audit":
+        if not isinstance(item.get("component"), str) \
+                or not isinstance(item.get("expect"), dict):
+            raise NoteError("an `audit` evidence is {component, expect: {emissions?, "
+                            "capabilities?}}")
+
+
+def _project(value, like):
+    """`value` reduced to the shape of `like`, so an expectation names only the
+    fields it asserts: a list of dicts becomes the list of their `component`
+    (or `key`, or `name`) when `like` is a list of strings."""
+    if isinstance(like, list) and all(isinstance(x, str) for x in like) \
+            and isinstance(value, list):
+        out = []
+        for item in value:
+            if isinstance(item, dict):
+                item = next((item[k] for k in ("component", "key", "name") if k in item),
+                            None)
+            out.append(item)
+        return sorted(out, key=str)
+    return value
+
+
+def run_evidence(session, item: dict) -> bool | None:
+    """Re-run one evidence item against the running composition: True when it
+    still holds, False when it does not, None when it is a citation."""
+    kind = item.get("kind")
+    if kind not in RERUNNABLE:
+        return None
+    try:
+        if kind == "query":
+            from .. import query as Q  # noqa: PLC0415
+
+            arg, fn = QUERY_VERBS[item["verb"]]
+            answer = getattr(Q, fn)(session.ir, item["args"][arg])
+            if answer.get("ok") is False:
+                return False
+            return all(_project(answer.get(key), want) ==
+                       (sorted(want, key=str) if isinstance(want, list) else want)
+                       for key, want in item["expect"].items())
+        if kind == "diagnostic":
+            from .server import compile_under_authoring  # noqa: PLC0415
+            from ..diagnostics import report  # noqa: PLC0415
+            from ..errors import RevlError  # noqa: PLC0415
+
+            try:
+                compile_under_authoring(item["source"], None)
+            except RevlError as error:
+                return report(error).get("diagnostics", [{}])[0].get("code") \
+                    == item["expect"]["code"]
+            return False
+        if kind == "audit":
+            from ..boundary import _boundary  # noqa: PLC0415
+
+            row = _boundary(session.ir).get(item["component"])
+            if row is None:
+                return False
+            return all(sorted(row.get(key) or []) == sorted(want)
+                       if isinstance(want, list) else row.get(key) == want
+                       for key, want in item["expect"].items())
+    except Exception:  # noqa: BLE001 — evidence that cannot run does not hold
+        return False
+    return None
+
+
 def _validate(note: dict) -> None:
     if not isinstance(note, dict):
         raise NoteError("a note is {kind, body, evidence?, symbol?}")
@@ -155,10 +264,7 @@ def _validate(note: dict) -> None:
         raise NoteError(f"a note's body is at most {BODY_LIMIT} characters; this "
                         f"one is {len(body)}. Refused, not truncated")
     for item in note.get("evidence") or []:
-        if not isinstance(item, dict) or item.get("kind") not in EVIDENCE_KINDS:
-            raise NoteError("evidence is a list of {kind, ...} with kind one of "
-                            f"{', '.join(EVIDENCE_KINDS)}: read-only checks the "
-                            "server may run, never a call or a swap")
+        _validate_evidence(item)
 
 
 def add(session, vs: dict, note: dict, symbol: str, *, author=None,
@@ -193,9 +299,17 @@ def op_record(session, op: str, target: str, **fields) -> dict:
 # ---------------------------------------------------------------- staleness
 
 def refresh(session, vs: dict) -> None:
-    """Which live notes are stale: their anchor's code changed (or vanished)
-    since they were written or last confirmed. Records are never rewritten."""
-    stale = set()
+    """Recompute every live note's status against the running composition.
+
+    A note whose evidence the server can re-run (slice 4: diagnostic, query,
+    audit) is re-checked every time, because a query's answer depends on the
+    whole composition and not only on the anchor: all checks hold, it is live
+    and re-fingerprinted; any fails, it is refuted. A note with only citations
+    (test, issue) or none goes stale when its anchor's code changed (or the
+    anchor vanished) since it was written or last confirmed. Records are never
+    rewritten."""
+    stale, refuted = set(), set()
+    rebased = dict(getattr(session, "note_rebased", None) or {})
     for note_id, note in _fold(session).items():
         if note["status"] != "live":
             continue
@@ -203,9 +317,18 @@ def refresh(session, vs: dict) -> None:
             now = _anchor_of(session, vs, note["anchor"]["symbol"])["fingerprint"]
         except NoteError:
             now = None
-        if now != note["anchor"]["fingerprint"]:
+        checks = [run_evidence(session, item) for item in note.get("evidence") or []]
+        checks = [c for c in checks if c is not None]
+        if checks:
+            if all(checks) and now is not None:
+                rebased[note_id] = now
+            else:
+                refuted.add(note_id)
+            continue
+        if now != rebased.get(note_id, note["anchor"]["fingerprint"]):
             stale.add(note_id)
-    session.note_stale = stale
+    session.note_stale, session.note_refuted = stale, refuted
+    session.note_rebased = rebased
 
 
 # ---------------------------------------------------------------- serving
@@ -361,6 +484,7 @@ def _declarations(text: str, name: str) -> list:
         return []
 
 
-__all__ = ["KINDS", "EVIDENCE_KINDS", "NoteError", "notes", "add", "op_record",
+__all__ = ["KINDS", "EVIDENCE_KINDS", "QUERY_VERBS", "RERUNNABLE", "run_evidence",
+           "NoteError", "notes", "add", "op_record",
            "refresh", "served", "concerning", "load_sidecar", "sidecar_writes",
            "render", "import_marked"]

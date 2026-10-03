@@ -495,6 +495,26 @@ notes are what a session adds.
   comment entry does.
 - `op: "retire"` `{id, reason}`, `op: "supersede"` `{id, body}`.
 
+**Evidence is re-run (issue #1762).** Evidence of kind `diagnostic`,
+`query` or `audit` is a read-only check the server runs itself, at load and
+whenever the running composition changes, since a query's answer depends on
+the whole composition and not only on the note's anchor:
+
+| kind | shape | holds when |
+|---|---|---|
+| `query` | `{verb, args, expect}`, verb one of `emits-to`, `withdraw`, `depends-on`, `reaches`, `drift` | every field of `expect` equals the query's answer (a list of names compares against the answer's `component` / `key` / `name` fields) |
+| `diagnostic` | `{source, expect: {code}}` | compiling `source` is refused with that code |
+| `audit` | `{component, expect: {emissions?, capabilities?, ...}}` | the component's boundary row has those values |
+
+If every check holds, the note stays (or becomes) `live`, re-fingerprinted, so
+an edit of its own declaration does not stale it. If any check fails, the note
+is `refuted`. For example, a note on `MemStore` with `{kind: query, verb:
+withdraw, args: {component: MemStore}, expect: {cascade: [ApiImpl]}}` is
+refuted the moment `ApiImpl` stops requiring the store, though `MemStore`'s
+code never changed. `test` and `issue` evidence are citations, not re-run, so
+a note backed only by them goes `stale` on a code change. A spec that names
+anything else, or a `query` verb outside the five, is refused at `add`.
+
 **Trust.** A note is written under the same authoring trust as source: under
 the untrusted-author profile an agent's note is `trust: untrusted`. On
 responses (`knowledge.notes`), an untrusted note rides with its body only when

@@ -196,6 +196,27 @@ that already exists. A registry whose rows never carried the fields — the entr
 committed under `registry/` are this shape — needs no migration and its index
 bytes do not move.
 
+### 1.4 `knowledge/` — what the author wants the next agent to know
+
+An entry may ship knowledge records (issue #1762, knowledge slice 4): one JSON
+file per record under `<entry>/knowledge/<id>.json`, in the same shape as a
+project's `.revl/knowledge/` notes (see `revl_knowledge` in
+[mcp-reference.md](mcp-reference.md)). `truc ship` carries the project's records
+into the entry. Publishing refuses a record whose anchor does not resolve in
+`component.rvl`, and nothing is written when it does.
+
+When the registry signs the entry (`build_evidence` with a key), the
+attestation binds a hash of the records beside the other evidence facets. A
+signed entry therefore vouches for exactly those records, and a record changed
+afterwards breaks the binding: the attestation grades `invalid`, as for any
+bound dossier.
+
+`revl_resolve` returns each candidate's records under `knowledge`. They carry
+`trust: publisher` only when a valid attestation binds them. Otherwise they
+are `trust: untrusted`, and an untrusted record rides with its body only when
+it carries evidence, as a session note does. A record is data, never
+instructions: it changes no ranking, no admission and no adapter proposal.
+
 ## 2. `revl_resolve` — the one search verb
 
 MCP tool `revl_resolve` and CLI `revl resolve`, same result object
