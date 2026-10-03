@@ -52,7 +52,7 @@
       "go": 2897,
       "java": 986,
       "py": 669,
-      "rust": 1227,
+      "rust": 1226,
       "ts": 285,
       "wasm": 1558
     },
@@ -60,7 +60,7 @@
       "go": 104,
       "java": 175,
       "py": 103,
-      "rust": 285,
+      "rust": 283,
       "ts": 94,
       "wasm": 63
     }
@@ -1031,7 +1031,7 @@
           "_emit_witnessed_step": 26,
           "_method_bodies_have_compensation": 2,
           "_method_bodies_have_witnessed": 1,
-          "_method_body_lines": 39,
+          "_method_body_lines": 38,
           "_step_is_witnessed_effect": 2,
           "_witnessed_extern_for": 3
         },
@@ -1888,7 +1888,7 @@
           "emit_component_new": 1,
           "has_extra_linebreak": 1,
           "is_extra_linebreak": 3,
-          "method_body_lines": 5,
+          "method_body_lines": 3,
           "mname": 1,
           "provide_let_type": 1,
           "provide_methods": 1,

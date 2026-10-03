@@ -242,6 +242,10 @@ CORPUS = [
                              #   re-reads the moved body local `key`: the
                              #   `let key_undo = key.clone();` pre-clone (item
                              #   114, `_undo_reclone_locals`)
+    "comp_let_binds_param_undo.rvl",  # issue #1723: `let key = k` before an
+                             #   `effect ... undo` clones the parameter
+                             #   (`let key = k.clone();`), as does `slot = v`;
+                             #   a `let` of a body local stays a move
     "comp_realm_isolate.rvl",# `isolate clock in realm("tenant_a")`: the
                              #   `_revl_realm` label-registry preamble and the
                              #   `ctx.isolate_with(..)` placement arm
