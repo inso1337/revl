@@ -35,10 +35,11 @@
           ]
         },
         "rust": {
-          "residual": 1,
-          "corpus": 42,
+          "residual": 2,
+          "corpus": 43,
           "reproduced": 41,
           "documents": [
+            "by_value_reuse.rvl",
             "comp_stream.rvl"
           ]
         },
@@ -72,8 +73,8 @@
           "documents": []
         }
       },
-      "total_residual": 26,
-      "total_corpus": 295,
+      "total_residual": 27,
+      "total_corpus": 296,
       "clean_tiers": [
         "java",
         "wasm"
@@ -282,9 +283,9 @@
           }
         },
         "rust": {
-          "unported_constructs": 20,
-          "unported_reasons": 7,
-          "blind_constructs": 15,
+          "unported_constructs": 19,
+          "unported_reasons": 6,
+          "blind_constructs": 16,
           "reasons": {
             "Item 421 F6 (#392) added the declared-`Secret[T]` runtime registry to the reference rust backend (backends/rust/emit.py): a `secret` config field is registered at the head of the plugin closure, a `secret` provide-method parameter at the method head, and a `secret_return` extern is wrapped at its origin, with every emitted-runtime sink (the host trace `revl_stream_record` and the WAL descriptor args under `--record`) reading through `revl_redact_text`. The item-199 Path B self-host rust emitter (selfhost/emit_rust.rvl) has not been extended to it yet; a corpus document reaching these markings would trigger the reference's `_SECRET_MODE` redaction while the port emits none, reddening the byte-agreement oracle, so they stay a named unported baseline until emit_rust.rvl ports the registry (item-429(d)).": [
               "secret=<true>",
@@ -296,9 +297,6 @@
             "Reference host Map construction and access use runtime descriptors and borrowed-key conventions. The self-host pure-v3 port has no host Map value representation, so its Map names and get/next operations are not renderable.": [
               "name=Map",
               "name=remove"
-            ],
-            "The reference Rust builtin renderer implements these positional-string, mutable-collection, conversion, and repetition families. The self-host renderer's supported subset ends at covered length/to_str/read-only string operations and returns an explicit unsupported marker for these methods.": [
-              "method=set"
             ],
             "These expression and destructuring forms are rejected before or inside the self-host pure-v3 renderer: unresolved holes, legacy format nodes, optional call/field chaining, record update, and list/record binding patterns all require lowering absent from the port.": [
               "bind=_",
@@ -408,7 +406,7 @@
           }
         }
       },
-      "total_unported": 173
+      "total_unported": 172
     },
     "unreached-constructs": {
       "source": "tests/fixtures/oracle_construct_reach_ledger.json",

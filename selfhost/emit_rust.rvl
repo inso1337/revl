@@ -534,12 +534,16 @@ fn is_builtin_ctor(name: Str) -> Bool {
 // parameter names in the current function (empty in component methods).
 // `flb` holds the module-wide borrowed LIST parameter indices (the list analog
 // of `fb`); `lp` holds the borrowed list-parameter names in the current function
-// (the list analog of `bp`).
-type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str] }
+// (the list analog of `bp`). `ft` is the declared field types of every record,
+// keyed `<Type>.<field>` (`_V3Ctx.record_field_types`). `mu` is the current
+// function's reused names (`ctx.multi_use`), `mf` the pre-order ordinals of the
+// `for` nodes whose iterable may move (`ctx.movable_for_iterables`), and `fo` the
+// ordinal the next rendered `for` takes; all three are empty outside a module fn.
+type Ctx = { vt: Map[Str, Str], fr: Map[Str, Str], ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], rn: Map[Str, Str], fb: Map[Str, List[Int]], bp: Map[Str, Str], flb: Map[Str, List[Int]], lp: Map[Str, Str], ft: Map[Str, Str], mu: Map[Str, Str], mf: List[Int], fo: Int }
 // The user-type tables, built once from the document's `types` and shared by
 // every function's ctx (the reference builds `_V3Ctx` per function-list, reusing
 // the same type tables); paired with the type-NAME set for `rust_type`.
-type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str] }
+type TypeTables = { ca: Map[Str, Str], cp: Map[Str, Str], rbf: Map[Str, Str], tn: Map[Str, Str], ft: Map[Str, Str] }
 // A statement-emission result: the lines produced AND the threaded ctx, since
 // revl has no shared mutable state and a `let` inside an `if`/`while`/`for` block
 // is visible to every later statement (the reference mutates one `ctx` in place).
@@ -549,15 +553,19 @@ fn map_get(m: Map[Str, Str], k: Str) -> Str {
   return match m.lookup(k) { Some(v) => v, None => "" }
 }
 fn set_vt(ctx: Ctx, k: Str, v: Str) -> Ctx {
-  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
+  return { vt: ctx.vt.set(k, v), fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
 }
 // Swap in a fresh rename map (the component-capture scope for one render).
 fn set_rn(ctx: Ctx, rn: Map[Str, Str]) -> Ctx {
-  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
 }
 // Swap in a fresh var_types map (a provide-method seeds params/map-bindings).
 fn set_vts(ctx: Ctx, vt: Map[Str, Str]) -> Ctx {
-  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp }
+  return { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
+}
+// Advance the `for` ordinal (the next rendered `for` takes `fo`).
+fn set_fo(ctx: Ctx, fo: Int) -> Ctx {
+  return { vt: ctx.vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: ctx.rn, fb: ctx.fb, bp: ctx.bp, flb: ctx.flb, lp: ctx.lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: fo }
 }
 // Whether a `ca`/`rbf` entry names a usable (unique) type; the `<<AMBIG>>`
 // sentinel and a missing key both mean "not a byte-exact target here".
@@ -577,12 +585,15 @@ fn build_type_tables(types: Any) -> TypeTables {
   var cp: Map[Str, Str] = Map.empty()
   var rbf: Map[Str, Str] = Map.empty()
   var tn: Map[Str, Str] = Map.empty()
+  var ft: Map[Str, Str] = Map.empty()
   for (name of value_keys(types)) {
     tn = tn.set(name, "1")
     let spec = value_field(types, name)
     let kind = value_str(value_field(spec, "kind"))
     if (kind == "record") {
-      let key = sorted_key(value_keys(value_field(spec, "fields")))
+      let fields = value_field(spec, "fields")
+      for (f of value_keys(fields)) { ft = ft.set(`${name}.${f}`, value_str(value_field(fields, f))) }
+      let key = sorted_key(value_keys(fields))
       if (rbf.has(key)) { rbf = rbf.set(key, "<<AMBIG>>") } else { rbf = rbf.set(key, name) }
     }
     if (kind == "variant") {
@@ -595,7 +606,7 @@ fn build_type_tables(types: Any) -> TypeTables {
       }
     }
   }
-  return { ca: ca, cp: cp, rbf: rbf, tn: tn }
+  return { ca: ca, cp: cp, rbf: rbf, tn: tn, ft: ft }
 }
 
 // `_V3Ctx.record_type_for_fields`: a record literal's nominal struct type, from
@@ -824,6 +835,13 @@ fn v3_is_str(node: Any, ctx: Ctx) -> Bool {
 fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
   let k = node_kind(node)
   if (k == "name" || k == "var" || k == "req") { return map_get(ctx.vt, ref_name(node)) }
+  if (k == "lit") {
+    // a bare `Int`/`Bool` literal is a Copy scalar, so a reused counter
+    // (`var i = 0`) is never cloned
+    let lv = value_field(node, "value")
+    if (value_kind(lv) == "bool") { return "Bool" }
+    if (value_kind(lv) == "int") { return "Int" }
+  }
   if (k == "adt") { return map_get(ctx.ca, value_str(value_field(node, "case"))) }
   if (k == "fn") { return map_get(ctx.fr, value_str(value_field(node, "name"))) }
   if (k == "call" && !value_is_null(value_field(node, "callee"))) {
@@ -835,8 +853,61 @@ fn v3_infer_type(node: Any, ctx: Ctx) -> Str {
     }
   }
   if (k == "list") { return "List" }
+  if (k == "index") {
+    // a Map subscript answers the map's declared VALUE type (#957)
+    let vty = value_str(value_field(node, "value_type"))
+    if (vty != "") { return vty }
+    let inner = list_element_type(v3_infer_type(value_field(node, "target"), ctx))
+    if (inner != "") { return inner }
+  }
+  if (k == "field") {
+    let bty = v3_infer_type(value_field(node, "target"), ctx)
+    if (bty != "") {
+      let fty = map_get(ctx.ft, `${bty}.${value_str(value_field(node, "name"))}`)
+      if (fty != "") { return fty }
+    }
+  }
+  if (k == "record") {
+    // only a field set that names exactly one record
+    var names = []
+    for (f of value_list(value_field(node, "fields"))) { names = names.push(value_str(value_at(f, 0))) }
+    let rn = map_get(ctx.rbf, sorted_key(names))
+    if (resolved(rn)) { return rn }
+  }
+  if (k == "match") {
+    for (arm of value_list(value_field(node, "arms"))) {
+      let aty = v3_infer_type(value_field(arm, "body"), ctx)
+      if (aty != "") { return aty }
+    }
+  }
+  if (k == "builtin") {
+    let bt = builtin_return_type(node, ctx)
+    if (bt != "") { return bt }
+  }
   if (v3_is_str(node, ctx)) { return "Str" }
   if (v3_is_float(node)) { return "Float" }
+  return ""
+}
+
+// `_v3_builtin_return_type`: a stdlib method call's surface type, from the
+// method table (`_BUILTIN_RESULT`) or, for an `@self` row, the receiver's.
+fn builtin_return_type(node: Any, ctx: Ctx) -> Str {
+  let m = value_str(value_field(node, "method"))
+  if (m == "length" || m == "charCodeAt" || m == "codepoint_at" || m == "indexOf"
+      || m == "div_trunc" || m == "div_floor" || m == "div_euclid" || m == "mod"
+      || m == "size") { return "Int" }
+  if (m == "charAt" || m == "join" || m == "repeat" || m == "str" || m == "to_str") { return "Str" }
+  if (m == "startsWith" || m == "endsWith" || m == "has" || m == "is_alnum"
+      || m == "is_digit" || m == "is_alpha" || m == "is_space") { return "Bool" }
+  if (m == "split" || m == "keys") { return "List[Str]" }
+  if (m == "to_int32") { return "Int32" }
+  if (m == "field") { return "Any" }
+  if (m == "list") { return "List[Any]" }
+  if (m == "checked_div_trunc" || m == "checked_div_floor" || m == "checked_div_euclid"
+      || m == "checked_mod") { return "Result[Int, Str]" }
+  if (m == "slice" || m == "concat" || m == "push" || m == "set" || m == "remove") {
+    return v3_infer_type(value_field(node, "target"), ctx)
+  }
   return ""
 }
 
@@ -948,34 +1019,223 @@ fn self_append_plus(target: Str, recv: Str, valnode: Any, ctx: Ctx) -> Str {
   return `${recv}.push_str(${borrow_str_arg(rn, render_expr(rn, ctx), ctx)});`
 }
 
+fn is_copy_type(ty: Str) -> Bool {
+  let head = strip_spaces(ty.split("[")[0])
+  return head == "Int" || head == "Bool" || head == "Float"
+}
+
+// `_by_value_field_clone`: `<rendered>.clone()` when a by-value use is a field
+// read `root.f1.f2..` whose ROOT binding the body reuses (`ctx.multi_use`), so
+// moving the field out would strand the later use (E0382). The field type is
+// followed down the declared record fields; only a field known to be Copy is
+// left bare. "" is the reference's `None` (let the caller decide).
+fn by_value_field_clone(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  if (node_kind(arg_node) != "field") { return "" }
+  var chain: List[Str] = []
+  var cur = arg_node
+  while (node_kind(cur) == "field") {
+    chain = chain.push(value_str(value_field(cur, "name")))
+    cur = value_field(cur, "target")
+  }
+  let root = ref_ident(cur)
+  if (root == "" || !ctx.mu.has(root)) { return "" }
+  var ty = map_get(ctx.vt, root)
+  var i = chain.length() - 1
+  while (i >= 0) {
+    if (ty != "") { ty = map_get(ctx.ft, `${ty}.${chain[i]}`) }
+    i = i - 1
+  }
+  if (ty != "" && is_copy_type(ty)) { return "" }
+  return `${rendered}.clone()`
+}
+
 // `_by_value_arg`: wrap a by-value free-function/constructor argument so the call
 // cannot consume a value the caller still needs (E0382). A bare non-Copy variable
 // is `.clone()`d; a function-typed one is passed `&`; Copy scalars and fresh
-// temporaries pass through.
+// temporaries pass through. A name whose type is unknown clones only when the
+// body reuses it.
 fn by_value_arg(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let fc = by_value_field_clone(arg_node, rendered, ctx)
+  if (fc != "") { return fc }
   let name = ref_name(arg_node)
   if (name == "") { return rendered }
   if (ctx.bp.has(name)) { return `${rendered}.to_string()` }
   let ty = map_get(ctx.vt, name)
-  if (ty == "") { return rendered }
-  if (is_fn_type(ty)) { return "&".concat(rendered) }
-  let head = strip_spaces(ty.split("[")[0])
-  if (head == "Int" || head == "Bool" || head == "Float") { return rendered }
-  return rendered.concat(".clone()")
+  if (ty != "") {
+    if (is_fn_type(ty)) { return "&".concat(rendered) }
+    if (is_copy_type(ty)) { return rendered }
+    return rendered.concat(".clone()")
+  }
+  if (ctx.mu.has(name)) { return rendered.concat(".clone()") }
+  return rendered
 }
 
-// `_by_value_reuse`: the clone for a position that moves ONLY on reuse — a
-// host/builtin method argument. The reference clones a binding the body READS
-// AGAIN (`ctx.multi_use`), and `multi_use` is populated in exactly one place:
-// the free-function pass. A component's `_V3Ctx` is a fresh object, so at the
-// component surface — the only surface this port calls it from — `multi_use` is
-// empty, the Copy test is unreachable, and the only live arm is the borrowed
-// `&str` param safety net.
-fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
-  let name = ref_name(arg_node)
+// `_by_value_tail`: a bare name in a position that moves only on reuse (an
+// `if`-expression branch, a `let` value, a `for` iterable) clones when the body
+// reads it again and it is not known to be Copy.
+fn by_value_tail(node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let name = ref_name(node)
   if (name == "") { return rendered }
-  if (ctx.bp.has(name)) { return rendered.concat(".to_string()") }
+  if (ctx.bp.has(name)) { return `${rendered}.to_string()` }
+  let ty = map_get(ctx.vt, name)
+  if (ty != "" && is_copy_type(ty)) { return rendered }
+  if (ctx.mu.has(name)) { return rendered.concat(".clone()") }
   return rendered
+}
+
+// `_by_value_reuse`: a `match` scrutinee, a list element, a builtin or host
+// method argument. The field rule first, then the tail rule. Outside a module
+// fn `mu` is empty, so only the borrowed-`&str` safety net can fire there.
+fn by_value_reuse(arg_node: Any, rendered: Str, ctx: Ctx) -> Str {
+  let fc = by_value_field_clone(arg_node, rendered, ctx)
+  if (fc != "") { return fc }
+  return by_value_tail(arg_node, rendered, ctx)
+}
+
+// --------------------------------------------------- the reuse analysis
+//
+// `_body_multi_use`, `_loop_repeated_reads` and `_movable_for_iterables`: run
+// once per module fn over its body, before it renders.
+
+// The identifier a reference node (`var`/`name`/`req`) names, else "".
+fn ref_ident(node: Any) -> Str {
+  let k = node_kind(node)
+  if (k != "var" && k != "name" && k != "req") { return "" }
+  let idv = value_str(value_field(node, "id"))
+  if (idv != "") { return idv }
+  return value_str(value_field(node, "name"))
+}
+
+// Every reference in a subtree, one entry per textual use.
+fn subtree_refs(node: Any) -> List[Str] {
+  var out: List[Str] = []
+  if (value_kind(node) == "record") {
+    let id = ref_ident(node)
+    if (id != "") { out = out.push(id) }
+    for (k of value_keys(node)) { out = out.concat(subtree_refs(value_field(node, k))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { out = out.concat(subtree_refs(item)) }
+  }
+  return out
+}
+
+fn ref_counts(node: Any) -> Map[Str, Int] {
+  var m: Map[Str, Int] = Map.empty()
+  for (r of subtree_refs(node)) { m = m.set(r, (m.lookup(r) ?? 0) + 1) }
+  return m
+}
+
+// `_decl_site_names`: the names one node DECLARES. A statement spells them in
+// a fixed field (`assign` declares nothing); an arrow declares its params and a
+// match arm its `bind`.
+fn decl_site_names(node: Any) -> List[Str] {
+  let step = value_str(value_field(node, "step"))
+  var keys: List[Str] = []
+  if (step != "") {
+    if (step == "let") { keys = ["name"] }
+    if (step == "for" || step == "let-effect") { keys = ["bind"] }
+    if (step == "let_pattern") { keys = ["names", "rest"] }
+  } else {
+    if (node_kind(node) == "arrow") { keys = ["params"] }
+    else { if (str_in(value_keys(node), "pattern")) { keys = ["bind"] } }
+  }
+  var out: List[Str] = []
+  for (key of keys) {
+    let v = value_field(node, key)
+    if (value_kind(v) == "str") { out = out.push(value_str(v)) }
+    if (value_kind(v) == "list") {
+      for (n of value_list(v)) { if (value_kind(n) == "str") { out = out.push(value_str(n)) } }
+    }
+  }
+  return out
+}
+
+fn subtree_decls(node: Any) -> List[Str] {
+  var out: List[Str] = []
+  if (value_kind(node) == "record") {
+    out = out.concat(decl_site_names(node))
+    for (k of value_keys(node)) { out = out.concat(subtree_decls(value_field(node, k))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { out = out.concat(subtree_decls(item)) }
+  }
+  return out
+}
+
+// `_loop_repeated_reads`: a name read inside a `while`/`for` frame runs more
+// than once, so it is a reuse even when spelled once (issue #1157), unless the
+// frame itself binds it. A `for` iterable runs once, outside its own frame.
+fn loop_repeated_reads(node: Any) -> List[Str] {
+  var out: List[Str] = []
+  if (value_kind(node) == "record") {
+    let step = value_str(value_field(node, "step"))
+    if (step == "while" || step == "for") {
+      var reads: List[Str] = []
+      var bound: List[Str] = []
+      if (step == "for" && value_kind(value_field(node, "bind")) == "str") {
+        bound = bound.push(value_str(value_field(node, "bind")))
+      }
+      for (k of value_keys(node)) {
+        if (k != "iterable") {
+          reads = reads.concat(subtree_refs(value_field(node, k)))
+          bound = bound.concat(subtree_decls(value_field(node, k)))
+        }
+      }
+      for (r of reads) { if (!str_in(bound, r) && !str_in(out, r)) { out = out.push(r) } }
+    }
+    for (k of value_keys(node)) { out = out.concat(loop_repeated_reads(value_field(node, k))) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { out = out.concat(loop_repeated_reads(item)) }
+  }
+  return out
+}
+
+// `ctx.multi_use`: referenced more than once, or read inside a loop frame.
+fn reused_names(body: List[Any]) -> Map[Str, Str] {
+  var mu: Map[Str, Str] = Map.empty()
+  let counts = ref_counts(body)
+  for (k of counts.keys()) { if ((counts.lookup(k) ?? 0) > 1) { mu = mu.set(k, "1") } }
+  for (r of loop_repeated_reads(body)) { mu = mu.set(r, "1") }
+  return mu
+}
+
+// `_movable_for_iterables` (item 437f): a reused bare-name `for` iterable MOVES
+// instead of cloning when the loop is not nested in a loop or an arrow and
+// every other reference to the name precedes it in pre-order. The reference
+// keys the answer by node identity; this port numbers the `for` nodes in the
+// same pre-order and `v3_stmt` counts them off as it renders.
+type MovSt = { seen: Map[Str, Int], ord: Int, mov: List[Int] }
+
+fn movable_walk(node: Any, depth: Int, total: Map[Str, Int], mu: Map[Str, Str], st: MovSt) -> MovSt {
+  var s = st
+  if (value_kind(node) == "record") {
+    let id = ref_ident(node)
+    if (id != "") { s = { seen: s.seen.set(id, (s.seen.lookup(id) ?? 0) + 1), ord: s.ord, mov: s.mov } }
+    let step = value_str(value_field(node, "step"))
+    if (step == "for") {
+      let name = ref_ident(value_field(node, "iterable"))
+      var mov = s.mov
+      if (name != "" && mu.has(name) && depth == 0
+          && (s.seen.lookup(name) ?? 0) + 1 == (total.lookup(name) ?? 0)) {
+        mov = mov.push(s.ord)
+      }
+      s = { seen: s.seen, ord: s.ord + 1, mov: mov }
+    }
+    var inner = depth
+    if (step == "while" || step == "for" || node_kind(node) == "arrow") { inner = depth + 1 }
+    for (k of value_keys(node)) { s = movable_walk(value_field(node, k), inner, total, mu, s) }
+  }
+  if (value_kind(node) == "list") {
+    for (item of value_list(node)) { s = movable_walk(item, depth, total, mu, s) }
+  }
+  return s
+}
+
+fn movable_for_iterables(body: List[Any], mu: Map[Str, Str]) -> List[Int] {
+  let st = movable_walk(body, 0, ref_counts(body), mu, { seen: Map.empty(), ord: 0, mov: [] })
+  return st.mov
 }
 
 fn str_readonly_arg_builtin(method: Str) -> Bool {
@@ -1257,12 +1517,6 @@ fn call_arg(callee: Str, index: Int, node: Any, rendered: Str, ctx: Ctx) -> Str 
   return by_value_arg(node, rendered, ctx)
 }
 
-fn owned_borrowed_tail(node: Any, ctx: Ctx) -> Str {
-  let rendered = render_expr(node, ctx)
-  if (ctx.bp.has(ref_name(node))) { return `${rendered}.to_string()` }
-  return rendered
-}
-
 // -------------------------------------------------------------- expressions
 // `_V3Ctx.constructor`: a user variant case -> `Enum::Case` / `Enum::Case(arg)`
 // (the case name is used RAW, as the reference does — not mangled), else the
@@ -1454,7 +1708,13 @@ fn render_call(node: Any, ctx: Ctx) -> Str {
   var callee_name = ""
   if (ckind == "var") { callee_name = value_str(value_field(callee_node, "name")) }
   if (callee_name != "" && (is_builtin_ctor(callee_name) || ctx.ca.has(callee_name))) {
-    return constructor(ctx, callee_name, arg_exprs)
+    var cargs = []
+    var ci = 0
+    while (ci < arg_nodes.length()) {
+      cargs = cargs.push(by_value_arg(arg_nodes[ci], arg_exprs[ci], ctx))
+      ci = ci + 1
+    }
+    return constructor(ctx, callee_name, cargs)
   }
   var callee = render_expr(callee_node, ctx)
   if (!is_atomic(ckind)) { callee = `(${callee})` }
@@ -1476,7 +1736,7 @@ fn render_index(node: Any, ctx: Ctx) -> Str {
 
 fn render_list(node: Any, ctx: Ctx) -> Str {
   var parts = []
-  for (it of value_list(value_field(node, "items"))) { parts = parts.push(owned_borrowed_tail(it, ctx)) }
+  for (it of value_list(value_field(node, "items"))) { parts = parts.push(by_value_reuse(it, render_expr(it, ctx), ctx)) }
   return "vec![".concat(parts.join(", ")).concat("]")
 }
 
@@ -1503,7 +1763,7 @@ fn render_arrow(node: Any, ctx: Ctx) -> Str {
     ps = ps.push(param)
     i = i + 1
   }
-  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp }
+  let inner = { vt: vt, fr: ctx.fr, ca: ctx.ca, cp: ctx.cp, rbf: ctx.rbf, tn: ctx.tn, rn: rn, fb: ctx.fb, bp: bp, flb: ctx.flb, lp: lp, ft: ctx.ft, mu: ctx.mu, mf: ctx.mf, fo: ctx.fo }
   return `move |${ps.join(", ")}| { ${render_expr(value_field(node, "body"), inner)} }`
 }
 
@@ -1548,7 +1808,8 @@ fn render_record(node: Any, ctx: Ctx) -> Str {
 // a fixed `    ` prefix and the enclosing `_v3_stmt` only pads the first line);
 // an unmatched `_` gets `unreachable!()` unless an arm already wilds.
 fn render_match(node: Any, ctx: Ctx) -> Str {
-  let scrut = render_expr(value_field(node, "scrutinee"), ctx)
+  let snode = value_field(node, "scrutinee")
+  let scrut = by_value_reuse(snode, render_expr(snode, ctx), ctx)
   let arms = value_list(value_field(node, "arms"))
   var lines = [`match ${scrut} {`]
   var hasWild = false
@@ -1648,7 +1909,7 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   }
   if (kind == "adt") {
     var aa = []
-    for (a of value_list(value_field(node, "args"))) { aa = aa.push(render_expr(a, ctx)) }
+    for (a of value_list(value_field(node, "args"))) { aa = aa.push(by_value_arg(a, render_expr(a, ctx), ctx)) }
     return constructor(ctx, value_str(value_field(node, "case")), aa)
   }
   if (kind == "bin") { return render_bin(node, ctx) }
@@ -1659,7 +1920,9 @@ fn render_inner(node: Any, ctx: Ctx) -> Str {
   if (kind == "match") { return render_match(node, ctx) }
   if (kind == "index") { return render_index(node, ctx) }
   if (kind == "if") {
-    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${owned_borrowed_tail(value_field(node, "then"), ctx)} } else { ${owned_borrowed_tail(value_field(node, "else"), ctx)} }`
+    let tn = value_field(node, "then")
+    let en = value_field(node, "else")
+    return `if ${render_expr(value_field(node, "cond"), ctx)} { ${by_value_tail(tn, render_expr(tn, ctx), ctx)} } else { ${by_value_tail(en, render_expr(en, ctx), ctx)} }`
   }
   if (kind == "list") { return render_list(node, ctx) }
   if (kind == "maplit") { return "std::collections::HashMap::new()" }
@@ -1732,9 +1995,7 @@ fn render_builtin(node: Any, ctx: Ctx) -> Str {
   var rendered = []
   for (a of args) {
     var r = render_expr(a, ctx)
-    if (method != "lookup" && method != "has" && method != "remove" && ctx.bp.has(ref_name(a))) {
-      r = `${r}.to_string()`
-    }
+    if (method != "lookup" && method != "has" && method != "remove") { r = by_value_reuse(a, r, ctx) }
     rendered = rendered.push(r)
   }
   if (method == "checked_div_trunc" || method == "checked_div_floor" || method == "checked_div_euclid" || method == "checked_mod") {
@@ -1995,7 +2256,7 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     let nm = mangle(raw)
     let valnode = value_field(node, "value")
     let inferred = v3_infer_type(valnode, ctx)
-    let value = render_expr(valnode, ctx)
+    let value = by_value_tail(valnode, render_expr(valnode, ctx), ctx)
     var nctx = ctx
     if (inferred != "") { nctx = set_vt(ctx, raw, inferred) }
     var out = []
@@ -2047,9 +2308,11 @@ fn v3_stmt(node: Any, ctx: Ctx, indent: Int) -> Sout {
     let iterable_node = value_field(node, "iterable")
     let iterable_type = v3_infer_type(iterable_node, ctx)
     let element_type = list_element_type(iterable_type)
-    var loop_ctx = ctx
-    if (element_type != "") { loop_ctx = set_vt(ctx, value_str(value_field(node, "bind")), element_type) }
-    var out = [line(indent, `for ${bind} in ${render_expr(iterable_node, ctx)} {`)]
+    var iterable = render_expr(iterable_node, ctx)
+    if (ctx.mf.indexOf(ctx.fo) < 0) { iterable = by_value_tail(iterable_node, iterable, ctx) }
+    var loop_ctx = set_fo(ctx, ctx.fo + 1)
+    if (element_type != "") { loop_ctx = set_vt(loop_ctx, value_str(value_field(node, "bind")), element_type) }
+    var out = [line(indent, `for ${bind} in ${iterable} {`)]
     let bodyR = emit_stmts(value_list(value_field(node, "body")), loop_ctx, indent + 1)
     out = out.concat(bodyR.lines)
     out = out.push(line(indent, "}"))
@@ -2101,7 +2364,7 @@ fn emit_v3_functions(functions: List[Any], fr: Map[Str, Str], tables: TypeTables
       ps = ps.push(`${mangle(pname)}: ${ptype}`)
       i = i + 1
     }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: bp, flb: list_borrow, lp: lp, ft: tables.ft, mu: reused_names(body), mf: movable_for_iterables(body, reused_names(body)), fo: 0 }
     var returns = "()"
     if (!value_is_null(value_field(fnode, "returns"))) {
       returns = rust_type_pos(value_field(fnode, "returns"), tables.tn)
@@ -4125,7 +4388,7 @@ fn activation_ctx(tables: TypeTables, fr: Map[Str, Str], map_values: Map[Str, St
 }
 
 fn plain_ctx(tables: TypeTables, fr: Map[Str, Str]) -> Ctx {
-  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
+  return { vt: Map.empty(), fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0 }
 }
 
 // `_map_value_expr_type`: best-effort SURFACE type of an expression. "" is the
@@ -4724,7 +4987,7 @@ fn emit_provide_methods(comp: Any, services: Any, key: Str, srv: Str, tables: Ty
     var ret = "()"
     let r = value_field(svc_method, "returns")
     if (!value_is_null(r)) { ret = rust_type_t(r, tables.tn) }
-    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty() }
+    let ctx = { vt: vt, fr: fr, ca: tables.ca, cp: tables.cp, rbf: tables.rbf, tn: tables.tn, rn: Map.empty(), fb: borrow, bp: Map.empty(), flb: list_borrow, lp: Map.empty(), ft: tables.ft, mu: Map.empty(), mf: [], fo: 0 }
     if (effectful && method_has_effectful_steps(method)) {
       out = out.push(`    fn ${mn}(&self, ${ps.join(", ")}) -> ${ret} {`)
       let bl = method_body_lines(comp, method, services, ctx, 2)
@@ -6072,7 +6335,7 @@ test "constructor lowers user variants and built-ins" {
   cp = cp.set("Node", "y")
   ca = ca.set("Leaf", "Tree")
   cp = cp.set("Leaf", "n")
-  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty() }
+  let ctx = { vt: Map.empty(), fr: Map.empty(), ca: ca, cp: cp, rbf: Map.empty(), tn: Map.empty(), rn: Map.empty(), fb: Map.empty(), bp: Map.empty(), flb: Map.empty(), lp: Map.empty(), ft: Map.empty(), mu: Map.empty(), mf: [], fo: 0 }
   assert constructor(ctx, "Node", ["x"]) == "Tree::Node(x)"
   assert constructor(ctx, "Leaf", []) == "Tree::Leaf"
   assert constructor(ctx, "Some", ["v"]) == "Some(v)"

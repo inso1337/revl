@@ -1816,13 +1816,13 @@ to identity. The middle column feeds each `selfhost/emit_<tier>.rvl` the
 | ts   |     76 |                   76 (100%) |             60 (78.9%) |
 | go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
-| rust |     42 |                   42 (100%) |             41 (97.6%) |
+| rust |     43 |                   43 (100%) |             41 (95.3%) |
 | wasm |     21 |                   21 (100%) |            21 (100.0%) |
-| **total** | **295** | **295 (100%)** | **269 (91.2%)** |
+| **total** | **296** | **296 (100%)** | **269 (90.9%)** |
 
-Every one of the 295 documents is reproduced byte-for-byte by its
+Every one of the 296 documents is reproduced byte-for-byte by its
 self-host emitter when the emitter is fed the **reference** IR. 269 of
-them survive the **fully-native** chain, so all 26 residual documents
+them survive the **fully-native** chain, so all 27 residual documents
 are `selfhost/lower.rvl` gaps, the native IR producer, and not emitter
 gaps.
 
@@ -1890,9 +1890,10 @@ relative to the tier's own corpus directory, `tests/fixtures/emit_<tier>_corpus/
 
 - none; the fully-native chain reproduces the whole corpus.
 
-`rust`, 1 residual of 42:
+`rust`, 2 residual of 43:
 
 - `comp_stream.rvl`
+- `by_value_reuse.rvl`
 
 `wasm`, 0 residual of 21:
 

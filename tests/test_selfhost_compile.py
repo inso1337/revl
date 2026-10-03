@@ -632,6 +632,11 @@ LOWER_GAP_DOCS: dict[str, tuple[str, ...]] = {
         "comp_stream.rvl",
         # (`bridge_types.rvl`, item 391's bridge marshalling document, left with
         # issue #1818 too: `fn weight(name) = None` dropped the component body.)
+        # item 391: the by-value reuse document. Emitter-exact from the
+        # reference IR; the native IR producer does not type the result of a
+        # call to a `let`-bound arrow (`i = bump(i) + 1`), so it writes the `+`
+        # without the reference's `"operands": "Int"` annotation.
+        "by_value_reuse.rvl",
     ),
     # no residual: the fully-native chain reproduces the whole wasm corpus.
     "wasm": (),

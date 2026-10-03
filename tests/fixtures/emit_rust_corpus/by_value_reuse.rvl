@@ -1,0 +1,146 @@
+// item 391 (#106), held to byte agreement by tests/test_selfhost_emit_rust.py:
+// the by-value reuse analysis. revl passes values, Rust moves them, so a value
+// the body reads again has to be cloned at each move or the second read borrows
+// a moved value (E0382). selfhost/emit_rust.rvl cloned only a bare name of a
+// known non-Copy type in a free-function or record slot, and never knew which
+// names a body reuses.
+//
+//   - `ctx.multi_use`: a name referenced twice, or read inside a loop frame;
+//   - a reused `match` scrutinee, list element, `if` branch tail, `let` value
+//     and `for` iterable clone; a single use stays a move;
+//   - a field read whose root is reused clones unless the field is Copy;
+//   - a constructor payload is an owned slot and clones a non-Copy name;
+//   - a reused `for` iterable read nowhere after the loop moves (item 437f);
+//   - a name of unknown type clones only when reused;
+//   - the inference behind those choices: literal, index, field, record,
+//     `match` and stdlib-method results;
+//   - the names a loop frame binds itself (a `let`, an arrow's params, a match
+//     arm's binder) are fresh each iteration and are not reuses.
+
+type Order = { id: Str, qty: Int, tags: List[Str] }
+type Shape = Circle(Int) | Dot
+
+fn describe(x: Str) -> Str {
+  return x
+}
+
+fn pair(a: Str, b: Str) -> Str {
+  return a.concat(b)
+}
+
+fn nested(s: Shape) -> Int {
+  return match s {
+    Circle(r) => match s {
+      Circle(q) => q + r,
+      Dot => 0
+    },
+    Dot => 0
+  }
+}
+
+fn wrapped(s: Shape) -> Result[Shape, Str] {
+  return Ok(s)
+}
+
+fn label(e: Order) -> Str {
+  let id = e.id
+  return describe(id)
+}
+
+fn ids(o: Order) -> List[Str] {
+  let n = o.qty
+  if (n > 0) {
+    return [o.id, o.id]
+  }
+  return [o.id]
+}
+
+fn walk(xs: List[Str]) -> Int {
+  var n = 0
+  for (x of xs) {
+    n = n + x.length()
+  }
+  for (y of xs) {
+    n = n + y.length()
+  }
+  return n
+}
+
+fn pick(c: Bool, a: Str, b: Str) -> Str {
+  let v = c ? a : b
+  return v.concat(a)
+}
+
+fn keep(s: Str) -> Str {
+  let t = s
+  return t.concat(s)
+}
+
+fn either(r: Result[Str, Str]) -> Str {
+  return match r {
+    Ok(v) => pair(v, v),
+    Err(e) => e
+  }
+}
+
+fn repeat_untyped(r: Result[Str, Str], n: Int) -> Str {
+  let h = match r {
+    Ok(v) => v,
+    Err(e) => e
+  }
+  var out = ""
+  var i = 0
+  while (i < n) {
+    out = describe(h)
+    i = i + 1
+  }
+  return out
+}
+
+fn typed_locals(xs: List[Str], s: Str) -> Str {
+  let first = xs[0]
+  let flag = true
+  let parts = s.split(",")
+  let o = { id: "a", qty: 1, tags: parts }
+  var acc = describe(first)
+  for (p of parts) {
+    acc = pair(acc, p)
+  }
+  if (flag) {
+    acc = pair(acc, o.id)
+  }
+  return pair(acc, label(o))
+}
+
+fn step_name(r: Result[Int, Str]) -> Str {
+  return match r {
+    Ok(v) => v.to_str(),
+    Err(e) => e
+  }
+}
+
+fn locals_in_loops(o: Order, n: Int) -> Str {
+  var out = describe(o.id)
+  var i = 0
+  while (i < n) {
+    let step = i.to_str()
+    let up = step.startsWith("1")
+    let shape = up ? Circle(i) : Dot
+    let size = match shape {
+      Circle(r) => r,
+      Dot => 0
+    }
+    let bump = (k: Int) => k + size
+    let tagged = step.concat("!")
+    out = pair(out, tagged)
+    i = bump(i) + 1
+  }
+  let f = 1.5
+  let g = -f
+  let z = !(n > 0)
+  let q = n.checked_div_trunc(2)
+  if (z || g > 0.0) {
+    return pair(out, step_name(q))
+  }
+  return pair(out, o.id)
+}

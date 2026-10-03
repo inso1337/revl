@@ -281,6 +281,11 @@ CORPUS = [
                              #   a std `Result` (return and argument, the canonical
                              #   `{"$kind","$value"}`), a List and a record through
                              #   serde, an `Opt[Float]` return
+    "by_value_reuse.rvl",    # item 391: the by-value reuse analysis: the
+                             #   reused-name set, the reuse clones (scrutinee,
+                             #   list element, branch tail, `let`, iterable),
+                             #   the field and constructor clones, the moving
+                             #   iterable, and the inference behind them
     "teardown_compensate.rvl",  # item 391: the per-activation teardown
                              #   accumulator: `RevlTeardown` opened first and
                              #   committed last, an activation `emit ...
