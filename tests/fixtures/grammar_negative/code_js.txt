@@ -1,0 +1,4 @@
+function get(key) {
+  if (cache.has(key)) { return cache.get(key); }
+  return null;
+}
