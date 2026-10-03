@@ -27,6 +27,14 @@ the draft handling are the ones `revl_edit` already runs. The intents:
   `cascade: true`, which withdraws the whole cascade with it.
 * ``{add: {source, target?}}``: new declarations appended to a buffer (the
   only one, or `target`), refused if a name is already declared.
+* ``{add: {component, provide, methods, config?, target?}}``: the server writes
+  the component (issue #1700, `component_source`). `provide` is a key, or
+  `{key, service}`; its service is the one given, or the one the composition
+  already knows that key as. Each method's frame comes from the service
+  declaration, `methods` holding only the bodies. `requires` is inferred:
+  every receiver a body calls (`store.get()`) that is a key of the composition.
+  An unknown receiver, a missing or unknown operation, or a `config.` read with
+  no `config` given is refused, naming it. `config` is never inferred.
 
 `verified.guarantees` reports the G1-G9 self-check of the verification
 compile (#1731's `self_check`), so "verifies the guarantees" is visible per
@@ -205,6 +213,113 @@ def shape(intent: str, result: dict, plan: dict | None, withdrawn: list[str],
         out["note"] = (result.get("note") or "the change was not committed") \
             + "; the running composition is unchanged"
     return out
+
+
+def component_source(vs: dict, spec: dict) -> str:
+    """The component declaration an `{add: {component, ...}}` intent writes,
+    read against the working set `vs`. Raises `ChangeError` naming what is
+    missing or unknown; nothing is guessed."""
+    from . import symbols  # noqa: PLC0415
+
+    name = spec.get("component")
+    methods = spec.get("methods")
+    if not isinstance(name, str) or not name or not isinstance(methods, dict):
+        raise ChangeError("`add` with `component` is {component, provide, methods: "
+                          "{op: body}, config?, target?}")
+    services, keys = _composition_vocabulary(vs)
+    key, service = _provided(spec.get("provide"), keys)
+    decl = services.get(service)
+    if decl is None:
+        raise ChangeError(f"no service `{service}` is declared, so `{key}` has no "
+                          "operations to write")
+    missing = [op for op in decl.methods if op not in methods]
+    unknown = [op for op in methods if op not in decl.methods]
+    if missing or unknown:
+        raise ChangeError(
+            f"`{service}` declares {', '.join(decl.methods)}; "
+            + "; ".join(part for part in (
+                f"no body for {', '.join(missing)}" if missing else "",
+                f"no operation {', '.join(unknown)}" if unknown else "") if part))
+    frames, receivers = [], set()
+    for op, body in methods.items():
+        params = [p for p, _type in decl.methods[op].params]
+        frames.append(symbols._framed(f"fn {op}({', '.join(params)})",
+                                      symbols.canonical(str(body)).rstrip("\n")))
+        receivers |= _receivers(str(body), set(params))
+    if "config" in receivers and not spec.get("config"):
+        raise ChangeError(f"a body of `{name}` reads `config`, and config is not "
+                          "inferred: give `config` (its fields, e.g. "
+                          "\"{ max_steps: Int = 8 }\")")
+    receivers.discard("config")
+    receivers.discard(key)
+    unresolved = sorted(r for r in receivers if r not in keys)
+    if unresolved:
+        raise ChangeError(
+            f"{', '.join(f'`{r}`' for r in unresolved)} is not a key of this "
+            f"composition, so `{name}` cannot require it; provide it first, or "
+            f"name the requirement in the body's source with {{add: {{source}}}}")
+    requires = ", ".join(f"{r}: {keys[r]}" for r in sorted(receivers))
+    header = f"component {name}" + (f" requires {requires}" if requires else "") \
+        + f" provides {key}: {service} {{"
+    body = []
+    if spec.get("config"):
+        body.append(f"  config {str(spec['config']).strip()}")
+    body.append(f"  provide {key} {{")
+    for frame in frames:
+        body += ["    " + line for line in frame.rstrip("\n").split("\n")]
+    body.append("  }")
+    return "\n".join([header, *body, "}"]) + "\n"
+
+
+def _composition_vocabulary(vs: dict) -> tuple[dict, dict]:
+    """Every service declared in the working set, and every key with the
+    service it is provided or required as."""
+    from ..parser import Parser  # noqa: PLC0415
+    from . import symbols  # noqa: PLC0415
+
+    services: dict = {}
+    keys: dict[str, set] = {}
+    for (_kind, buffer), text in symbols.buffers(vs):
+        try:
+            program = Parser(text, buffer).parse()
+        except RevlError:
+            continue
+        services.update({svc.name: svc for svc in program.services})
+        for comp in program.components:
+            for key, service, _line in [*comp.provides, *getattr(comp, "requires", [])]:
+                keys.setdefault(key, set()).add(service)
+    ambiguous = sorted(k for k, svcs in keys.items() if len(svcs) > 1)
+    resolved = {k: next(iter(svcs)) for k, svcs in keys.items() if len(svcs) == 1}
+    for key in ambiguous:
+        resolved.pop(key, None)
+    return services, resolved
+
+
+def _provided(provide, keys: dict) -> tuple[str, str]:
+    if isinstance(provide, dict) and isinstance(provide.get("key"), str):
+        key = provide["key"]
+        service = provide.get("service") or keys.get(key)
+    elif isinstance(provide, str) and provide:
+        key, service = provide, keys.get(provide)
+    else:
+        raise ChangeError("`provide` is a key, or {key, service}")
+    if not service:
+        raise ChangeError(f"the composition does not know `{key}` yet, so its "
+                          "service cannot be inferred: give {key, service}")
+    return key, service
+
+
+def _receivers(body: str, params: set) -> set:
+    """The lowercase names a body calls a method on (`store.get()`), minus its
+    own parameters and `let`/`var` bindings. A type namespace (`Map.new()`)
+    starts uppercase and is not a receiver."""
+    import re  # noqa: PLC0415
+
+    bound = set(params) | set(re.findall(r"\b(?:let|var)\s+([a-z_]\w*)", body))
+    names = set(re.findall(r"(?<![\w.])([a-z_]\w*)\s*\.\s*[a-z_]\w*\s*\(", body))
+    if re.search(r"(?<![\w.])config\s*\.", body):
+        names.add("config")
+    return {n for n in names if n not in bound}
 
 
 def _guarantees(admission: str, result: dict) -> dict | None:

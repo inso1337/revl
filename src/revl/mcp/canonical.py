@@ -8,7 +8,9 @@ rewrite changed nothing the compiler sees. The authoring verbs use both:
 * `canonicalise(text)` formats one text under that gate. A rewrite the gate
   refuses, or a text the formatter cannot scan, is kept exactly as written:
   canonicalisation is a convenience and never changes what is admitted.
-* a whole source `revl_check` or `revl_swap` receives is COMPILED AS SENT, so every diagnostic names a line the agent wrote, and only
+* a whole source `revl_check`, `revl_swap` or a `revl_load` draft receives is
+  COMPILED AS SENT (after `complete.py` fills in terse punctuation that does
+  not parse, inside its own lines), so every diagnostic names a line the agent wrote, and only
   STORED canonical (the gate proved both compile to the same IR). The verb
   answers with `canonicalSource: {changed, digest}`, and the text itself only
   when asked (`returnCanonical: true`), because sending the text back would
@@ -86,6 +88,32 @@ def canonical_arguments(arguments: dict) -> tuple[dict, dict | None]:
                           if isinstance(text, str) else text
                           for path, text in modules.items()}
     return out, report
+
+
+def prepare(arguments: dict) -> tuple[dict, dict, dict | None]:
+    """`(sent, stored, report)` for a verb's inline candidate (issue #1700).
+
+    `sent` is what to COMPILE: the arguments as given, with terse punctuation
+    completed when the source does not parse as written (`complete.py`; the
+    insertions stay inside their lines, so diagnostics keep their line
+    numbers). `stored` is what to HOLD: `sent` canonicalised under the
+    IR-equivalence gate. `report` is `canonicalSource`, with `completed` when
+    anything was inserted; None when the call carried no inline source."""
+    from .complete import complete  # noqa: PLC0415
+
+    source = arguments.get("source")
+    sent, completed = dict(arguments), []
+    if isinstance(source, str):
+        sent["source"], completed = complete(source)
+    modules = arguments.get("modules")
+    if isinstance(modules, dict):
+        sent["modules"] = {path: complete(text, path)[0] if isinstance(text, str)
+                           else text for path, text in modules.items()}
+    stored, report = canonical_arguments(sent)
+    if report is not None and completed:
+        report["completed"] = completed
+        report["changed"] = True
+    return sent, stored, report
 
 
 def attach(payload: dict, report: dict | None) -> dict:

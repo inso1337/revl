@@ -442,6 +442,19 @@ expensive ones, so the edit path asks for as little text as it can:
   `returnCanonical: true`. Text the formatter cannot read, or a rewrite its
   gate refuses, is kept as written (`kept` says why). A files-loaded
   composition is the operator's files and is not rewritten.
+- **Punctuation you may leave out.** Match arms separated by newlines alone
+  (`A => 1` on one line, `B => 2` on the next) and an `if` condition without
+  parentheses (`if x > 1 { ... }`) are completed on the server: the `,` and the
+  parentheses are inserted, inside their lines, so every diagnostic keeps its
+  line number. A line is a new arm only if it holds `=>` at the arm's depth,
+  and an `if` is wrapped only up to the first `{` at its depth on the same
+  line. Completion runs only on text that does not parse and is used only if
+  the result parses; anything ambiguous (a condition whose first `{` is a
+  record literal) is left as written, and the parse error is yours. The
+  answer reports it as `completed: [{line, inserted}]`, in `canonicalSource`
+  for `revl_check`/`revl_swap`/`revl_load` and as a `completed` entry in
+  `applied` for an edit. This is the MCP surface only: `revl compile` still
+  refuses both forms, so files stay in the one canonical grammar.
 - `revl_load` holds a DRAFT (a holed candidate) canonical, and answers with
   `canonicalSource` too; a load that boots keeps the bytes it was sent (a
   snapshot reproduces them). A draft's hole lines never move: the IR records
@@ -529,6 +542,7 @@ rule for edited files, the gates and drafts behave exactly as for `revl_edit`:
 | `{replace: {component, source}}` | replaces one declaration by name with its whole new text |
 | `{withdraw: "Name"}` | removes the component (and the comment above it) and withdraws it. Refused from the plan when the cascade is not empty |
 | `{withdraw: {component, cascade: true}}` | withdraws the component and its whole cascade together |
+| `{add: {component, provide, methods, config?, target?}}` | the server writes the component. `provide` is a key, or `{key, service}`; the service is the given one, or the one the composition already knows the key as. `methods` holds only bodies (`{"now": "store.get_count() + 1"}`); each frame comes from the service declaration. `requires` is inferred: every receiver a body calls (`store.get()`) that is a key of the composition. Refused, naming it: an unknown receiver, a missing or unknown operation, a key whose service cannot be inferred, a `config.` read with no `config` given (config is never inferred) |
 | `{add: {source, target?}}` | appends new declarations to the only buffer, or to `target` (a loaded file's path, a module key, or `source`). Refused before anything applies when a name is already declared (use `replace`), when `source` declares nothing, or when there are several buffers and no `target` |
 
 The answer carries `committed`, `verified` (`admission`; `guarantees`, the

@@ -342,7 +342,27 @@ def _apply_to_buffers(vs: dict, edits: list, default_target) \
         applied.append(echo)
         if buffer not in touched:
             touched.append(buffer)
+    applied += _complete_touched(vs, touched)
     return applied, touched
+
+
+def _complete_touched(vs: dict, touched: list) -> list[dict]:
+    """Complete terse punctuation in every buffer the edits left unparsable
+    (issue #1700): newline-separated match arms and an `if` without
+    parentheses. A buffer that parses, or that completion cannot make parse,
+    is left as it is, and the compile reports it. Each completion is echoed."""
+    from .complete import complete  # noqa: PLC0415
+
+    out = []
+    for buffer in touched:
+        text, inserted = complete(_get_text(vs, buffer), buffer[1])
+        if inserted:
+            _set_text(vs, buffer, text)
+            echo = {"form": "completed", "inserted": inserted}
+            if buffer[0] != "source":
+                echo["target"] = buffer[1]
+            out.append(echo)
+    return out
 
 
 def _apply_append(vs: dict, edit: dict, target) -> tuple[tuple[str, str], str, dict]:

@@ -857,6 +857,12 @@ def _tool_load(arguments: dict) -> dict:
     if source is None and not files and _draft.pending(SESSION) is not None \
             and not SESSION.loaded:
         return _draft.boot_held(SESSION, arguments, _boot_draft)
+    # issue #1700: terse punctuation completed before the compile; a draft is
+    # held canonical, a booting load holds the (completed) text as sent
+    sent, stored, canon = _canonical.prepare(arguments)
+    completed = canon if canon is not None and canon.get("completed") else None
+    arguments = sent
+    source, files, modules = _candidate_of(sent)
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -869,14 +875,14 @@ def _tool_load(arguments: dict) -> dict:
         # move (the IR records them, so the gate refuses any layout that would
         # shift one), symbols are names, and an anchor copied from what was
         # sent still matches by its tokens
-        stored, canon = _canonical.canonical_arguments(arguments)
         return _canonical.attach(_draft.open_draft(SESSION, stored, ir), canon)
     if not SESSION.loaded:   # a load over a running composition is refused below
         refusal = _leases.check(SESSION, "load", arguments)
         if refusal is not None:
             return _refused_by_lease(refusal)
-    return _boot(ir, source, modules, arguments.get("config"),
-                 bool(arguments.get("record")), _origin(arguments))
+    return _canonical.attach(
+        _boot(ir, source, modules, arguments.get("config"),
+              bool(arguments.get("record")), _origin(arguments)), completed)
 
 
 def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
@@ -980,8 +986,8 @@ def _tool_swap(arguments: dict) -> dict:
         return _with_touched(_swap_server_side(replacing), before)
 
     # issue #1700: compiled as sent, stored canonical, and the answer says which
-    stored, canon = _canonical.canonical_arguments(arguments)
-    return _canonical.attach(_swap_inline(arguments, stored, replacing, before), canon)
+    sent, stored, canon = _canonical.prepare(arguments)
+    return _canonical.attach(_swap_inline(sent, stored, replacing, before), canon)
 
 
 def _swap_inline(arguments: dict, stored: dict, replacing: tuple, before) -> dict:
@@ -1164,6 +1170,14 @@ def _tool_change(arguments: dict) -> dict:
         return _commit_held(arguments)
     try:
         intent = _change.intent_of(arguments)
+        if intent == "add" and isinstance(arguments["add"], dict) \
+                and arguments["add"].get("component") is not None:
+            # issue #1700: the server writes the component from the service
+            spec = arguments["add"]
+            vs = _proposal.base(SESSION) or _change_working_set()
+            arguments = {**arguments, "add": {
+                "source": _change.component_source(vs, spec),
+                **({"target": spec["target"]} if spec.get("target") else {})}}
         plan = None
         if intent == "withdraw":
             component, _ = _change._withdraw_spec(arguments["withdraw"])
@@ -1179,6 +1193,14 @@ def _tool_change(arguments: dict) -> dict:
     result = refused or _tool_edit(edit_arguments, verify=verifier)
     return _change.shape(intent, result, plan,
                          _change.withdrawn_names(edit_arguments), verifier)
+
+
+def _change_working_set() -> dict:
+    """The source set a change is read against: a held draft, or what runs."""
+    held = _draft.pending(SESSION)
+    if not SESSION.loaded and held is not None:
+        return held["vs"]
+    return _edit.virtual_source(SESSION)
 
 
 def _tool_export(arguments: dict) -> dict:
@@ -2099,8 +2121,8 @@ def _tool_history_lifetime(arguments: dict) -> dict:
 def _tool_check(arguments: dict) -> dict:
     """Compile a candidate AS SENT, so every diagnostic names a line the agent
     wrote, and say what its canonical form is (issue #1700)."""
-    _stored, canon = _canonical.canonical_arguments(arguments)
-    return _canonical.attach(_check_as_sent(arguments), canon)
+    sent, _stored, canon = _canonical.prepare(arguments)
+    return _canonical.attach(_check_as_sent(sent), canon)
 
 
 def _check_as_sent(arguments: dict) -> dict:
@@ -2970,7 +2992,10 @@ TOOLS = [
                        "a provider, and without `cascade: true` admission refuses "
                        "it); {add: {source, target?}} (new declarations appended "
                        "to the only buffer, or `target`; a name already declared "
-                       "is refused). Returns `committed`, `verified` (admission, "
+                       "is refused); {add: {component, provide, methods: {op: "
+                       "body}, config?}} (the server writes the component: the "
+                       "service, the method frames and `requires` from the "
+                       "composition). Returns `committed`, `verified` (admission, "
                        "and `guarantees`: the G1-G9 self-check), the `plan`, the "
                        "`touched` symbols and every `component` the change touched. "
                        "A failed verification commits nothing and says why.",
@@ -2984,7 +3009,9 @@ TOOLS = [
                                            "name and its whole new text"},
                 "add": {"type": "object",
                         "description": "{source, target?}: new declarations to "
-                                       "append to the only buffer, or `target`"},
+                                       "append to the only buffer, or `target`; "
+                                       "or {component, provide, methods, config?}: "
+                                       "the server writes the component"},
                 "withdraw": {"description": "a component name, or {component, "
                                             "cascade?: true}"},
                 "gauntlet": {"type": "boolean",
