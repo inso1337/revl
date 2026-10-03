@@ -27,8 +27,9 @@ order, and each verb on it opens its description with "Authoring loop step N of
    draft and re-run `revl_check`, or send `revl_edit {hole, expr}` once the
    composition is running.
 4. **preflight:** `revl_query_withdraw` gives the exact blast radius of replacing
-   or removing a component. `revl_edit` returns it in `blastRadius` for the
-   components it touches, and `revl_plan` shows what a swap would do.
+   or removing a component. `revl_edit`, `revl_swap` and `revl_change` return
+   it in `blastRadius` for the components they touch, and `revl_plan` shows
+   what a swap would do.
 5. **check:** `revl_check` returns `selfCheck`, every guarantee G1-G9 as pass or
    fail with the code and the fix.
 6. **commit:** `revl_admit` against the running manifest, then `revl_swap`.
@@ -498,6 +499,9 @@ candidate leaves the running system untouched; this is the acting half of
 `revl_admit`. Called with NO source (`source`/`files`/`modules`), it re-admits
 the source the server already holds, inline or loaded from files - so an agent
 that edited server-side with `revl_edit` need not re-serialize the whole file.
+A swap that lands, inline or by name, carries `blastRadius` in the shape
+`revl_edit` gives it below, read off the composition that was running before
+the swap (issue #1704).
 
 - Inputs: `source` / `files` / `modules` (all optional); `replacing`.
 
@@ -598,8 +602,10 @@ The answer carries `committed`, `verified` (`admission`, and `gauntlet` when
 asked), `plan` for a withdrawal (`cascade`, `withdrawalOrder`,
 `orphanedKeys`), the `touched` symbols, and `components`: every component the
 change touched, each with `added` / `changed` / `removed`, plus `would lose a
-provider` for a refused cascade. A change that fails verification commits
-nothing, and the running composition is unchanged.
+provider` for a refused cascade. A proposal and a commit (with an intent, or
+of the held proposal) also carry `blastRadius`, as `revl_edit` does; a commit
+reads it off the composition running at commit time. A change that fails
+verification commits nothing, and the running composition is unchanged.
 
 - Inputs: one of `edit` / `replace` / `withdraw`; `gauntlet`; `commit`
   (default false: propose only); `discard`; with nothing loaded, `files` /
