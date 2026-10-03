@@ -83,6 +83,7 @@ from . import gauntlet as _gauntlet
 from . import quarantine as _quarantine
 from . import quorum as _quorum
 from . import repair as _repair
+from . import runtime_gate as _runtime_gate
 from . import ship as _ship
 from . import deploy as _mcp_deploy
 from .persist import RestoreError
@@ -3907,6 +3908,28 @@ for _schema in LIVE_QUERY_TOOLS + HISTORY_QUERY_TOOLS:
 _HANDLERS = {tool["name"]: tool["handler"] for tool in TOOLS}
 _ADVERTISED = [{k: v for k, v in tool.items() if k != "handler"} for tool in TOOLS]
 
+# issue #1692: whether this interpreter can boot a composition at all. Probed
+# once, on first use; `set_runtime_available` overrides it (tests, transports).
+_RUNTIME_AVAILABLE: bool | None = None
+
+
+def runtime_available() -> bool:
+    global _RUNTIME_AVAILABLE
+    if _RUNTIME_AVAILABLE is None:
+        _RUNTIME_AVAILABLE = _runtime_gate.cordis_importable()
+    return _RUNTIME_AVAILABLE
+
+
+def set_runtime_available(available: bool | None) -> None:
+    """Pin the probe (`None` re-probes on next use)."""
+    global _RUNTIME_AVAILABLE
+    _RUNTIME_AVAILABLE = available
+
+
+_INSTRUCTIONS = ("Compile revl components before proposing them; use "
+                 "revl_admit against the running manifest before a swap, "
+                 "and revl_plan to see what that swap would do first.")
+
 
 # ---------------------------------------------------------------- protocol
 
@@ -3920,9 +3943,8 @@ def handle(message: dict) -> dict | None:
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {"tools": {"listChanged": False}},
             "serverInfo": SERVER_INFO,
-            "instructions": "Compile revl components before proposing them; use "
-                            "revl_admit against the running manifest before a swap, "
-                            "and revl_plan to see what that swap would do first.",
+            "instructions": _INSTRUCTIONS if runtime_available()
+                            else f"{_INSTRUCTIONS} {_runtime_gate.announcement()}",
         }
     elif method == "tools/list":
         result = {"tools": _ADVERTISED}
@@ -3948,6 +3970,13 @@ def handle(message: dict) -> dict | None:
             pass                    # refused above; the handler never runs
         elif decision.gated and not decision.allowed:
             payload = _refused_by_operator(decision)
+        elif not runtime_available() and _runtime_gate.is_refused(name, arguments):
+            # issue #1692: a verb that needs a live composition, on an
+            # interpreter that cannot boot one, refuses by name with the fix in
+            # `next`, instead of failing on an import error or on "nothing is
+            # loaded". After the operator gate: "you may not" outranks "this
+            # server cannot".
+            payload = _runtime_gate.refusal(name)
         else:
             try:
                 payload = handler(arguments)
