@@ -8,7 +8,7 @@
 
 ["reason", "blocking-tier-stream-and-typed-event-runtime-reached", "Blocking-tier stream and typed-event runtime, reached only by a component that holds a stream: subscribe/next/merge and the `every … in` loop (`_flag_stream`/`_is_stream_next`/`_stream_head`), the `on … as` schema-and-dedup contract (`_flag_stream_event` pulls the EventContract preamble, `_raw_go_ident` validates its key), the honest refusal of an unlowered stream surface (`_refuse_unlowered_stream_surface`), and the routing that diverts a stream-bearing component off the pure-module path (`_document_holds_stream`). Successful module corpus inputs contain no component stream effects, so these stay unexecuted. item 130 Slice 2 lowered the derived-stream combinator chain here (`_stream_chain` nests the `map`/`filter`/`take` links inside the subscription's acquisition and `_stream_stage_arrow` renders each pure transform against the tier's string item type); both are on the same stream-holding path and so are uncovered for the same reason. `_refuse_unlowered_stream_surface` drops from 7 to 5 because the combinator arm it used to carry is gone. `_refuse_unlowered_stream_surface` is down to 2: item 130 §8's `drain` window is LOWERED on this tier now, against the clock coeffect (item 57) it has always carried, so only the §4.5 `replay(…)` refusal is left in it. The retired window refusal had claimed the tier had no deterministic clock; it did. `_flag_stream_drain` is the flag that pulls the window's runtime and that scheduler into the emitted module, and it is uncovered for the same reason every other name here is: a corpus document holding a stream cannot be a byte-agreement case, because selfhost/emit_go.rvl ports no stream lowering at all. The window is pinned by tests/test_stream_reactive.py and executed, on the emitted module against real stc-go under `-race`, by backends/go/test_stream_exec_130.py. Item 130's required-`Stream[T]` coeffect adds `_refuse_required_stream`, which refuses a component that declares `requires <k>: Stream[T]` on this tier: the coeffect is lowered only on the py reference, and a corpus document declaring one would be REFUSED here rather than emitted, so it cannot be a byte-agreement case. The refusal is pinned by tests/test_stream_reactive.py instead."]
 
-["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_document_holds_stream", 6, 6]
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_document_holds_stream", 2, 2]
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_flag_stream", 1, 1]
 
@@ -20,7 +20,7 @@
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_raw_go_ident", 3, 3]
 
-["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_refuse_required_stream", 3, 3]
+["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_refuse_required_stream", 1, 1]
 
 ["function", "blocking-tier-stream-and-typed-event-runtime-reached", "_refuse_unlowered_stream_surface", 2, 2]
 
@@ -32,7 +32,7 @@
 
 ["reason", "component-effect-undo-frame-and-witnessed-wal-emission", "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port."]
 
-["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_body_needs_frame", 14, 14]
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_body_needs_frame", 6, 6]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_call_descriptor", 15, 15]
 
@@ -44,11 +44,9 @@
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_emit_witnessed_step", 53, 53]
 
-["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_method_body_has_compensate", 4, 4]
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_method_body_has_compensate", 1, 1]
 
-["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_method_body_has_witnessed", 4, 4]
-
-["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_provide_has_method_frame", 1, 1]
+["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_method_body_has_witnessed", 1, 1]
 
 ["function", "component-effect-undo-frame-and-witnessed-wal-emission", "_teardown_preamble", 8, 8]
 
@@ -66,11 +64,11 @@
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_comp_infer", 76, 76]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_construction_case", 15, 15]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_construction_case", 6, 6]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_emit_return", 32, 32]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_emit_return", 23, 23]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_expr", 168, 168]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_expr", 142, 142]
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_format", 50, 50]
 
@@ -82,9 +80,9 @@
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_literal", 2, 2]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_return", 9, 9]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_return", 4, 4]
 
-["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_type", 24, 24]
+["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_type", 10, 10]
 
 ["function", "component-method-expression-renderer-and-tuple-return-conven", "_go_widen_int", 1, 1]
 
@@ -104,19 +102,17 @@
 
 ["reason", "emit-calls-this-secret-marking-scan-only-after", "emit calls this Secret-marking scan only after the pure-module early return, to select component record/WAL redaction. The corpus already exercises a pure extern Secret return, but service secret parameters, config secrets and secret_witness descriptors remain a separate roadmap 421F6 runtime/redaction gap; pure wrapping is not evidence of runtime parity."]
 
-["function", "emit-calls-this-secret-marking-scan-only-after", "_declares_secret", 16, 16]
+["function", "emit-calls-this-secret-marking-scan-only-after", "_declares_secret", 8, 8]
 
 ["reason", "extern-declared-compensate-item-254-issue-1592-compensated", "Extern-declared compensate (item 254, issue #1592): `_compensated_table` builds the table of emission externs that declare their own `compensate`, `_emit_compensations` adds that compensation to the ones an `emit` registers, `_timer_has_compensate` flags a timer firing that registers one, `_declared_call` and `_reaches_declared` register one for a call in a value position of a provide method (a `let`, a `return`, an argument, a nested operand, through `revlDeclared`), and `_as_fn_call` re-spells the slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_go.rvl ports no extern-declared compensation. The behaviour is pinned and executed against real stc-go by backends/go/scenarios/emitted/extern_compensate/exec_test.go."]
 
 ["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_as_fn_call", 5, 5]
 
-["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_compensated_table", 1, 1]
-
 ["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_declared_call", 11, 11]
 
 ["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_emit_compensations", 9, 9]
 
-["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_reaches_declared", 9, 9]
+["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_reaches_declared", 7, 7]
 
 ["function", "extern-declared-compensate-item-254-issue-1592-compensated", "_timer_has_compensate", 1, 1]
 
@@ -148,7 +144,7 @@
 
 ["reason", "issue-721-issue-1321-component-is-observable-decides", "issue #721 / issue #1321: `_component_is_observable` decides whether a document that declares a top-level `fn`/`type`/`extern`/plain `test` beside a component takes the pure typed-core path (which routes PAST the component) or `_emit_v3_combined` (which renders both). A corpus document cannot reach it: an emit_go_corpus document declares no component, and one that did would take the combined path, which selfhost/emit_go.rvl has none of, so it would flip the byte-agreement oracle RED rather than cover the line. `_refuse_pure_path_component_drop` is gone from this bucket because issue #1321 removed it: the refusal PR #1317 added is unreachable once the combined path carries the document. The predicate is pinned by tests/test_548_control_flow_in_provide_methods.py::test_go_carries_a_component_the_pure_path_would_drop and by tests/test_selfhost_emit_go.py::test_an_observable_component_on_the_pure_path_is_named_by_the_port, with both boundaries (the live path still carries the same component, and a component with nothing to drop is still routed past silently) pinned beside them."]
 
-["function", "issue-721-issue-1321-component-is-observable-decides", "_component_is_observable", 6, 6]
+["function", "issue-721-issue-1321-component-is-observable-decides", "_component_is_observable", 4, 4]
 
 ["reason", "json-file-command-line-entry-and-output-writing", "JSON-file command-line entry and output writing are not entered by the in-process emit(ir) oracle."]
 
@@ -166,17 +162,11 @@
 
 ["reason", "live-component-binding-environment-emit-component-emit-provi", "Live-component binding environment: _emit_component/_emit_provide_impl construct _Env to resolve Apply receiver fields, requires, config and context; pure _emit_v3_go uses _V3GoCtx instead. The module-only port deliberately has no stc-go activation/provide ABI."]
 
-["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.__init__", 9, 9]
-
-["function", "live-component-binding-environment-emit-component-emit-provi", "_Env._prefix", 1, 1]
-
 ["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.config_ref", 2, 2]
 
 ["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.ctx_ref", 1, 1]
 
 ["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.name_ref", 7, 7]
-
-["function", "live-component-binding-environment-emit-component-emit-provi", "_Env.req_ref", 1, 1]
 
 ["function", "live-component-binding-environment-emit-component-emit-provi", "_bind_field", 1, 1]
 
@@ -188,13 +178,7 @@
 
 ["function", "live-component-binding-environment-emit-component-emit-provi", "_host_of_bind", 1, 1]
 
-["function", "live-component-binding-environment-emit-component-emit-provi", "_lower_camel", 2, 2]
-
-["function", "live-component-binding-environment-emit-component-emit-provi", "_req_field", 1, 1]
-
-["function", "live-component-binding-environment-emit-component-emit-provi", "_safe_local", 9, 9]
-
-["function", "live-component-binding-environment-emit-component-emit-provi", "_service_of_req", 1, 1]
+["function", "live-component-binding-environment-emit-component-emit-provi", "_safe_local", 2, 2]
 
 ["reason", "live-component-config-structs-defaults-service-key-registrat", "Live-component config structs/defaults, service-key registration, realm load helpers and routed-require realization. These are called by component assembly, not pure function/type emission; config/provide/req/realms are outside the module-only selfhost ABI."]
 
@@ -202,21 +186,15 @@
 
 ["function", "live-component-config-structs-defaults-service-key-registrat", "_component_has_config", 4, 4]
 
-["function", "live-component-config-structs-defaults-service-key-registrat", "_config_fields_flag", 1, 1]
-
 ["function", "live-component-config-structs-defaults-service-key-registrat", "_default_lit", 6, 6]
 
-["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_config_struct", 18, 18]
+["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_config_struct", 15, 15]
 
 ["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_go_router_struct", 82, 82]
 
-["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_keys", 10, 10]
-
 ["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_load_helpers", 27, 27]
 
-["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_realm_helper", 21, 21]
-
-["function", "live-component-config-structs-defaults-service-key-registrat", "_key_var", 1, 1]
+["function", "live-component-config-structs-defaults-service-key-registrat", "_emit_realm_helper", 19, 19]
 
 ["function", "live-component-config-structs-defaults-service-key-registrat", "_realm_helper_name", 1, 1]
 
@@ -256,7 +234,7 @@
 
 ["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_bridge_helpers", 52, 52]
 
-["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_combined", 262, 262]
+["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_combined", 215, 215]
 
 ["function", "placement-interop-bridge-entry-point-emits-wire-codecs", "_emit_v3_placement", 1, 1]
 
@@ -304,7 +282,7 @@
 
 ["reason", "remaining-entry-paths-accept-the-package-name-compatibility", "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead. Issue #1347 adds three statements: `Int.to_int32` in a component METHOD body flags the checked narrow `revlToI32`, so this path resets `_COMP_NEEDS_OVERFLOW32` and writes the helper that the pure typed-core path emits off `ctx.needs_overflow32`. It sits in the same live-component assembly after the pure-module early return, which the module oracle never enters. Issue #1669 adds two statements: an ir_version 3 document that carries a `lifecycle test`, components and a module `fn` takes the combined renderer, because the live stc-go path never renders module fns. A component document cannot be a go corpus case (selfhost/emit_go.rvl names its components instead); backends/go/test_module_fn_lifecycle_1669.py runs it under `go test` against the pinned stc-go."]
 
-["function", "remaining-entry-paths-accept-the-package-name-compatibility", "_emit", 121, 121]
+["function", "remaining-entry-paths-accept-the-package-name-compatibility", "_emit", 84, 84]
 
 ["reason", "remaining-fallbacks-reject-a-signature-without-a-parenthesiz", "Remaining fallbacks reject a signature without a parenthesized argument list or without its closing parenthesis; canonical frontend function types are well formed."]
 
@@ -346,7 +324,7 @@
 
 ["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_instance_get_expr", 9, 9]
 
-["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_iter_spawn_nodes", 5, 5]
+["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_iter_spawn_nodes", 3, 3]
 
 ["function", "spawn-handle-runtime-and-instance-key-lookup-require", "_spawn_expr", 9, 9]
 
@@ -360,17 +338,17 @@
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_collect_host_calls", 10, 10]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component", 88, 88]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component", 34, 34]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component_step", 180, 180]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_component_step", 152, 152]
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_host_stubs", 30, 30]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_method_body", 89, 89]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_method_body", 84, 84]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_provide_impl", 39, 39]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_provide_impl", 7, 7]
 
-["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_services", 16, 16]
+["function", "stc-go-component-activation-and-provided-service-implementat", "_emit_services", 1, 1]
 
 ["function", "stc-go-component-activation-and-provided-service-implementat", "_host_runtime", 14, 14]
 

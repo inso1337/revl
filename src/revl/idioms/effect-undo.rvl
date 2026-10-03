@@ -1,0 +1,10 @@
+// idiom: effect-undo
+// summary: the inverse of an `effect`: what fully releases what the acquisition took
+// rule: G4: the inverse undoes the acquisition completely (no residue), naming the bound value
+// rule: G5: teardown cannot register effects, so the inverse only releases
+// fill: store.drop()
+// type: Unit
+
+component Counter {
+  let store = effect Map.new() undo store.drop()
+}
