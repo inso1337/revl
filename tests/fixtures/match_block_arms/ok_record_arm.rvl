@@ -1,0 +1,16 @@
+// ADMITTED (issue #1699): arms that are record literals, `{ a: v }`, are not blocks
+// (parser.py `_block_arm_ahead`).
+// The file name's prefix is the expected verdict (`ok_` admitted, `g1_`/`g4_` refused
+// under that tag); tests/test_gate_match_block_arms_1699.py holds it.
+
+type P = { a: Int }
+service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let r = match o { Some(v) => { a: v }, None => { a: 0 } }
+      return r.a
+    }
+  }
+}

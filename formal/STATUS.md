@@ -1035,15 +1035,15 @@ printed 1. Nothing compared the two, in either direction.
 
 <!-- BEGIN GENERATED alignment: regenerate with `python3 formal/harness/diff_corpus.py --write-status` -->
 
-**688 .rvl files -> 626 components -> 1549 statements = 436 modeled +
-223 componentless + 29 refused at parse**, and **7957 verdicts compared
-(436 files + 626 components + 217 provide methods + 38 spawn edges + 29
-parse refusals + 267 teardown scenarios + 1620 recoveries + 1549
-confinements + 1549 surfaces + 423 teardowns + 494 provide-clause
-components + 83 config fields + 626 A2 bodies), 7957 agree, 0
+**704 .rvl files -> 642 components -> 1598 statements = 452 modeled +
+223 componentless + 29 refused at parse**, and **8121 verdicts compared
+(452 files + 642 components + 219 provide methods + 38 spawn edges + 29
+parse refusals + 267 teardown scenarios + 1620 recoveries + 1598
+confinements + 1598 surfaces + 423 teardowns + 510 provide-clause
+components + 83 config fields + 642 A2 bodies), 8121 agree, 0
 mismatches**.
 
-Checker alignment over the 436 modeled files. Every bucket recording a
+Checker alignment over the 452 modeled files. Every bucket recording a
 DISAGREEMENT fails the gate, in both directions: `missed-*` is the model
 weaker than the checker, `formal-strict` and `formal-found-other` are
 the model stricter than the language that ships. `out-of-fragment*`
@@ -1068,9 +1068,9 @@ layer.
 | `agree-A9` | 2 | informational |
 | `agree-G2` | 2 | informational |
 | `agree-G3` | 1 | informational |
-| `agree-G4` | 91 | informational |
+| `agree-G4` | 93 | informational |
 | `agree-G5` | 2 | informational |
-| `agree-accept` | 222 | informational |
+| `agree-accept` | 233 | informational |
 | `formal-found-other` | 0 | **FATAL** |
 | `formal-strict` | 0 | **FATAL** |
 | `missed-A2` | 0 | **FATAL** |
@@ -1078,7 +1078,7 @@ layer.
 | `missed-G2` | 0 | **FATAL** |
 | `missed-G4` | 0 | **FATAL** |
 | `missed-G5` | 0 | **FATAL** |
-| `out-of-fragment` | 70 | informational |
+| `out-of-fragment` | 73 | informational |
 | `out-of-fragment-G5` | 10 | ratcheted |
 | `out-of-fragment-G6` | 1 | ratcheted |
 | `out-of-fragment-approval` | 34 | ratcheted |

@@ -1921,10 +1921,258 @@ fn mark_timer(ss: List[Stmt]) -> List[Stmt] {
 fn p_stmts(ts: List[Token], lo: Int, hi: Int, acc: List[Stmt]) -> List[Stmt] {
   if (lo >= hi) { return acc }
   if (atk(ts, lo, "}")) { return p_stmts(ts, lo + 1, hi, acc) }
+  let ba = ba_stmt(ts, lo, hi)
+  if (ba.i > lo) { return p_stmts(ts, ba.i, hi, append_stmts(acc, ba.ss)) }
   let le = line_end(ts, lo, hi)
   let r = p_run(ts, lo, le)
   let nx = r.i > lo ? r.i : le
   return p_stmts(ts, nx, hi, append_stmts(acc, stamp_lines(r.ss, tkc(ts, lo).line)))
+}
+
+// ------------------------------------------- match block arms (issue #1699)
+//
+// A `match` arm may be a statement block, `Pat => { stmt* tail }` (parser.py
+// `_match_block_arm`, docs/records.md §4). In a component body the reference
+// lowers it inline as a `do` expression (lower.py `_lower_component_block_arm`):
+// the statements run in the arm's own scope and the tail is the arm's value.
+//
+// This reader had no such form. The expression reader takes `{` after `=>` for
+// a record literal and fails on its first statement, so the statement was read
+// up to the end of its line and skipped, and the rest of the block was read as
+// statements of the BODY: `z }, None => 0 }` on the next line drew the G1
+// "`z` is not a declared requirement" the reference never raises.
+//
+// A statement holding a block arm is now read to its real end (`ba_extent`,
+// by bracket depth) and rewritten (`ba_rw`):
+//   * the arm's statements are read with this same reader and bracketed as one
+//     scope (`scoped`), the arm's payload binding first, the way `for` binds
+//     its element;
+//   * the block itself is replaced in the statement by its tail, in
+//     parentheses, so the match is an ordinary expression whose arm reads the
+//     same names and calls the reference's `do` value does.
+// The tail is walked once, inside the rewritten statement. The arm's own names
+// stay visible to that walk because a method's scope names are the union of
+// every binding in its body (`stmt_binds`), which is also why a name an arm
+// binds is not a G1 anywhere else.
+//
+// A block statement (`if`, `while`, `for`, a timer, an event handler) is never
+// rewritten as a whole: its body is read by `p_stmts` again, which meets the
+// arm there.
+type BaRw = { pre: List[Stmt], toks: List[Token] }
+
+fn ba_opener(k: Str) -> Bool { return k == "{" || k == "(" || k == "[" }
+
+fn ba_closer(k: Str) -> Bool { return k == "}" || k == ")" || k == "]" }
+
+// The end of the statement that starts at lo: the first token at bracket depth
+// 0 that begins a new line, or a closer that leaves the statement. With `semi`,
+// a depth-0 `;` ends it too (the separator inside an arm block).
+fn ba_end(ts: List[Token], lo: Int, hi: Int, semi: Bool) -> Int {
+  var depth = 0
+  var j = lo
+  while (j < hi) {
+    let k = tkc(ts, j).kind
+    if (j > lo && depth == 0 && tkc(ts, j).line != tkc(ts, j - 1).line) {
+      return j
+    }
+    if (semi && depth == 0 && k == ";") { return j }
+    if (ba_opener(k)) { depth += 1 }
+    if (ba_closer(k)) {
+      if (depth == 0) { return j }
+      depth -= 1
+    }
+    j += 1
+  }
+  return hi
+}
+
+fn ba_extent(ts: List[Token], lo: Int, hi: Int) -> Int {
+  return ba_end(ts, lo, hi, false)
+}
+
+// parser.py `_record_update_ahead`: a depth-1 `|` before the matching brace.
+fn ba_update_ahead(ts: List[Token], k: Int) -> Bool {
+  var j = k + 1
+  var depth = 1
+  while (j < ts.length()) {
+    let kd = tkc(ts, j).kind
+    if (ba_opener(kd)) { depth += 1 }
+    if (ba_closer(kd)) {
+      depth -= 1
+      if (depth == 0) { return false }
+    }
+    if (kd == "|" && depth == 1) { return true }
+    j += 1
+  }
+  return false
+}
+
+// parser.py `_block_arm_ahead`, at the `{` after an arm's `=>`: anything but an
+// empty record, a record literal (`ident :`) or a record update is a block.
+fn ba_block_ahead(ts: List[Token], k: Int) -> Bool {
+  if (atk(ts, k + 1, "}")) { return false }
+  if (atk(ts, k + 1, "ident") && atk(ts, k + 2, ":")) { return false }
+  return !ba_update_ahead(ts, k)
+}
+
+fn ba_sep(ts: List[Token], j: Int) -> Bool {
+  return atk(ts, j, "{") || atk(ts, j, ",")
+}
+
+// Is the `=>` at i a match arm whose body is a block? The innermost open
+// bracket is the match's `{`, and the pattern is `Case` or `Case(x)` right
+// after that brace or a `,`. An arrow is told apart by both: its parameters
+// are not preceded by a case name, and it sits in a call's `(` or a record
+// field's `:`.
+fn ba_arm_at(ts: List[Token], i: Int, inner: Str) -> Bool {
+  if (inner != "{" || !atk(ts, i, "=>") || !atk(ts, i + 1, "{")) { return false }
+  let bare = atk(ts, i - 1, "ident") && ba_sep(ts, i - 2)
+  let bound = atk(ts, i - 1, ")") && atk(ts, i - 2, "ident")
+    && atk(ts, i - 3, "(") && atk(ts, i - 4, "ident") && ba_sep(ts, i - 5)
+  return (bare || bound) && ba_block_ahead(ts, i + 1)
+}
+
+fn ba_pop(stack: List[Str]) -> List[Str] {
+  return stack.length() > 0 ? stack.slice(0, stack.length() - 1) : stack
+}
+
+fn ba_top(stack: List[Str]) -> Str {
+  return stack.length() > 0 ? stack[stack.length() - 1] : ""
+}
+
+// Does `[lo, hi)` hold a block arm?
+fn ba_has(ts: List[Token], lo: Int, hi: Int) -> Bool {
+  var stack: List[Str] = []
+  var i = lo
+  while (i < hi) {
+    if (ba_arm_at(ts, i, ba_top(stack))) { return true }
+    let k = tkc(ts, i).kind
+    if (ba_opener(k)) { stack = stack.push(k) }
+    if (ba_closer(k)) { stack = ba_pop(stack) }
+    i += 1
+  }
+  return false
+}
+
+// The first token of an arm block's last statement (its tail).
+fn ba_tail_start(ts: List[Token], lo: Int, hi: Int) -> Int {
+  var i = lo
+  var last = lo
+  while (i < hi) {
+    if (atk(ts, i, ";")) { i += 1 }
+    else {
+      last = i
+      let se = ba_end(ts, i, hi, true)
+      i = se > i ? se : i + 1
+    }
+  }
+  return last
+}
+
+fn ba_tok(kind: Str, line: Int) -> Token {
+  return { kind: kind, text: kind, line: line }
+}
+
+fn ba_append(a: List[Token], bs: List[Token]) -> List[Token] {
+  var out = a
+  var i = 0
+  while (i < bs.length()) {
+    out = out.push(bs[i])
+    i += 1
+  }
+  return out
+}
+
+// Every token on one line, so the statement reader reads the rewritten
+// statement as the one statement it is.
+fn ba_one_line(xs: List[Token], line: Int) -> List[Token] {
+  var out: List[Token] = []
+  var i = 0
+  while (i < xs.length()) {
+    out = out.push({ kind: xs[i].kind, text: xs[i].text, line: line })
+    i += 1
+  }
+  return out
+}
+
+// One arm block at the `=>` at i, its block closing just before e: the arm's
+// scoped statements, and the tail that stands in for the block.
+fn ba_arm(ts: List[Token], i: Int, e: Int) -> BaRw {
+  let t0 = ba_tail_start(ts, i + 2, e - 1)
+  var tend = e - 1
+  while (tend > t0 && atk(ts, tend - 1, ";")) { tend -= 1 }
+  let tail = ba_rw(ts, t0, tend)
+  var arm: List[Stmt] = []
+  if (atk(ts, i - 1, ")")) {
+    arm = [mkstmtb("expr", expr_bind_only(), tkc(ts, i - 2).text)]
+  }
+  arm = append_stmts(append_stmts(arm, p_stmts(ts, i + 2, t0, [])), tail.pre)
+  let ln = tkc(ts, i).line
+  let open: List[Token] = [ba_tok("(", ln)]
+  return { pre: arm_scoped(arm),
+           toks: ba_append(open, tail.toks).push(ba_tok(")", ln)) }
+}
+
+// `[lo, hi)` with every block arm in it rewritten (see above).
+fn ba_rw(ts: List[Token], lo: Int, hi: Int) -> BaRw {
+  var pre: List[Stmt] = []
+  var out: List[Token] = []
+  var stack: List[Str] = []
+  var i = lo
+  while (i < hi) {
+    let t = tkc(ts, i)
+    let e = ba_arm_at(ts, i, ba_top(stack)) ? close_brace(ts, i + 1) : 0 - 1
+    if (e != 0 - 1 && e <= hi) {
+      let a = ba_arm(ts, i, e)
+      pre = append_stmts(pre, a.pre)
+      out = ba_append(out.push(t), a.toks)
+      i = e
+    } else {
+      if (ba_opener(t.kind)) { stack = stack.push(t.kind) }
+      if (ba_closer(t.kind)) { stack = ba_pop(stack) }
+      out = out.push(t)
+      i += 1
+    }
+  }
+  return { pre: pre, toks: out }
+}
+
+// An arm's statements, bracketed. Not `scoped`: the reference gives every
+// `let` in the arm a fresh name (`_safe_name` in `_lower_component_block_arm`),
+// so an arm may rebind a name of the body or of its own, and the G6 rebind walk
+// steps over the whole arm (`arm_skip`). Every other walk passes over the two
+// markers as it passes over `scope_open` and `scope_close`.
+fn arm_scoped(ss: List[Stmt]) -> List[Stmt] {
+  let open: List[Stmt] = [scope_stmt("arm_open")]
+  return append_stmts(open, ss).push(scope_stmt("arm_close"))
+}
+
+// The index just past the `arm_close` that closes the arm opened before i.
+fn arm_skip(ss: List[Stmt], i: Int, depth: Int) -> Int {
+  if (i >= ss.length()) { return i }
+  let k = ss[i].kind
+  if (k == "arm_close") { return depth == 0 ? i + 1 : arm_skip(ss, i + 1, depth - 1) }
+  return arm_skip(ss, i + 1, k == "arm_open" ? depth + 1 : depth)
+}
+
+// A statement head whose body `p_stmts` reads on its own.
+fn ba_block_head(ts: List[Token], lo: Int) -> Bool {
+  return atw(ts, lo, "if") || atw(ts, lo, "while") || atw(ts, lo, "for")
+    || atw(ts, lo, "every") || atw(ts, lo, "after") || ati(ts, lo, "after")
+    || atw(ts, lo, "else")
+    || (ati(ts, lo, "on") && atw(ts, lo + 2, "as"))
+}
+
+// The statement at lo, when it holds a block arm: its statements and its end.
+fn ba_stmt(ts: List[Token], lo: Int, hi: Int) -> SRun {
+  if (ba_block_head(ts, lo)) { return mk_srun([], lo) }
+  let se = ba_extent(ts, lo, hi)
+  if (se <= lo || !ba_has(ts, lo, se)) { return mk_srun([], lo) }
+  let ln = tkc(ts, lo).line
+  let rw = ba_rw(ts, lo, se)
+  let rt = ba_one_line(rw.toks, ln)
+  let r = p_run(rt, 0, rt.length())
+  return mk_srun(append_stmts(stamp_lines(rw.pre, ln), stamp_lines(r.ss, ln)), se)
 }
 
 // ---------------------------------------------------------------- fn callees
@@ -6691,6 +6939,9 @@ fn mth_rebind_in(pm: ProvM, scope: List[Str], marks: List[Int], i: Int) -> Verd 
   let s = pm.body[i]
   if (s.kind == "scope_open") {
     return mth_rebind_in(pm, scope, marks.push(scope.length()), i + 1)
+  }
+  if (s.kind == "arm_open") {
+    return mth_rebind_in(pm, scope, marks, arm_skip(pm.body, i + 1, 0))
   }
   if (s.kind == "scope_close" && marks.length() > 0) {
     let m = marks[marks.length() - 1]
@@ -26160,4 +26411,81 @@ component C provides s: S {
   }
 }""")
   assert v == ""
+}
+
+test "a block match arm in a provide method is read as the arm's scope" {
+  let v = admit_src("""service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let x = match o { Some(v) => { let z = v + 1
+ z }, None => 0 }
+      return x
+    }
+  }
+}""")
+  assert v == ""
+}
+
+test "an undeclared name in a block arm's tail is refused on that name" {
+  let v = admit_src("""service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let x = match o {
+        Some(v) => {
+          let z = v + 1
+          nope(z)
+        },
+        None => 0
+      }
+      return x
+    }
+  }
+}""")
+  assert v == "G1|`nope` is not a declared requirement of C"
+}
+
+test "a name bound in a block arm may be bound again after it" {
+  let v = admit_src("""service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let x = match o {
+        Some(v) => {
+          let z = v + 1
+          z
+        },
+        None => 0
+      }
+      let z = x + 1
+      return z
+    }
+  }
+}""")
+  assert v == ""
+}
+
+test "a name the block-arm statement binds is a G6 rebind" {
+  let v = admit_src("""service S { fn go(n: Int) -> Int }
+component C provides s: S {
+  provide s {
+    fn go(n: Int) {
+      let o = Some(n)
+      let x = match o {
+        Some(v) => {
+          let z = v + 1
+          z
+        },
+        None => 0
+      }
+      let x = 2
+      return x
+    }
+  }
+}""")
+  assert v == "G6|`x` is already bound in `go`"
 }
