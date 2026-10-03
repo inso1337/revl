@@ -56,8 +56,8 @@
 //     `req`/`config`/`fn` expression kinds and the `target`/`method` call form).
 //     Still DEFERRED and REPORTED (each fires a `<<DEFER-*>>` marker): timers /
 //     routers (`routes`), `await`/`spawn`, `isolate`/`intercept`/realms, host
-//     `let-effect` binds (`Pool`/`Map`/`Job`) and the item-114 host-Map
-//     undo-reclone, body-level `effect`/`timer`/`fail`/`if` steps, the `host`/
+//     `let-effect` binds (`Pool`/`Map`/`Job`), body-level
+//     `effect`/`timer`/`fail`/`if` steps, the `host`/
 //     `format` component-dialect kinds, and the non-scalar bridge marshalling
 //     (Result/serde/`Vec<Value>`/opaque-`Value`). These stay ENTANGLED with the
 //     erasure surface below;
@@ -4435,6 +4435,62 @@ fn method_undo_clones(comp: Any, method: Any, indent: Int) -> List[Str] {
   for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) out = out.push(`${pad}let ${pn}_undo = ${pn}.clone();`) }
   return out
 }
+// The identifier a `var`/`name`/`req` node names (`id`, falling back to `name`).
+fn ref_ident(node: Any) -> Str {
+  var ident = value_str(value_field(node, "id"))
+  if (ident == "") { ident = value_str(value_field(node, "name")) }
+  return ident
+}
+// `_expr_var_names`: every bare variable name an IR subtree references, so the
+// undo's reads can be matched against the acquire's moves (item 114).
+fn expr_var_names(node: Any, acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    let k = node_kind(node)
+    if (k == "var" || k == "name" || k == "req") {
+      let ident = ref_ident(node)
+      if (ident != "") { m = m.set(ident, "1") }
+    }
+  }
+  for (child of value_children(node)) { m = expr_var_names(child, m) }
+  return m
+}
+// `_acquire_moved_locals`: the bare-identifier arguments a host-Map method
+// takes by value (`insert(key, value)`; `get`/`remove` borrow the key). Every
+// other acquire argument is already cloned at the call site.
+fn acquire_moved_locals(node: Any, vt: Map[Str, Str], acc: Map[Str, Str]) -> Map[Str, Str] {
+  var m = acc
+  if (value_kind(node) == "record") {
+    if (node_kind(node) == "call" && value_is_null(value_field(node, "callee"))) {
+      let recv = ref_ident(value_field(node, "target"))
+      let mth = value_str(value_field(node, "method"))
+      if (map_get(vt, recv).startsWith("Map[") && mth != "get" && mth != "remove") {
+        for (arg of value_list(value_field(node, "args"))) {
+          let ak = node_kind(arg)
+          if (ak == "var" || ak == "name") {
+            let ident = ref_ident(arg)
+            if (ident != "") { m = m.set(ident, "1") }
+          }
+        }
+      }
+    }
+  }
+  for (child of value_children(node)) { m = acquire_moved_locals(child, vt, m) }
+  return m
+}
+// `_undo_reclone_locals`, sorted: the method-body locals the undo reads AND the
+// acquire consumes by value. The `move` undo closure would find those already
+// moved (E0382), so each is pre-cloned into `<local>_undo` before the acquire.
+fn undo_reclone_locals(acq: Any, undonode: Any, body_locals: Map[Str, Str], vt: Map[Str, Str]) -> List[Str] {
+  // Only reached for a step that registers an undo, so `undonode` is never null.
+  var out = []
+  let refs = expr_var_names(undonode, Map.empty())
+  let moved = acquire_moved_locals(acq, vt, Map.empty())
+  for (local of body_locals.keys()) {
+    if (refs.has(local) && moved.has(local)) { out = out.push(local) }
+  }
+  return list_sort(out)
+}
 // `_provide_let_type`: `_v3_infer_type` extended with the one source that only
 // exists in a provide body — a required-service method call's declared return
 // (`let answer = model.complete(seed)`), so a later by-value use of the local
@@ -4465,8 +4521,9 @@ fn reqs_map(comp: Any) -> Map[Str, Str] {
 
 // `_method_body_lines`: lower effect/emit/return/let/assign steps in an
 // effectful provide-method body. Effect registration is fire-and-forget through
-// `self.ctx.effect(..)`. The host-Map reclone (item 114) is DEFERRED — the
-// subset declares no host `Map`, so `_undo_reclone_locals` is always empty.
+// `self.ctx.effect(..)`. Ahead of each undo, a method-body local the undo reads
+// and a host-Map acquire moves (`insert(key, ..)`) is pre-cloned into
+// `<local>_undo` (item 114, `_undo_reclone_locals`).
 // Returns the lines AND the threaded ctx (its `vt` carries let-inferred types).
 fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: Int) -> Sout {
   let pad = ind(indent)
@@ -4476,6 +4533,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
   var c = set_rn(ctx, scope)
   var out = []
   var index = 0
+  var body_locals: Map[Str, Str] = Map.empty()
   for (step of value_list(value_field(method, "body"))) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "return") {
@@ -4484,7 +4542,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
       else { out = out.push(`${pad}return ${render_expr(e, c)};`) }
     } else {
       if (kind == "effect" || kind == "emit") {
-        let undoR = method_undo_rename(comp, method)
+        var undoR = method_undo_rename(comp, method)
         var acqR = scope
         for (p of value_list(value_field(method, "params"))) { let pn = value_str(p) acqR = acqR.set(pn, `${pn}.clone()`) }
         let label = string_lit(`${name}.${mnm}.${kind}.${num_str(index)}`)
@@ -4498,7 +4556,10 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
         if (value_is_null(acqnode)) { acqnode = value_field(step, "expr") }
         if (registers_undo) {
           out = out.concat(method_undo_clones(comp, method, indent))
-          // host-Map reclone (item 114): DEFERRED — no host Map in subset.
+          for (local of undo_reclone_locals(acqnode, undonode, body_locals, c.vt)) {
+            out = out.push(`${pad}let ${local}_undo = ${local}.clone();`)
+            undoR = undoR.set(local, `${local}_undo`)
+          }
         }
         let acq = render_expr(acqnode, set_rn(c, acqR))
         out = out.push(`${pad}let _ = ${acq};`)
@@ -4520,6 +4581,7 @@ fn method_body_lines(comp: Any, method: Any, services: Any, ctx: Ctx, indent: In
             out = out.push(`${pad}${mangle(nm)} = ${render_expr(value_field(step, "value"), c)};`)
           }
           if (inferred != "") { c = set_vt(c, nm, inferred) }
+          if (kind == "let" && nm != "") { body_locals = body_locals.set(nm, "1") }
         } else {
           out = out.push(`${pad}<<DEFER-method-step:${kind}>>`)
         }

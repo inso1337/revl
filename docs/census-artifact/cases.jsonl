@@ -1662,6 +1662,8 @@
 
 ["tests/fixtures/emit_py_corpus/services_timers.rvl", "agree-admit"]
 
+["tests/fixtures/emit_py_corpus/services_value_emission.rvl", "agree-admit"]
+
 ["tests/fixtures/emit_py_corpus/shadowing_near_misses.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_py_corpus/streams.rvl", "agree-admit"]
@@ -1705,6 +1707,8 @@
 ["tests/fixtures/emit_rust_corpus/comp_body_steps.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/comp_host_map.rvl", "agree-admit"]
+
+["tests/fixtures/emit_rust_corpus/comp_host_map_undo_local.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_rust_corpus/comp_realm_isolate.rvl", "agree-admit"]
 
@@ -1919,6 +1923,8 @@
 ["tests/fixtures/emit_wasm_refusals/compound_required_call.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/deferred_emission_call.rvl", "agree-admit"]
+
+["tests/fixtures/emit_wasm_refusals/secret_fed_plain_witness.rvl", "agree-admit"]
 
 ["tests/fixtures/emit_wasm_refusals/validated_emission_operation.rvl", "agree-admit"]
 
