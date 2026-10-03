@@ -451,6 +451,9 @@ class _SwapPlan:
     pre: dict
     handoff_pre: dict
     pre_resolved: set
+    # issue #1751: the components gen N was ALREADY running PENDING (an unmet
+    # requirement, e.g. an ambient host service this host does not supply)
+    pre_pending: frozenset = frozenset()
 
 
 def _container_copy(value):
@@ -1653,8 +1656,14 @@ class Session:
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
         pre_resolved = set(driver.resolved_keys())
+        # issue #1751: and the components it was running PENDING, so the gate
+        # does not hold the successor to a health its predecessor never had
+        pre_pending = frozenset(
+            name for name, fiber in driver.fibers.items()
+            if driver.FiberState(fiber.state).name == "PENDING")
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
-                         handoff_pre=handoff_pre, pre_resolved=pre_resolved)
+                         handoff_pre=handoff_pre, pre_resolved=pre_resolved,
+                         pre_pending=pre_pending)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
@@ -1704,7 +1713,8 @@ class Session:
             # opposite of the revert guarantee. So assert the successor activated
             # CLEANLY and, if not, raise into the `_activation_error` branch below,
             # which routes to `_abort_swap` (revert to gen N, keep serving gen N).
-            self._assert_successor_activated(ir, plan.pre_resolved)
+            self._assert_successor_activated(ir, plan.pre_resolved,
+                                             plan.pre_pending)
         except BaseException as exc:
             # item 372: the successor's activation did not complete — roll the
             # whole swap back to the predecessor (which activated cleanly) so the
@@ -1966,7 +1976,8 @@ class Session:
                         pass
 
     def _assert_successor_activated(self, ir: dict,
-                                    pre_resolved: set | None = None) -> None:
+                                    pre_resolved: set | None = None,
+                                    pre_pending: frozenset | None = None) -> None:
         """The item-334 post-activation health gate (EDGE 1).
 
         `driver._load` returns cleanly even when the successor did not truly come
@@ -2009,6 +2020,17 @@ class Session:
         and `Gate.propose` both report the smaller set honestly). What it may
         not do is claim a key it inherited and deliver nothing.
 
+        A component gen N was ALREADY running PENDING (`pre_pending`, issue
+        #1751) may come back PENDING: the swap does not make it worse, and
+        refusing it made a composition with one legitimately pending component
+        (an ambient host service this host does not supply, as
+        `examples/app/notes.rvl`'s `NotesConsole` needs `webui`) impossible to
+        swap at all, even to itself. Its root keys are not held against the
+        successor either, since gen N never served them. Everything else stands:
+        a FAILED fiber, a component that was ACTIVE and comes back PENDING, a
+        new component that comes up PENDING, and a key gen N served that no
+        longer resolves are all refused.
+
         On any failure, raise `ActivationError` so the enclosing `swap` catches it
         in its `_activation_error()` branch and routes to `_abort_swap` — reverting
         to gen N exactly as a raised activation fault does. `_dispose_all` in the
@@ -2017,9 +2039,14 @@ class Session:
         as part of the rollback (the 245 owner was installed before this load)."""
         ActivationError = _activation_error()
         driver = self._driver
-        # 1) no successor fiber may be FAILED or PENDING.
+        # 1) no successor fiber may be FAILED or PENDING, except one that was
+        #    already PENDING in gen N (issue #1751).
+        still_pending = set()
         for name, fiber in driver.fibers.items():
             state = driver.FiberState(fiber.state).name
+            if state == "PENDING" and name in (pre_pending or ()):
+                still_pending.add(name)
+                continue
             if state in ("FAILED", "PENDING"):
                 comp = next((c for c in (ir.get("components") or [])
                              if c.get("name") == name), {})
@@ -2043,7 +2070,7 @@ class Session:
         for comp in (ir.get("components") or []):
             keys = set((comp.get("provides") or {}).keys())
             declared_all |= keys
-            if comp.get("name") not in templates:
+            if comp.get("name") not in templates and comp.get("name") not in still_pending:
                 declared_root |= keys
         inherited = declared_all & set(pre_resolved or ())
         resolved = driver.resolved_keys()
