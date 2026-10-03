@@ -1,0 +1,10 @@
+# User cache
+
+This component caches lookups.
+
+## Usage
+
+- call `get(key)` to read a value
+- call `put(key, value)` to store one
+
+See [the docs](https://example.com/docs) for more.
