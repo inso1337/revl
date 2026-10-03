@@ -1823,23 +1823,110 @@ def _body_has_witnessed(steps: list | None, witnessed: dict) -> bool:
     return False
 
 
-def _body_has_compensation(steps: list | None) -> bool:
+def _compensated_table(externs: list) -> dict:
+    """item 254 (issue #1592): emission externs that DECLARE their own
+    `compensate`, by name. Every `emit` of one registers that compensation, at
+    whatever site the emit sits. Mirrors backends/python/emit.py's
+    `_ComponentEmitter.compensated`; empty for a document with no such extern,
+    so its emission stays byte-identical."""
+    return {ext["name"]: ext for ext in externs
+            if ext.get("class") == "emission" and ext.get("compensate") is not None}
+
+
+def _as_fn_call(node):
+    """An extern's declared slot is lowered in the pure-expression dialect
+    (`{"kind": "call", "callee": {"kind": "var", ...}}`). Re-spell a bare named
+    call as the component-site `fn` node the component renderer reads.
+    Anything else is returned as is."""
+    if isinstance(node, dict) and node.get("kind") == "call" and "method" not in node:
+        callee = node.get("callee")
+        if isinstance(callee, dict) and callee.get("kind") == "var":
+            return {"kind": "fn", "name": callee.get("name"),
+                    "args": list(node.get("args") or [])}
+    return node
+
+
+def _emit_compensations(step: dict, compensated: dict | None) -> list:
+    """The compensations an `emit` step registers, in order: the site-spelled
+    `compensate` clause, then the emitted extern's own declared one (item 254,
+    issue #1592), the order the py reference registers them in. An extern is
+    matched as a `fn`-kind call naming it."""
+    out = []
+    if step.get("compensate") is not None:
+        out.append(step["compensate"])
+    expr = step.get("expr")
+    if compensated and isinstance(expr, dict) and expr.get("kind") == "fn":
+        ext = compensated.get(expr.get("name"))
+        if ext is not None:
+            out.append(_as_fn_call(ext["compensate"]))
+    return out
+
+
+def _reaches_declared(node, compensated: dict | None) -> bool:
+    """Whether any `fn` call in *node* (an IR subtree) names an extern that
+    declares its own `compensate` (issue #1592)."""
+    if not compensated:
+        return False
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in compensated:
+            return True
+        return any(_reaches_declared(v, compensated) for v in node.values())
+    if isinstance(node, list):
+        return any(_reaches_declared(v, compensated) for v in node)
+    return False
+
+
+def _declared_call(node: dict, call: str, ctx) -> str:
+    """A call to an extern that declares its own `compensate`, anywhere in a
+    provide method other than the `emit` statement that registers it itself (a
+    `let`, a `return`, an argument, a nested operand, an `if` or loop arm;
+    issue #1592, the positions of #1511). It renders as a block expression: the
+    call runs first, then the offset is registered on the activation's
+    accumulator exactly as a method-body `emit` statement registers it, and the
+    block yields the call's value."""
+    if not ctx.declared_ctx or node is ctx.declared_skip:
+        return call
+    ext = ctx.compensated.get(node.get("name"))
+    if ext is None:
+        return call
+    offset = _render_expr(_as_fn_call(ext["compensate"]), ctx, {})
+    owner = ctx.declared_ctx
+    label = _string(ctx.declared_label)
+    return (f"{{ let _revl_dv = {call}; "
+            f"let _revl_state = revl_teardown_of(&{owner}); "
+            f"let _revl_call: Box<dyn FnOnce() + Send> = Box::new(move || {{ let _ = {offset}; }}); "
+            f"let _ = {owner}.effect({label}, move || {{ "
+            f"if !_revl_state.committed.load(std::sync::atomic::Ordering::Acquire) {{ "
+            f"_revl_state.phase2.lock().unwrap().push("
+            f"RevlPendingCompensation {{ label: {label}.to_string(), call: _revl_call }}); }} "
+            f"Ok(()) }}); _revl_dv }}")
+
+
+def _body_has_compensation(steps: list | None, compensated: dict | None = None) -> bool:
     for step in steps or []:
-        if step.get("step") == "emit" and step.get("compensate") is not None:
+        if step.get("step") == "emit" and _emit_compensations(step, compensated):
+            return True
+        # a timer firing that emits an extern declaring its own `compensate`
+        # registers it onto the activation's accumulator (issue #1592)
+        if step.get("step") == "timer" and any(
+                _emit_compensations(em, compensated) for em in step.get("body") or []):
             return True
         if step.get("step") == "if":
-            if (_body_has_compensation(step.get("then"))
-                    or _body_has_compensation(step.get("else"))):
+            if (_body_has_compensation(step.get("then"), compensated)
+                    or _body_has_compensation(step.get("else"), compensated)):
                 return True
     return False
 
 
-def _method_bodies_have_compensation(component: dict) -> bool:
+def _method_bodies_have_compensation(component: dict, compensated: dict | None = None) -> bool:
     for step in component.get("body") or []:
         if step.get("step") != "provide":
             continue
         for method in step.get("methods") or []:
-            if _body_has_compensation(method.get("body")):
+            if _body_has_compensation(method.get("body"), compensated):
+                return True
+            # a call to such an extern in a value position (issue #1592)
+            if _reaches_declared(method.get("body"), compensated):
                 return True
     return False
 
@@ -1862,11 +1949,12 @@ def _method_bodies_have_witnessed(component: dict, witnessed: dict) -> bool:
     return False
 
 
-def _component_needs_teardown(component: dict, witnessed: dict) -> bool:
+def _component_needs_teardown(component: dict, witnessed: dict,
+                              compensated: dict | None = None) -> bool:
     body = component.get("body") or []
     return (_body_has_witnessed(body, witnessed)
-            or _body_has_compensation(body)
-            or _method_bodies_have_compensation(component)
+            or _body_has_compensation(body, compensated)
+            or _method_bodies_have_compensation(component, compensated)
             or _method_bodies_have_witnessed(component, witnessed))
 
 
@@ -2268,7 +2356,11 @@ class _Env:
         # `compensation` (`emit ... compensate`, activation- or method-body)
         # entry. Gated so a program using neither emits byte-identically to
         # before this slice.
-        self.needs_teardown: bool = _component_needs_teardown(component, self.witnessed)
+        # item 254 (issue #1592): emission externs that declare their own
+        # `compensate`; every emit of one registers it (see `_emit_compensations`).
+        self.compensated: dict[str, dict] = _compensated_table(self.externs)
+        self.needs_teardown: bool = _component_needs_teardown(
+            component, self.witnessed, self.compensated)
 
     def v3_ctx(self) -> _V3Ctx:
         if self._v3_ctx is None:
@@ -4372,11 +4464,16 @@ def _iter_method_steps(steps):
             yield from _iter_method_steps(step.get("body") or [])
 
 
-def _component_has_effectful_methods(component: dict) -> bool:
+def _component_has_effectful_methods(component: dict, compensated: dict | None = None) -> bool:
     for step in component.get("body") or []:
         if step.get("step") != "provide":
             continue
         for method in step.get("methods") or []:
+            # issue #1592: a call to an extern that declares its own
+            # `compensate`, in any position, registers on the activation frame
+            # through `self.ctx`, so the impl needs it.
+            if _reaches_declared(method.get("body"), compensated):
+                return True
             # `let-effect` (item 397: a method-body host CAS) is effectful
             # too — it registers a guarded inverse on the activation frame.
             if any(body_step.get("step") in _RUST_EFFECTFUL_STEPS
@@ -4632,9 +4729,12 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             for param in method.get("params") or []:
                 acquire_rename[param] = f"{param}.clone()"
             acquire_node = step.get("expr")
+            env.v3_ctx().declared_skip = acquire_node
             acquire = _expr(acquire_node, env, acquire_rename)
+            env.v3_ctx().declared_skip = None
             out.append(f"{pad}let _ = {acquire};")
-            if step.get("compensate") is None:
+            compensations = _emit_compensations(step, env.compensated)
+            if not compensations:
                 continue
             # `compensation` (item 247 / the teardown-contract two-phase
             # abort): recover this activation's `RevlTeardown` through the
@@ -4642,16 +4742,17 @@ def _method_body_lines(env: _Env, method: dict, out: list[str], indent: int) -> 
             # `revl_teardown_begin` stored there at activation), then register
             # a disposer that discharges on commit or queues onto phase 2 on
             # abort — never runs immediately, unlike the old placeholder.
-            undo_rename = _method_undo_rename(env, method)
-            _method_undo_clones(env, method, out, indent)
-            for local in sorted(_undo_reclone_locals(
-                    acquire_node, step.get("compensate"), body_locals, env.v3_ctx())):
-                out.append(f"{pad}let {local}_undo = {local}.clone();")
-                undo_rename[local] = f"{local}_undo"
-            out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
-            _emit_compensation_registration(
-                env, step["compensate"], f"{env.name}.{method.get('name')}.compensate.{index}",
-                out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
+            for compensate_node in compensations:
+                undo_rename = _method_undo_rename(env, method)
+                _method_undo_clones(env, method, out, indent)
+                for local in sorted(_undo_reclone_locals(
+                        acquire_node, compensate_node, body_locals, env.v3_ctx())):
+                    out.append(f"{pad}let {local}_undo = {local}.clone();")
+                    undo_rename[local] = f"{local}_undo"
+                out.append(f"{pad}let _revl_teardown = revl_teardown_of(&self.ctx);")
+                _emit_compensation_registration(
+                    env, compensate_node, f"{env.name}.{method.get('name')}.compensate.{index}",
+                    out, indent, undo_rename, ctx_expr="self.ctx", propagate=False)
         elif kind in ("let", "assign"):
             name = _ident(step.get("name"), "binding")
             # Seed the local's inferred type into the shared type table so a
@@ -4743,7 +4844,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
     cname = _ident(name, "component")
     isolate = component.get("isolate") or {}
     intercept = component.get("intercept") or {}
-    has_effectful = _component_has_effectful_methods(component)
+    has_effectful = _component_has_effectful_methods(
+        component, _compensated_table(ir.get("externs") or []))
 
     for local, service in env.reqs.items():
         _ident(local, "requirement")
@@ -4822,6 +4924,9 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 env, key, original_mname, method.get("params") or [])
             mark = "".join(_secret_mark_call(t, p, tail=" ", types=env.types)
                            for p, t in secret_params)
+            if has_effectful:
+                env.v3_ctx().declared_ctx = "self.ctx"
+                env.v3_ctx().declared_label = f"{env.name}.{original_mname}.declared.compensate"
             if _method_has_effectful_steps(method):
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{")
                 if secret_params:
@@ -4830,6 +4935,7 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
                 out.append("    }")
             else:
                 out.append(f"    fn {mname}(&self, {params}) -> {ret} {{ {mark}{_method_body_pure_new(env, method)} }}")
+            env.v3_ctx().declared_ctx = None
         out.append("}")
         out.append("")
 
@@ -4913,7 +5019,8 @@ def _emit_component_new(component: dict, services: dict, ir: dict | None = None)
 def _emit_component_auto(component: dict, services: dict, ir: dict | None = None) -> list[str]:
     if (
         not (component.get("isolate") or component.get("intercept"))
-        and not _component_has_effectful_methods(component)
+        and not _component_has_effectful_methods(
+            component, _compensated_table((ir or {}).get("externs") or []))
     ):
         return _emit_component(component, services, ir)
     return _emit_component_new(component, services, ir)
@@ -5451,7 +5558,8 @@ def _emit_compensation_registration(env: "_Env", compensate_node: dict, label_te
     out.append(f"{pad}}}){tail}")
 
 
-def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], indent: int) -> None:
+def _emit_activation_compensation(env: "_Env", compensate_node: dict, out: list[str],
+                                  indent: int) -> None:
     """`emit ... compensate` at activation level. Requires `env.needs_teardown`
     (the caller guarantees `_revl_teardown`/`ctx` are the extended locals from
     `_emit_teardown_begin`). Pre-clones every `req` and every prior
@@ -5460,7 +5568,7 @@ def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], inden
     from under it (mirrors the existing bracket-undo req cloning above)."""
     pad = "    " * indent
     referenced: set[str] = set()
-    _expr_var_names(step.get("compensate"), referenced)
+    _expr_var_names(compensate_node, referenced)
     rename: dict[str, str] = {}
     for req in env.reqs:
         req_c = f"{req}_comp"
@@ -5471,7 +5579,7 @@ def _emit_activation_compensation(env: "_Env", step: dict, out: list[str], inden
         out.append(f"{pad}let {local_c} = {local}.clone();")
         rename[local] = local_c
     _emit_compensation_registration(
-        env, step["compensate"], env.name + ".compensate", out, indent, rename)
+        env, compensate_node, env.name + ".compensate", out, indent, rename)
 
 
 def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
@@ -5549,8 +5657,10 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
         out.append(f"{pad}ctx.effect({label}, move || {{ {undo}; Ok(()) }})?;")
     elif kind == "emit":
         out.append(f"{pad}let _ = {_expr(step['expr'], env)};")
-        if step.get("compensate") is not None:
-            _emit_activation_compensation(env, step, out, indent)
+        # the site-spelled clause, then the extern's own declared one (item
+        # 254, issue #1592), each registered after the fire.
+        for compensate_node in _emit_compensations(step, env.compensated):
+            _emit_activation_compensation(env, compensate_node, out, indent)
     elif kind == "timer":
         # A `timer` step (item 57, docs/time-coeffect.md): a revertible
         # schedule. Arming the timer is the acquire, cancellation its derived
@@ -5577,12 +5687,26 @@ def _emit_step(step: dict, env: _Env, out: list[str], indent: int) -> None:
             cloned = f"{req}_t{n}"
             out.append(f"{pad}let {cloned} = {req}.clone();")
             rename[req] = cloned
+        # a firing that emits an extern declaring its own `compensate` registers
+        # it on the activation's accumulator, once per firing, after the fire
+        # (item 254, issue #1592). The firing runs after activation, so it
+        # registers the way a provide method does: through its own clone of the
+        # activation `ctx`, recovering the accumulator with `revl_teardown_of`.
+        compensates = any(_emit_compensations(em, env.compensated)
+                          for em in step.get("body") or [])
+        if compensates:
+            out.append(f"{pad}let _revl_ctx_t{n} = ctx.clone();")
         out.append(f"{pad}let _revl_timer_{n} = {schedule}({interval}, move || {{")
         for em in step.get("body") or []:
             if em.get("step") != "emit":  # lowerer invariant (scope: emissions)
                 raise EmitError(
                     f"timer body carries emissions only, found {em.get('step')!r}")
             out.append(f"{pad}    let _ = {_expr(em.get('expr'), env, rename=rename)};")
+            for compensate_node in _emit_compensations(em, env.compensated):
+                out.append(f"{pad}    let _revl_teardown = revl_teardown_of(&_revl_ctx_t{n});")
+                _emit_compensation_registration(
+                    env, compensate_node, env.name + ".timer.compensate", out, indent + 1,
+                    rename, ctx_expr=f"_revl_ctx_t{n}", propagate=False)
         out.append(f"{pad}}});")
         # the derived inverse: cancellation, yielded into the disposer stack.
         label = _string(env.name + ".timer.undo")
@@ -6267,6 +6391,14 @@ class _V3Ctx:
             analyses = _V3Analyses(functions, self.types)
         self.function_names = {fn.get("name") for fn in functions or []}
         self.extern_names = {ext.get("name") for ext in externs or []}
+        # issue #1592: emission externs that declare their own `compensate`, and,
+        # while a provide method renders, the context expression a call to one
+        # registers through (`self.ctx`), its label, and the one call node an
+        # `emit` statement registers itself.
+        self.compensated: dict = _compensated_table(externs or [])
+        self.declared_ctx: str | None = None
+        self.declared_label: str = ""
+        self.declared_skip = None
         # Declared return type of every free function / extern, so a `let`
         # binding to a call can be typed (`let dec = decode(..)` -> `Reply`) and
         # a later by-value use knows to clone (see `_by_value_arg`).
@@ -6651,7 +6783,7 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
         # item 277: a viewed callee takes its `&[char]` companions last.
         rendered += _char_view_args(
             node.get("name"), fn_arg_nodes, fn_arg_exprs, ctx)
-        return f"{name}({', '.join(rendered)})"
+        return _declared_call(node, f"{name}({', '.join(rendered)})", ctx)
 
     if kind == "adt":
         # tagged ADT construction: user variants -> `Enum::Case(..)`, built-in
@@ -7063,9 +7195,16 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                 # here (`&s.to_string()` -> `&String`). An index read is not a
                 # borrowed param, so it stripped above and never reaches here —
                 # the two rewrites are disjoint.
+                #
+                # Every receiver not KNOWN to be a `Str` takes the rewrite: a
+                # list literal types as bare `List` and a field or call may not
+                # type at all, and each of those missed it (E0308 on
+                # `let xs = ["a"]; xs.indexOf(s)`). On a `Str` receiver the
+                # owned `String` would still coerce to the `&str` slot, so the
+                # only cost of an unknown type is the allocation.
                 recv_ty = _v3_infer_type(target_node, ctx)
                 a0 = arg_nodes[0]
-                if (isinstance(recv_ty, str) and recv_ty.startswith("List[")
+                if (recv_ty != "Str"
                         and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
                         and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
                     args[0] = f"{args[0]}.to_string()"
@@ -9564,20 +9703,22 @@ def _emit_bridge(ir: dict) -> list[str]:
                 out.append(f"        {deser}")
             out.append("    }")
         out.append("}")
-        # provider-side dispatch
+        # provider-side dispatch. Issue #1634: a call this cannot make is an
+        # `Err`, never `null` (which the runner used to send as `ok: true`).
         out.append(f"fn _revl_dispatch_{_snake(sname)}(svc: &dyn {sname}, method: &str, "
-                   "args: &[serde_json::Value]) -> serde_json::Value {")
+                   "args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
         out.append("    match method {")
         for mname, method in methods.items():
             params = method.get("params") or []
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             extracts = [_bridge_arg_extract(i, _rust_type(p.get("type"), types)) for i, p in enumerate(params)]
             if any(e is None for e in extracts):
-                out.append(f'        "{mname}" => serde_json::Value::Null, // unmarshalled param type')
+                out.append(f'        "{mname}" => Err("{sname}.{mname} cannot be called across a '
+                           'seam: a parameter type has no wire form".to_string()),')
                 continue
             call = f"svc.{_method_ident(mname)}({', '.join(extracts)})"
-            out.append(f'        "{mname}" => {_bridge_ret_ser(call, ret)},')
-        out.append("        _ => serde_json::Value::Null,")
+            out.append(f'        "{mname}" => Ok({_bridge_ret_ser(call, ret)}),')
+        out.append(f'        _ => Err(format!("method \'{{method}}\' is not exported for service {sname}")),')
         out.append("    }")
         out.append("}")
         out.append("")
@@ -9613,16 +9754,18 @@ def _emit_bridge(ir: dict) -> list[str]:
     out.append("}")
     out.append("")
 
-    # provider/probe: require a locally-provided key and dispatch to it
+    # provider/probe: require a locally-provided key and dispatch to it. A key
+    # whose provider cannot be resolved, or that no component provides, is an
+    # `Err` (issue #1634).
     out.append("pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, "
-               "args: &[serde_json::Value]) -> serde_json::Value {")
+               "args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
     out.append("    match key {")
     for key, service in provided.items():
         out.append(f'        "{key}" => match ctx.require::<Box<dyn {service}>>("{key}") {{')
         out.append(f"            Ok(svc) => _revl_dispatch_{_snake(service)}(&**svc, method, args),")
-        out.append("            Err(_) => serde_json::Value::Null,")
+        out.append(f'            Err(_) => Err("no provider for key \'{key}\' right now".to_string()),')
         out.append("        },")
-    out.append("        _ => serde_json::Value::Null,")
+    out.append('        _ => Err(format!("key \'{key}\' is not provided by this process")),')
     out.append("    }")
     out.append("}")
     out.append("")
@@ -9712,7 +9855,8 @@ def _uses_teardown(components: list, externs: list) -> bool:
     method-body)? Gates `_revl_teardown_preamble` so a program using
     neither emits byte-identically to before this slice."""
     witnessed = {ext["name"]: ext for ext in externs if ext.get("class") == "witnessed"}
-    return any(_component_needs_teardown(c, witnessed) for c in components)
+    compensated = _compensated_table(externs)
+    return any(_component_needs_teardown(c, witnessed, compensated) for c in components)
 
 
 def _emit_components(ir: dict, components: list) -> list[str]:

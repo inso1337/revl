@@ -51,6 +51,27 @@ class SessionError(RuntimeError):
         self.code = code
 
 
+class ApprovalRefused(SessionError):
+    """A class-(c) crossing whose pending ticket an operator answered NO
+    (`revl_revoke` with the ticket `hash`, issue #1553). Raised once, on the
+    re-issue that question was holding, and fired nothing. A `SessionError`, so
+    every surface that already reports a session refusal reports this one; the
+    HTTP face names it (`approvalRefused`) because an app caller has to tell
+    "no" apart from "not yet"."""
+
+    def __init__(self, ticket: dict, refusal: dict) -> None:
+        by = refusal.get("by") or "an operator"
+        why = refusal.get("reason") or ""
+        super().__init__(
+            f"`{ticket.get('key')}.{ticket.get('method')}` was refused: {by} "
+            f"revoked its pending ticket {ticket.get('hash')}"
+            + (f" ({why})" if why else "")
+            + ". Nothing fired. Asking again opens a new question",
+            code="APPROVAL_REFUSED")
+        self.ticket = ticket
+        self.refusal = dict(refusal)
+
+
 @dataclasses.dataclass(frozen=True)
 class VerdictReview:
     """The review half of the item 483 exact-state verdict protocol, returned by
@@ -341,9 +362,14 @@ _SURVIVES_A_FAILED_LOAD = frozenset({
     # crossed. Rolling these back would refund a yes that was used.
     # `_auto_spend` in particular is created on a rule's first materialization,
     # so restoring it would hand a failed load a fresh budget every time.
-    "_tickets", "_ticket_rounds", "_ledger", "_grants", "_grants_consumed",
+    "_tickets", "_ticket_rounds", "_ticket_refusals", "_ledger", "_grants",
+    "_grants_consumed",
     "_approval_grants", "_approval_records", "_auto_spend", "_auto_consumed",
     "_quorums", "_quorum_receipts",
+    # The agent-loop axes (issue #1738). They count what the session did,
+    # refusals included, and a count that a failed load could take back would
+    # be one an agent can lower on demand.
+    "_loop_axes",
     # The event loop the load ran on. It is plumbing, not composition state, and
     # putting back `None` would orphan an open loop rather than undo anything.
     "_loop",
@@ -425,6 +451,9 @@ class _SwapPlan:
     pre: dict
     handoff_pre: dict
     pre_resolved: set
+    # issue #1751: the components gen N was ALREADY running PENDING (an unmet
+    # requirement, e.g. an ambient host service this host does not supply)
+    pre_pending: frozenset = frozenset()
 
 
 def _container_copy(value):
@@ -667,12 +696,25 @@ class Session:
         # at every load/swap so a call decided against a stale map is impossible.
         # None when nothing is loaded or the policy is off.
         self._class_map = None
+        # issue #1738: the agent-loop axes `state()` always reports. Cumulative
+        # for the whole MCP session, so `_reset` leaves them alone, and a failed
+        # load does not roll them back (`_SURVIVES_A_FAILED_LOAD`). The class map
+        # they classify a call against when the policy is off is built lazily
+        # per generation, `(generation, map)`.
+        from .loop_axes import LoopAxes  # noqa: PLC0415
+        self._loop_axes = LoopAxes()
+        self._loop_class_map: tuple | None = None
         # the outstanding-ticket table (Fix 8): every class-(c) ticket the server
         # issues, keyed by its hash. `revl_approve` refuses a hash not in here —
         # an approval can only be minted for a question the server actually asked.
         # Replaced atomically with the class map at swap (a ticket from a previous
         # generation is gone, not stale).
         self._tickets: dict = {}
+        # issue #1553: the NO an operator gave a pending single-party ticket
+        # (`revoke_ticket`), keyed by its hash, until the re-issue it answers
+        # consumes it (`_approval_decide_call`). One no refuses one re-issue, as
+        # one yes fires one; asking again after that is a new question.
+        self._ticket_refusals: dict = {}
         # the ANSWER ROUND each ticket is currently on, keyed by its hash. A
         # ticket hash is the deterministic identity of a QUESTION (component +
         # reach-closure candidate hash + kind + args digest), so the SAME
@@ -1614,8 +1656,14 @@ class Session:
         # teardown while its providers are still live. The health gate below
         # holds the successor to these — see `_assert_successor_activated`.
         pre_resolved = set(driver.resolved_keys())
+        # issue #1751: and the components it was running PENDING, so the gate
+        # does not hold the successor to a health its predecessor never had
+        pre_pending = frozenset(
+            name for name, fiber in driver.fibers.items()
+            if driver.FiberState(fiber.state).name == "PENDING")
         return _SwapPlan(old_ir=old_ir, new_map=new_map, source=source, pre=pre,
-                         handoff_pre=handoff_pre, pre_resolved=pre_resolved)
+                         handoff_pre=handoff_pre, pre_resolved=pre_resolved,
+                         pre_pending=pre_pending)
 
     def _cut_over(self, driver, ir: dict, origin: dict | None,
                   plan: "_SwapPlan") -> dict:
@@ -1665,7 +1713,8 @@ class Session:
             # opposite of the revert guarantee. So assert the successor activated
             # CLEANLY and, if not, raise into the `_activation_error` branch below,
             # which routes to `_abort_swap` (revert to gen N, keep serving gen N).
-            self._assert_successor_activated(ir, plan.pre_resolved)
+            self._assert_successor_activated(ir, plan.pre_resolved,
+                                             plan.pre_pending)
         except BaseException as exc:
             # item 372: the successor's activation did not complete — roll the
             # whole swap back to the predecessor (which activated cleanly) so the
@@ -1733,6 +1782,7 @@ class Session:
         # each of them moves the epoch exactly once here.
         self._surface_epoch += 1
         self._tickets = {}
+        self._ticket_refusals = {}
         # item 251 Slice 2: re-materialize the distilled rules against the new
         # generation. The H1 review bind (`_auto_reviewed`) persists across the
         # swap, so a component the swap moves INTO a rule's glob that was not in the
@@ -1926,7 +1976,8 @@ class Session:
                         pass
 
     def _assert_successor_activated(self, ir: dict,
-                                    pre_resolved: set | None = None) -> None:
+                                    pre_resolved: set | None = None,
+                                    pre_pending: frozenset | None = None) -> None:
         """The item-334 post-activation health gate (EDGE 1).
 
         `driver._load` returns cleanly even when the successor did not truly come
@@ -1969,6 +2020,17 @@ class Session:
         and `Gate.propose` both report the smaller set honestly). What it may
         not do is claim a key it inherited and deliver nothing.
 
+        A component gen N was ALREADY running PENDING (`pre_pending`, issue
+        #1751) may come back PENDING: the swap does not make it worse, and
+        refusing it made a composition with one legitimately pending component
+        (an ambient host service this host does not supply, as
+        `examples/app/notes.rvl`'s `NotesConsole` needs `webui`) impossible to
+        swap at all, even to itself. Its root keys are not held against the
+        successor either, since gen N never served them. Everything else stands:
+        a FAILED fiber, a component that was ACTIVE and comes back PENDING, a
+        new component that comes up PENDING, and a key gen N served that no
+        longer resolves are all refused.
+
         On any failure, raise `ActivationError` so the enclosing `swap` catches it
         in its `_activation_error()` branch and routes to `_abort_swap` — reverting
         to gen N exactly as a raised activation fault does. `_dispose_all` in the
@@ -1977,9 +2039,14 @@ class Session:
         as part of the rollback (the 245 owner was installed before this load)."""
         ActivationError = _activation_error()
         driver = self._driver
-        # 1) no successor fiber may be FAILED or PENDING.
+        # 1) no successor fiber may be FAILED or PENDING, except one that was
+        #    already PENDING in gen N (issue #1751).
+        still_pending = set()
         for name, fiber in driver.fibers.items():
             state = driver.FiberState(fiber.state).name
+            if state == "PENDING" and name in (pre_pending or ()):
+                still_pending.add(name)
+                continue
             if state in ("FAILED", "PENDING"):
                 comp = next((c for c in (ir.get("components") or [])
                              if c.get("name") == name), {})
@@ -2003,7 +2070,7 @@ class Session:
         for comp in (ir.get("components") or []):
             keys = set((comp.get("provides") or {}).keys())
             declared_all |= keys
-            if comp.get("name") not in templates:
+            if comp.get("name") not in templates and comp.get("name") not in still_pending:
                 declared_root |= keys
         inherited = declared_all & set(pre_resolved or ())
         resolved = driver.resolved_keys()
@@ -3535,6 +3602,7 @@ class Session:
         result = owner.finalize_abort()            # aborted record (+ escrow Phase 2)
         self._close_wal()
         residue = self._surface_compensation_residue(owner)
+        self._loop_axes.record_abort(residue)      # issue #1738
         report = self._teardown_report(driver)
         prompts = dict(owner.prompts)
         self._reset()
@@ -4251,6 +4319,8 @@ class Session:
         # seeds the next owner from an entry still reading `consumed: False` and
         # a single-use approval re-arms across the unload.
         self._settle_approval_spend(self._owner)
+        # issue #1738: the commit session ends here; keep its prompt tally.
+        self._loop_axes.close_owner(self._owner)
         self._owner = None
         self.ir = None
         self.previous = None
@@ -4279,6 +4349,7 @@ class Session:
         # deliberately NOT reset here.
         self._class_map = None
         self._tickets = {}
+        self._ticket_refusals = {}
         self._ticket_rounds = {}   # indexes `_ledger`; dies with it
         self._ledger = []
         self._grants = []
@@ -4869,6 +4940,9 @@ class Session:
         # binds to THAT grant/approval (not any that could have covered).
         decision: dict | None = {} if cache_active else None
         self._approval_decide_call(key, method, args, record=decision)
+        # issue #1738: the call is decided and about to cross, so it counts
+        # toward the loop axes now, policy or not.
+        self._loop_axes.record_call(self._loop_call_class(key, method))
 
         async def invoke():
             result = target(*(args or []))
@@ -5540,6 +5614,11 @@ class Session:
         from .approval import ApprovalRequired  # noqa: PLC0415
         ticket = self._class_map.build_ticket(
             reach, args, record_values=self.approval_record_values)
+        # issue #1553: an operator's NO to this question refuses the re-issue it
+        # was holding, once, before anything could cover it
+        refusal = self._ticket_refusals.pop(ticket["hash"], None)
+        if refusal is not None:
+            raise ApprovalRefused(ticket, refusal)
         standing = self._find_standing_approval(ticket)
         if standing is not None:
             self._consume_approval(standing)   # durable spend before the fire
@@ -6352,7 +6431,10 @@ class Session:
                                        vote=vote),
             now_ms=self._now_ms(),
             bound=getattr(self, "operator", None),
-            registry=getattr(self, "operator_registry", None))
+            registry=getattr(self, "operator_registry", None),
+            # issue #1463: "transport" when the HTTP transport authenticated the
+            # bound operator for this request; the label is the only difference
+            bound_by=getattr(self, "operator_bound_by", "session"))
         if isinstance(outcome, _quorum.UnboundCast):
             self._record_quorum("quorum-refused", {
                 **self._refusal_row(record, action, outcome.reason,
@@ -6755,14 +6837,26 @@ class Session:
         names can also close the question, which is a veto. Either way the votes
         cast so far stop counting and no approval is minted, and the record names
         who closed it and why. A bystander cannot: the same fail-closed membership
-        check escalation uses."""
+        check escalation uses.
+
+        A ticket no rule names approvers for is answered by one operator, so its
+        revoke is that operator's NO (issue #1553, `_refuse_single_party_ticket`):
+        the re-issue the ticket holds is refused once and fires nothing."""
         ticket = self._tickets.get(ticket_hash)
         if ticket is None:
             raise SessionError(
                 f"unknown ticket hash {ticket_hash!r} - the server never issued it "
                 f"(roadmap item 471, the outstanding-ticket table)")
         rule = self._ticket_approval_shape(ticket)
-        if rule is None or not rule.is_quorum():
+        if rule is None:
+            if as_token is not None or as_secret is not None \
+                    or as_proof is not None:
+                raise SessionError(
+                    f"ticket {ticket_hash} names no approver set, so it is "
+                    f"answered by the calling operator, not cast as anyone: "
+                    f"revoke it plainly (issue #1553)")
+            return self._refuse_single_party_ticket(ticket, reason)
+        if not rule.is_quorum():
             raise SessionError(
                 f"ticket {ticket_hash} does not demand a quorum, so it cannot be "
                 f"revoked as one: revoke the standing grant instead (roadmap item "
@@ -6801,6 +6895,40 @@ class Session:
                 "candidateHash": ticket["candidateHash"],
                 "component": ticket["component"], "requestId": record["requestId"],
                 "by": actor, "withdrewVotes": withdrawn, "outcome": "revoked"}
+
+    def _refuse_single_party_ticket(self, ticket: dict,
+                                    reason: str | None) -> dict:
+        """Answer a pending single-party ticket NO (issue #1553).
+
+        A ticket no rule names approvers for is answered by one operator: yes
+        through `approve_ticket`, and now no through the same `revl_revoke` verb
+        that closes a multi-party question. The no is held until the re-issue it
+        answers (`_approval_decide_call`), which is refused and fires nothing.
+        A yes already minted for this round and not yet spent is withdrawn with
+        it (`approval-revoked`, as a standing grant's early revoke is). The
+        revoke closes the round: `approve_ticket` refuses it from then on, and
+        the next asking of the crossing opens a new one."""
+        ticket_hash = ticket["hash"]
+        by = getattr(getattr(self, "operator", None), "token", None) or ""
+        withdrawn = None
+        entry = self._ledger_entry_for_ticket(ticket_hash)
+        if entry is not None and not entry["consumed"]:
+            entry["consumed"] = True
+            entry["revoked"] = True
+            withdrawn = entry["requestId"]
+            wal = self._approval_wal()
+            if wal is not None:
+                wal.record_approval_revoked(withdrawn)
+        self._ticket_refusals[ticket_hash] = {
+            "by": by, "reason": (str(reason).strip() if reason else ""),
+            "round": self._ticket_rounds.get(ticket_hash, 1),
+            "at": self._now_ms()}
+        return {"revoked": True, "hash": ticket_hash,
+                "candidateHash": ticket.get("candidateHash"),
+                "component": ticket.get("component"), "by": by,
+                "outcome": "refused", "withdrewApproval": withdrawn,
+                "note": ("the re-issue this ticket is holding is refused once "
+                         "and fires nothing; asking again opens a new question")}
 
     def quorum_state(self, ticket_hash: str) -> dict:
         """The decision graph of an outstanding multi-party ticket, read-only: the
@@ -7027,6 +7155,14 @@ class Session:
                     f"quorum, so it cannot be answered with a vote: approve it "
                     f"plainly (roadmap item 471)")
             existing = self._ledger_entry_for_ticket(ticket_hash)
+            if ticket_hash in self._ticket_refusals \
+                    or (existing is not None and existing.get("revoked")):
+                # issue #1553: a revoke closed this round, so no yes follows it
+                raise SessionError(
+                    f"ticket {ticket_hash} was revoked in this round, so it "
+                    f"cannot be approved: the re-issue it holds is refused. The "
+                    f"next asking of the crossing opens a new round, which can "
+                    f"be approved")
             if existing is not None:
                 return self._ticket_response(existing)
             self._mint_ticket_entry(ticket)
@@ -8582,7 +8718,8 @@ class Session:
         if self._driver is None:
             # even with nothing loaded, the workspace's active leases (item 61)
             # are visible — an agent can survey who holds what before it loads.
-            return {"loaded": False, "leases": self.leases.document()}
+            return {"loaded": False, "leases": self.leases.document(),
+                    "loopAxes": self.loop_axes()}
         driver = self._driver
         manifest = (self.ir or {}).get("manifest") or {}
         paused_now = self.slo_paused()
@@ -8628,8 +8765,46 @@ class Session:
             # configured (off-policy `state()` is byte-identical).
             **({"approval": self.approval_metrics()}
                if self.approval_policy is not None else {}),
+            # issue #1738: the six agent-loop axes, always.
+            "loopAxes": self.loop_axes(),
             **({"trace": driver.drain_events()} if drain else {}),
         }
+
+    def loop_axes(self) -> dict:
+        """The agent-loop axes of issue #1738 (`revl.mcp.loop_axes`), each a
+        numerator, a denominator and their ratio, cumulative for the session."""
+        return self._loop_axes.document(self._owner)
+
+    def record_tool_call(self, name: str, arguments: dict, payload: dict,
+                         ir_before: dict | None) -> None:
+        """Feed one finished MCP tool call to the loop axes. `ir_before` is the
+        running composition before the handler ran; the components that differ
+        from it now are the ones the call touched."""
+        from .loop_axes import EDIT_TOOLS  # noqa: PLC0415
+        touched = None
+        if name in EDIT_TOOLS and self.ir is not ir_before:
+            from .operator import _changed_targets  # noqa: PLC0415
+            touched = [component for component, _ in
+                       _changed_targets(ir_before or {}, self.ir or {})]
+        self._loop_axes.record_tool(name, arguments, payload, touched)
+
+    def _loop_call_class(self, key: str, method: str):
+        """The class of a call's reach for the loop axes: the policy's own class
+        map when there is one, else a policy-independent one for the live
+        generation. `False` when the call cannot be classified."""
+        class_map = self._class_map
+        if class_map is None and self.ir is not None:
+            cached = self._loop_class_map
+            if cached is None or cached[0] is not self.ir:
+                from .approval import ClassMap  # noqa: PLC0415 — lazy, no cordis
+                try:
+                    cached = (self.ir, ClassMap(self.ir))
+                except Exception:  # noqa: BLE001 — unclassifiable, counted as such
+                    cached = (self.ir, None)
+                self._loop_class_map = cached
+            class_map = cached[1]
+        reach = class_map.classify_call(key, method) if class_map is not None else None
+        return False if reach is None else reach["class"]
 
 
 def _decision_id_of(sources: dict, granted, base_manifest_hash: str | None,

@@ -35,6 +35,7 @@
   "emit_go": [
     "case=None",
     "case=Some",
+    "class=emission",
     "class=witnessed",
     "fn=Map.new",
     "has_config=<true>",
@@ -153,6 +154,7 @@
   ],
   "emit_rust": [
     "bind=_",
+    "class=emission",
     "class=witnessed",
     "interp_type=Float",
     "kind=format",
@@ -188,26 +190,11 @@
     "step=unload"
   ],
   "emit_ts": [
-    "class=witnessed",
-    "kind=do",
     "kind=hole",
-    "kind=stream-merge",
-    "kind=subscribe",
-    "lifecycle=<true>",
-    "mode=every",
     "name=Err",
     "name=Ok",
     "op=!==",
-    "op====",
-    "root=stdlib",
-    "stage=take",
-    "step=advance",
-    "step=assert_no_residue",
-    "step=call",
-    "step=load",
-    "step=stream-iter",
-    "step=timer",
-    "step=unload"
+    "op===="
   ],
   "emit_wasm": [
     "async=<true>",

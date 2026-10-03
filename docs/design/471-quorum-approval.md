@@ -682,6 +682,13 @@ what would make the count a count of authenticated callers rather than of
 credentials presented on one wire. It is the entire residual of #979 after
 Slice 4.
 
+Issue #1463 (slice 1) added that transport for MCP over HTTP
+(docs/mcp-http-transport.md): each request is authenticated as one operator, a
+cast naming anyone else is refused, and the vote is recorded `boundBy:
+"transport"`. Over HTTP the count is therefore of authenticated credentials, one
+per request. It is still not a count of people, and the stdio residual above is
+unchanged: the pinned expected admission stays green.
+
 ## Exit tests
 
 The item's exit criterion: "a `require 2 of {a,b,c}` rule admits only on two

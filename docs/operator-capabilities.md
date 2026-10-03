@@ -238,11 +238,21 @@ A session runs *as* one operator. The identity is set at serve time:
 revl mcp serve --operator-profile ops.profile --operator alice
 ```
 
-`--operator` is optional when the profile declares exactly one operator. Today
-the stdio transport carries a single session, so one served process is one
-operator. When the transport later carries a per-caller **session token** (item
-39), the same registry maps each token to its operator with no change to the
-gate — the token *is* the operator's name.
+`--operator` is optional when the profile declares exactly one operator. The
+stdio transport carries a single session, so one served process is one operator.
+The profile FILE is live on every transport: an edit (a `revoked` line, an
+`until`, a removed operator, a changed grant) applies once it has settled
+(`--profile-settle-ms`, default 1000), with no restart. A profile that is mid-edit
+or does not parse refuses every request except `revl_estop`, and a revoked stdio
+serve-time operator is refused everything except `revl_estop`
+([mcp-http-transport.md](mcp-http-transport.md#identity)).
+
+Over HTTP (`--http HOST:PORT`, issue #1463, [mcp-http-transport.md](mcp-http-transport.md))
+it is the other way round: the process runs as no operator (`--operator` is
+refused), and **each request** is bound to the operator whose bearer secret
+(`key sha256:`) or client certificate it presents. The gate is unchanged: it
+reads the session's operator, which for the length of one request is the
+caller's. A request with no identity is refused, never run as a default.
 
 ## Vote credentials (multi-party approval)
 
@@ -326,9 +336,13 @@ It does **not** prove that N humans consented. A caller holding two of the named
 approvers' private keys signs twice and satisfies a two-of-M rule from one
 session, and the decision graph honestly reads as two principals because at this
 boundary it was two keys. Signing changes what must be held and what a captured
-value is worth; it does not make the count a count of people. Closing that needs
-a per-caller authenticated transport (item 39) where each cast arrives on its
-own authenticated connection and the count is of connections.
+value is worth; it does not make the count a count of people.
+
+Over the HTTP transport ([mcp-http-transport.md](mcp-http-transport.md)) each
+cast arrives on its own authenticated request, a cast naming anyone but the
+caller is refused, and the vote is recorded `boundBy: "transport"`. That makes
+the count a count of authenticated credentials, one per request. It is still not
+a count of people: someone holding two operators' secrets sends two requests.
 
 So: treat `require N of M` as binding against mistake, against a single
 operator's unaided assertion, and, with `sign`, against replay and against

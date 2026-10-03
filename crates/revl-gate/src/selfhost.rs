@@ -3056,7 +3056,7 @@ fn render_builtin(node: Value, ctx_: Ctx__m1) -> String {
             if (iplace != "") {
                 r = iplace.clone();
             }
-            if (((method == "indexOf") && recv_type.revl_starts_with("List[")) && ctx_.bp.contains_key(&ref_name(a.clone()))) {
+            if (((method == "indexOf") && (recv_type != "Str")) && ctx_.bp.contains_key(&ref_name(a.clone()))) {
                 r = format!("{}.to_string()", r);
             }
             let lit = borrowed_str_lit(a.clone());
@@ -6533,7 +6533,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
             out.push(String::from("    }"));
         }
         out.push(String::from("}"));
-        out.push(format!("fn _revl_dispatch_{}(svc: &dyn {}, method: &str, args: &[serde_json::Value]) -> serde_json::Value {{", snake(sname.clone()), sname));
+        out.push(format!("fn _revl_dispatch_{}(svc: &dyn {}, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {{", snake(sname.clone()), sname));
         out.push(String::from("    match method {"));
         for mn in value_keys(methods.clone()) {
             let method = value_field(methods.clone(), mn.clone());
@@ -6555,12 +6555,12 @@ fn emit_bridge(ir: Value) -> Vec<String> {
                 idx = (idx).checked_add(1i64).expect("revl: Int overflow");
             }
             if any_none {
-                out.push(format!("        \"{}\" => serde_json::Value::Null, // unmarshalled param type", mn));
+                out.push(format!("        \"{}\" => Err(\"{}.{} cannot be called across a seam: a parameter type has no wire form\".to_string()),", mn, sname, mn));
             } else {
-                out.push(format!("        \"{}\" => {},", mn, bridge_ret_ser(&(format!("svc.{}({})", mname(mn.clone()), extracts.revl_join(", "))), &ret)));
+                out.push(format!("        \"{}\" => Ok({}),", mn, bridge_ret_ser(&(format!("svc.{}({})", mname(mn.clone()), extracts.revl_join(", "))), &ret)));
             }
         }
-        out.push(String::from("        _ => serde_json::Value::Null,"));
+        out.push(format!("        _ => Err(format!(\"method '{{method}}' is not exported for service {}\")),", sname));
         out.push(String::from("    }"));
         out.push(String::from("}"));
         out.push(String::from(""));
@@ -6594,7 +6594,7 @@ fn emit_bridge(ir: Value) -> Vec<String> {
     out.push(String::from("    }"));
     out.push(String::from("}"));
     out.push(String::from(""));
-    out.push(String::from("pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> serde_json::Value {"));
+    out.push(String::from("pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, args: &[serde_json::Value]) -> Result<serde_json::Value, String> {"));
     out.push(String::from("    match key {"));
     pi = 0i64;
     while (pi < pkeys.revl_length()) {
@@ -6602,11 +6602,11 @@ fn emit_bridge(ir: Value) -> Vec<String> {
         let srv = (psvcs)[(pi) as usize].clone();
         out.push(format!("        \"{}\" => match ctx.require::<Box<dyn {}>>(\"{}\") {{", key, srv, key));
         out.push(format!("            Ok(svc) => _revl_dispatch_{}(&**svc, method, args),", snake(srv.clone())));
-        out.push(String::from("            Err(_) => serde_json::Value::Null,"));
+        out.push(format!("            Err(_) => Err(\"no provider for key '{}' right now\".to_string()),", key));
         out.push(String::from("        },"));
         pi = (pi).checked_add(1i64).expect("revl: Int overflow");
     }
-    out.push(String::from("        _ => serde_json::Value::Null,"));
+    out.push(String::from("        _ => Err(format!(\"key '{key}' is not provided by this process\")),"));
     out.push(String::from("    }"));
     out.push(String::from("}"));
     out.push(String::from(""));
