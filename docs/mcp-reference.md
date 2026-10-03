@@ -282,10 +282,24 @@ Boot a composition IN MEMORY and hold it live. Nothing is written to disk, so a
 draft component can be run and tested before it exists as a file. Returns fiber
 states, provided keys, and the lifecycle trace.
 
+**Drafts (issue #1727).** With nothing running, a candidate that still has
+open typed holes (a `revl_scaffold` result, say) is not refused: it opens a
+DRAFT. The draft is compiled and checked, and the answer is `draft: true` with
+every hole and its fillSpec, but nothing boots. `revl_edit` then patches the
+draft (hole fills, ranges, anchors, `{symbol, replacement}`). While a hole
+remains it reports the holes left. The call that fills the last one boots the
+draft through the same gates a `revl_load` runs (the load half of the operator
+gate, a lease on a cold load, the session's admission checks, the approval
+ticket). A gate that refuses leaves the draft held, hole-free, with the reason.
+`revl_load` with no source boots the held draft (with `config`/`record` if
+given), and refuses while a hole remains. `revl_unload` discards it,
+`revl_state` reports `draft: {holes}`, and `revl_source` reads from it. A draft
+never boots while a hole remains.
+
 - Inputs: `source` / `files` / `modules`; `config` (per-component config
   tables); `record` (record the effect accumulator so the composition can be
   stepped backwards - must be set at load, recording is installed before
-  activation).
+  activation). With a draft held and no source: boots the draft.
 
 ### `revl_call`
 
