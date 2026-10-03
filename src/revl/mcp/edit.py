@@ -71,6 +71,7 @@ from ..compiler import compile_source
 from ..diagnostics import report
 from ..errors import RevlError
 from . import fillspec
+from .authoring_loop import blast_radius
 
 _WORD_HOLE = re.compile(r"\bhole\b")
 
@@ -628,11 +629,13 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
         else:
             return {"ok": True, "edited": True, "swapped": False, "admitted": False,
                     "speculative": True, "_proposal": vs, "applied": applied,
-                    "touched": _touched(before, vs), "holes": holes, **_summary(ir),
+                    "touched": _touched(before, vs), "holes": holes,
+                    "blastRadius": blast_radius(session.ir, ir), **_summary(ir),
                     "note": f"proposed with {len(holes)} open hole(s); fill them "
                             "before it can commit"}
         return {"ok": True, "edited": True, "swapped": False, "admitted": False,
                 "applied": applied, "touched": _touched(before, vs), "holes": holes,
+                "blastRadius": blast_radius(session.ir, ir),
                 **_summary(ir),
                 "note": f"{len(holes)} open hole(s) remain — the edit was applied "
                         "to the server-side source and it compiles, but a hole may "
@@ -682,10 +685,15 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
         return {**refused, "edited": False, "swapped": False, "applied": applied,
                 "touched": _touched(before, vs)}
 
+    # issue #1704: the cascade of what this edit replaces, read off the
+    # composition that is running now, so preflight comes with the change. A
+    # proposal carries it too: that is where preflight is worth the most.
+    radius = blast_radius(session.ir, ir)
     if not commit:
         return {"ok": True, "edited": True, "admitted": True, "swapped": False,
                 "speculative": True, "_proposal": vs, "applied": applied,
-                "touched": _touched(before, vs), **_summary(ir),
+                "touched": _touched(before, vs), "blastRadius": radius,
+                **_summary(ir),
                 "note": "proposed and verified: admission and every gate passed "
                         "against the running composition, which is unchanged. "
                         "Commit it, or discard it"}
@@ -693,7 +701,7 @@ def admit(session, vs: dict, before: dict, applied: list, replacing: tuple,
     session.draft = None  # committed; re-derives from the new running source
     return {"ok": True, "edited": True, "admitted": True, "swapped": True,
             "applied": applied, "touched": _touched(before, vs),
-            **_summary(ir), **state}
+            "blastRadius": radius, **_summary(ir), **state}
 
 
 def running_source(session) -> dict:

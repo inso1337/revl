@@ -135,6 +135,8 @@ def test_revl_edit_can_propose_too(files_loaded):
     proposed = _call("revl_edit", {"commit": False, "edits": [
         {"anchor": "fn now() = 7", "replacement": "fn now() = 3"}]})
     assert proposed["ok"] is True and proposed["swapped"] is False, proposed
+    # a proposal is where preflight matters most, so it carries the cascade too
+    assert proposed["blastRadius"]["touched"] == ["FixedClock"], proposed
     assert _now() == 7
     assert _call("revl_change", {"commit": True})["committed"] is True
     assert _now() == 3

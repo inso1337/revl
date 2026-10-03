@@ -17,6 +17,12 @@ authoring agent reaches for before anything is live, each with both its CLI
 form and its MCP form. Every step of the loop is reachable either way, so an
 MCP-native agent never has to shell out.
 
+Over MCP the server states the full loop itself, in its `initialize`
+instructions: reuse (`revl_resolve`) -> scaffold (`revl_scaffold`) -> fill ->
+preflight (`revl_query_withdraw`) -> check (`revl_check`'s `selfCheck`, every
+guarantee G1-G9 as pass or fail) -> commit (`revl_admit`). See
+[mcp-reference.md](mcp-reference.md#the-authoring-loop).
+
 ## The loop
 
 ```
