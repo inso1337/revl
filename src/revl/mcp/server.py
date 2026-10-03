@@ -859,9 +859,10 @@ def _tool_load(arguments: dict) -> dict:
     under a name another operator leases is refused, as a swap replacing it is
     (`leases.FENCED` says why a cold load is fenced too)."""
     source, files, modules = _candidate_of(arguments)
-    if source is None and not files and _draft.pending(SESSION) is not None \
-            and not SESSION.loaded:
-        return _draft.boot_held(SESSION, arguments, _boot_draft)
+    if source is None and not files:
+        if _draft.pending(SESSION) is not None and not SESSION.loaded:
+            return _draft.boot_held(SESSION, arguments, _boot_draft)
+        return _nothing_to_load()
     try:
         ir = compile_under_authoring(source, files, modules=modules)
     except RevlError as error:
@@ -877,6 +878,21 @@ def _tool_load(arguments: dict) -> dict:
             return _refused_by_lease(refusal)
     return _boot(ir, source, modules, arguments.get("config"),
                  bool(arguments.get("record")), _origin(arguments))
+
+
+def _nothing_to_load() -> dict:
+    """`revl_load` with neither `source` nor `files` and no draft to boot
+    (issue #1851): a refusal that says which, not the compiler's ValueError."""
+    if SESSION.loaded:
+        return _session_error(
+            "a composition is already running and no draft is held, so "
+            "`revl_load {}` has nothing to boot. Change what runs with revl_edit "
+            "or revl_swap, or revl_unload first to load something else",
+            loaded=True)
+    return _session_error(
+        "revl_load needs `source` (inline .rvl text) or `files` (.rvl paths); "
+        "with neither it boots a held draft, and none is held",
+        next=_remedy.load_next())
 
 
 def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict:
