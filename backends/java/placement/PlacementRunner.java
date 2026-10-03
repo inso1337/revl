@@ -448,7 +448,7 @@ public final class PlacementRunner {
     // (`serviceInRealm`), so where the real runner keeps each component's
     // isolated context, this one reads `placements`: key -> [{component,
     // realm}] for this process's own provisions
-    // (src/revl/placement.py::_java_placements). A key this process does not
+    // (src/revl/placement.py::_process_placements). A key this process does not
     // provide (a proxy) resolves in the shared realm, as before.
     static Map<String, Object> placements = Map.of();
 
