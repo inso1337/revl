@@ -10,6 +10,7 @@ import RevL.Theorems.A9_ProvideKeyDeclared
 import RevL.Theorems.A2_NoAcquisitionAfterProvision
 import RevL.Theorems.G4_DeferredPosition
 import RevL.Theorems.G4_ApprovalFloor
+import RevL.Theorems.G6_BindingUnique
 
 /-!
 Formal oracle — the differential harness's Lean side (formal/STATUS.md,
@@ -39,7 +40,11 @@ proved model itself**, not from a private restatement of it (roadmap item
     `RevL.G4Approval.crossingB` over one marked crossing's tokens (the
     `AX` rows), its `with` edge (the `AE` row) and the file's
     approval-required tokens (the `AR` rows); `approvalRowB_iff` PROVES
-    it equals `RevL.G4Approval.CrossingOK` (issue #1455).
+    it equals `RevL.G4Approval.CrossingOK` (issue #1455);
+  * `BU … binding=` is `bindingRowB`, which IS `RevL.G6Binding.bindingB`
+    over one scope's seed names and its bind/enter/leave events (the `BE`
+    rows); `bindingRowB_iff` PROVES it equals `RevL.G6Binding.BindingOK`
+    (G6 binding uniqueness, issue #1812).
 
 The components are `RevL.Manifest.LComponent` values built from the `M`
 rows, so `slots`/`needs` — the `(key, realm)` slot the linker's
@@ -158,6 +163,13 @@ Fact rows in (tab-separated, one fact per line):
                                              an `effect … undo …` (legal); any
                                              other site acquires irreversibly
                                              (G4, category `acquire`)
+  BE <file> <comp> <scope> <ord> <seed|bind|enter|leave> <name|->
+                                             one step through a binding scope
+                                             (`@act` for the activation body,
+                                             `<key>.<method>` for a provide
+                                             method): a name in view at its
+                                             start, a binding, or a block
+                                             boundary (G6, category `binding`)
   DR <file> <fn|test|component> <owner> <extern> <call|arrow|value>
                                              one reach of a `deferred` emission
                                              extern and where it sits: a call,
@@ -248,6 +260,9 @@ Verdict rows out:
   AP <file> <comp> <ord> <approval=ok|fail>        the approval floor over one
                                                    marked crossing:
                                                    `RevL.G4Approval.crossingB`
+  BU <file> <comp> <scope> <binding=ok|fail>       G6 binding uniqueness over
+                                                   one scope:
+                                                   `RevL.G6Binding.bindingB`
 
 ### The one row whose reference side RUNS rather than reads
 
@@ -1708,6 +1723,52 @@ theorem approvalRowB_iff (required tokens : List String) (edge : Option String) 
 
 end ApprovalFloor
 
+/-! ## Deciding G6 binding uniqueness (issue #1812)
+
+A `BE` row is one step through a binding scope, in source order: a `seed`
+name in view when the scope starts, a `bind`, or an `enter`/`leave` block
+boundary. The verdict is the model's `RevL.G6Binding.bindingB` over the seed
+and the events, and `bindingRowB_iff` is the bridge to
+`RevL.G6Binding.BindingOK`. An unknown step kind is a hard error in `main`. -/
+
+section BindingUnique
+
+structure BERow where
+  path : String
+  comp : String
+  scope : String
+  ord : Nat
+  kind : String
+  name : String
+
+def parseBE (f : List String) : Option BERow :=
+  match f with
+  | ["BE", path, comp, scope, ord, kind, name] =>
+      ord.toNat?.map fun o => ⟨path, comp, scope, o, kind, name⟩
+  | _ => none
+
+/-- The model's event for one `BE` row; `none` for a seed or an unknown kind. -/
+def beEvent (r : BERow) : Option RevL.G6Binding.Ev :=
+  match r.kind with
+  | "bind" => some (.bind r.name)
+  | "enter" => some .enter
+  | "leave" => some .leave
+  | _ => none
+
+def beKnown (r : BERow) : Bool :=
+  r.kind == "seed" || (beEvent r).isSome
+
+/-- **Binding decider**: the model's judgment over one scope. -/
+def bindingRowB (seed : List String) (evs : List RevL.G6Binding.Ev) : Bool :=
+  RevL.G6Binding.bindingB seed evs
+
+/-- **The `BU` verdict is the model's rule.** -/
+theorem bindingRowB_iff (seed : List String) (evs : List RevL.G6Binding.Ev) :
+    bindingRowB seed evs = true ↔ RevL.G6Binding.BindingOK seed evs :=
+  RevL.G6Binding.bindingB_iff seed evs
+
+end BindingUnique
+
 -- ---------------------------------------------------------------- main
 
 /-- Build the model's component from an `M` row. `realm` is the
@@ -1760,6 +1821,7 @@ def main (args : List String) : IO UInt32 := do
     let aqrows := fields.filterMap parseAQ
     let arrows' := fields.filterMap parseAR
     let axrows := fields.filterMap parseAX
+    let berows := fields.filterMap parseBE
     let aerows := fields.filterMap parseAE
     -- An edge with no crossing, or two edges on one crossing, is a malformed
     -- export: refuse it rather than read one of them.
@@ -1826,6 +1888,10 @@ def main (args : List String) : IO UInt32 := do
         s!"replayed={csv (replayedSeqLabels log)}\tresidue={residue}\n"
     -- A `DR` row whose scope or position the model has no constructor for
     -- would drop a reach silently and move the verdict: refuse instead.
+    let unknownBE := berows.filter (fun r => !beKnown r)
+    if !unknownBE.isEmpty then
+      IO.eprintln s!"oracle: BE rows of unknown kind: {unknownBE.map (·.path)}"
+      return 1
     let unknownDR := drrows.filter (fun r => (reachOf r).isNone)
     if !unknownDR.isEmpty then
       IO.eprintln s!"oracle: DR rows of unknown scope or position: {unknownDR.map (·.path)}"
@@ -1986,6 +2052,16 @@ def main (args : List String) : IO UInt32 := do
         let edge := (pae.find? (fun r => r.comp == k.1 && r.ord == k.2)).map (·.scope)
         let apv := if approvalRowB required toks edge then "ok" else "fail"
         out := out ++ s!"AP\t{p}\t{k.1}\t{k.2}\tapproval={apv}\n"
+      -- BU verdicts (G6 binding uniqueness, issue #1812), one per scope: the
+      -- model's rule over the scope's seed names and its ordered events.
+      let pbe := berows.filter (fun r => r.path == p)
+      for k in (pbe.map (fun r => (r.comp, r.scope))).eraseDups do
+        let mine := (pbe.filter (fun r => r.comp == k.1 && r.scope == k.2)).mergeSort
+          (fun a b => a.ord <= b.ord)
+        let seed := (mine.filter (fun r => r.kind == "seed")).map (·.name)
+        let evs := mine.filterMap beEvent
+        let buv := if bindingRowB seed evs then "ok" else "fail"
+        out := out ++ s!"BU\t{p}\t{k.1}\t{k.2}\tbinding={buv}\n"
     IO.FS.writeFile outPath out
     return 0
   | _ =>
@@ -2047,3 +2123,4 @@ runs, proved equivalent to the judgment the theorems are about. -/
 #print axioms RevLOracle.a2OKB_iff
 #print axioms RevLOracle.deferredOKB_iff
 #print axioms RevLOracle.approvalRowB_iff
+#print axioms RevLOracle.bindingRowB_iff

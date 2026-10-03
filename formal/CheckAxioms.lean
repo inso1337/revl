@@ -358,3 +358,15 @@ import RevL
 #print axioms RevL.G4Approval.globMatch_star_any
 #print axioms RevL.G4Approval.approval_not_vacuous
 #print axioms RevL.G4Approval.approval_row_not_vacuous
+-- Issue #1812: G6 binding uniqueness. A binding may not reuse a name in view,
+-- and visibility is block-scoped. The frame-membership decider, the scope
+-- decider (the oracle's `BU` row), the three refusal shapes and the corpus
+-- shapes the rule both admits and refuses.
+#print axioms RevL.G6Binding.okB_iff
+#print axioms RevL.G6Binding.bindingB_iff
+#print axioms RevL.G6Binding.visibleB_iff
+#print axioms RevL.G6Binding.seed_rebind_refused
+#print axioms RevL.G6Binding.rebind_refused
+#print axioms RevL.G6Binding.inner_shadow_refused
+#print axioms RevL.G6Binding.fixtures_decided
+#print axioms RevL.G6Binding.binding_not_vacuous

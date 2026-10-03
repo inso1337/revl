@@ -243,3 +243,11 @@ RevL.G4Approval.covering_edge_admits	instance	RevL.G4Approval.approval_not_vacuo
 RevL.G4Approval.globMatch_star_any	instance	RevL.G4Approval.approval_not_vacuous	the trailing star the glob fixture's scope ends in; scopedWrongGlob shows a star does not cover a different prefix
 RevL.G4Approval.approval_not_vacuous	concrete	-	the scoped-extern fixture refused and admitted under the exact and the glob edge, refused under another glob; the other-edge fixture's head admitted and compensation refused; an unrequired head admitted with no edge
 RevL.G4Approval.approval_row_not_vacuous	concrete	-	the verdict moves with the edge alone, the required set alone and the token alone: the AE, AR and AX rows are each load-bearing
+RevL.G6Binding.okB_iff	instance	RevL.G6Binding.binding_not_vacuous,RevL.G6Binding.fixtures_decided	okB decides false on the shadowing method (shadowSeed) and on letThenFor, true on siblingArms and on the unseeded binding, so the frame walk is mutation-sensitive
+RevL.G6Binding.bindingB_iff	instance	RevL.G6Binding.binding_not_vacuous,RevL.G6Binding.fixtures_decided	bindingB is false on the corpus shape and true on its twin without the colliding seed name, so the printed BU verdict is mutation-sensitive
+RevL.G6Binding.visibleB_iff	instance	RevL.G6Binding.binding_not_vacuous	visibleB is true for store against shadowSeed and false for store against the seed [key], both reached in binding_not_vacuous
+RevL.G6Binding.seed_rebind_refused	necessity	RevL.G6Binding.binding_not_vacuous	a seeded name is refused; the same bind is admitted under a seed without it, so the refusal is not universal
+RevL.G6Binding.rebind_refused	necessity	RevL.G6Binding.binding_not_vacuous	two binds of one name in a row are refused; a single bind is admitted (the unseeded twin), so the refusal is not universal
+RevL.G6Binding.inner_shadow_refused	necessity	RevL.G6Binding.binding_not_vacuous,RevL.G6Binding.fixtures_decided	an outer name rebound inside a block is refused; sibling blocks reusing a name are admitted (siblingArms), so the refusal is scoped
+RevL.G6Binding.fixtures_decided	concrete	-	the corpus shape refused and its unseeded twin admitted; sibling arms admitted; a let then a for binder of the same name refused
+RevL.G6Binding.binding_not_vacuous	concrete	-	shadowSeed refused, the unseeded twin and siblingArms admitted by the rule
