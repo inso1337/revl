@@ -758,7 +758,9 @@ def _closure_problems(ledger: dict) -> list[str]:
             for rid in sorted(used - set(reasons)):
                 problems.append(
                     f"{half}/{tier}: functions name reason `{rid}`, which is "
-                    f"not declared")
+                    f"not declared. If that is the reason's text, "
+                    f"`python3 tools/selfhost_line_coverage.py --write` files "
+                    f"it under the reason's id, minting one if it is new")
     return problems
 
 
@@ -881,20 +883,34 @@ def write_ledger(data: dict) -> None:
             before = previous.get(half, {}).get(tier, {"reasons": {}, "functions": {}})
             reasons = dict(before["reasons"])
             by_text = {text: rid for rid, text in reasons.items()}
+
+            def reason_for(text: str) -> str:
+                """The id `text` is filed under: an existing reason's id when
+                the text is that reason's, else a new id with the text
+                recorded once."""
+                rid = by_text.get(text)
+                if rid is None:
+                    rid = _reason_id(text, set(reasons))
+                    reasons[rid] = text
+                    by_text[text] = rid
+                return rid
+
             functions = {}
             for name, count in found["functions"].items():
                 old = before["functions"].get(name)
                 if old is not None:
+                    # A record whose reason field is not a declared id holds
+                    # the reason's TEXT, the way the single-file ledger keyed
+                    # it and the way a record carried across from that layout
+                    # arrives. Resolve it, so the budget is the only hand edit.
+                    rid = (old["reason"] if old["reason"] in reasons
+                           else reason_for(old["reason"]))
                     functions[name] = {"uncovered": count, "budget": old["budget"],
-                                       "reason": old["reason"]}
+                                       "reason": rid}
                     continue
                 text = _group_for(name, count, found["sizes"].get(name, count))
-                rid = by_text.get(text)
-                if rid is None:
-                    rid = _reason_id(text, set(reasons))
-                    reasons[rid] = by_text[text] = text
                 functions[name] = {"uncovered": count, "budget": None,
-                                   "reason": rid}
+                                   "reason": reason_for(text)}
             used = {f["reason"] for f in functions.values()}
             out[half][tier] = {
                 "reasons": {rid: t for rid, t in reasons.items() if rid in used},
