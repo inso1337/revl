@@ -113,9 +113,18 @@ def test_the_schema_accepts_a_call_and_a_preference_list():
 
 # ------------------------------------------------- nothing is loaded
 
+@pytest.fixture
+def can_boot():
+    """A server whose interpreter can boot a composition. Without the runtime
+    the #1692 gate answers first, with its own remedy (the test below)."""
+    server_mod.set_runtime_available(True)
+    yield
+    server_mod.set_runtime_available(None)
+
+
 @pytest.mark.parametrize("tool,arguments", NEEDS_LOADED,
                          ids=[t for t, _ in NEEDS_LOADED])
-def test_nothing_loaded_names_revl_load_and_what_it_needs(tool, arguments):
+def test_nothing_loaded_names_revl_load_and_what_it_needs(can_boot, tool, arguments):
     """No composition was ever loaded: `next` is `revl_load`, not ready, and
     says the caller must supply `source` or `files`."""
     payload = _call(tool, arguments)
@@ -127,6 +136,27 @@ def test_nothing_loaded_names_revl_load_and_what_it_needs(tool, arguments):
     message = payload["diagnostics"][0]["message"]
     assert message.startswith("nothing is loaded")
     assert "Next: revl_load with `source`" in message
+
+
+@pytest.mark.parametrize("tool,arguments", NEEDS_LOADED,
+                         ids=[t for t, _ in NEEDS_LOADED])
+def test_without_the_runtime_the_remedy_is_the_operator_step(tool, arguments):
+    """On a server that cannot import cordis, `revl_load` would fail too, so a
+    runtime verb's refusal names what fixes it: an operator step (#1692). The
+    refusal still carries `next`; offering `revl_load` would be a false remedy."""
+    from revl.mcp import runtime_gate
+    server_mod.set_runtime_available(False)
+    try:
+        payload = _call(tool, arguments)
+    finally:
+        server_mod.set_runtime_available(None)
+    assert payload["ok"] is False
+    nxt = payload["next"]
+    _assert_next_shape(nxt)
+    if runtime_gate.is_refused(tool, arguments):
+        assert nxt["ready"] is False and "setup.sh" in nxt["operator"]
+    else:
+        assert nxt["tool"] == "revl_load"
 
 
 @needs_runtime
