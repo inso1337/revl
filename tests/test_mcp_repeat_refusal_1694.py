@@ -38,9 +38,14 @@ def _body(payload: dict) -> dict:
 
 @pytest.fixture(autouse=True)
 def _clean():
+    # a server that can boot a composition, so `revl_call` reaches the
+    # nothing-loaded refusal rather than the #1692 runtime gate (the operator
+    # step case below sets the runtime unavailable itself)
+    server_mod.set_runtime_available(True)
     repeat.forget()
     remedy.forget()
     yield
+    server_mod.set_runtime_available(None)
     if server_mod.SESSION.loaded:
         server_mod.SESSION.unload()
     repeat.forget()

@@ -219,8 +219,14 @@ def test_initialize_and_tools_list(all_mcp_tools):
     listed = handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     tools = {t["name"]: t for t in listed["result"]["tools"]}
     assert set(tools) == {"revl_check", "revl_admit", "revl_plan", "revl_audit",
-                          "revl_tools", "revl_grammar", "revl_load", "revl_call",
+                          "revl_tools", "revl_grammar", "revl_idiom", "revl_load", "revl_call",
                           "revl_swap", "revl_rollback", "revl_unload", "revl_state",
+                          # symbol-addressed reads (issue #1714)
+                          "revl_source",
+                          # one intent-shaped change (issue #1695)
+                          "revl_change",
+                          # the held source written to disk on request (#1696)
+                          "revl_export",
                           # the session commit protocol (docs/design/245-session-commit.md)
                           "revl_commit", "revl_commit_confirm", "revl_abort",
                           # session branching (docs/design/250-session-branching.md)

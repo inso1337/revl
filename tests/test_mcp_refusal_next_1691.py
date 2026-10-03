@@ -113,9 +113,18 @@ def test_the_schema_accepts_a_call_and_a_preference_list():
 
 # ------------------------------------------------- nothing is loaded
 
+@pytest.fixture
+def can_boot():
+    """A server whose interpreter can boot a composition. Without the runtime
+    the #1692 gate answers first, with its own remedy (the test below)."""
+    server_mod.set_runtime_available(True)
+    yield
+    server_mod.set_runtime_available(None)
+
+
 @pytest.mark.parametrize("tool,arguments", NEEDS_LOADED,
                          ids=[t for t, _ in NEEDS_LOADED])
-def test_nothing_loaded_names_revl_load_and_what_it_needs(tool, arguments):
+def test_nothing_loaded_names_revl_load_and_what_it_needs(can_boot, tool, arguments):
     """No composition was ever loaded: `next` is `revl_load`, not ready, and
     says the caller must supply `source` or `files`."""
     payload = _call(tool, arguments)
@@ -127,6 +136,27 @@ def test_nothing_loaded_names_revl_load_and_what_it_needs(tool, arguments):
     message = payload["diagnostics"][0]["message"]
     assert message.startswith("nothing is loaded")
     assert "Next: revl_load with `source`" in message
+
+
+@pytest.mark.parametrize("tool,arguments", NEEDS_LOADED,
+                         ids=[t for t, _ in NEEDS_LOADED])
+def test_without_the_runtime_the_remedy_is_the_operator_step(tool, arguments):
+    """On a server that cannot import cordis, `revl_load` would fail too, so a
+    runtime verb's refusal names what fixes it: an operator step (#1692). The
+    refusal still carries `next`; offering `revl_load` would be a false remedy."""
+    from revl.mcp import runtime_gate
+    server_mod.set_runtime_available(False)
+    try:
+        payload = _call(tool, arguments)
+    finally:
+        server_mod.set_runtime_available(None)
+    assert payload["ok"] is False
+    nxt = payload["next"]
+    _assert_next_shape(nxt)
+    if runtime_gate.is_refused(tool, arguments):
+        assert nxt["ready"] is False and "setup.sh" in nxt["operator"]
+    else:
+        assert nxt["tool"] == "revl_load"
 
 
 @needs_runtime
@@ -155,61 +185,46 @@ def test_after_an_unload_next_reloads_what_ran(tmp_path, tool, arguments):
 
 # ------------------------------------------- a files-loaded composition
 
+# Since issue #1690 a files-loaded composition is edited and swapped by name
+# directly: each loaded file is a buffer the session holds. The remedies that
+# offered a swap with inline `source` (or with the files) in place of those
+# calls answer a refusal that no longer happens, so these pin that it does not.
+
 @needs_runtime
-def test_a_files_loaded_edit_refusal_carries_a_swap_that_succeeds(tmp_path):
+def test_a_files_loaded_edit_lands_without_a_remedy(tmp_path):
     path = tmp_path / "cache.rvl"
     path.write_text(CACHE, encoding="utf-8")
     assert _call("revl_load", {"files": [str(path)]})["ok"] is True
 
-    refused = _call("revl_edit", {"edits": [{"anchor": "fn size() = 0",
-                                             "replacement": "fn size() = 7"}]})
-    assert refused["ok"] is False and refused["edited"] is False
-    nxt = refused["next"]
-    _assert_next_shape(nxt)
-    assert nxt["tool"] == "revl_swap" and nxt["ready"] is True
-    assert "fn size() = 7" in nxt["arguments"]["source"]
-    message = refused["diagnostics"][0]["message"]
-    assert "loaded from files (cache.rvl)" in message
-    assert "Next: revl_swap" in message
-
-    swapped = _send(nxt)
-    assert swapped["ok"] is True and swapped["swapped"] is True, swapped
+    edited = _call("revl_edit", {"edits": [{"anchor": "fn size() = 0",
+                                            "replacement": "fn size() = 7"}]})
+    assert edited["ok"] is True and edited["swapped"] is True, edited
+    assert "next" not in edited
     assert _call("revl_call", {"key": "cache", "method": "size",
                                "args": []})["result"] == 7
-    # the session now holds inline source, so revl_edit patches it directly
-    edited = _call("revl_edit", {"edits": [{"anchor": "fn size() = 7",
-                                            "replacement": "fn size() = 8"}]})
-    assert edited["ok"] is True and edited["swapped"] is True, edited
     assert path.read_text(encoding="utf-8") == CACHE   # disk untouched
 
 
 @needs_runtime
-def test_a_files_loaded_edit_that_would_not_admit_is_not_ready(tmp_path):
+def test_a_files_loaded_edit_that_would_not_admit_offers_no_swap(tmp_path):
     path = tmp_path / "cache.rvl"
     path.write_text(CACHE, encoding="utf-8")
     assert _call("revl_load", {"files": [str(path)]})["ok"] is True
 
     refused = _call("revl_edit", {"edits": [{"anchor": "fn size() = 0",
                                              "replacement": "fn size() = \"x\""}]})
-    nxt = refused["next"]
-    _assert_next_shape(nxt)
-    assert nxt["tool"] == "revl_swap" and nxt["ready"] is False
-    assert "this one is refused" in nxt["needs"]
+    assert refused["ok"] is False and refused["swapped"] is False, refused
+    assert (refused.get("next") or {}).get("tool") != "revl_swap"
 
 
 @needs_runtime
-def test_a_files_loaded_name_only_swap_offers_the_files(tmp_path):
+def test_a_files_loaded_name_only_swap_readmits_the_held_files(tmp_path):
     path = tmp_path / "cache.rvl"
     path.write_text(CACHE, encoding="utf-8")
     assert _call("revl_load", {"files": [str(path)]})["ok"] is True
 
-    refused = _call("revl_swap", {})
-    assert refused["ok"] is False
-    nxt = refused["next"]
-    _assert_next_shape(nxt)
-    assert nxt == {"tool": "revl_swap", "arguments": {"files": [str(path)]},
-                   "ready": True}
-    assert _send(nxt)["swapped"] is True
+    swapped = _call("revl_swap", {})
+    assert swapped["ok"] is True and swapped["swapped"] is True, swapped
 
 
 def test_the_runtime_gate_refusal_uses_the_same_schema():

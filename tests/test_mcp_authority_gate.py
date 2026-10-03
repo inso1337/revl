@@ -437,8 +437,11 @@ UNGATED = {
     "revl_fmt": "formats source text",
     "revl_explain": "renders a diagnostic",
     "revl_grammar": "returns the grammar",
+    "revl_idiom": "returns a fixed example document",
     "revl_verbs": "returns the server's own verb schemas (issue #1697)",
     "revl_tools": "returns the tool surface",
+    "revl_source": "reads one declaration of the held source; changes nothing "
+                   "(issue #1714)",
     "revl_state": "reports session state",
     "revl_estop_report": "reports a halt that already happened",
     "revl_distillation_offers": "proposes rules; installs none",

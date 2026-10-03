@@ -1,0 +1,10 @@
+// idiom: effect-acquire
+// summary: the acquisition of an `effect ... undo ...`: the value the component holds while it is active
+// rule: G4: every acquisition carries its inverse in the same statement, `undo <inverse>`
+// rule: G7: teardown runs the inverses in reverse order of acquisition, so nothing is released by hand
+// fill: Map.new()
+// type: Map[Str, Int]
+
+component Counter {
+  let store = effect Map.new() undo store.drop()
+}

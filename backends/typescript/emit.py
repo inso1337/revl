@@ -961,11 +961,14 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             if not isinstance(fn, str) or not all(IDENT_RE.match(p) for p in fn.split(".")):
                 raise EmitError(f"invalid host builtin: {fn!r}")
             _refuse_missing_host_root(fn)
-            # item 130 §4.5: a provider-side `replay(…)` declaration this tier
-            # does not lower. Refused rather than dropped — a declared backlog
-            # nothing holds is exactly the vacuous durability claim §4.5 keeps
-            # off the wire.
-            _refuse_unlowered_replay(node)
+            # item 130 §4.5: a provider-side `replay(…)` declaration. The
+            # last-n form is lowered (the source holds that many items); the
+            # durable cursor is refused by name rather than dropped, since a
+            # declared cursor nothing can resume is exactly the vacuous
+            # durability claim §4.5 keeps off the wire.
+            count = _replay_count(node)
+            if count is not None:
+                return f"host.{fn}({{ replay: {count} }})"
             args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
             return f"host.{fn}({args})"
         # kind == "format"
@@ -1327,7 +1330,7 @@ def _expr(node: object, ctx: "_Ctx") -> str:
         # future synchronously — so the bracket inverse is reachable off the
         # teardown path even while a `next` is parked (the cancellation-first
         # fix, §9 Part A). `ctx` lets the subscription observe owner withdrawal.
-        _refuse_unlowered_replay(node)
+        replay = _replay_count(node)
         stream = _stream_head(node.get("stream") or {}, ctx)
         policy = node.get("policy") or "error"
         # Slice 2: the derived combinator chain, the declared buffer capacity and
@@ -1349,6 +1352,11 @@ def _expr(node: object, ctx: "_Ctx") -> str:
             opts.append(f"capacity: {int(node.get('buffer'))}")
         if node.get("drain") is not None:
             opts.append(f"drainMs: {int(node.get('drain'))}")
+        if replay is not None:
+            # §4.5: the last-n backlog this consumer asked for, delivered by the
+            # runtime through the provider's own forward path before any live
+            # item (the py reference's `replay={'count': n}`).
+            opts.append(f"replay: {replay}")
         base = f"host.Stream.subscribe({stream}, {_string(policy)}, ctx"
         if opts:
             return f"{base}, {{ {', '.join(opts)} }})"
@@ -1357,23 +1365,35 @@ def _expr(node: object, ctx: "_Ctx") -> str:
     raise EmitError(f"unsupported expression kind {kind!r}")
 
 
-def _refuse_unlowered_replay(node: dict) -> None:
-    """Refuse an item-130 §4.5 `replay(…)` on the ts tier.
+def _replay_count(node: dict) -> Optional[int]:
+    """The item-130 §4.5 last-n `replay(<n>)` a node carries, or None.
 
-    ts mirrors the py reference for the whole reactive surface, so this is the
-    one place the two deliberately part. Replay is a DURABILITY claim, and what
-    makes it worth anything is the §4.9 half: a durable cursor turns a crashed
+    ts mirrors the py reference for the whole reactive surface, and that now
+    includes the last-n backlog: the provider holds the last n items in memory
+    and a subscription that asks for k of them receives them through the
+    provider's forward path before any live item. The py reference makes no
+    recovery claim for that form either (its bracket is the ordinary
+    closure-only one), so lowering it here agrees with the reference in full.
+
+    The durable `replay(from: "<name>")` cursor is where the two tiers part.
+    What makes it worth anything is §4.9: the cursor turns a crashed
     subscription from residue into a re-issuable descriptor, and that recovery
     surface is the WAL's, which lives on the py reference tier. A ts
-    subscription that delivered a backlog and called it durable would be a claim
-    nothing backs, so the surface is refused by name rather than half-lowered."""
-    if node.get("replay"):
+    subscription that resumed an in-memory position and called it durable would
+    be a claim nothing backs, so the cursor is refused by name rather than
+    half-lowered, at the provider's declaration and at the consumer's request."""
+    replay = node.get("replay")
+    if not replay:
+        return None
+    if "cursor" in replay:
         raise EmitError(
-            "a stream `replay(…)` is not lowered on the cordis-ts tier; replay "
-            "is a durability claim — the provider holds the backlog, and a "
-            "durable cursor is what makes a crashed subscription reconstructible "
-            "rather than residue — and that recovery surface is the py reference "
-            "tier's (item 130 §4.5, §4.9) — try `--backend py`")
+            "a durable stream `replay(from: …)` cursor is not lowered on the "
+            "cordis-ts tier; a durable cursor is what makes a crashed "
+            "subscription reconstructible rather than residue, and that "
+            "recovery surface is the py reference tier's WAL (item 130 §4.5, "
+            "§4.9). The last-n `replay(<n>)` form does lower here; try "
+            "`--backend py` for the cursor")
+    return int(replay["count"])
 
 
 def _method_body(steps: list, ctx: "_Ctx", indent: str,
@@ -2729,8 +2749,9 @@ _BUILTIN_CONSTRUCTORS = {"Some", "None", "Ok", "Err"}
 # (the same async-generator mirror the py reference runs, design §4.6), so
 # `Stream.source()` / `subscribe` / `merge`, the `every … in` iteration form and
 # the `on … as` typed-event handler (its `Stream.contract` schema-and-dedup gate,
-# Slice 5) all lower here. Only the durable-replay surface is still the py
-# reference tier's — a frontend refusal that never reaches the emitter.
+# Slice 5) and the §4.5 last-n `replay(<n>)` backlog all lower here. The durable
+# `replay(from: …)` cursor is still the py reference tier's, refused by name in
+# `_replay_count`.
 _UNIMPLEMENTED_HOST_ROOTS: dict = {
 }
 

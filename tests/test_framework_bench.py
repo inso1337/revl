@@ -216,6 +216,7 @@ class _Args:
     residue_from = "hand-corpus"
     tokens_from = None
     injection_from = None
+    three_host_from = None
     attempt = 1
     compiler_root = None
     pin = None
@@ -1028,17 +1029,105 @@ def test_the_committed_report_is_what_the_documented_command_reproduces():
             f"a default names {label}, which is not committed")
 
 
-def test_the_committed_report_headline_agrees_with_a_fresh_recompute():
+def test_the_built_report_headline_agrees_with_a_fresh_recompute(report):
     """The refused column is the headline and it is recomputed from ledgers
-    that move. A committed artifact whose headline no longer matches the tree
-    is a published number nobody can reproduce."""
-    committed = json.loads(COMMITTED_REPORT.read_text())["columns"]["refused"]
+    that move, so the report this module builds carries the recompute. Since
+    issue #1768 the committed snapshot carries no copy of it to go stale (the
+    next test), which is why this is asserted on the built report."""
+    built = report["columns"]["refused"]
     section = refusal_inventory.build()["sections"]["native-chain-residual"]
-    assert committed["headline"]["documents_refused"] == section["total_residual"]
-    assert committed["headline"]["corpus"] == section["total_corpus"]
-    assert committed["headline"]["n"] == section["total_corpus"]
-    assert committed["headline"]["per_tier"] == {
+    assert built["headline"]["documents_refused"] == section["total_residual"]
+    assert built["headline"]["corpus"] == section["total_corpus"]
+    assert built["headline"]["n"] == section["total_corpus"]
+    assert built["headline"]["per_tier"] == {
         tier: body["residual"] for tier, body in section["tiers"].items()}
+
+
+def test_the_committed_snapshot_holds_no_number_a_fix_pull_request_moves():
+    """Issue #1768. The committed report used to freeze the refused column,
+    whose counts come from `LOWER_GAP_DOCS`, the self-host corpora and the
+    blind-spot ledger, and a test held that copy current. So every fix pull
+    request that moved one of those ledgers rewrote the whole report,
+    including its `compiler commit` line (`git rev-parse HEAD`), and any two
+    of them conflicted. The snapshot now carries the command instead of the
+    numbers, and names the scoring compiler by content."""
+    committed = json.loads(COMMITTED_REPORT.read_text())
+    assert framework_bench.snapshot_problems(committed) == []
+    text = (BENCH / "results" / "framework-bench" / "report.md").read_text()
+    assert "recomputed" in text and "bench/refusal_inventory.py" in text
+    import re  # noqa: PLC0415
+    assert not re.search(r"\b[0-9a-f]{40}\b", text), (
+        "report.md names a commit sha")
+    for stale in ("refusals.json", "refusals.md"):
+        assert not (BENCH / "results" / "framework-bench" / stale).exists(), (
+            f"{stale} is a frozen copy of the recomputed column")
+
+
+def test_a_snapshot_with_a_frozen_column_fails_the_check(report):
+    """The check bites on exactly the layout it replaced: the built report,
+    committed as it was before #1768, has a frozen column, a claim quoting it
+    and (once a commit sha is put back) a commit for a compiler."""
+    old = json.loads(json.dumps(report))
+    old["checker"]["compiler_commit"] = "74c9094472f15bd2ce35b0801fa258f309366a7a"
+    problems = framework_bench.snapshot_problems(old)
+    assert len(problems) == 3, problems
+    assert framework_bench.snapshot_problems(framework_bench.snapshot(report)) == []
+
+
+def test_two_ledger_moves_leave_the_snapshot_unchanged(report, monkeypatch):
+    """Two fix pull requests that each move a ledger the refused column reads
+    produce the same snapshot, so neither has a reason to touch the committed
+    report and they cannot conflict in it. Before #1768 each one's report
+    differed in the headline, the per-tier table and the claim."""
+    frozen = framework_bench.snapshot(report)
+    moved = json.loads(json.dumps(report))
+    head = moved["columns"]["refused"]["headline"]
+    head["documents_refused"] += 1
+    head["corpus"] += 2
+    moved["columns"]["refused"]["unported_constructs"] = 999
+    assert framework_bench.snapshot(moved) == frozen
+    assert framework_bench.render(framework_bench.snapshot(moved)) == \
+        framework_bench.render(frozen)
+
+
+def test_two_fix_pull_requests_merge_in_the_bench_snapshot(report):
+    """The exit test of issue #1768 for this file, through `git merge-tree`.
+    Two fix pull requests each move a ledger the refused column reads and
+    regenerate. In the layout this replaces their reports differ in the
+    headline, the per-tier rows, the claim and the commit line, and conflict.
+    In the snapshot neither changes anything."""
+    from _merge_tree import git_has_merge_tree, merge  # noqa: PLC0415
+    if not git_has_merge_tree():
+        pytest.skip("git merge-tree --write-tree needs git 2.38")
+
+    def moved(by: int, sha: str | None = None) -> dict:
+        out = json.loads(json.dumps(report))
+        head = out["columns"]["refused"]["headline"]
+        head["documents_refused"] += by
+        head["corpus"] += by
+        out["claims"][0]["text"] += f" ({by})"
+        if sha is not None:  # the old layout stamped `git rev-parse HEAD`
+            out["checker"]["compiler_commit"] = sha
+        return out
+
+    def files(r: dict) -> dict:
+        return {"report.json": json.dumps(r, indent=2) + "\n",
+                "report.md": framework_bench.render(r)}
+
+    base, left, right = moved(0, "a" * 40), moved(1, "b" * 40), moved(2, "c" * 40)
+    clean, conflicted = merge(files(base), files(left), files(right))
+    assert not clean and sorted(conflicted) == ["report.json", "report.md"]
+    snap = framework_bench.snapshot
+    assert snap(moved(1)) == snap(moved(2)) == snap(moved(0))
+    clean, conflicted = merge(files(snap(moved(0))), files(snap(moved(1))),
+                              files(snap(moved(2))))
+    assert clean, conflicted
+
+
+def test_the_scoring_compiler_is_named_by_content():
+    digest = framework_bench.compiler_digest()
+    assert digest.startswith("src/revl@sha256:") and len(digest) == 28
+    assert digest == framework_bench.compiler_digest()
 
 
 def test_the_bench_runner_is_the_one_in_bench_and_not_a_namesake():
@@ -1069,3 +1158,202 @@ def test_no_bench_module_reaches_its_runner_through_a_bare_import():
             if stripped.startswith(("import run", "from run import")):
                 offenders.append(f"{path.name}:{lineno}: {stripped}")
     assert not offenders, offenders
+
+
+# ---------------------------------------------------------------------------
+# The third host's harness, and the one-model three-host row
+# ---------------------------------------------------------------------------
+
+score_mcp = _load_by_path("framework_test_score_mcp", BENCH / "score_mcp.py")
+
+_MCP_HOST = BENCH / "mcp_host"
+
+
+def _mcp_host_installed() -> bool:
+    return not score_mcp.prerequisites()
+
+
+def test_the_framework_host_is_runnable_and_carries_its_harness(hosts):
+    fw = next(h for h in hosts["hosts"] if h["id"] == "framework")
+    assert fw["runnable"] is True
+    assert (ROOT / fw["prompt"]).is_file()
+    harness = fw["harness"]
+    for key in ("probe", "scorer", "pinned_by"):
+        assert (ROOT / harness[key]).is_file(), harness[key]
+    # The convention that is ours and not the SDK's is stated in the registry,
+    # where a reader swapping the host looks.
+    assert "not the SDK" in " ".join(harness["what"] + harness["unload_convention"]) \
+        or "convention" in " ".join(harness["unload_convention"])
+    assert fw["prompt_authored_by"] == "this repository"
+
+
+def test_the_sdk_version_the_registry_names_is_the_one_the_lock_pins(hosts):
+    fw = next(h for h in hosts["hosts"] if h["id"] == "framework")
+    manifest = json.loads((_MCP_HOST / "package.json").read_text())
+    lock = json.loads((_MCP_HOST / "package-lock.json").read_text())
+    assert manifest["dependencies"][fw["name"]] == fw["version"], (
+        "an exact version, not a range: a range is not a pin")
+    locked = lock["packages"][f"node_modules/{fw['name']}"]
+    assert locked["version"] == fw["version"]
+    assert locked["integrity"].startswith("sha512-")
+
+
+def test_the_prompt_states_the_unload_the_probe_performs():
+    """The model is told the unload protocol, and it is the one the probe runs.
+    A prompt that described a different unload would measure the prompt."""
+    prompt = (BENCH / "prompts" / "mcp.md").read_text()
+    probe = (_MCP_HOST / "probe.mjs").read_text()
+    assert "remove()" in prompt and "returned a function" in prompt
+    assert "handle.remove()" in probe
+    assert "typeof teardown === 'function'" in probe
+    for method in ("registerTool", "registerResource", "registerPrompt"):
+        assert method in prompt and f"'{method}'" in probe
+
+
+def test_a_probe_report_is_scored_on_its_categories_only():
+    clean = json.dumps({"leakedCategories": [], "leaks": {}, "registered": 2,
+                        "returnedTeardown": True})
+    rec = score_mcp.parse_report(clean, "", 0, 5)
+    assert rec["status"] == "clean" and rec["registered"] == 2
+    leaky = json.dumps({"leakedCategories": ["timers", "resources"],
+                        "leaks": {"resources": {"baseline": [], "final": ["m"]}},
+                        "registered": 1})
+    rec = score_mcp.parse_report(leaky, "", 1, 5)
+    assert rec["status"] == "leaked"
+    # Reported in the fixed category order, not the order the probe printed.
+    assert rec["leaked_categories"] == ["resources", "timers"]
+
+
+def test_a_pack_the_probe_could_not_run_is_an_error_and_never_clean():
+    rec = score_mcp.parse_report("", "mcp-probe: module x has no exported "
+                                 "function \"install\"\n", 2, 5)
+    assert rec["status"] == "error" and rec["leaked"] is True
+    assert "install" in rec["error"]
+
+
+@pytest.mark.skipif(not _mcp_host_installed(),
+                    reason="bench/mcp_host or backends/typescript not npm-installed")
+def test_the_mock_packs_run_through_the_real_sdk_and_probe():
+    """The run.py mock for the mcp host: the clean pack is clean and the leaky
+    one leaks its Map, through the pinned SDK and the probe, end to end."""
+    clean = score_mcp.probe_source(
+        bench_run._mock_mcp({"id": "01-x"}), cycles=2, name="test-mock-clean")
+    leaky = score_mcp.probe_source(
+        bench_run._mock_mcp({"id": "03-x"}), cycles=2, name="test-mock-leaky")
+    assert clean["status"] == "clean", clean
+    assert leaky["status"] == "leaked" and leaky["leaked_categories"] == ["resources"]
+
+
+def _three_host_run(tmp_path: Path, *, model: str, revl: dict, probed: dict,
+                    reasoning: tuple = ()) -> Path:
+    """A synthetic bench/run.py directory: v2 attempt files plus records."""
+    run_dir = tmp_path / "three"
+    rows = []
+    good = "service S {\n  fn a(x: Int) -> Int\n}\n"
+    bad = "component {\n"
+    for spec, attempts in revl.items():
+        d = run_dir / spec / "v2"
+        d.mkdir(parents=True)
+        for i, ok in enumerate(attempts, 1):
+            (d / f"attempt-{i}.rvl").write_text(good if ok else bad)
+            rows.append({"spec": spec, "variant": "v2", "model": model,
+                         "attempt": i, "ok": ok,
+                         "answer_from_reasoning": (spec, "v2") in reasoning})
+        rows.append({"spec": spec, "variant": "v2", "model": model,
+                     "summary": True})
+    for (spec, variant), status in probed.items():
+        rows.append({"spec": spec, "variant": variant, "model": model,
+                     "summary": True, "status": status,
+                     "leaked": status != "clean",
+                     "leaked_categories": ["resources"] if status == "leaked" else [],
+                     "answer_from_reasoning": (spec, variant) in reasoning})
+    run_dir.mkdir(parents=True, exist_ok=True)
+    (run_dir / "results.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows))
+    return run_dir
+
+
+_PIN = {"present": True, "model": {"resolved": "pinned:tag"}}
+
+
+@pytest.fixture
+def synthetic_results(tmp_path, monkeypatch):
+    """Point the no-self-score guard at the synthetic corpus. The guard refuses
+    to grade anything outside the committed results directory, which is right
+    for a real run and is the one thing a synthetic run has to move."""
+    import rescore  # noqa: PLC0415
+
+    monkeypatch.setattr(rescore, "RESULTS", tmp_path)
+    return tmp_path
+
+
+def test_the_three_host_row_is_computed_from_one_run(synthetic_results):
+    tmp_path = synthetic_results
+    run_dir = _three_host_run(
+        tmp_path, model="pinned:tag",
+        revl={"01": [True], "02": [False, False, False], "03": [False, True]},
+        probed={("01", "raw-ts"): "clean", ("02", "raw-ts"): "leaked",
+                ("03", "raw-ts"): "error",
+                ("01", "mcp"): "clean", ("02", "mcp"): "clean",
+                ("03", "mcp"): "leaked"})
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["status"] == "measured" and cell["n"] == 3
+    assert cell["is_pinned_model"] is True and cell["same_model_on_every_host"]
+    assert cell["revl"]["first_pass_admitted"] == 1
+    assert cell["revl"]["admitted_within_attempts"] == 2
+    assert cell["revl"]["refused"] == ["02"]
+    assert cell["raw-ts"]["could_not_load"] == ["03"]
+    assert list(cell["raw-ts"]["leaked"]) == ["02"]
+    assert list(cell["framework"]["leaked"]) == ["03"]
+    # The cost of the guarantee, in this run: refused by revl, and loaded by at
+    # least one other host.
+    assert cell["refused_by_revl_loaded_by_another_host"] == ["02"]
+
+
+def test_a_different_model_is_named_as_not_the_pin(synthetic_results):
+    tmp_path = synthetic_results
+    run_dir = _three_host_run(
+        tmp_path, model="some:other",
+        revl={"01": [True]},
+        probed={("01", "raw-ts"): "clean", ("01", "mcp"): "clean"})
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["is_pinned_model"] is False
+    assert "NOT the pinned model" in "\n".join(
+        framework_bench._three_host_section(cell))
+
+
+def test_a_run_missing_a_host_is_not_a_three_host_row(synthetic_results):
+    tmp_path = synthetic_results
+    run_dir = _three_host_run(
+        tmp_path, model="pinned:tag", revl={"01": [True]},
+        probed={("01", "raw-ts"): "clean"})
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["status"] == framework_bench.NOT_RUN
+    assert "framework" in cell["blocked_on"]
+
+
+def test_a_brief_answered_from_reasoning_leaves_every_host(synthetic_results):
+    tmp_path = synthetic_results
+    """Scoring a draft on one side of a comparison is how a comparison comes
+    out flattering by accident, so the brief leaves all three."""
+    run_dir = _three_host_run(
+        tmp_path, model="pinned:tag",
+        revl={"01": [True], "02": [True]},
+        probed={("01", "raw-ts"): "clean", ("02", "raw-ts"): "clean",
+                ("01", "mcp"): "clean", ("02", "mcp"): "leaked"},
+        reasoning=(("02", "mcp"),))
+    cell = framework_bench.column_three_host(run_dir, _PIN, ROOT)
+    assert cell["specs"] == ["01"]
+    assert cell["dropped_no_answer_within_cap"] == ["02"]
+
+
+def test_without_a_run_the_row_says_exactly_what_it_needs(report):
+    cell = report["columns"]["three-host"]
+    assert cell["status"] == framework_bench.NOT_RUN
+    needs = cell["blocked_on"]
+    assert "--variants v2,raw-ts,mcp" in needs
+    assert "--three-host-from" in needs
+    assert "npm ci" in needs
+    gate = next(g for g in report["remaining_gates"]
+                if g["gate"] == "a pinned-model run across all three hosts")
+    assert gate["why"] == framework_bench.THREE_HOST_NEEDS

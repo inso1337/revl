@@ -218,6 +218,20 @@ def _completeness_guard(before_audit: dict, after_audit: dict) -> list[Changelog
 # --------------------------------------------------------------------------
 # classification of the differenced facts (§2 table, §3 buckets).
 
+
+def _realm_key(record: dict) -> str:
+    """A provider or edge record's key for a fact token: `db`, or `db@b` for a
+    key scoped to realm `b`, so two realms' records never share a fact
+    (issue #1848)."""
+    realm = record.get("realm")
+    return f"{record['key']}@{realm}" if realm else record["key"]
+
+
+def _realm_text(record: dict) -> str:
+    realm = record.get("realm")
+    return f" in realm {realm}" if realm else ""
+
+
 def _classify_structural(delta: dict) -> list[ChangelogLine]:
     """The membership and wiring axes of `composition_diff.diff` (§2 table)."""
     lines: list[ChangelogLine] = []
@@ -232,45 +246,47 @@ def _classify_structural(delta: dict) -> list[ChangelogLine]:
             text=f"component {name} removed"))
 
     for prov in delta["providers"]["changed"]:
-        key = prov["key"]
+        key, where = _realm_key(prov), _realm_text(prov)
         if prov["from_service"] != prov["to_service"]:
             lines.append(ChangelogLine(
                 fact=f"provider.changed:{key}", category="breaking", lede=False,
-                text=(f"provider of key {key} changed from {prov['from']} to "
-                      f"{prov['to']} (service {prov['from_service']} -> "
-                      f"{prov['to_service']})")))
+                text=(f"provider of key {prov['key']}{where} changed from "
+                      f"{prov['from']} to {prov['to']} (service "
+                      f"{prov['from_service']} -> {prov['to_service']})")))
         else:
             lines.append(ChangelogLine(
                 fact=f"provider.swapped:{key}", category="internal",
-                text=(f"provider of key {key} swapped from {prov['from']} to "
-                      f"{prov['to']} (same service {prov['to_service']})")))
+                text=(f"provider of key {prov['key']}{where} swapped from "
+                      f"{prov['from']} to {prov['to']} (same service "
+                      f"{prov['to_service']})")))
     for prov in delta["providers"]["added"]:
         svc = prov.get("service")
         via = f" by {svc}" if svc else ""
         lines.append(ChangelogLine(
-            fact=f"provider.added:{prov['key']}", category="added",
-            text=f"key {prov['key']} is now provided{via}"))
+            fact=f"provider.added:{_realm_key(prov)}", category="added",
+            text=f"key {prov['key']}{_realm_text(prov)} is now provided{via}"))
     for prov in delta["providers"]["removed"]:
         lines.append(ChangelogLine(
-            fact=f"provider.removed:{prov['key']}", category="breaking",
-            text=f"key {prov['key']} is no longer provided"))
+            fact=f"provider.removed:{_realm_key(prov)}", category="breaking",
+            text=f"key {prov['key']}{_realm_text(prov)} is no longer provided"))
 
     for edge in delta["requires"]["added"]:
         lines.append(ChangelogLine(
-            fact=f"require.added:{edge['component']}:{edge['key']}",
+            fact=f"require.added:{edge['component']}:{_realm_key(edge)}",
             category="added",
-            text=f"{edge['component']} now requires {edge['key']}"))
+            text=f"{edge['component']} now requires {edge['key']}{_realm_text(edge)}"))
     for edge in delta["requires"]["removed"]:
         lines.append(ChangelogLine(
-            fact=f"require.removed:{edge['component']}:{edge['key']}",
+            fact=f"require.removed:{edge['component']}:{_realm_key(edge)}",
             category="internal",
-            text=f"{edge['component']} no longer requires {edge['key']}"))
+            text=(f"{edge['component']} no longer requires "
+                  f"{edge['key']}{_realm_text(edge)}")))
     for edge in delta["requires"]["broken"]:
         lines.append(ChangelogLine(
-            fact=f"require.broken:{edge['component']}:{edge['key']}",
+            fact=f"require.broken:{edge['component']}:{_realm_key(edge)}",
             category="breaking",
-            text=(f"{edge['component']} requires {edge['key']} - no provider "
-                  f"(broken dependency)")))
+            text=(f"{edge['component']} requires {edge['key']}{_realm_text(edge)} "
+                  f"- no provider (broken dependency)")))
     return lines
 
 

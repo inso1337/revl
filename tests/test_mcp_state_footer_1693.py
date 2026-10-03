@@ -73,7 +73,12 @@ def _assert_footer_shape(footer: dict) -> None:
 
 @pytest.fixture(autouse=True)
 def _clean_session():
+    # a server that can boot a composition: without the runtime the #1692
+    # gate answers a runtime verb before its handler, which the
+    # runtime-gate case below covers on its own
+    server_mod.set_runtime_available(True)
     yield
+    server_mod.set_runtime_available(None)
     if server_mod.SESSION.loaded:
         server_mod.SESSION.unload()
 

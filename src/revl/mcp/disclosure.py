@@ -43,13 +43,13 @@ TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
                "format and explain", (
         "revl_check", "revl_admit", "revl_plan", "revl_ship", "revl_deploy",
         "revl_audit", "revl_tools", "revl_grammar", "revl_scaffold",
-        "revl_fmt", "revl_explain")),
+        "revl_fmt", "revl_explain", "revl_idiom")),
     "session": ("load, call, change and tear down the running composition; "
                 "commit, roll back, lease, snapshot", (
         "revl_load", "revl_call", "revl_state", "revl_swap", "revl_edit",
         "revl_unload", "revl_commit", "revl_commit_confirm", "revl_abort",
         "revl_rollback", "revl_undo", "revl_lease", "revl_snapshot",
-        "revl_restore")),
+        "revl_restore", "revl_source", "revl_change", "revl_export")),
     "approve": ("approval tickets, revocation, escalation and quorum; "
                 "distillation offers; the E-Stop; forking a session", (
         "revl_approve", "revl_revoke", "revl_escalate", "revl_override",

@@ -866,6 +866,21 @@ def drift(ir: dict, service: str, gains=(), losses=()) -> dict:
                 "to lose.",
     } for method in losses]
 
+    # Issue #1849: the top-level answer is about the change ASKED about. With
+    # gains or losses named, `callSites` are the sites of those methods and
+    # `impacted` is what that change touches: every provider for a gain (each
+    # must implement it), the providers implementing a lost method and the
+    # sites calling it. The roll-up over every existing method stays available
+    # as `existingCallSites`. With nothing named, the answer is the roll-up.
+    asked = set(gains) | set(losses)
+    if asked:
+        scoped_sites = [s for s in call_sites if s["method"] in asked]
+        touched = ({p for g in gained for p in g["providersMustImplement"]}
+                   | {p for lo in lost for p in lo["providersMustDrop"]})
+    else:
+        scoped_sites = call_sites
+        touched = {p["component"] for p in providers}
+
     return _result(
         "drift", f"what changes if `{service}` gains/loses a method?", EXACT,
         "providers and call sites are declarations and syntactic call nodes, "
@@ -883,10 +898,11 @@ def drift(ir: dict, service: str, gains=(), losses=()) -> dict:
              "callSites": _sites(name)}
             for name in methods
         ],
-        providers=providers, callSites=call_sites,
+        providers=providers, callSites=scoped_sites,
+        callSitesScope=sorted(asked) if asked else "all declared methods",
+        existingCallSites=call_sites,
         gains=gained, losses=lost,
-        impacted=sorted({p["component"] for p in providers}
-                        | {s["component"] for s in call_sites}),
+        impacted=sorted(touched | {s["component"] for s in scoped_sites}),
     )
 
 

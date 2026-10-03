@@ -48,7 +48,7 @@ RUNTIME_VERBS = frozenset({
     "revl_commit_confirm", "revl_abort", "revl_estop", "revl_estop_report",
     "revl_edit", "revl_live_query", "revl_timeline", "revl_inspect_step",
     "revl_step_back", "revl_replay_bisect", "revl_replay_forward",
-    "revl_fork", "revl_fork_confirm",
+    "revl_fork", "revl_fork_confirm", "revl_change", "revl_export",
 })
 
 #: Verbs that still answer without the runtime, and what they lose.
@@ -67,10 +67,20 @@ NO_REEXEC_ENV = "REVL_MCP_NO_REEXEC"
 
 
 def cordis_importable() -> bool:
+    """Whether `import cordis` succeeds here. Finding the package is not
+    enough: an install that is present but fails on import (the pinned fork's
+    `cordis.hmr` raises a TypeError when its optional `watchdog` extra is
+    absent) would otherwise read as a runtime this server can boot."""
     try:
-        return importlib.util.find_spec("cordis") is not None
+        if importlib.util.find_spec("cordis") is None:
+            return False
     except (ImportError, ValueError):
         return False
+    try:
+        importlib.import_module("cordis")
+    except Exception:  # noqa: BLE001 - any failure to import is "not importable"
+        return False
+    return True
 
 
 def setup_command() -> str:
