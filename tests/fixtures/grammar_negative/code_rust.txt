@@ -1,0 +1,3 @@
+fn get(&self, key: &str) -> Option<&String> {
+    self.items.get(key)
+}

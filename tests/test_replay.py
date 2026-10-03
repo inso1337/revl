@@ -59,6 +59,19 @@ import replay  # noqa: E402
 import runtime as runtime_mod  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _runtime_gate_open():
+    """These tests pin what each handler answers by itself (an argument check,
+    an empty session, a rejected snapshot), so they hold the issue #1692
+    runtime gate open. A cordis-less server refuses those verbs before the
+    handler runs; tests/test_mcp_runtime_gate_1692.py tests that."""
+    from revl.mcp import server as server_mod
+
+    server_mod.set_runtime_available(True)
+    yield
+    server_mod.set_runtime_available(None)
+
+
 # --------------------------------------------------------------------- sources
 
 USER_CACHE = (ROOT / "examples" / "user_cache.rvl").read_text(encoding="utf-8")

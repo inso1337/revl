@@ -1,0 +1,2 @@
+The gate does not sandbox host code. So an inline extern body runs with the
+full authority of the process, which is why the checker refuses it by default.
