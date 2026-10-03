@@ -52,7 +52,7 @@
       "go": 2897,
       "java": 986,
       "py": 669,
-      "rust": 1227,
+      "rust": 1191,
       "ts": 285,
       "wasm": 1558
     },
@@ -60,7 +60,7 @@
       "go": 104,
       "java": 175,
       "py": 103,
-      "rust": 286,
+      "rust": 284,
       "ts": 94,
       "wasm": 63
     }
@@ -920,9 +920,9 @@
           "_map_value_expr_type": 67,
           "_map_value_rust_type": 2
         },
-        "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions.": {
+        "In-file test and lifecycle harness generation is outside the self-host module emitter: these branches create runtime load/unload/call/advance/no-residue drivers and fault-test rejection rather than library functions. Since item 391 the pure `test` section is ported: selfhost/emit_rust.rvl emits each block as a `#[test] fn`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl, so `_emit_v3_tests` keeps only its `continue` past a lifecycle test, which `_emit_v3` never hands it (it splits the lifecycle tests off first).": {
           "_emit_v3_lifecycle_tests": 81,
-          "_emit_v3_tests": 32,
+          "_emit_v3_tests": 1,
           "_lifecycle_uses_advance": 1,
           "_refuse_fault_tests": 2
         },
@@ -1010,10 +1010,10 @@
           "_split_fn_type": 1,
           "_string": 5
         },
-        "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements handle empty documents plus test/lifecycle sections delegated to their explicit boundaries.": {
+        "Version and document-shape guards: emit rejects malformed/unknown IR, _emit_v1/_emit_v2 are legacy paths outside the mirrored v3 contract, and the residual _emit_v3 statements are the empty-document refusal and the lifecycle-test delegation (the pure test section is emitted since item 391, emit_rust_corpus/in_file_tests.rvl).": {
           "_emit_v1": 1,
           "_emit_v2": 6,
-          "_emit_v3": 7,
+          "_emit_v3": 2,
           "emit": 3
         },
         "Witnessed effect and compensation runtime: these branches detect transactional bodies, emit setup/acquire/undo registration, reclone captured locals, and begin/commit teardown frames. The self-host port has no WAL/frame ABI and explicitly defers this family rather than emitting a partial transaction.": {
@@ -1067,7 +1067,7 @@
           "_reaches_declared": 7
         }
       },
-      "uncovered_statements": 1227
+      "uncovered_statements": 1191
     },
     "ts": {
       "statements": 2208,
@@ -1857,7 +1857,7 @@
       "uncovered_statements": 103
     },
     "rust": {
-      "statements": 4112,
+      "statements": 4154,
       "uncovered": {
         "Async activation remains outside the self-host Rust slice: component_uses_await only selects a DEFER marker and erase_async_ret handles the legacy async function-color spelling rather than generating a Rust future.": {
           "erase_async_ret": 1
@@ -1872,7 +1872,7 @@
         "Compiler-inlined helper copies: the Python bootstrap emitter substitutes these small self-host functions at their call sites, leaving the generated out-of-line definitions uncalled. Their behavior is nevertheless exercised through expression rendering, loop typing, config defaults, context updates, constructor tests, and final module trimming.": {
           "checked_method": 5,
           "default_for_rust_type": 11,
-          "emit_host_stubs": 2,
+          "emit_host_stubs": 1,
           "ind": 1,
           "is_addsubmul": 1,
           "is_builtin_ctor": 1,
@@ -1895,7 +1895,7 @@
           "pure_method_statements": 2,
           "strip_spaces": 1
         },
-        "Deferred in-file test section, marked rather than emitted (issue #1123): `deferred_test_markers` names each `tests` / `fault_tests` entry with an `<<UNSUPPORTED-TEST:...>>` / `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block where the reference emits its driver section. In-file `test` / `fault test` / `lifecycle test` emission is deferred out of every self-host slice, so the reference emits drivers here and this port does not; a corpus document carrying a test section would therefore turn the byte-agreement oracle red rather than close the gap, which is why no corpus document on any tier carries one and these statements have no corpus case. Before #1123 the section was skipped in SILENCE on all six emitters - no marker, no diagnostic, and nothing for these two ledgers or the byte oracle to see. The marker is what makes the divergence loud; porting the drivers is the separate, larger half, and it is what deletes this entry": {
+        "Deferred in-file test sections, marked rather than emitted (issue #1123): `deferred_test_markers` names each `lifecycle test` with an `<<UNSUPPORTED-TEST:...>>` marker and each `fault test` with an `<<UNSUPPORTED-FAULT-TEST:...>>` marker, and `emit_rust_src` splices that block in. A plain `test` is EMITTED since item 391 (`emit_v3_tests`, held to byte agreement by emit_rust_corpus/in_file_tests.rvl); the two sections still marked drive a live composition or are a reference refusal, so no byte-agreement corpus document can carry either, and the marker is what keeps them loud rather than silently skipped, as all six emitters did before #1123.": {
           "deferred_test_markers": 2,
           "emit_rust_src": 1
         },
@@ -1940,8 +1940,8 @@
           "v3_is_str": 1,
           "v3_stmt": 1
         },
-        "The in-file `test` declarations that drive the clock. Consulted only when no component arms a timer — `uses_timer(..) || tests_use_advance(ir)` at selfhost/emit_rust.rvl:5568 short-circuits on the left — and the corpus's own document arms one. The section that would consult it is the in-file test section the port defers (tests/fixtures/selfhost_blind_spots.json, `step=advance`) (issue 1153).": {
-          "tests_use_advance": 4
+        "The in-file `test` declarations that drive the clock. Consulted only when no component arms a timer: `uses_timer(..) || tests_use_advance(ir)` short-circuits on the left. Since item 391 emit_rust_corpus/in_file_tests.rvl reaches it (a test section and no component), so its walk runs; what is left is the `advance` match and its early returns, because no corpus test drives the clock: an `advance` is a lifecycle step, and the lifecycle section is still marked (tests/fixtures/selfhost_blind_spots.json, `step=advance`) (issue 1153).": {
+          "tests_use_advance": 3
         },
         "The port's own `json.dumps` for the typed-event contract schema (`json_str`, `json_dumps`) and the non-BMP `\\uXXXX` escape arm inside it (`hex4`). They are reached only through `Stream::contract` at selfhost/emit_rust.rvl:4889, which the corpus's `comp_stream.rvl` `Handler` component does not reach; the reference calls python's `json`, so it has no counterpart in `backends/rust/emit.py` (issue 1153).": {
           "hex4": 8,
@@ -1980,7 +1980,7 @@
           "strip_index_clone": 1
         }
       },
-      "uncovered_statements": 286
+      "uncovered_statements": 284
     },
     "ts": {
       "statements": 2204,
