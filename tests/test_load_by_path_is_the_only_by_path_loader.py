@@ -260,3 +260,105 @@ def test_the_bare_emit_detector_sees_every_spelling():
                    "import emit_temporal", "from . import emit",
                    "emit = python_backend_emitter()"):
         assert not bare_emit_imports(source), source
+
+
+# --------------------------------------------------------------------------- #
+# Any bare top-level name that more than one file answers to.                 #
+# --------------------------------------------------------------------------- #
+#
+# `emit` was one instance. tests/test_71_codegen_perf_findings.py put
+# bench/codegen/python first on sys.path and imported the bare name `run`,
+# which five files in the repository are (bench/run.py and one per
+# bench/codegen/<tier>/). `sys.modules["run"]` then held the bench driver for
+# every later test in the session, and an unrelated test broke by order (issue
+# #1829). A bare import is safe only when one file answers to the name. A file
+# inside a package (a directory with `__init__.py`, like tck/conformance.py) is
+# reached qualified (`tck.conformance`), never by its bare name, so it does not
+# count, and neither does anything under src/ (the `revl` package).
+
+#: Directories whose tests may import a colliding bare name, and why.
+BARE_NAME_DIRS = {
+    "backends/python/tests/":
+        "the directory's conftest.py pins `emit` and `runtime` to this "
+        "backend's own copies before any test here is collected, and its tests "
+        "import their own `conftest` helpers, which pytest has already loaded",
+}
+
+_NOT_SOURCE = ("node_modules", ".venv", "__pycache__", ".lake", "target", ".git")
+
+
+def bare_importable_files(root: Path) -> dict[str, list[str]]:
+    """`{name: [files]}` for every `.py` a bare `import <name>` can reach: one
+    outside src/ whose directory is not a package."""
+    out: dict[str, list[str]] = {}
+    for path in root.rglob("*.py"):
+        rel = path.relative_to(root)
+        if rel.parts[0] == "src" or any(
+                p in _NOT_SOURCE or p.startswith(".") for p in rel.parts[:-1]):
+            continue
+        if (path.parent / "__init__.py").exists():
+            continue
+        out.setdefault(path.stem, []).append(rel.as_posix())
+    return out
+
+
+def bare_imports(source: str) -> list[tuple[str, int]]:
+    """`(top-level name, line)` for every absolute import in `source`:
+    `import x`, `from x import y`, `importlib.import_module("x")`,
+    `__import__("x")`."""
+    out = []
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            out += [(a.name.split(".")[0], node.lineno) for a in node.names]
+        elif isinstance(node, ast.ImportFrom) and node.module and not node.level:
+            out.append((node.module.split(".")[0], node.lineno))
+        elif (isinstance(node, ast.Call) and node.args
+              and isinstance(node.args[0], ast.Constant)
+              and isinstance(node.args[0].value, str)
+              and ast.unparse(node.func).split(".")[-1] in ("import_module", "__import__")):
+            out.append((node.args[0].value.split(".")[0], node.lineno))
+    return out
+
+
+def colliding_bare_imports(root: Path, modules: list[Path]) -> list[str]:
+    files = bare_importable_files(root)
+    stdlib = set(sys.stdlib_module_names)
+    found = []
+    for path in modules:
+        rel = path.relative_to(root).as_posix()
+        if any(rel.startswith(d) for d in BARE_NAME_DIRS):
+            continue
+        for name, line in bare_imports(path.read_text(encoding="utf-8")):
+            answers = files.get(name, [])
+            if name not in stdlib and len(answers) > 1:
+                found.append(f"{rel}:{line} imports bare `{name}`, which "
+                             f"{len(answers)} files answer to: {sorted(answers)}")
+    return found
+
+
+def test_no_collected_test_imports_a_bare_name_two_files_answer_to():
+    found = colliding_bare_imports(ROOT, collected_test_modules())
+    assert not found, (
+        "a test imports a bare module name more than one file in the "
+        "repository answers to, so it gets whichever was imported first and "
+        "leaks into every later test. Load the file with `load_by_path` under "
+        "a name only that test uses:\n  " + "\n  ".join(found))
+    for directory in BARE_NAME_DIRS:
+        assert (ROOT / directory).is_dir(), f"allowed directory is gone: {directory}"
+
+
+def test_the_colliding_name_detector_sees_the_run_import(tmp_path):
+    """Non-vacuity, on a tree with the #1829 shape: two `run.py` files outside
+    any package, a test importing `run` bare, and a package member that shares
+    a name but is reached qualified."""
+    for rel in ("bench/run.py", "bench/codegen/python/run.py", "bench/solo.py",
+                "tck/__init__.py", "tck/conformance.py", "tools/conformance.py"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("")
+    test = tmp_path / "tests" / "test_x.py"
+    test.parent.mkdir(parents=True)
+    test.write_text("import importlib\nimport json\nimport solo\nimport conformance\n"
+                    "run = importlib.import_module('run')\n")
+    found = colliding_bare_imports(tmp_path, [test])
+    assert len(found) == 1 and "bare `run`" in found[0], found
+    assert bare_importable_files(tmp_path)["conformance"] == ["tools/conformance.py"]

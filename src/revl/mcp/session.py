@@ -51,6 +51,12 @@ class SessionError(RuntimeError):
         self.code = code
 
 
+class NothingLoaded(SessionError):
+    """A verb that acts on the running composition, called with nothing loaded.
+    Typed so the MCP surface can answer it with the reload that works
+    (`revl.mcp.remedy.load_next`, issue #1691) instead of parsing the prose."""
+
+
 def _note_spend(spends: list | None, entry: dict, use: int, ticket: dict) -> None:
     """Remember one per-call spend so `Session.call` can write its
     `approval-emission` once the crossing returns (issue #1781)."""
@@ -1022,7 +1028,7 @@ class Session:
                 "parent is retired at k and non-callable; the branch is the only "
                 "live continuation over the shared workspace (item 250)")
         if self._driver is None:
-            raise SessionError("nothing is loaded — call revl_load first")
+            raise NothingLoaded("nothing is loaded — call revl_load first")
         return self._driver
 
     # -- lifecycle ---------------------------------------------------------
@@ -2818,10 +2824,11 @@ class Session:
         # not a crash — the undo never bypasses admission.
         from ..errors import RevlError  # noqa: PLC0415
         from ..diagnostics import classify  # noqa: PLC0415
-        from .persist import _origin_from, _recompile  # noqa: PLC0415
+        from .persist import _origin_from, _recompile, admitted_name  # noqa: PLC0415
 
         try:
-            target_ir = _recompile(target["snapshot"]["sources"])
+            target_ir = _recompile(target["snapshot"]["sources"],
+                                   admitted_name(target["snapshot"]))
         except RevlError as error:
             diag = classify(error)
             return {
