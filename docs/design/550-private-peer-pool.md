@@ -284,6 +284,16 @@ Running work on the member, once it is admitted ([567](567-pool-dispatch.md)):
       --attest-identity attestor.key --pool-runner test-py work.rvl
     revl pool ledger --dir ./pool
 
+A composition made of several files is one bundle. `<digest>` above is then the
+bundle digest, which covers every file, its path and its mode; print it from
+the composition's root and run from there too, since each file is named by its
+path relative to the working directory ([567](567-pool-dispatch.md),
+"Multi-file artifacts"):
+
+    revl pool digest main.rvl lib/math.rvl lib/twice.rvl
+    revl run --pool private ... --pool-runner test-py \
+      main.rvl lib/math.rvl lib/twice.rvl
+
 Checking members are still there (see "Liveness" below):
 
     revl pool probe --dir ./pool --peer alpha --peer-addr 127.0.0.1:<port> \
@@ -340,6 +350,10 @@ last of those. What remains:
    declared class as an effect class would be fail-open on this arrow. The
    `replayable` and `durable` tiers therefore admit nothing through the
    dispatcher until a classifier for a composition WITH a boundary exists.
+   A composition may be several files: they travel as one bundle whose digest
+   covers every file, its path and its mode, the peer checks each file against
+   the manifest before it runs anything, and the receipt and the ledger both
+   name the bundle ([567](567-pool-dispatch.md), "Multi-file artifacts").
 6. **Liveness and health in `pool status`.** DONE, in `src/revl/pool_health.py`
    with `revl pool probe` and `revl pool status --require-live SECONDS`; see
    "Liveness" below. Each member's row carries what it OWES (`outstanding=N`,

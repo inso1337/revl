@@ -61,6 +61,25 @@ def build_parser() -> argparse.ArgumentParser:
         help="print the dense, complete, prompt-pinnable grammar (roadmap item "
              "346; also shipped as docs/syntax-2.0.prompt.txt) instead of the "
              "short human-readable summary")
+    grammar.add_argument(
+        "--format", choices=("lark", "gbnf", "ebnf"), default=None,
+        help="print the grammar of revl source DERIVED FROM THE PARSER in a "
+             "format grammar-constrained decoders read: `lark` (llguidance), "
+             "`gbnf` (llama.cpp server, XGrammar) or `ebnf` (issue #1661)")
+    grammar.add_argument(
+        "--category", default="program",
+        choices=("program", "component-body", "statements", "expression", "type"),
+        help="with --format: scope the grammar to one syntactic category, so a "
+             "hole-filling decoder is constrained to that slice (default: program)")
+    grammar.add_argument(
+        "--notes", action="store_true",
+        help="list where the derived grammar is looser than the parser")
+    grammar.add_argument(
+        "--write", action="store_true",
+        help="regenerate the committed grammar/revl.{lark,gbnf,ebnf} (source checkout)")
+    grammar.add_argument(
+        "--check", action="store_true",
+        help="exit 1 if grammar/ differs from a fresh derivation (the drift gate)")
 
     # item 296: propose a safe adapter between a consumer's required service and
     # a candidate's provided service (proposed, not silent).
@@ -2041,6 +2060,19 @@ def build_parser() -> argparse.ArgumentParser:
                              help="the pool directory")
     pool_ledger.add_argument("--json", action="store_true",
                              help="the whole ledger as JSON")
+
+    pool_digest = pool_sub.add_parser(
+        "digest",
+        help="print the artifact digest to pin with `pool init --artifact` "
+             "and `pool request --artifact` for the files `run --pool "
+             "private` would send: one file's sha256, or for several files "
+             "a bundle digest over every file, its path and its mode")
+    pool_digest.add_argument("files", nargs="+", metavar="FILE",
+                             help="the composition's files, named relative "
+                                  "to the working directory as `run --pool "
+                                  "private` will name them")
+    pool_digest.add_argument("--json", action="store_true",
+                             help="the digest and the bundle manifest as JSON")
 
     attest_cmd = sub.add_parser(
         "attest",
