@@ -1337,6 +1337,18 @@ export class Frame {
     this.deferredCompensations.push({ seq, crossing, methodName: method, args, run })
   }
 
+  /** A provide method crossed an extern that DECLARES its own compensation
+   * (`extern emission fn put(..) compensate undo()`, issue #1511). The emitter
+   * renders every such call, in any position, as `frame.declared(<call>, ..)`:
+   * the call has already returned when this runs, so the offset is owed, and
+   * it parks through `compensationMethod`, the entry a site-spelled method-body
+   * compensation makes. A call that threw never reaches here and registers
+   * nothing. Returns the call's value, so the call stays an expression. */
+  declared<T>(value: T, crossing: Crossing, method: string, run: () => unknown): T {
+    this.compensationMethod(crossing, method, [], run)
+    return value
+  }
+
   // -- prologue / epilogue sentinels ----------------------------------------
 
   /** Yielded FIRST -> disposed LAST. No-op on commit (nothing left to do —

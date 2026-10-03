@@ -17,6 +17,12 @@ from __future__ import annotations
 from .completion import Completion, CompletionRequest
 from .structured import TOOL_NAME
 
+#: The `provider` value a binding names to use this wire format, and the
+#: fields it accepts beyond the common ones. `revl.providers.config` builds
+#: its closed vocabulary from these, so the format list is declared once.
+PROVIDER = "anthropic"
+FIELDS = frozenset({"anthropic_version"})
+
 
 def build(binding, request: CompletionRequest, credential: str | None):
     headers = {

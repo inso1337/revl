@@ -438,8 +438,12 @@ _AP_BODY = """component Biller provides ops: Ops {{
   provide ops {{ fn ping() = 1 }}
 }}
 """
-_AP_REFUSAL = ("crossing capability `charge` requires approval, but this "
-               "`emit` carries no covering `with` edge")
+def _AP_REFUSAL_OF(token: str) -> str:  # noqa: N802 - reads as the constant
+    return (f"crossing capability `{token}` requires approval, but this "
+            f"`emit` carries no covering `with` edge")
+
+
+_AP_REFUSAL = _AP_REFUSAL_OF("charge")
 
 # Two host emission externs, shared by the marker-rule programs below.
 _MK_HEAD = """extern emission fn log_line(n: Int) -> Int = @py { return 1 }
@@ -753,9 +757,7 @@ component C requires a: A, b: B provides r: R {
       "g4_emit_arrow_argument_inline.rvl").read_text()),
     # ---- the declaration-owned approval floor: what is admitted (item 246) --
     # A covering `with` edge, by exact token, by a `*` or `?` glob, and by a
-    # dotted-ident token; an extern without the floor; and a scoped extern,
-    # which crosses its declared scope rather than its name, so the floor keyed
-    # on the name does not reach it (the reference's `_emit_crossed_caps`).
+    # dotted-ident token; and an extern without the floor.
     ("an approval edge that names the capability",
      _AP_HEAD + _AP_BODY.format(token='"charge"')),
     ("an approval edge whose `*` glob covers the capability",
@@ -772,6 +774,52 @@ component Biller provides ops: Ops {
   provide ops { fn ping() = 1 }
 }
 """),
+    # ---- every crossing marked (issue #1437): what stays admitted -----------
+    # The marked value forms, a pure extern called unmarked, a marked call to a
+    # helper that reaches an emission with no floor, and a witnessed extern
+    # called in effect position, where `effect` is its marker.
+    ("a marked host crossing returned from a method", _MK_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till {
+    fn ring(cents) {
+      return emit charge(cents)
+    }
+  }
+}
+"""),
+    ("a marked host crossing as a method's shorthand body", _MK_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till { fn ring(cents) = emit charge(cents) }
+}
+"""),
+    ("a pure extern called unmarked", """
+extern pure fn add1(n: Int) -> Int = @py { return n + 1 }
+service Till { fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till {
+    fn ring(cents) {
+      return add1(cents)
+    }
+  }
+}
+"""),
+    ("a marked helper that reaches an emission with no floor", _MK_HEAD + """
+fn bill(c: Int) -> Int { return charge(c) }
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till {
+    fn ring(cents) {
+      let r = emit bill(cents)
+      return r
+    }
+  }
+}
+"""),
+    ("a witnessed extern in a provide method's effect position",
+     (ROOT / "backends" / "go" / "scenarios" /
+      "provide_method_witnessed.rvl").read_text()),
     ("a service crossing scoped to the floor, covered", _AP_HEAD + """
 service Pay { emission[charge] fn go() -> Int }
 component B requires pay: Pay provides ops: Ops {
@@ -1369,6 +1417,81 @@ component B provides p: P {
 }
 """, "`with` on `emit` expects an `Approval[C]` value, but the expression "
      "has type Int"),
+    # ---- every crossing marked, and the floor on the value form (#1437) ----
+    # `_refuse_unmarked_emission_call` holds the host-extern carrier to the
+    # marker in every setup position, not only in an emit head's arguments,
+    # and `_require_declared_approval` meets the `emit` VALUE form (which has
+    # no `with` clause) and a marked helper's reach. The required set is keyed
+    # by capability TOKEN, so a scoped extern's crossing meets the floor too.
+    # The six checked-in fixtures first.
+    ("g4_unmarked_host_emission", _fixture("g4_unmarked_host_emission.rvl"),
+     "call to emission `charge` must be marked `emit` (G4)"),
+    ("g4_unmarked_host_emission_acquire",
+     _fixture("g4_unmarked_host_emission_acquire.rvl"),
+     "call to emission `open_line` must be marked `emit` (G4)"),
+    ("g4_unmarked_host_emission_helper",
+     _fixture("g4_unmarked_host_emission_helper.rvl"),
+     "call to emission `bill` must be marked `emit` (G4)"),
+    ("g4_approval_value_form_method",
+     _fixture("g4_approval_value_form_method.rvl"), _AP_REFUSAL_OF("charge")),
+    ("g4_approval_helper_reach", _fixture("g4_approval_helper_reach.rvl"),
+     _AP_REFUSAL_OF("charge")),
+    ("g4_approval_scoped_extern", _fixture("g4_approval_scoped_extern.rvl"),
+     _AP_REFUSAL_OF("production.payment")),
+    ("an unmarked host crossing returned from a method", _MK_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till {
+    fn ring(cents) {
+      return charge(cents)
+    }
+  }
+}
+""", "call to emission `charge` must be marked `emit` (G4)"),
+    ("an unmarked host crossing as a method's shorthand body", _MK_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till { fn ring(cents) = charge(cents) }
+}
+""", "call to emission `charge` must be marked `emit` (G4)"),
+    ("an unmarked host crossing in a condition", _MK_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till {
+    fn ring(cents) {
+      if (charge(cents) > 0) { return 1 }
+      return 0
+    }
+  }
+}
+""", "call to emission `charge` must be marked `emit` (G4)"),
+    ("the floor on a returned value-form crossing", _AP_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till {
+    fn ring(cents) {
+      return emit charge("s", "m")
+    }
+  }
+}
+""", _AP_REFUSAL),
+    ("the floor on a value-form shorthand body", _AP_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till { fn ring(cents) = emit charge("s", "m") }
+}
+""", _AP_REFUSAL),
+    ("the floor on a value-form crossing inside an expression", _AP_HEAD + """
+service Till { emission fn ring(cents: Int) -> Int }
+component R provides till: Till {
+  provide till {
+    fn ring(cents) {
+      let r = 1 + emit charge("s", "m")
+      return r
+    }
+  }
+}
+""", _AP_REFUSAL),
 ]
 
 

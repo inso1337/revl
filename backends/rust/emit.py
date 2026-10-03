@@ -7063,9 +7063,16 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                 # here (`&s.to_string()` -> `&String`). An index read is not a
                 # borrowed param, so it stripped above and never reaches here —
                 # the two rewrites are disjoint.
+                #
+                # Every receiver not KNOWN to be a `Str` takes the rewrite: a
+                # list literal types as bare `List` and a field or call may not
+                # type at all, and each of those missed it (E0308 on
+                # `let xs = ["a"]; xs.indexOf(s)`). On a `Str` receiver the
+                # owned `String` would still coerce to the `&str` slot, so the
+                # only cost of an unknown type is the allocation.
                 recv_ty = _v3_infer_type(target_node, ctx)
                 a0 = arg_nodes[0]
-                if (isinstance(recv_ty, str) and recv_ty.startswith("List[")
+                if (recv_ty != "Str"
                         and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
                         and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
                     args[0] = f"{args[0]}.to_string()"
@@ -9564,20 +9571,22 @@ def _emit_bridge(ir: dict) -> list[str]:
                 out.append(f"        {deser}")
             out.append("    }")
         out.append("}")
-        # provider-side dispatch
+        # provider-side dispatch. Issue #1634: a call this cannot make is an
+        # `Err`, never `null` (which the runner used to send as `ok: true`).
         out.append(f"fn _revl_dispatch_{_snake(sname)}(svc: &dyn {sname}, method: &str, "
-                   "args: &[serde_json::Value]) -> serde_json::Value {")
+                   "args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
         out.append("    match method {")
         for mname, method in methods.items():
             params = method.get("params") or []
             ret = _rust_type(method.get("returns"), types) if method.get("returns") else "()"
             extracts = [_bridge_arg_extract(i, _rust_type(p.get("type"), types)) for i, p in enumerate(params)]
             if any(e is None for e in extracts):
-                out.append(f'        "{mname}" => serde_json::Value::Null, // unmarshalled param type')
+                out.append(f'        "{mname}" => Err("{sname}.{mname} cannot be called across a '
+                           'seam: a parameter type has no wire form".to_string()),')
                 continue
             call = f"svc.{_method_ident(mname)}({', '.join(extracts)})"
-            out.append(f'        "{mname}" => {_bridge_ret_ser(call, ret)},')
-        out.append("        _ => serde_json::Value::Null,")
+            out.append(f'        "{mname}" => Ok({_bridge_ret_ser(call, ret)}),')
+        out.append(f'        _ => Err(format!("method \'{{method}}\' is not exported for service {sname}")),')
         out.append("    }")
         out.append("}")
         out.append("")
@@ -9613,16 +9622,18 @@ def _emit_bridge(ir: dict) -> list[str]:
     out.append("}")
     out.append("")
 
-    # provider/probe: require a locally-provided key and dispatch to it
+    # provider/probe: require a locally-provided key and dispatch to it. A key
+    # whose provider cannot be resolved, or that no component provides, is an
+    # `Err` (issue #1634).
     out.append("pub fn _revl_invoke(ctx: &cordis::Context, key: &str, method: &str, "
-               "args: &[serde_json::Value]) -> serde_json::Value {")
+               "args: &[serde_json::Value]) -> Result<serde_json::Value, String> {")
     out.append("    match key {")
     for key, service in provided.items():
         out.append(f'        "{key}" => match ctx.require::<Box<dyn {service}>>("{key}") {{')
         out.append(f"            Ok(svc) => _revl_dispatch_{_snake(service)}(&**svc, method, args),")
-        out.append("            Err(_) => serde_json::Value::Null,")
+        out.append(f'            Err(_) => Err("no provider for key \'{key}\' right now".to_string()),')
         out.append("        },")
-    out.append("        _ => serde_json::Value::Null,")
+    out.append('        _ => Err(format!("key \'{key}\' is not provided by this process")),')
     out.append("    }")
     out.append("}")
     out.append("")

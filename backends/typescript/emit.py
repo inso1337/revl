@@ -639,6 +639,8 @@ def _fn_call(node: dict, ctx: "_Ctx") -> str:
         )
     args = ", ".join(_expr(arg, ctx) for arg in node.get("args") or [])
     call = f"{name}({args})"
+    if node.get("name") in ctx.compensated:
+        return _declared_call(node, call, ctx)
     # async extern call (roadmap item 80, docs/design/async-extern.md §5):
     # await it, parenthesized so it stays atomic in a larger expression. The
     # frontend admits such a call only inside an async provide method, so
@@ -652,6 +654,41 @@ def _fn_call(node: dict, ctx: "_Ctx") -> str:
             )
         return f"(await {call})"
     return call
+
+
+def _declared_call(node: dict, call: str, ctx: "_Ctx") -> str:
+    """A call to an extern that declares its own `compensate` (issue #1511).
+
+    An `emit` statement's own call renders bare: the statement registers the
+    compensation itself, at every site (`_emit_compensations`, issue #1592),
+    and `_emit_ctx` marks that one node. Every OTHER position inside a provide
+    method (a `let`, a `return`, an argument, a nested operand) renders as
+    `<frame>.declared(<call>, <crossing>, <method>, () => <offset>)`: the call
+    runs first, and only once it returns does `Frame.declared` park the offset
+    with `compensationMethod`, the same entry a method-body `emit` makes. A call
+    that throws registers nothing. Any other component position has no frame
+    to register on and is refused by name. Outside a component (a pure `fn` or
+    a `test`) there is no activation to abort, so nothing is owed."""
+    name = node.get("name")
+    if ctx.declared_statement is node:
+        return call
+    if ctx.comp_frame is not None:
+        ctx._counter[0] += 1
+        site = f"{ctx.comp_site or 'provide'}#{ctx._counter[0]}"
+        comp = ctx.compensated[name]["compensate"]
+        method = _call_method_name(comp)
+        crossing = _crossing_literal(method, method, [], site)
+        pure = ctx.with_scope(None)
+        pure.comp_frame = None
+        offset = _expr(comp, pure)
+        return (f"{ctx.comp_frame}.declared({call}, {crossing}, "
+                f"{_string(method)}, () => {offset})")
+    if ctx.component_scope is None:
+        return call
+    raise EmitError(
+        f"extern `{name}` declares a `compensate`, and the ts tier registers it "
+        f"only at an `emit` statement or inside a provide method; this call is "
+        f"in neither (issue #1511)")
 
 
 def _is_float_expr(node: object) -> bool:
@@ -1450,7 +1487,7 @@ def _method_body(steps: list, ctx: "_Ctx", indent: str,
             # inverse, guarded and residue-collected. Fire the emission first,
             # then register: the site-spelled clause, then the extern's own
             # declared one (item 254, issue #1592).
-            lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+            lines.append(f"{indent}{_expr(step['expr'], _emit_ctx(step, ctx))}")
             for comp_node in _emit_compensations(step, ctx):
                 _register_compensation(
                     comp_node, ctx, lines, indent, frame_var,
@@ -1565,8 +1602,12 @@ def _provide_impl(step: dict, ctx: "_Ctx", services: dict, indent: str,
         if secret_params:
             lines.append(
                 f"{indent}  host.markSecret({', '.join(secret_params)})")
+        method_ctx = ctx.with_scope(body_scope, in_async=method_is_async)
+        if frame_var is not None:
+            method_ctx = method_ctx.with_compensation_frame(
+                frame_var, f"{service_name}.{name}")
         lines.extend(_method_body(method.get("body") or [],
-                                  ctx.with_scope(body_scope, in_async=method_is_async),
+                                  method_ctx,
                                   indent + "  ", method_is_async,
                                   frame_var, provide_name=service_name,
                                   method_name=name))
@@ -1933,7 +1974,34 @@ def _method_body_needs_frame(steps: list, ctx: "_Ctx") -> bool:
             return True
         if kind == "emit" and _emit_compensations(step, ctx):
             return True
+    # issue #1511: a call to an extern that declares its own `compensate`, in
+    # any position (a `let`, a `return`, an argument, an `if` arm, nested)
+    return _reaches_declared(steps, ctx)
+
+
+def _reaches_declared(node: Any, ctx: "_Ctx") -> bool:
+    """Whether *node* (any IR subtree) calls an extern that declares its own
+    `compensate`."""
+    if not ctx.compensated:
+        return False
+    if isinstance(node, dict):
+        if node.get("kind") == "fn" and node.get("name") in ctx.compensated:
+            return True
+        return any(_reaches_declared(value, ctx) for value in node.values())
+    if isinstance(node, list):
+        return any(_reaches_declared(item, ctx) for item in node)
     return False
+
+
+def _emit_ctx(step: dict, ctx: "_Ctx") -> "_Ctx":
+    """The view an `emit` statement renders its own call in. When that call is
+    to an extern declaring a `compensate`, the statement registers it
+    (`_emit_compensations`), so `_declared_call` renders that one node bare
+    rather than registering it a second time (issue #1511)."""
+    expr = step.get("expr")
+    if _compensated_extern(expr, ctx) is None:
+        return ctx
+    return ctx.with_declared_statement(expr)
 
 
 def _needs_frame(component: dict, ctx: "_Ctx") -> bool:
@@ -2155,10 +2223,11 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         # Promise. Emitted keyword-led (`await …`) so it never begins with `(`;
         # the compensation registers after, as in the sync spelling. A sync emit
         # carries no flag and is byte-identical to before.
+        ectx = _emit_ctx(step, ctx)
         if step.get("async"):
-            lines.append(f"{indent}{_await_statement(step['expr'], ctx)}")
+            lines.append(f"{indent}{_await_statement(step['expr'], ectx)}")
         else:
-            lines.append(f"{indent}{_expr(step['expr'], ctx)}")
+            lines.append(f"{indent}{_expr(step['expr'], ectx)}")
         # item 247: a compensation entry: audit-facing, best-effort,
         # ABORT-ONLY, Phase 2 (never on a clean unload). Both the site-spelled
         # clause and the extern's own declared one (item 254, issue #1592)
@@ -2241,7 +2310,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         if not step.get("async"):
             lines.append(f"{indent}const {fn} = () => {{")
             for emission in emissions:
-                lines.append(f"{indent}  {_expr(emission['expr'], ctx)}")
+                lines.append(f"{indent}  {_expr(emission['expr'], _emit_ctx(emission, ctx))}")
                 for comp_node in _emit_compensations(emission, ctx):
                     _register_compensation(
                         comp_node, ctx, lines, indent + "  ", frame_var,
@@ -2273,7 +2342,7 @@ def _component_step(step: dict, component: dict, services: dict, ctx: "_Ctx",
         lines.append(f"{indent}const {fn} = () => {{")
         for emission in emissions:
             expr = emission["expr"]
-            rendered = _expr(expr, ctx)
+            rendered = _expr(expr, _emit_ctx(emission, ctx))
             if _ts_emission_is_async(expr, ctx):
                 # spawn the suspension into the in-flight window and track it so
                 # the inverse can drop it; a settled task removes itself.
@@ -2816,6 +2885,15 @@ class _Ctx:
             ext["name"]: ext for ext in (externs or [])
             if ext.get("class") == "emission" and ext.get("compensate") is not None
         }
+        # issue #1511: a call to one of those externs in any OTHER position (a
+        # `let`, a `return`, an argument, a nested operand) registers through
+        # `_declared_call`: inside a provide method on the component's frame
+        # (`comp_frame`, with `comp_site` naming the method). Any other
+        # component position is refused by name, never dropped.
+        self.comp_frame: Optional[str] = None
+        self.comp_site: Optional[str] = None
+        # the call node an `emit` statement registers itself (`_emit_ctx`)
+        self.declared_statement: Optional[dict] = None
         # async callables (roadmap item 80): call sites naming one are awaited
         # (docs/design/async-extern.md §5). Seeded from async externs *and*
         # phase-2 async-colored module fns (both carry `"async": True` on their
@@ -2864,6 +2942,9 @@ class _Ctx:
                                  if empty_list_types is None else empty_list_types)
         view.witnessed = self.witnessed
         view.compensated = self.compensated
+        view.comp_frame = self.comp_frame
+        view.comp_site = self.comp_site
+        view.declared_statement = self.declared_statement
         view.async_names = self.async_names
         view.async_ops = self.async_ops
         view.async_locals = self.async_locals if async_locals is None else async_locals
@@ -2872,6 +2953,22 @@ class _Ctx:
         view.case_names = self.case_names
         view._counter = self._counter
         view.component_scope = scope
+        return view
+
+    def with_compensation_frame(self, frame_var: Optional[str],
+                                site: Optional[str]) -> "_Ctx":
+        """A view rendering a provide-method body: a call to an extern that
+        declares a `compensate` registers it on *frame_var*."""
+        view = self.with_scope(self.component_scope)
+        view.comp_frame = frame_var
+        view.comp_site = site
+        return view
+
+    def with_declared_statement(self, node: dict) -> "_Ctx":
+        """A view rendering an `emit` statement whose call *node* the
+        statement itself registers (see `_emit_ctx`)."""
+        view = self.with_scope(self.component_scope)
+        view.declared_statement = node
         return view
 
 
