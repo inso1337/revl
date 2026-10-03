@@ -803,6 +803,25 @@ grant, so n prompts become one. Gated by the `approve` operator verb: who may
 say yes is scoped in the same profile grammar as who may commit. Class (a)
 (witnessed-revertible) and class (b) (deferred) crossings never reach here.
 
+The ticket carries `ceilings` (issue #1755): for each class-(c) capability it
+asks about, the crossing component's item-260 crossing ceiling, read from
+`revl audit`'s cardinality analysis
+([260-emission-cardinality-bounds.md](design/260-emission-cardinality-bounds.md)):
+
+    "ceilings": {"charge": {"verdict": "bounded-symbolic",
+                            "ceiling": "config.max_steps",
+                            "reason": "..."}}
+
+`verdict` is `bounded` (`ceiling` is the proved count), `bounded-symbolic`
+(`ceiling` is the fuel expression, `"k * expr"` when an iteration crosses `k`
+times) or `unbounded` (`ceiling` is null and `reason` says why). The ceiling is
+per activation of the crossing component, not a count for this one call: it is
+the worst case to size a standing grant's `uses` against. A capability with no
+recorded row reads `unbounded`. The field lands after the ticket `hash`, so the
+hash is unchanged. Under the boundary-policy line `approvals require bounded
+crossings` (off by default), a call whose capability is `unbounded` is refused
+by name instead of ticketed.
+
 When the crossing's approval rule demands a QUORUM (`capability payments.refund
 requires approval require 2 of {finance.oncall, fraud.oncall, cs.lead}`), a bare
 `hash` is not an answer: the ticket takes a VOTE. Pass `vote` (`approve` or
