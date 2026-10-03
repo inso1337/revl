@@ -445,6 +445,12 @@ def _classify(e: RevlError) -> str:
     if ("unknown service `" in m
             and ("in `requires` of" in m or "in `provides` of" in m)):
         return "G1"
+    # issue #1847: a requirement key spelling a builtin type or a host root
+    # (`Env.__init__`, `_refuse_builtin_requirement_key`). The gate spells it
+    # byte for byte in the same header verdict as the unknown service above.
+    if m.startswith("requirement key `") and (
+            " shadows the builtin type `" in m or " shadows the host root `" in m):
+        return "G1"
     if ("cannot reassign" in m
             or "is already declared in this function" in m
             or "is bound here and called in this body" in m
@@ -2389,6 +2395,9 @@ component C requires kv: Kv {
      _fixture("g4_method_host_acquire"), "G4"),
     ("g4 host acquire in a teardown slot",
      _fixture("g4_undo_host_acquire"), "G4"),
+    # issue #1859: the undo of a host acquisition is not its release
+    ("g4 host undo that is not the release",
+     _fixture("g4_undo_not_release"), "G4"),
     ("g4 host acquire in a component-reachable fn body",
      _fixture("g4_fn_body_host_acquire"), "G4"),
     # the same rule at the two positions no checked-in fixture occupies

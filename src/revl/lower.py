@@ -48,6 +48,7 @@ from .typecheck import (
     format_type,
     host_check,
     _HOST_ACQUIRE_VERBS,
+    _BUILTIN_TYPE_NAMES,
     _HOST_FAMILIES,
     _HOST_RESULT_SIG,
     check_ir,
@@ -890,6 +891,7 @@ class Env:
         self._stream_head_position = False
         for key, svc, line in component.requires:
             binding = _key_binding(key)
+            _refuse_builtin_requirement_key(binding, component.name, filename, line)
             if binding in self.requires:
                 raise RevlError(filename, line, f"duplicate requirement name `{binding}` in {component.name}")
             if svc.startswith("Stream["):
@@ -9101,6 +9103,8 @@ def _lower_component_pure_expr(expr, env: Env, scope: dict[str, str], callables:
             # item 130: the key IS declared — it is a required stream, and a
             # stream is read only in a `subscribe` head.
             _refuse_stream_requirement_read(env, name, filename, line)
+        if getattr(env, "_plain_body", False) and name in _BUILTIN_TYPE_NAMES:
+            _refuse_builtin_type_value(name, env, filename, line)
         if getattr(env, "_plain_body", False):
             declared = ", ".join(f"`{r}`" for r in env.requires) or "<nothing>"
             raise RevlError(
@@ -11100,6 +11104,113 @@ def _lower_subscribe_step(stmt: "LetEffect", env: "Env", filename: str,
     return step
 
 
+#: the names a requirement key may not spell (issue #1847): every builtin type
+#: and every host root, so `List.<op>` or `Map.<op>` can never resolve to a
+#: required service instead of the builtin.
+_RESERVED_REQUIREMENT_KEYS = frozenset(_BUILTIN_TYPE_NAMES) | frozenset(_HOST_FAMILIES)
+
+
+def _refuse_builtin_requirement_key(binding: str, comp: str, filename: str,
+                                    line: int) -> None:
+    if binding not in _RESERVED_REQUIREMENT_KEYS:
+        return
+    what = "builtin type" if binding in _BUILTIN_TYPE_NAMES else "host root"
+    raise RevlError(
+        filename, line,
+        f"requirement key `{binding}` of {comp} shadows the {what} `{binding}`",
+        hint=f"rename the key: a call on `{binding}` would resolve to the "
+             f"required service instead of the {what}, so a requirement key "
+             f"may not spell a builtin type or a host root",
+        code="G1", category="wiring")
+
+
+def _refuse_builtin_type_value(name: str, env: "Env", filename: str,
+                               line: int) -> None:
+    """A builtin type named where a value is read (`List.reverse(xs)`).
+
+    Issue #1847: this was the generic "`List` is not a declared requirement",
+    whose hint (`add requires List: <Service>`) cannot be followed: a
+    requirement key may not spell a builtin type, and before that refusal
+    existed, following it made `List.<op>` resolve to the service. A builtin
+    method is called on a value of its type. In a bracket's `undo` the hint
+    names the bracket rule as well, since that is where the shape is usually
+    written: a host inverse is the release on the bound handle."""
+    if getattr(env, "_inverse_slot", None) == "undo":
+        hint = ("a bracket inverse releases the handle its bracket bound: "
+                "`let h = effect Map.new() undo h.drop()`. A builtin method "
+                "computes a new value and releases nothing, so it is never an "
+                "inverse (docs/rejections.md#g4--inverse-or-emit)")
+    else:
+        hint = (f"call the method on a value of the type (`xs.<method>()`); "
+                f"revl has no methods on a builtin type itself "
+                f"(docs/stdlib-2.0.md)")
+    raise RevlError(
+        filename, line,
+        f"`{name}` is a builtin type, not a value: a builtin method is called "
+        f"on a value of the type, never on the type",
+        hint=hint, code="T1", category="type-mismatch")
+
+
+def _host_release_of(acquire) -> str | None:
+    """The release verb of a host acquisition, or None for any other acquire.
+
+    `_HOST_ACQUIRE_VERBS` maps each host acquire to its family's release
+    (`Map.new -> drop`, `Pool.open -> close`, `Stream.source -> close`). revl
+    owns those stubs, so for these three the inverse is provable: it is that
+    release applied to the handle the bracket bound (issue #1859)."""
+    if isinstance(acquire, dict) and acquire.get("kind") == "host":
+        return _HOST_ACQUIRE_VERBS.get(acquire.get("fn"))
+    return None
+
+
+def _check_host_release(step: dict, env: "Env", filename: str, line: int, *,
+                        bind: str | None, safe: str | None) -> None:
+    """A host acquisition's `undo` is its family's release on THAT handle.
+
+    Before issue #1859 the bracket checked only that an `undo` was written, so
+    `let store = effect Map.new() undo store.get("x")` compiled, the handle was
+    never released, and the teardown report still said `noResidue: true`. The
+    subscription bracket already held its inverse to this shape (it must close
+    THAT subscription); this is the same rule for the three host families.
+
+    Runs after the G5 classification of the undo and after O1/B1, so a program
+    those already refuse keeps its message. An unbound host acquisition is
+    refused outright: nothing names the handle, so no `undo` can release it."""
+    acquire = step.get("acquire")
+    release = _host_release_of(acquire)
+    if release is None:
+        return
+    fn = acquire.get("fn")
+    if bind is None:
+        raise RevlError(
+            filename, line,
+            f"`effect {fn}(...)` must bind its handle so its `undo` can release it: "
+            f"write `let <name> = effect {fn}(...) undo <name>.{release}()`",
+            hint=f"an unbound `{fn}` acquisition leaves nothing for an `undo` "
+                 f"to release, so no `undo` written beside it is its inverse: "
+                 f"the handle stays open while the teardown reports a clean "
+                 f"release (issue #1859)",
+            code="G4", category="inverse")
+    undo = step.get("undo")
+    target = undo.get("target") if isinstance(undo, dict) else None
+    if (isinstance(undo, dict) and undo.get("kind") == "call"
+            and undo.get("method") == release and not undo.get("args")
+            and isinstance(target, dict) and target.get("kind") == "name"
+            and target.get("id") == safe):
+        return
+    raise RevlError(
+        filename, line,
+        f"the `undo` of `let {bind} = effect {fn}(...)` must release THAT "
+        f"handle: write `undo {bind}.{release}()`",
+        hint=f"a host acquisition has exactly one inverse, its family's "
+             f"release applied to the handle it bound (`Map.new` -> `drop`, "
+             f"`Pool.open` -> `close`, `Stream.source` -> `close`). Any other "
+             f"`undo` (another verb, a sibling handle, a helper fn, a literal) "
+             f"runs at teardown and leaves `{bind}` unreleased while the "
+             f"teardown reports a clean release (issue #1859)",
+        code="G4", category="inverse")
+
+
 def _bare_callee_name(raw_acquire) -> str | None:
     """The extern name an acquisition AST names by bare spelling, or None.
 
@@ -11596,6 +11707,12 @@ def _ownership_walk_method(steps, env: "Env", filename: str, line: int) -> None:
                                 borrows_only=True, extra_owned=method_owned)
             _ownership_check_expr(acq, env, filename, line, seam=True)
             _b1_witnessed_check(acq, env, filename, line)
+            # issue #1859: a provide method may not acquire a host resource
+            # unbound either; judged here, after the O1/B1 checks above, so a
+            # program they refuse keeps its message. (A host acquisition BOUND
+            # in a method is refused earlier: only `spawn` may be.)
+            if stp == "effect":
+                _check_host_release(st, env, filename, line, bind=None, safe=None)
             if acq_res and bind:
                 method_owned.add(bind)
         elif stp == "emit":
@@ -12161,6 +12278,8 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                           position="undo", exempt_handle=safe)
                 _b1_no_resource(step["undo"], env, filename, stmt.line,
                                 clause="undo", borrows_only=True)
+            _check_host_release(step, env, filename, stmt.line,
+                                bind=stmt.bind, safe=safe)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
             # item 130 (rule 3.6): a stream source whose inverse CLOSES it is a
@@ -12221,6 +12340,7 @@ def _lower_component(comp: ComponentDecl, services: dict[str, ServiceDecl], file
                 _o1_check(step["undo"], env, filename, stmt.line, position="undo")
                 _b1_no_resource(step["undo"], env, filename, stmt.line,
                                 clause="undo", borrows_only=True)
+            _check_host_release(step, env, filename, stmt.line, bind=None, safe=None)
             _ownership_check_expr(step.get("acquire"), env, filename, stmt.line)
             _b1_witnessed_check(step.get("acquire"), env, filename, stmt.line)
             body.append(step)

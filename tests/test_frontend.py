@@ -374,6 +374,11 @@ REJECTIONS = {
         "host acquisition `Pool.open` cannot be called in this position",
     "g4_undo_host_acquire.rvl":
         "host acquisition `Pool.open` cannot be called in a teardown slot",
+    # issue #1859: a host acquisition's `undo` must be its family's release
+    # on the handle the bracket bound, not just any expression
+    "g4_undo_not_release.rvl":
+        "the `undo` of `let store = effect Map.new(...)` must release THAT "
+        "handle: write `undo store.drop()`",
     # G5's teardown bound, reached through the three indirections that hid it:
     # a spawn handle, a locally-bound arrow (followed into its body, so a PURE
     # local arrow still compiles), and an emitting callable passed as a value.

@@ -819,17 +819,21 @@ def _run_src(src: str, capsys):
     return code, capsys.readouterr().out
 
 
-@needs_cordis
-def test_a_non_inverse_undo_fails_the_fault_test(capsys):
-    """Before the R1 accounting this exact document passed."""
-    code, out = _run_src(_FAULT_ON_LEAKY, capsys)
-    assert code == 1, out
-    assert "FAIL mid-activation failure reverts its acquisition" in out
-    assert "residue in the host" in out
-    # the tag carries the runtime's global Map serial, which depends on how
-    # many stubs earlier tests created - assert the shape, not the number
-    assert re.search(r"map#\d+ \(new\(\) with no drop\(\)\)", out)
-    assert "(R1)" in out
+_NON_INVERSE_REFUSAL = (
+    "the `undo` of `let scratch = effect Map.new(...)` must release THAT "
+    "handle: write `undo scratch.drop()`")
+
+
+def test_a_non_inverse_undo_is_refused_before_the_fault_test():
+    """Before the R1 accounting this exact document passed the fault test;
+    the R1 accounting made the run fail it. Since issue #1859 it no longer
+    compiles: a host acquisition's `undo` must be its release on the bound
+    handle. The runtime R1 judgment stays covered for what the checker cannot
+    see by `test_judge_names_the_unreleased_resource` and its neighbours above."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_FAULT_ON_LEAKY, "fault.rvl")
+    assert excinfo.value.code == "G4"
+    assert excinfo.value.message == _NON_INVERSE_REFUSAL
 
 
 @needs_cordis
@@ -872,16 +876,12 @@ fault test "mid-activation failure with a non-inverse undo" for Fragile {
 '''
 
 
-@needs_cordis
-def test_a_non_inverse_undo_fails_under_an_injected_fault(capsys):
-    """The R1 accounting must hold when the *probe* faults the activation,
-    not only when a `fail` statement in the body does."""
-    code, out = _run_src(_LEAKY_UNDER_INJECTION, capsys)
-    assert code == 1, out
-    assert "FAIL mid-activation failure with a non-inverse undo" in out
-    assert "residue in the host" in out
-    assert re.search(r"map#\d+ \(new\(\) with no drop\(\)\)", out)
-    assert "(R1)" in out
+def test_a_non_inverse_undo_is_refused_before_an_injected_fault():
+    """The injected-fault twin of the test above, refused the same way."""
+    with pytest.raises(RevlError) as excinfo:
+        compile_source(_LEAKY_UNDER_INJECTION, "fault.rvl")
+    assert excinfo.value.code == "G4"
+    assert excinfo.value.message == _NON_INVERSE_REFUSAL
 
 
 @needs_cordis

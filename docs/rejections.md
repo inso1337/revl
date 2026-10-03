@@ -151,7 +151,7 @@ the same code (`import cycle:`, v2_use_cycle.rvl).
 ## G4 — inverse or emit
 
 Every mutation carries an inverse, or admits irreversibility with `emit`.
-Five distinct shapes violate it, all in `examples/rejections/`.
+Six distinct shapes violate it, all in `examples/rejections/`.
 
 **A bare acquisition** — `effect` without `undo` where the callee is not
 pure (g4_missing_undo.rvl):
@@ -165,9 +165,33 @@ component Leaky {
 
 ```
 effect has no `undo` and `Pool.open` is not pure
-  write `effect Pool.open(...) undo <expr>`, or mark the call `emit`
-  if it deliberately crosses the system boundary (G4)
+  write `let <name> = effect Pool.open(...) undo <name>.close()`: a host
+  acquisition's inverse is its family's release on the handle it bound (G4)
 ```
+
+**A host acquisition whose `undo` is not its release** — for `Map.new`,
+`Pool.open` and `Stream.source` revl owns the stubs, so the inverse is
+provable: the family's release (`drop`, `close`, `close`) applied to the
+handle the bracket bound. Any other `undo` (another verb, a sibling handle, a
+helper `fn`, a literal) runs at teardown and leaves the resource open while
+the teardown reports a clean release, so it is refused, and so is an unbound
+host acquisition, which leaves nothing to release (issue #1859,
+g4_undo_not_release.rvl):
+
+```revl reject G4
+component Keeper {
+  let store = effect Map.new() undo store.get("x")
+}
+```
+
+```
+the `undo` of `let store = effect Map.new(...)` must release THAT handle:
+  write `undo store.drop()`
+```
+
+For an `extern acquire` or a user `effect` over a service, revl has no table
+to check the `undo` against, so a wrong inverse there is still the author's
+assertion, and nothing checks it yet (issue #1859 tracks the extern half).
 
 **An unmarked emission call** — the operation is declared `emission fn`,
 so the call site must say `emit` (g4_unmarked_emission.rvl):

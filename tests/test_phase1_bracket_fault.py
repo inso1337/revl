@@ -60,8 +60,20 @@ def _backend():
 
 # a bracket inverse that RAISES. `undo` is declared as an ordinary pure call,
 # so the extern is exactly how an author writes a fallible inverse by accident.
+#
+# The raising bracket acquires through an `extern acquire` (`open_b`), not a
+# host `Pool.open`: since issue #1859 a host acquisition's `undo` must be its
+# release on the bound handle (`b.close()`), so `Pool.open(...) undo blow(..)`
+# is refused before it can run. An extern acquire's site inverse is the shape
+# that can still raise at teardown, and the runtime property under test, that
+# one Phase-1 raise does not starve the inverses below it, is about the
+# disposal chain, not about which bracket faults.
 _BLOW = ('extern pure fn blow(x: Str) -> Int = '
-         '@py { raise RuntimeError("undo exploded") }\n')
+         '@py { raise RuntimeError("undo exploded") }\n'
+         'type BH = { id: Int }\n'
+         'extern pure fn close_b(h: BH) -> Unit = @py { return None }\n'
+         'extern acquire fn open_b(tag: Str) -> BH undo close_b(result) = '
+         '@py { return {"id": 1} }\n')
 
 # the audit's synchronous reproducer: three brackets, the MIDDLE one's inverse
 # raises. LIFO disposal is C, B, A — so a broken chain starves A, the OLDEST
@@ -69,7 +81,7 @@ _BLOW = ('extern pure fn blow(x: Str) -> Int = '
 _SYNC = _BLOW + """
 component C {
   let a = effect Pool.open("A", 1) undo a.close()
-  let b = effect Pool.open("B", 1) undo blow("x")
+  let b = effect open_b("B") undo blow("x")
   let c = effect Pool.open("C", 1) undo c.close()
 }
 """
@@ -91,7 +103,7 @@ _STREAM = _BLOW + """
 component C {
   let a = effect Pool.open("A", 1) undo a.close()
   let src = effect Stream.source() undo src.close()
-  let b = effect Pool.open("B", 1) undo blow("x")
+  let b = effect open_b("B") undo blow("x")
   let sub = subscribe src undo sub.close()
   await sub.next()
 }
@@ -191,8 +203,9 @@ async def test_a_raising_bracket_inverse_does_not_skip_the_remaining_inverses():
 
     # the host proves it: C closed (sound inverse), then B's inverse EXPLODED,
     # then A still closed. Before the fix the trace stopped at `pool.close C`.
+    # (B is an extern acquire, so the host trace carries only the two pools.)
     assert _ops(run.events) == [
-        "pool.open A", "pool.open B", "pool.open C", "pool.close C", "pool.close A"]
+        "pool.open A", "pool.open C", "pool.close C", "pool.close A"]
 
     # R4: the failure is recorded, not silent, and it NAMES the inverse.
     [record] = run.residue
