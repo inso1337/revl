@@ -1,0 +1,208 @@
+// Expected final state for task `commerce-drift-orders-summary`
+// (bench/blast_radius/tasks.json): Orders without `summary`; OrderService
+// drops it and InvoiceService calls `read` instead.
+
+// Blast-radius benchmark composition: a storefront of 23 components.
+//
+// The provider graph, read from the bottom up:
+//
+//   Journal (ledger)        <- Store, Payments, Audit
+//   Store (kv)              <- Cache, Users, Catalog, Inventory
+//   Cache (cache)           <- Auth, Catalog
+//   Users (users)           <- Auth, Recs, Admin
+//   Auth (auth)             <- Cart
+//   Catalog (catalog)       <- Pricing, Cart, Search
+//   Pricing (pricing)       <- Cart
+//   Inventory (stock)       <- Orders
+//   Cart (cart)             <- Orders, Storefront
+//   Payments (pay)          <- Orders, Invoices
+//   Orders (orders)         <- Shipping, Invoices, Reports
+//   Mailer (mail)           <- Notify
+//   Notify (notify)         <- Shipping
+//   Shipping (ship)         <- nobody
+//   Invoices (invoices)     <- Reports
+//   Search (search)         <- Recs, Storefront
+//   Recs (recs)             <- Storefront
+//   Reports (reports)       <- Admin, Scheduler
+//   Audit (audit)           <- Admin
+//   Metrics (metrics)       <- nobody
+//   AdminConsole provides nothing; Storefront (page) and NightlyScheduler
+//   (job) provide keys nothing consumes.
+//
+// Two boundaries are irreversible: `ledger_write` (a journal line) and
+// `send_mail` (a message that cannot be unsent).
+
+extern emission fn ledger_write(line: Str) -> Str
+  = @py { return line }
+  = @ts { return line; }
+
+extern emission fn send_mail(to: Str, body: Str) -> Str
+  = @py { return to }
+  = @ts { return to; }
+
+service Ledger { emission[ledger_write] fn append(line: Str) -> Str }
+service Kv { fn read(k: Str) -> Str }
+service Cache { fn read(k: Str) -> Str }
+service Users { fn read(k: Str) -> Str }
+service Auth { fn check(user: Str) -> Str }
+service Catalog { fn read(k: Str) -> Str }
+service Pricing { fn quote(sku: Str) -> Str }
+service Stock { fn level(sku: Str) -> Str }
+service Cart { fn total(user: Str) -> Str }
+service Payments {
+  fn status(order: Str) -> Str
+  emission[ledger] fn charge(order: Str) -> Str
+}
+service Orders {
+  fn read(order: Str) -> Str
+}
+service Mailer { emission[send_mail] fn send(to: Str, body: Str) -> Str }
+service Notify { emission[mail] fn tell(user: Str, body: Str) -> Str }
+service Shipping { fn track(order: Str) -> Str }
+service Invoices { fn render(order: Str) -> Str }
+service Search { fn find(q: Str) -> Str }
+service Recs { fn suggest(user: Str) -> Str }
+service Reports { fn daily(day: Str) -> Str }
+service Audit { emission[ledger] fn record(line: Str) -> Str }
+service Metrics { fn count(name: Str) -> Str }
+
+component Journal provides ledger: Ledger {
+  provide ledger {
+    fn append(line) = emit ledger_write(line)
+  }
+}
+
+component Store requires ledger: Ledger provides kv: Kv {
+  provide kv {
+    fn read(k) = k
+  }
+}
+
+component CacheTier requires kv: Kv provides cache: Cache {
+  provide cache {
+    fn read(k) = kv.read(k)
+  }
+}
+
+component UserDirectory requires kv: Kv provides users: Users {
+  provide users {
+    fn read(k) = kv.read(k)
+  }
+}
+
+component AuthService requires users: Users, cache: Cache provides auth: Auth {
+  provide auth {
+    fn check(user) = users.read(user)
+  }
+}
+
+component CatalogService requires kv: Kv, cache: Cache provides catalog: Catalog {
+  provide catalog {
+    fn read(k) = cache.read(k)
+  }
+}
+
+component PricingEngine requires catalog: Catalog provides pricing: Pricing {
+  provide pricing {
+    fn quote(sku) = catalog.read(sku)
+  }
+}
+
+component Inventory requires kv: Kv provides stock: Stock {
+  provide stock {
+    fn level(sku) = kv.read(sku)
+  }
+}
+
+component CartService requires auth: Auth, catalog: Catalog, pricing: Pricing provides cart: Cart {
+  provide cart {
+    fn total(user) = pricing.quote(auth.check(user))
+  }
+}
+
+component PaymentGateway requires ledger: Ledger provides pay: Payments {
+  provide pay {
+    fn status(order) = order
+    fn charge(order) = emit ledger.append(order)
+  }
+}
+
+component OrderService requires cart: Cart, stock: Stock, pay: Payments provides orders: Orders {
+  provide orders {
+    fn read(order) = pay.status(order)
+  }
+}
+
+component MailRelay provides mail: Mailer {
+  provide mail {
+    fn send(to, body) = emit send_mail(to, body)
+  }
+}
+
+component Notifier requires mail: Mailer provides notify: Notify {
+  provide notify {
+    fn tell(user, body) = emit mail.send(user, body)
+  }
+}
+
+component ShippingDesk requires orders: Orders, notify: Notify provides ship: Shipping {
+  provide ship {
+    fn track(order) = orders.read(order)
+  }
+}
+
+component InvoiceService requires orders: Orders, pay: Payments provides invoices: Invoices {
+  provide invoices {
+    fn render(order) = orders.read(order)
+  }
+}
+
+component SearchIndex requires catalog: Catalog provides search: Search {
+  provide search {
+    fn find(q) = catalog.read(q)
+  }
+}
+
+component Recommender requires search: Search, users: Users provides recs: Recs {
+  provide recs {
+    fn suggest(user) = search.find(users.read(user))
+  }
+}
+
+component ReportBuilder requires orders: Orders, invoices: Invoices provides reports: Reports {
+  provide reports {
+    fn daily(day) = invoices.render(day)
+  }
+}
+
+component AuditTrail requires ledger: Ledger provides audit: Audit {
+  provide audit {
+    fn record(line) = emit ledger.append(line)
+  }
+}
+
+component MetricsSink provides metrics: Metrics {
+  provide metrics {
+    fn count(name) = name
+  }
+}
+
+component AdminConsole requires reports: Reports, audit: Audit, users: Users {
+  emit audit.record("admin console up")
+}
+
+service Page { fn render(user: Str) -> Str }
+
+component Storefront requires cart: Cart, recs: Recs, search: Search provides page: Page {
+  provide page {
+    fn render(user) = recs.suggest(cart.total(user))
+  }
+}
+
+service Job { fn run(day: Str) -> Str }
+
+component NightlyScheduler requires reports: Reports provides job: Job {
+  provide job {
+    fn run(day) = reports.daily(day)
+  }
+}

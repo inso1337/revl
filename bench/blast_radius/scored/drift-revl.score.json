@@ -1,0 +1,16 @@
+{
+  "task": "commerce-drift-orders-summary",
+  "arm": "revl",
+  "correct": true,
+  "problems": [],
+  "touched": ["InvoiceService", "OrderService", "ShippingDesk"],
+  "touchedBeyondCascade": ["ShippingDesk"],
+  "missedCascade": [],
+  "turns": 7,
+  "tokensWritten": 1840,
+  "gate": {
+    "promptsPerSession": 1,
+    "percentAutoApprovedWithProof": 75.0,
+    "notInRevlState": ["reversibilityRate", "preflightCoverage", "violationsCaughtBeforeExecution", "residueAfterAbort"]
+  }
+}
