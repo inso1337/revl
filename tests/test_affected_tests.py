@@ -1461,12 +1461,16 @@ def test_a_backend_import_counts_where_the_backend_is_loaded(tmp_path):
     """A `backends/` file runs only when something loads it, so its `revl.*`
     imports are edges from every module that loads code (by path, by name, or
     by `exec`), not roots. A mention of `exec(` in a comment loads nothing."""
+def test_a_module_a_backend_imports_is_reachable(tmp_path):
+    """The compile path loads backend files by path, so their `revl.*` imports
+    are roots even though no `src/revl` module names them."""
     root = _tree(tmp_path, {
         "src/revl/__init__.py": "from . import loader, prose\n",
         "src/revl/loader.py": "import importlib.util\n"
                               "def load(p):\n"
                               "    return importlib.util.spec_from_file_location('x', p)\n",
         "src/revl/prose.py": "# a shell sink: emit sh.exec(emit fs.read(p))\n",
+        "src/revl/__init__.py": "",
         "src/revl/viahost.py": "",
         "src/revl/alone.py": "",
         "backends/py/emit.py": "from revl.viahost import thing\n",
@@ -1530,6 +1534,17 @@ def test_a_leaf_module_change_does_not_word_match_the_importer_closure():
             f"reach metrics is selected: the importer closure is being "
             f"word-matched again"
         )
+def test_an_mcp_module_on_the_compile_path_still_selects_full():
+    """The other direction, on a real chain: `revl.gate` (on the import chain
+    of `revl/__init__`) lazily imports `revl.mcp.session`, which imports
+    `revl.mcp.operator`, which imports `revl.mcp.server`. Each of those can run
+    while compiling, so a change to any of them is FULL."""
+    reach = at.compile_reachable(ROOT)
+    assert {"gate", "mcp.session", "mcp.operator", "mcp.server"} <= reach
+    for module in ("session", "operator", "server"):
+        r = sel(f"src/revl/mcp/{module}.py")
+        assert r["full"] is True, module
+        assert "compile-reachable" in r["reason"]
 
 
 def test_a_test_that_reaches_a_leaf_module_through_its_cli_command_is_selected(
@@ -2053,3 +2068,9 @@ def test_the_corpus_inputs_are_empty_without_a_workflow_and_keep_a_deleted_test(
         "      - run: pytest tests/test_gone.py\n", encoding="utf-8")
     assert at.ci_backend_corpus_inputs(tmp_path) == frozenset(
         {"tests/test_gone.py"})
+def test_a_module_reached_only_through_a_subpackage_is_full():
+    """The unsound direction the old graph had: `revl.run` is reached only
+    through a `revl.mcp` module's relative import, which the old resolution
+    dropped, so a change to it got a narrow selection."""
+    assert "run" in at.compile_reachable(ROOT)
+    assert sel("src/revl/run.py")["full"] is True
