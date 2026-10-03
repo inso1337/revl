@@ -266,6 +266,22 @@
         ]
       },
       "note": "merged into agent/1195-ui-taint-classes, already squashed to main. CARRIED, and the credit to PR #1325 is verified rather than repeated: all five files this merge ADDED (src/revl/ui_action.py, docs/design/565-ui-target-binding.md, tests/test_ui_action_receipt_521.py, tests/test_ui_ladder_rungs_521.py and tests/test_ui_target_binding_521.py) were brought to main by commit e1bb8131, which is PR #1325, and at that commit all five are BYTE-IDENTICAL to this merge's copies. So are two of the files it MODIFIED, src/revl/ui_family.py (428 lines changed here) and tests/test_ui_taint_classes_521.py. The earlier note said STRANDED and listed the inventory wrongly: test_ui_taint_classes_521.py was modified by this merge, not added, and the fifth added file went unnamed, so a reader checking the three names it gave would have been checking the wrong set. src/revl/lower.py was carried already modified and is pinned by the whole of test_ui_target_binding_521.py, which is unchanged from this merge and pins its lowering additions. The gate crate's generated files, its builder and its admission test differ as well and are not claimed."
+    },
+    "1607": {
+      "merge": "43ffd3fe03884e617498c599048e3d38591f2cfc",
+      "verdict": "CARRIED",
+      "carried_at": "1fb2c721f290001703e7a637a8149e672e120c64",
+      "added": [],
+      "identical": [
+        "tests/test_mcp_http_transport.py"
+      ],
+      "drifted": {
+        "src/revl/mcp/http_guard.py": [
+          "tests/test_mcp_http_transport.py::test_a_refusal_survives_an_unread_request_body",
+          "tests/test_mcp_http_transport.py::test_an_mtls_refusal_survives_an_unread_request_body"
+        ]
+      },
+      "note": "merged into feat/1463-mcp-http (PR #1529's branch, still open) as a fast-forward, so its merge commit 43ffd3fe was never on main. CARRIED by PR #1557 (squash commit 1fb2c721, 2026-10-02 23:58), which brought that branch's work to main. The merge added no files and MODIFIED two: tests/test_mcp_http_transport.py is BYTE-IDENTICAL to this merge's copy at 1fb2c721, and src/revl/mcp/http_guard.py was carried already modified (the same squash adds DispatchLock to it), so it is pinned by the two drain tests this merge added, which still pass."
     }
   }
 }

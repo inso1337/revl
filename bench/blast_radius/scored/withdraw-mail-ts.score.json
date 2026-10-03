@@ -1,0 +1,35 @@
+{
+  "task": "commerce-withdraw-mail",
+  "arm": "typescript",
+  "correct": false,
+  "problems": [
+    "ShippingDesk injects `notify`, which nothing provides",
+    "kept components that cannot link: ['ShippingDesk']"
+  ],
+  "touched": [
+    "MailRelay",
+    "Notifier"
+  ],
+  "touchedBeyondCascade": [],
+  "missedCascade": [
+    "ShippingDesk"
+  ],
+  "turns": 4,
+  "tokensWritten": 610,
+  "gate": {
+    "reversibilityRate": null,
+    "autoApprovedWithProof": null,
+    "promptsPerSession": null,
+    "preflightCoverage": null,
+    "violationsCaughtBeforeExecution": null,
+    "residueAfterAbort": null,
+    "notInRevlState": [
+      "reversibilityRate",
+      "autoApprovedWithProof",
+      "promptsPerSession",
+      "preflightCoverage",
+      "violationsCaughtBeforeExecution",
+      "residueAfterAbort"
+    ]
+  }
+}
