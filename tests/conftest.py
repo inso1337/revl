@@ -26,6 +26,7 @@ selector picked it too. Appended rather than inserted, so the resolution order
 of everything that already resolved is unchanged.
 """
 
+import functools
 import importlib.util
 import os
 import sys
@@ -155,6 +156,7 @@ def pytest_unconfigure(config):
 # computes the same assignment from the same collection, so together they run
 # each collected test exactly once (tests/test_root_suite_shards_1774.py).
 
+@functools.cache
 def _shard_module():
     spec = importlib.util.spec_from_file_location(
         "revl_tests_shard", Path(__file__).with_name("_shard.py"))
@@ -167,6 +169,11 @@ def _shard_module():
 # (several do, against fixture trees) must run its whole collection, not a
 # shard of it.
 _SHARD_SPEC = os.environ.pop("REVL_TEST_SHARD", "")
+# The weights file, for a test that exercises splitting against weights of its
+# own; tests/shard_weights.json when unset. Removed for the same reason.
+_SHARD_WEIGHTS = os.environ.pop("REVL_SHARD_WEIGHTS", "") or None
+# The files this run split into test families, timed per family below.
+_SHARD_SPLIT: set = set()
 
 
 def pytest_collection_modifyitems(config, items):
@@ -175,19 +182,23 @@ def pytest_collection_modifyitems(config, items):
         return
     shard = _shard_module()
     k, n = shard.parse(spec)
-    owner = shard.assign({item.nodeid.split("::", 1)[0] for item in items},
-                         shard.load_weights(), n)
-    keep = [item for item in items if owner[item.nodeid.split("::", 1)[0]] == k - 1]
-    drop = [item for item in items if owner[item.nodeid.split("::", 1)[0]] != k - 1]
+    nodeids = [item.nodeid for item in items]
+    weights = shard.load_weights(_SHARD_WEIGHTS)
+    owner = shard.plan(nodeids, weights, shard.load_families(_SHARD_WEIGHTS), n)
+    _SHARD_SPLIT.update(shard.split_files({shard.file_of(t) for t in nodeids}, weights, n))
+    keep = [item for item in items if owner[item.nodeid] == k - 1]
+    drop = [item for item in items if owner[item.nodeid] != k - 1]
     items[:] = keep
     if drop:
         config.hook.pytest_deselected(items=drop)
-    files = {item.nodeid.split("::", 1)[0] for item in keep}
+    files = {shard.file_of(item.nodeid) for item in keep}
+    split = f", split by family: {' '.join(sorted(_SHARD_SPLIT))}" if _SHARD_SPLIT else ""
     print(f"\nREVL_TEST_SHARD {k}/{n}: {len(files)} file(s), {len(keep)} test(s) "
-          f"of {len(keep) + len(drop)} collected")
+          f"of {len(keep) + len(drop)} collected{split}")
 
 
-# A sharded run times each file it runs and prints the totals at the end, so
+# A sharded run times each file it runs (and each family of a file it split)
+# and prints the totals at the end, so
 # tests/shard_weights.json can be refreshed from CI's own durations
 # (tools/refresh_shard_weights.py). An unsharded run prints nothing extra.
 _SHARD_SECONDS: dict = {}
@@ -197,6 +208,9 @@ def pytest_runtest_logreport(report):
     if _SHARD_SPEC:
         name = report.nodeid.split("::", 1)[0]
         _SHARD_SECONDS[name] = _SHARD_SECONDS.get(name, 0.0) + report.duration
+        if name in _SHARD_SPLIT:
+            fam = _shard_module().family(report.nodeid)
+            _SHARD_SECONDS[fam] = _SHARD_SECONDS.get(fam, 0.0) + report.duration
 
 
 def pytest_terminal_summary(terminalreporter):
