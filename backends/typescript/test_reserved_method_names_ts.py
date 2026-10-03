@@ -115,3 +115,43 @@ def test_a_lifecycle_test_calls_it_on_the_ts_tier(tmp_path):
     out = proc.stdout + proc.stderr
     assert proc.returncode == 0, out
     assert "1 passed" in out or "1 test(s) passed" in out, out
+
+
+#: Names #1552's keyword table does not list but a JS object answers to: the
+#: Object.prototype and Function.prototype members, the thenable `then` (a
+#: provider object with a `then` member is awaited as a promise) and the two
+#: sloppy-mode globals. Re-measured after #1552 with `revl test --backend ts`:
+#: each one crosses, called directly and through a required service.
+PROTOTYPE_NAMES = ["then", "toString", "valueOf", "hasOwnProperty", "isPrototypeOf",
+                   "propertyIsEnumerable", "toLocaleString", "prototype", "length",
+                   "name", "call", "apply", "bind", "arguments", "eval"]
+
+
+@pytest.mark.skipif(
+    shutil.which("node") is None
+    or not (BACKEND / "node_modules" / ".bin" / "vitest").exists(),
+    reason="the ts tier's vitest is not installed (cd backends/typescript && npm ci)")
+def test_a_prototype_name_crosses_on_the_ts_tier(tmp_path):
+    names = PROTOTYPE_NAMES
+    svc = "\n".join(f"  fn {n}(k: Int) -> Int" for n in names)
+    impl = "\n".join(f"    fn {n}(k) = k + {i + 1}" for i, n in enumerate(names))
+    ops = "\n".join(f"  fn go{i}(k: Int) -> Int" for i in range(len(names)))
+    calls = "\n".join(f"    fn go{i}(k) = s.{n}(k)" for i, n in enumerate(names))
+    steps = "".join(f"  let d{i} = call s.{n}(10)\n  assert d{i} == {11 + i}\n"
+                    f"  let t{i} = call ops.go{i}(10)\n  assert t{i} == {11 + i}\n"
+                    for i, n in enumerate(names))
+    source = tmp_path / "proto_lifecycle.rvl"
+    source.write_text(
+        f"service S {{\n{svc}\n}}\n"
+        f"component P provides s: S {{\n  provide s {{\n{impl}\n  }}\n}}\n"
+        f"service Ops {{\n{ops}\n}}\n"
+        f"component C requires s: S provides ops: Ops {{\n  provide ops {{\n{calls}\n  }}\n}}\n"
+        'lifecycle test "every prototype name crosses" {\n  load P\n  load C\n'
+        f"{steps}  unload C\n  unload P\n  assert no_residue\n}}\n", encoding="utf-8")
+    proc = subprocess.run(
+        [sys.executable, "-m", "revl", "test", "--backend", "ts", str(source)],
+        capture_output=True, text=True, timeout=600,
+        env={**os.environ, "PYTHONPATH": str(ROOT / "src")})
+    out = proc.stdout + proc.stderr
+    assert proc.returncode == 0, out
+    assert "1 passed" in out or "1 test(s) passed" in out, out
