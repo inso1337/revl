@@ -6,7 +6,7 @@ returns. This is the complete set, verified against `src/revl/mcp/server.py`
 query verbs appended to it).
 
 <!-- docgen:mcp-verb-count begin -->
-The advertised list is exactly the 55 verbs below, one section each.
+The advertised list is exactly the 56 verbs below, one section each.
 <!-- docgen:mcp-verb-count end -->
 
 Start the server with `revl mcp serve` (see [commands-reference.md](commands-reference.md#revl-mcp)
@@ -105,6 +105,7 @@ the current interpreter (issue #1692).
 | `revl_replay_bisect` | yes | no | `assert` |
 | `revl_replay_forward` | no | yes | `from` |
 | `revl_grammar` | yes | no | - |
+| `revl_idiom` | yes | no | - |
 | `revl_scaffold` | yes | no | `service` |
 | `revl_fmt` | yes | no | `source` |
 | `revl_explain` | yes | no | `code` |
@@ -238,6 +239,19 @@ context while generating. With no inputs it returns that prose summary
   filling a hole can constrain its decoder to that slot (each hole's
   `fillSpec.grammarCategory` names it). `category` without
   `format`, or a value outside these lists, is refused.
+
+### `revl_idiom`
+
+The minimal admitted example of one construct, with the one or two rules that
+make it correct (issue #1701). Every hole's `fillSpec` already carries the
+idiom of its construct (`construct`, `idiom`; [holes.md](holes.md) §8), so
+this tool is for asking about a construct before there is a hole in it.
+
+- Inputs (optional): `name`, an idiom such as `emission-method`, `effect-undo`
+  or `spawn`, returns `{ok, idiom: {name, summary, rules, fill, example}}`.
+  With no `name` it returns `{ok, idioms: [{name, summary}]}`. An unknown name
+  is refused, listing the idioms. The same table is printed by
+  [`revl idiom`](commands-reference.md#revl-idiom).
 
 ---
 
