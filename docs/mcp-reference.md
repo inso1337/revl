@@ -61,6 +61,27 @@ with the same remedy in words, so the two never disagree. Remedies today:
 | `revl_edit` on a composition loaded from one file | `revl_swap` with your patch applied to that file's text as inline `source`. `ready` only if that swap would admit. After it, `revl_edit` patches the inline source directly. The file on disk is not changed |
 | `revl_swap` with no source, on a composition loaded from files | `revl_swap` with those `files` |
 
+**Every response says what the session holds.** Each `tools/call` result, on
+success and refusal alike, ends with the same footer (issue #1693):
+
+```json
+"sessionState": {"loaded": true, "generation": 2, "components": ["MemCache"],
+                 "dirty": false, "draft": false}
+```
+
+| Field | Meaning |
+| ----- | ------- |
+| `loaded` | a composition is running |
+| `generation` | the running generation: 1 after `revl_load`, plus one per swap, edit that swaps, rollback or undo; `null` when nothing is loaded |
+| `components` | the running components' names, in load order |
+| `dirty` | the server-side working source (what `revl_edit` patches) differs from the source the running generation was admitted from |
+| `draft` | an edit with open holes is pending; the working source cannot swap until they are filled |
+
+The footer is computed after the verb ran, so it describes the state the call
+left behind. It is named `sessionState` because several verbs already return a
+top-level `state` (fiber states). A refusal that changed nothing returns the
+same footer as the call before it.
+
 ## The verb set at a glance
 
 <!-- docgen:mcp-verbs begin -->
