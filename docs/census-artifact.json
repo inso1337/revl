@@ -5343,7 +5343,7 @@
    "tools/gate_reference_census.py": "f0c3cacef6999ae22e992375e9e1f3a8a66f455791cdd9b497e717c2cdf3d1b5"
   },
   "checker_version": "GATE-CENSUS-1+6feced95a60e",
-  "compiler_tree_digest": "src/revl@sha256:eb399b5f334c",
+  "compiler_tree_digest": "src/revl@sha256:32a68a2d435e",
   "compiler_tree_digest_note": "EVAL-REPORT-1 names this field `compiler_commit`. It is not a commit. It is a sha256 over the src/revl/**/*.py modules the census run opened, listed in `pins.reference`, which is narrower than a commit (a commit that touched no module the run reads does not move it) and recomputable by anyone with a checkout.",
   "corpus_dirs": [
    "examples",
@@ -5411,25 +5411,23 @@
     "src/revl/_paths.py": "448b38c6a523ffe232175719964fe1a6c70508afe0da66bf537964c876ec0236",
     "src/revl/admission.py": "4430f34615b4b3cb22d13fa5eb2f613adf1c2cea72d858ec67e294b70d9530b4",
     "src/revl/admit_profile.py": "7842f51607e0aa6ec1812e01f08d55ecfbced508e378c9487a4087105d044b08",
-    "src/revl/attest.py": "305085235db218edab30c23bcbc3ceb799fc62c4fa8f3068815e1a22baa33776",
+    "src/revl/attest.py": "6a9518728504d05ce16c9d7660b8e256bd82381a72b65f8e9ae4108f5b1ae2f1",
     "src/revl/boundary.py": "21ec0b322e0693ca5471e4ee2a04968ef407acab895dd94e5c2881e98496e0d6",
     "src/revl/cap_order.py": "de1032d05b402839a79287cbe62e2b0d2e91dd24002d04dd7264a41e74ed651f",
     "src/revl/cardinality.py": "b3ece8c5c213a047244f45563df9764cf894b203a9eddd1cb6193615df5d2ea0",
     "src/revl/compiler.py": "9f9c210b6b7dc0a78fe9e1017b4a9017d6a94cd6c048a7c514b51225c895fc45",
-    "src/revl/decode_grammar.py": "f0f44dc8da22fc9674573bf3a584366bac0ae87ff0472f2cdc975aea294d266a",
+    "src/revl/decode_grammar.py": "f04508e6df0f0b3b2c48052522db8f6880dd51fc224f1a1cc8dd5d71ab5c2c8f",
     "src/revl/diagnostics.py": "7bcfa4eacf1a8a056d2cd7b73ffc9ed5746199e926f18371bb0aad86f701dfbc",
     "src/revl/emission_analysis.py": "f296a58b2c0ada38015372ac322d57a3ba5f12d36e9c0f39d99f9d65ef73f71c",
     "src/revl/errors.py": "9de8113a3aae7b74da53d67ad5267edb1cdddd74b5d66383a201fcd15afd587c",
     "src/revl/fmt.py": "4b6e2fa356d32307b5c5bfc1bf4e33d4f77c7b710d33acfe80ff5416c68b75d1",
     "src/revl/holes.py": "0d3ab0f41e75f6bd6c163159c2e75f04820603c19c78c78800ca1e6d8cad0014",
     "src/revl/hostfile.py": "58a0f9dc8186cbd2c601c10bcb29b4cba35ac89991c608ab6991c08590fdf705",
-    "src/revl/hostref.py": "45f90347be17bfa157ee0901534d58c54ca8e5dc8d971f1239904f3e6082e702",
+    "src/revl/hostref.py": "9c61302ef0f2dba6d6e23e96e329bda048a75a965b29b3bde545484c45f2b62c",
     "src/revl/kernel_boundary.py": "fbce94cb69042b099a0aaead6d2327d4e4cf78b1c667fc61bf2ec424b025c56a",
     "src/revl/lexer.py": "2c74dc6f972a40ac97efcada0b6cb57ad01646dfd454a011696a76dea3422c37",
-    "src/revl/lower.py": "433bc164ffba261db7e36ae24103bb3f7832a153ee5d0ed353bdc2ff41f12731",
+    "src/revl/lower.py": "b35ba9609867e87c3d2d2656b304f30608470280b6288e60594bd85ccfb3a5b3",
     "src/revl/manifest.py": "bb02c10d66a224db2be5594c9352cd5eef3c039346c2325ecd36544ad3df9bbb",
-    "src/revl/mcp/__init__.py": "0fd5b46dae686502c19b461717deb260f4816b082c605eebad7c0331d02e825a",
-    "src/revl/mcp/schema.py": "c837e6e1a0aa15fdf594c8d78d4848bc6d03d60d1d773baafe3f8d96dd3a2632",
     "src/revl/model_answer.py": "b6f9b78c76c132de4e5a6aeb13fd90e66efa2047d65aa33cadc6441327252083",
     "src/revl/model_council.py": "e1624ed5b84d43b12a362f524a4e6d11f7e44394573cdbd374b2f3f589fa0e52",
     "src/revl/model_profile.py": "5e63b72a4ea582f95e1401692dca8c0ada94cfe3bc87c5feefa6e052757c32f4",
@@ -5438,10 +5436,11 @@
     "src/revl/ownership.py": "2433a7fe729a6347d66dbdc0dbab1577fe2f421a753a33995c356a7be86150cf",
     "src/revl/parallel.py": "814a50af84e46926e962e3607cd3308b8271064310ff31429877930b4250fba0",
     "src/revl/parser.py": "7c881b51e28d8f484294590afdeae660f4e10bca20edaf289963c16cf092bcf8",
-    "src/revl/policy.py": "028284481cc35a686d3354dbc2722a2e40b655a57d6e7f6d75bdfa5ef4024312",
+    "src/revl/policy.py": "7819b0346c063397576431bc421a4c59f88cdf5872996995d50cc148cb165674",
     "src/revl/resources.py": "6b4deac97a9a6b21301109678bdb12892eb84aa694a9c8bf76644133f5fb1a7f",
     "src/revl/retention.py": "45874047bad9f66ac8241baff8db816ed2e48d31bb8232068b53d24896451ec1",
     "src/revl/taint.py": "0b9c3cc7a63eeb9ab3453849ff7d003a8e75aabe1d6161632a0f144309a68daa",
+    "src/revl/type_schema.py": "dacf929de2faf753a6d47b8edd94a690b979ee7b9b78f47a90a54eae3e8eb00c",
     "src/revl/typecheck.py": "6b1e52f11c06f8ea0b97879d598abbc987d1dd4702374e5457e7608b408a2e4c",
     "src/revl/ui_family.py": "c7a05905427c2ca014c9866c4f4e9640d87dc6ef1f885a797a57319773fa8677",
     "src/revl/why.py": "a3bda0e5b90104db01f46803c2e365b4b235ae70ab819289c0a0f2236d9502b1"
@@ -5598,7 +5597,7 @@
  "claims": [
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:32a68a2d435e",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
     "run": "census-selfhost-dc16b0ebbcbc"
@@ -5609,7 +5608,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:32a68a2d435e",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
     "run": "census-selfhost-dc16b0ebbcbc"
@@ -5620,7 +5619,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:32a68a2d435e",
     "protocol": "EVAL-1",
     "run": "census-selfhost-dc16b0ebbcbc"
    },
@@ -5630,7 +5629,7 @@
   },
   {
    "evidence": {
-    "compiler_commit": "src/revl@sha256:eb399b5f334c",
+    "compiler_commit": "src/revl@sha256:32a68a2d435e",
     "protocol": "EVAL-1",
     "run": "census-selfhost-dc16b0ebbcbc"
    },
