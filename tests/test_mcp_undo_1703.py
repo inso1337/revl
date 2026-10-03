@@ -101,6 +101,7 @@ def test_every_mutating_verb_is_classified():
     assert all(reason.strip() for reason in undo_record.IRREVERSIBLE.values())
 
 
+@needs_runtime
 def test_step_back_with_nothing_to_revert_is_refused_with_depth_zero():
     out = _call("revl_step_back", {})
     assert out["ok"] is False and out["refused"] is True
@@ -108,10 +109,25 @@ def test_step_back_with_nothing_to_revert_is_refused_with_depth_zero():
     assert "nothing to step back" in out["diagnostics"][0]["message"]
 
 
+@needs_runtime
 def test_step_back_with_arguments_but_no_to_still_requires_it():
     out = _call("revl_step_back", {"component": "MemCache"})
     assert out["ok"] is False
     assert "`to` is required" in out["diagnostics"][0]["message"]
+
+
+def test_without_the_runtime_step_back_is_the_runtime_gates_refusal(monkeypatch):
+    """`revl_step_back` is a runtime verb (issue #1692's measured list): on a
+    server that cannot import cordis nothing can have been loaded, so the
+    runtime gate's refusal, which names the fix, answers before the argument
+    checks and the undo stack are consulted."""
+    from revl.mcp import server as server_mod
+
+    monkeypatch.setattr(server_mod, "_RUNTIME_AVAILABLE", False)
+    out = _call("revl_step_back", {})
+    assert out["ok"] is False and out["refused"] is True
+    assert out["unavailable"] == "cordis-py runtime"
+    assert "undoDepth" not in out
 
 
 # ------------------------------------------- each verb's undo is exact
