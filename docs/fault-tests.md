@@ -451,16 +451,37 @@ step N (`fault._inject`, section 2). What differs is how residue is *observed*:
   code that reads the runner's own memory, and on the in-process py tier a
   body that calls `os._exit(0)` still ends the checker with status 0.
 
+**Compensations are checked too, not only residue** (issue #1511). A
+compensation offsets an emission on the far side of a boundary, so the runtime
+is exactly as clean whether it ran or not: the residue proof cannot see it. At
+every fault point the sweep therefore also compares:
+
+* **owed**, read off the IR: the faulted component's steps up to the fault,
+  each `emit` with a site-spelled `compensate` and each `emit` of an extern
+  that declares one (`extern emission fn put(..) compensate undo()`); and
+* **ran**, observed on the tier: the sweep prepends one line to the host body
+  of every compensation extern, on every tier, printing
+  `[revl-sweep] compensation ran: <name>`. The host body itself proves it ran.
+
+A point is clean only when the tier ran exactly the owed compensations, newest
+first. Anything else (a missing one, an extra one, the wrong order) makes the
+tier **DIVERGED**, which fails the run. A tier that ran none of what was owed
+is never counted as agreeing, even when every other tier ran none as well. A
+compensation whose callee is not an extern with an inline body for the tier (a
+service call, a `fn`, a host builtin, a `@<tier> ref`) cannot be observed this
+way; it is printed as "not observed" under the tier, never counted as run.
+
 Faulting a *provider* would strand its dependents on the `--once` runner (they
 wait on a provision that never arrives). So the compiled-tier sweep prunes the
 target's transitive dependents before the boot — the same hold-out the py
 reference applies (section 9.2), so the two sweep the same fault points.
 
-**What the program prints.** The py leg runs in process with nothing captured,
-so an extern body's prints reach the terminal as they happen. Each compiled-tier
-`--once` run is captured, because the verdict is read from it. The program's own
-lines in that capture (everything after `== load composition` that is not a
-`[run]` line or the runner's closing `error: the <tier> composition …`) are kept
+**What the program prints.** Every leg's output is captured: each compiled-tier
+`--once` run because the verdict is read from it, and each py step because the
+compensation check reads its markers from it (issue #1511). The program's own
+lines (on a compiled tier, everything after `== load composition` that is not
+a `[run]` line or the runner's closing `error: the <tier> composition …`; on
+any tier, never the sweep's `[revl-sweep] compensation ran:` markers) are kept
 on the fault point as `hostOutput` and replayed under the tier's line, labelled
 `[<tier>] host output at <point>:`. They never feed the verdict (issue #1614).
 
@@ -481,9 +502,21 @@ every tier.
 ```
 
 **AGREEMENT** is checked over the tiers that *executed*: every fault point is
-residue-free on every executing tier. A point residue-free on one runtime and
-residue-bearing on another is a **disagreement** — a portability failure,
-reported as such (exit 1).
+residue-free on every executing tier, and every one ran exactly the
+compensations owed. A point residue-free on one runtime and residue-bearing on
+another, or clean on one and diverged on another, is a **disagreement**: a
+portability failure, reported as such (exit 1). A run with any disagreement,
+leak or divergence never prints the AGREEMENT line.
+
+```
+  py    EXECUTED — 3 fault point(s), all residue-free
+  go    DIVERGED - ran compensations other than those declared at 2 of 3 fault
+        point(s); first at step 1 (emit): owed newest first [undo_act], ran []
+
+DISAGREEMENT — the tiers do not agree at these fault points:
+  Agent step 1 (emit): py=clean, go=diverged
+DIVERGENCE: go did not run the compensations the program declared; not agreement.
+```
 
 A tier is **loud-skipped**, never a false green, when either:
 
@@ -492,7 +525,10 @@ A tier is **loud-skipped**, never a false green, when either:
 * its `--once` runner cannot yet drive a *faulting* activation to a residue
   proof — a named **capability gap** (e.g. the rust runner unwraps a faulting
   `Ready` and panics; the java emitter rejects a mid-body `fail` as an
-  unreachable statement). A gap is reported with how many points proved clean
+  unreachable statement). The ts runner had one until issue #1511: a faulting
+  activation rejected the fiber's promise and the process exited FATAL; it now
+  records the load error and goes on to the teardown and the residue proof, as
+  the go, java and rust runners do. A gap is reported with how many points proved clean
   before it, and is never rounded up to a pass — nor mistaken for a leak
   (`RESIDUE-LEFT` is the only leak signal).
 

@@ -49,11 +49,11 @@
   ],
   "_budget": {
     "reference": {
-      "go": 2824,
+      "go": 2882,
       "java": 986,
-      "py": 667,
+      "py": 669,
       "rust": 1200,
-      "ts": 265,
+      "ts": 285,
       "wasm": 1558
     },
     "selfhost": {
@@ -86,7 +86,7 @@
           "_stream_stage_arrow": 16
         },
         "Component effect/undo frame and witnessed-WAL emission: activation/provide methods register inverses, pin captures and encode residue/teardown descriptors. None is a pure-function step in the accepted selfhost corpus; witnessed runtime support, including secret-witness redaction, remains outside this port.": {
-          "_body_needs_frame": 12,
+          "_body_needs_frame": 14,
           "_call_descriptor": 15,
           "_emit_effect_step": 11,
           "_emit_method_witnessed_step": 45,
@@ -140,7 +140,7 @@
           "_go_lifecycle_assert": 28
         },
         "Live-component binding environment: _emit_component/_emit_provide_impl construct _Env to resolve Apply receiver fields, requires, config and context; pure _emit_v3_go uses _V3GoCtx instead. The module-only port deliberately has no stc-go activation/provide ABI.": {
-          "_Env.__init__": 7,
+          "_Env.__init__": 9,
           "_Env._prefix": 1,
           "_Env.config_ref": 2,
           "_Env.ctx_ref": 1,
@@ -190,7 +190,7 @@
           "_emit_go_proxy_decode": 49,
           "_emit_go_proxy_method": 15,
           "_emit_v3_bridge_helpers": 52,
-          "_emit_v3_combined": 258,
+          "_emit_v3_combined": 262,
           "_emit_v3_placement": 1,
           "_go_bridge_arg_expr": 4,
           "_go_opt_inner": 4,
@@ -214,7 +214,7 @@
           "_go_v3_infer_type": 9
         },
         "Remaining entry paths accept the package_name compatibility option, reject unsupported IR versions/lifecycle placement, or assemble live component/host/realm/runtime output after the pure-module early return -- including item 421 F6(e)'s `reflect` import for a live component holding a declared `Secret[T]` with no lifecycle in play. The oracle calls _emit(ir) on module-only v3 documents, and a module-only document takes the pure typed-core path before any of this code; a component document cannot stand in as a corpus case either, because emit_go.rvl excludes the live component surface. The F6(e) guard is pinned by backends/go/test_secret_registry_go.py::test_a_live_component_reaches_the_reflect_import_without_a_lifecycle instead. Issue #1347 adds three statements: `Int.to_int32` in a component METHOD body flags the checked narrow `revlToI32`, so this path resets `_COMP_NEEDS_OVERFLOW32` and writes the helper that the pure typed-core path emits off `ctx.needs_overflow32`. It sits in the same live-component assembly after the pure-module early return, which the module oracle never enters. Issue #1669 adds two statements: an ir_version 3 document that carries a `lifecycle test`, components and a module `fn` takes the combined renderer, because the live stc-go path never renders module fns. A component document cannot be a go corpus case (selfhost/emit_go.rvl names its components instead); backends/go/test_module_fn_lifecycle_1669.py runs it under `go test` against the pinned stc-go.": {
-          "_emit": 117
+          "_emit": 121
         },
         "Remaining fallbacks reject a signature without a parenthesized argument list or without its closing parenthesis; canonical frontend function types are well formed.": {
           "_v3_split_fn_type": 1
@@ -287,10 +287,10 @@
           "_acquire_value_go_type": 17,
           "_collect_host_calls": 10,
           "_emit_component": 88,
-          "_emit_component_step": 173,
+          "_emit_component_step": 180,
           "_emit_host_stubs": 30,
-          "_emit_method_body": 88,
-          "_emit_provide_impl": 37,
+          "_emit_method_body": 89,
+          "_emit_provide_impl": 39,
           "_emit_services": 16,
           "_host_runtime": 14,
           "_host_type_of_acquire": 9,
@@ -300,6 +300,14 @@
         },
         "Issue #1631: the arity guard in `_v3_fill_erased` (selfhost `fill_erased`). Two surfaces of the same built-in family always carry the same number of type arguments (one for `Opt`, two for `Result`), so the guard that returns the surface unchanged on a mismatch never fires. The fill itself, its no-hint and other-family paths, and `_v3_fn_value_ret` are reached by backends/go/testdata/result_erased_1631.rvl in the go corpus.": {
           "_v3_fill_erased": 1
+        },
+        "Extern-declared compensate (item 254, issue #1592): `_compensated_table` builds the table of emission externs that declare their own `compensate`, `_emit_compensations` adds that compensation to the ones an `emit` registers, `_timer_has_compensate` flags a timer firing that registers one, `_declared_call` and `_reaches_declared` register one for a call in a value position of a provide method (a `let`, a `return`, an argument, a nested operand, through `revlDeclared`), and `_as_fn_call` re-spells the slot (lowered in the pure-expression call dialect) as a component `fn` node, at the activation body, a provide-method body and a timer firing. A corpus document carrying such an extern cannot be a byte-agreement case: selfhost/emit_go.rvl ports no extern-declared compensation. The behaviour is pinned and executed against real stc-go by backends/go/scenarios/emitted/extern_compensate/exec_test.go.": {
+          "_as_fn_call": 5,
+          "_compensated_table": 1,
+          "_declared_call": 11,
+          "_emit_compensations": 9,
+          "_reaches_declared": 9,
+          "_timer_has_compensate": 1
         }
       },
       "uncovered_statements": 3190
@@ -674,14 +682,15 @@
           "_ComponentEmitter._stream_iter": 25
         },
         "Async timer boundary only: _timer's inflight set, ensure_future callbacks, cancellation loop and async import are selected by a coroutine-reachable emission. services_timers.rvl covers both synchronous modes; async extern/service inputs require the excluded await/coloring surface.": {
-          "_ComponentEmitter._timer": 19
+          "_ComponentEmitter._timer": 20
         },
         "Async/walrus match-binding path: _match_expr.bind_payload uses a walrus for emitter temps or a comprehension to retain an awaited binder; _walrus_temp recognizes generated names/optional-temp regex. Sync binder use/folding is covered by result/control/services_match and branches fixtures. Async match source is represented by emit_ts_corpus/async_module_switch.rvl; async lowering is the retained boundary, not ordinary match.": {
           "_match_expr.bind_payload": 3,
           "_walrus_temp": 1
         },
-        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run.": {
-          "_ComponentEmitter._compensated_extern": 3
+        "Compensated emission boundary (item 254): _compensated_extern returns None on its empty-table, non-`fn` and unknown-name lookup paths for an emit whose callee declares no compensate. The emit corpus holds no compensate-bearing emission, so those residual statements never run. `_ComponentEmitter._timer_compensation` registers the same compensation on a timer firing (issue #1589) and is unreached for the same reason; its one call on the async-timer path adds one statement to `_ComponentEmitter._timer`.": {
+          "_ComponentEmitter._compensated_extern": 3,
+          "_ComponentEmitter._timer_compensation": 1
         },
         "Component expression residuals read in _expr: malformed expression/field/method/config/require checks; routed requirements; produced_emit/model completion/validated retry; the unknown-host-root refusal; spawn/lease/instance/subscribe with take/capacity/drain; async fn/arrow. These are the named realm/runtime/flow boundaries reproduced by accessor.rvl, stream_130.rvl, async TS fixtures and validation tests. The `format` branch (a component-body `${…}` template) is now exercised by services_interp.rvl, and the `host` branch (the dotted call, its root import, and a bare `Stream.source()`) by services_host.rvl, so their statements are no longer residual. Remaining ordinary cases are single-arg Some identity, bare None/Some, empty do tail; their port branches agree by inspection. Non-let do is rejected by reference and marked unsupported by port. branches.rvl pins optional/sized-field and nonempty do behavior. Issue #957's `Map` subscript arm adds one statement: no corpus document indexes a `Map`, and one that did would flip the byte-agreement oracle RED rather than close the gap, because selfhost/emit_py.rvl has no map-subscript arm (item-429(d)); the reference half is pinned by tests/test_cross_tier_execution.py. Item 130 §4.5 adds two statements to the same stream boundary: the provider's `replay(…)` declaration on `Stream.source()` and the backlog a `subscribe` asks for. The port refuses the first by name (the `host` marker) and has no `subscribe` arm for the second, and no corpus document can declare either while the self-host gate refuses the `replay(…)` clause with G1 (test_a_declared_stream_replay_is_named_not_dropped pins the refusal).": {
           "_ComponentEmitter._expr": 81
@@ -1175,6 +1184,10 @@
         },
         "Extern-declared compensate (item 254, issue #1592): `_as_fn_call` re-spells an extern's declared `compensate` slot, lowered in the pure-expression call dialect, as a component `fn` node. Its fall-through returns any other shape unchanged. The frontend lowers every declared slot to a bare named call, so no corpus document can reach that return. selfhost/emit_ts.rvl mirrors the rest of the path (emit_ts_corpus/extern_compensate.rvl).": {
           "_as_fn_call": 1
+        },
+        "Extern-declared compensations (issue #1511): `_declared_call` renders a call to an extern that declares its own `compensate` as `Frame.declared(..)` in any non-statement position inside a provide method (a `let`, a `return`, an argument, a nested operand), renders an `emit` statement's own call bare (the statement registers it, issue #1592; `_emit_ctx` and `_Ctx.with_declared_statement` mark that node), and refuses any other component position by name; `_reaches_declared` walks a method body for such a call so the component builds a Frame. The ts corpus document tests/fixtures/emit_ts_corpus/extern_compensate.rvl (issue #1592) reaches only the `emit`-statement path, the call rendered bare, which selfhost/emit_ts.rvl ports. The non-statement positions stay unreached: no corpus document crosses one, and one that did would flip the byte-agreement oracle RED, because selfhost/emit_ts.rvl does not port `Frame.declared`. The behaviour is pinned and executed against real cordis by backends/typescript/tests/declared_compensate.test.ts.": {
+          "_declared_call": 13,
+          "_reaches_declared": 7
         }
       },
       "uncovered_statements": 518

@@ -85,14 +85,15 @@ _PLAIN_DOC = _SECRET_DOC.replace("api_key: Secret[Str]", "api_key: Str")
 
 # The dispatch arm a `Result`-returning method had before the funnel existed.
 # Byte-identical output for a marking-free document is the contract that keeps
-# every golden and the selfhost mirror untouched.
+# every golden and the selfhost mirror untouched. Since issue #1634 the dispatch
+# returns `Result<Value, String>`, so the arm's value is wrapped in `Ok(...)`.
 _PLAIN_ARM = (
-    '"open" => { match svc.open(args[0].as_str().unwrap_or("").to_string(), '
+    '"open" => Ok({ match svc.open(args[0].as_str().unwrap_or("").to_string(), '
     'args[1].as_str().unwrap_or("").to_string()) { '
     'Ok(_v) => serde_json::json!({"$kind": "Ok", "$value": serde_json::to_value(&_v)'
     '.unwrap_or(serde_json::Value::Null)}), '
     'Err(_e) => serde_json::json!({"$kind": "Err", "$value": serde_json::to_value(&_e)'
-    '.unwrap_or(serde_json::Value::Null)}) } }'
+    '.unwrap_or(serde_json::Value::Null)}) } })'
 )
 
 
@@ -265,7 +266,8 @@ mod revl_seam_failure_tests {{
         let raw = connect("bad://host".to_string(), ARG_CANARY.to_string()).unwrap_err();
         assert!(raw.contains(ARG_CANARY), "the raw failure is already clean: {{raw}}");
 
-        let reply = _revl_dispatch_vault(&svc, "open", &args);
+        // issue #1634: the dispatch returns `Result`; a made call is `Ok`
+        let reply = _revl_dispatch_vault(&svc, "open", &args).unwrap();
         assert_eq!(reply["$kind"], "Err", "{{reply}}");
         let text = reply["$value"].as_str().unwrap().to_string();
         assert!(!text.contains(ARG_CANARY), "argument leaked: {{text}}");
@@ -275,7 +277,7 @@ mod revl_seam_failure_tests {{
 
         // the Ok half is not funnelled: a caller's requested value is returned
         let ok = _revl_dispatch_vault(
-            &svc, "open", &vec![serde_json::json!("good"), serde_json::json!(ARG_CANARY)]);
+            &svc, "open", &vec![serde_json::json!("good"), serde_json::json!(ARG_CANARY)]).unwrap();
         assert_eq!(ok["$kind"], "Ok", "{{ok}}");
         assert_eq!(ok["$value"], serde_json::json!("opened"), "{{ok}}");
     }}
