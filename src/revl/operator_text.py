@@ -70,7 +70,10 @@ def shape(node):
     if isinstance(node, (list, tuple)):
         return ("seq", tuple(shape(item) for item in node))
     if isinstance(node, dict):
-        return ("map", tuple(sorted((repr(k), shape(v)) for k, v in node.items())))
+        # a dict-valued field can carry a position too (`MethodDecl.route` is
+        # `{"method", "path", "line"}`)
+        return ("map", tuple(sorted((repr(k), shape(v)) for k, v in node.items()
+                                    if not (isinstance(k, str) and _position_field(k)))))
     if isinstance(node, (set, frozenset)):
         return ("set", tuple(sorted(repr(item) for item in node)))
     if node is None or isinstance(node, (str, int, float, bool)):

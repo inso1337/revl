@@ -147,6 +147,9 @@ def components_touched(result: dict, plan: dict | None, withdrawn: list[str]) ->
     for entry in result.get("touched") or []:
         if entry.get("kind") == "component":
             seen[entry["symbol"]] = entry["change"]
+        elif entry.get("parentKind") == "component":
+            # a member changed (issue #1733): its component changed
+            seen.setdefault(entry["parent"], "changed")
     for name in withdrawn:
         seen.setdefault(name, "removed")
     out = [{"component": name, "change": change} for name, change in seen.items()]

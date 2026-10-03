@@ -157,7 +157,10 @@ def test_a_change_task_completes_with_no_whole_file_read(composition):
     result = _call("revl_edit", {"edits": [{"symbol": "T", "replacement": new}]})
     assert result["ok"] is True and result["swapped"] is True, result
     assert result["applied"][0]["form"] == "symbol"
-    assert result["touched"] == [{"symbol": "T", "kind": "component",
+    # only one method's body changed, so that method is what is reported
+    # (issue #1733), with the component it belongs to
+    assert result["touched"] == [{"symbol": "T.tool.describe", "kind": "method",
+                                  "parent": "T", "parentKind": "component",
                                   "buffer": composition[1], "change": "changed"}]
     assert _call("revl_call", {"key": "tool", "method": "describe"})["result"] == "two"
     # the disk is untouched, and the comment above T survives the replacement
@@ -183,7 +186,8 @@ def test_a_swap_lists_the_symbols_it_touched(composition):
     swapped = _call("revl_swap", {"source": SERVICE + COMPONENT.replace(
         "component T", "component T").replace('"one"', '"three"')})
     assert swapped["swapped"] is True, swapped
-    assert swapped["touched"] == [{"symbol": "T", "kind": "component",
+    assert swapped["touched"] == [{"symbol": "T.tool.describe", "kind": "method",
+                                   "parent": "T", "parentKind": "component",
                                    "buffer": "source", "change": "changed"}]
 
 
