@@ -10,8 +10,8 @@ The verb set, in the order the parser declares it:
 
 <!-- docgen:cli-verbs begin -->
 ```text
-compile  explain  grammar  adapt  doctor  scaffold  composition  layer
-audit  goal  policy  simulate  diff  changelog  version  contract
+compile  explain  grammar  idiom  adapt  doctor  scaffold  composition
+layer  audit  goal  policy  simulate  diff  changelog  version  contract
 erase-report  retention-receipt  plan  apply  undo  canary  query  fmt
 quarantine  analyze  test  mcp  import  export  sourcemap  serve  run
 dev  recover  estop  slo  branch  compare  replay  why  metrics  trace
@@ -136,6 +136,29 @@ the built-in guarantee/fix table (`src/revl/diagnostics.py`).
 ```bash
 revl explain G4
 revl explain t3 --json
+```
+
+### `revl idiom`
+
+Print the minimal admitted example of one construct and the one or two rules
+that make it correct (issue #1701). No sources; it reads the idiom files under
+`src/revl/idioms/`. Each hole's `fillSpec` carries the idiom of its construct
+already; this command is for reading one by name.
+
+- `NAME` - an idiom: one per construct a fillSpec names (`provide-method`,
+  `emission-method`, `component-setup`, `effect-acquire`, `effect-undo`,
+  `function`, `test`) and a few served by name only (`spawn`, `subscribe`,
+  `match`, `timer`). With no name, the list.
+- `--json` - the entry as `{name, summary, rules, fill, example}`.
+
+Every idiom compiles, admits for an untrusted author, and, with its `fill`
+replaced by a hole, yields a fillSpec naming that same construct
+(`tests/test_idioms_1701.py`). An unknown name exits 2.
+
+```bash
+revl idiom                      # the list
+revl idiom emission-method      # one idiom, as text
+revl idiom effect-undo --json
 ```
 
 ### `revl grammar`
