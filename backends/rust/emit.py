@@ -7195,9 +7195,16 @@ def _render_expr(node: dict, ctx: _V3Ctx, rename: dict[str, str] | None = None,
                 # here (`&s.to_string()` -> `&String`). An index read is not a
                 # borrowed param, so it stripped above and never reaches here —
                 # the two rewrites are disjoint.
+                #
+                # Every receiver not KNOWN to be a `Str` takes the rewrite: a
+                # list literal types as bare `List` and a field or call may not
+                # type at all, and each of those missed it (E0308 on
+                # `let xs = ["a"]; xs.indexOf(s)`). On a `Str` receiver the
+                # owned `String` would still coerce to the `&str` slot, so the
+                # only cost of an unknown type is the allocation.
                 recv_ty = _v3_infer_type(target_node, ctx)
                 a0 = arg_nodes[0]
-                if (isinstance(recv_ty, str) and recv_ty.startswith("List[")
+                if (recv_ty != "Str"
                         and isinstance(a0, dict) and a0.get("kind") in ("var", "name", "req")
                         and (a0.get("id") or a0.get("name")) in ctx.borrowed_params):
                     args[0] = f"{args[0]}.to_string()"
