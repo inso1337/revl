@@ -228,7 +228,7 @@
       "Validated runtime/model-flow boundary: emit.py::_validated_call/_ctor_map/_ComponentEmitter._expr wrap completion in validate_response/validate_retry with schema/constructors; emit_py.rvl::cexpr emits raw calls. Named inputs: tests/test_validated_boundary.py::test_emit_wraps_validated_call_and_is_byte_identical_when_absent and tests/test_validated_retry_257s2.py::test_emit_wraps_only_the_completion_call_in_the_retry_thunk. Ordinary ADT construction/Secret[T] marking are supported.": [
         "validated=<true>"
       ],
-      "UI transaction unit boundary (item 522): emit.py::_ui_units groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and _emit_externs decorates each such extern with `ui_crossing`. emit_py.rvl::emit_externs/method_step carries no UI transaction unit at all. tests/test_ui_transaction_runtime_1369.py reproduces the family; a corpus document would need a computer-use capability the port cannot emit.": [
+      "UI transaction unit boundary (item 522): emit.py::_ui_transaction_facts groups a computer-use extern's crossings into per-method transaction units, skipping the activation-scoped plan (`key=<activation>`, which the activation frame settles itself), and _emit_externs decorates each such extern with `declared_crossing` (`ui=True`). emit_py.rvl::emit_externs/method_step carries no UI transaction unit at all. tests/test_ui_transaction_runtime_1369.py reproduces the family; a corpus document would need a computer-use capability the port cannot emit.": [
         "key=<activation>"
       ]
     }

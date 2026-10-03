@@ -85,7 +85,12 @@ for the one component the successor hosts:
   the population the conductor SIGKILLs outright and the halt report names as
   residue UNKNOWN, exactly as it would had the placement booted it there;
 - the **§46 intra-process dependency edges** (`depends`), computed for the
-  successor's component set.
+  successor's component set;
+- the **model provider configuration** (`providers`), when the predecessor
+  served model keys in-process under `revl run --placement --providers`. The
+  boot path builds no proxy for such a key, so without it nothing would serve
+  the key after the cutover. Carried only onto the py tier, the one tier that
+  binds a model host, the same rule the boot path applies.
 
 *Refused instead.* Where carrying a key correctly is not possible, the swap
 refuses up front and leaves the running composition untouched. A **sandboxed
@@ -93,6 +98,11 @@ component** is the standing example: moving it across an isolation boundary
 changes the running system's security posture, so `revl swap` names the gap and
 declines (item 411) rather than booting a successor whose sandbox envelope it
 would have to invent.
+A component whose process loads a **managed model role** (one revl loads and
+unloads itself, docs/model-providers.md) is refused too. A provision belongs to
+one process, so the successor would load the member and the predecessor's
+teardown would then unload it from under the successor. Restart the placement
+to move such a component.
 
 One key is neither carried nor refused, and that is deliberate: `probe`. A
 process runs the probes its own `[processes.<name>]` entry declares, and the

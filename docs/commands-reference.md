@@ -887,7 +887,11 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   to an endpoint off the device, a crossing on an unbound or undeclared role, a
   binding that reaches past its role, a credential written into the file, or
   an unset credential variable each refuse the boot. py tier only. `--plan`
-  prints the bindings. See [model-providers.md](model-providers.md).
+  prints the bindings. With `--placement`, each process serves the model keys
+  its components require, and an `ollama` role is loaded on the device the
+  model schedule chose and unloaded at teardown, with the model in the residue
+  proof. See [model-providers.md](model-providers.md) and
+  [providers-ollama.md](providers-ollama.md).
 - `--watch` - watch the sources and recompile on change; a rejected edit is
   refused and the run keeps going.
 - `--record` - record the effect accumulator so the REPL can step backwards
@@ -957,6 +961,21 @@ Holds and opens a REPL by default; `--watch`, `--once`, or `--plan` change that.
   to a pool member, so `--pool private` refuses it by name on
   `unsupported-with-pool` rather than accepting it and ignoring it. What the
   peer does with the artifact is `--pool-runner` and nothing else.
+
+  One file is pinned by the sha256 of its bytes. Two or more files are one
+  BUNDLE, pinned by a digest over every file's content, its path and its mode
+  (`0644` or `0755`); print it with [`revl pool digest`](#revl-pool) and pin
+  it with `pool init --artifact` and `pool request --artifact`. Each file is
+  named by its path relative to the working directory, so run from the
+  composition's root: a name that would leave it (`../x.rvl`) is refused on
+  `bundle-path` before any file is read. The peer checks the manifest against
+  the digest and every file against the manifest before it runs anything, and
+  refuses a missing file, an extra file or an altered one by name
+  (`bundle-missing-file`, `bundle-extra-file`, `bundle-file-digest`). It hands
+  the runner every `.rvl` file in path order. The signed receipt and the
+  ledger entry both carry the bundle digest and its file list. See
+  [design/567-pool-dispatch.md](design/567-pool-dispatch.md), "Multi-file
+  artifacts".
 
   Only a composition whose audited G8 boundary is EMPTY is dispatched. That is
   `EffectClass.pure` and nothing weaker is claimed: an extern whose declared
@@ -1463,7 +1482,16 @@ for the key lifecycle and what the signature binds.
   log. A refused SECOND delivery for a task is an appended event carrying both
   result digests, which is the visible half of "delivered twice must be
   impossible or visible". Needs no key, for the same reason `status` does not.
+  A multi-file task's line carries `bundle=<digest> (N files)`, and `--json`
+  carries its whole manifest.
   - `--dir DIR`, `--json`
+- `digest FILE...` - print the artifact digest `run --pool private` would pin
+  for these files, for `init --artifact` and `request --artifact`. One file
+  prints the sha256 of its bytes. Several files print the bundle digest and
+  then one line per file (mode, file digest, path). Reads the command line
+  exactly as `run --pool private` does, so run it from the same directory.
+  Touches no pool and needs no key. Exits 1 on a name the bundle would refuse.
+  - `--json` - the digest, its form (`file` or `bundle`) and the manifest.
 
 ### `revl erase-report`
 
