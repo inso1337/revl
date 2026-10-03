@@ -145,11 +145,12 @@ A successful response is never rewritten.
 that mutates the session answers with `undo: {tool, arguments}`: the one call
 that returns the session to where it was, byte for byte (the snapshot's
 `sources` and `manifest`). A load's undo is `revl_unload`, an unload's is a
-`revl_restore` of what ran, and a swap, edit, undo, rollback, restore or
-applied ship/repair answers with `revl_undo` back to the earlier generation; a
-fresh `revl_lease` claim answers with its release. A verb with no exact inverse
-says so: `undo: null` and an `undoReason` (an emission cannot be un-emitted, a
-halt or an approval is recorded evidence). `undoDepth` is how many changes
+`revl_restore` of what ran, and a swap, edit, committed `revl_change`, undo,
+rollback, restore or applied ship/repair answers with `revl_undo` back to the
+earlier generation; a fresh `revl_lease` claim answers with its release. A verb
+with no exact inverse says so: `undo: null` and an `undoReason` (an emission
+cannot be un-emitted, a halt or an approval is recorded evidence, and
+`revl_export` keeps no copy of the disk contents it replaced). `undoDepth` is how many changes
 `revl_step_back` with no arguments can still revert. A refused call changed
 nothing and carries no undo field.
 
