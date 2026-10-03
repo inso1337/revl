@@ -75,7 +75,7 @@ Measured over each tier's own emitter corpus, the enumerated document list
 <!-- docgen:selfhost-residual begin -->
 | tier | corpus | emitter vs the reference IR | the fully-native chain |
 |------|-------:|----------------------------:|-----------------------:|
-| py   |     59 |                   59 (100%) |             53 (89.8%) |
+| py   |     60 |                   60 (100%) |             54 (90.0%) |
 | ts   |     76 |                   76 (100%) |             60 (78.9%) |
 | go   |     38 |                   38 (100%) |             35 (92.1%) |
 | java |     59 |                   59 (100%) |            59 (100.0%) |
