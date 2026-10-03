@@ -107,6 +107,7 @@ from .tee_quote import (
     ecdsa_verify,
     private_key_from_seed,
     public_key_id,
+    require_signing_backend,
 )
 
 #: The one curve a peer identity uses. Named rather than negotiated: a record
@@ -311,7 +312,8 @@ def signed_bytes(domain: bytes, body: Mapping[str, Any]) -> bytes:
 
 
 def sign_record(domain: bytes, body: Mapping[str, Any],
-                identity: PeerIdentity) -> dict:
+                identity: PeerIdentity, *,
+                network_exposed: bool = False) -> dict:
     """Sign ``body`` under ``identity``, returning the record plus its
     signature.
 
@@ -323,16 +325,28 @@ def sign_record(domain: bytes, body: Mapping[str, Any],
 
     Deterministic: RFC 6979 nonces mean the same ``(body, identity)`` always
     produces the same bytes, which is what lets a fixture be regenerated and a
-    digest be pinned."""
+    digest be pinned. The bytes do not depend on which signing backend is
+    installed (issue #1460).
+
+    ``network_exposed=True`` is for a signer an attacker can time over a
+    network (a pool peer answering tasks on a non-loopback bind, a dispatch to
+    a remote peer). It refuses with
+    :class:`~revl.tee_quote.SigningBackendUnavailable`, naming the
+    ``revl[crypto]`` extra, rather than sign in timing-variable pure Python.
+    The check runs before anything is signed or derived."""
     if not isinstance(identity, PeerIdentity):
         raise IdentityError("signing needs a PeerIdentity, not a raw key")
+    if network_exposed:
+        require_signing_backend("a network-exposed peer identity",
+                                identity.curve)
     record = dict(body)
     record["sign_alg"] = SIGN_ALG
     record[KEY_ID_FIELD] = identity.key_id
     record[PUBLIC_KEY_FIELD] = identity.public_key.hex()
     record[SIGNATURE_FIELD] = ecdsa_sign(
         identity.curve, identity.private_key,
-        signed_bytes(domain, record)).hex()
+        signed_bytes(domain, record),
+        network_exposed=network_exposed).hex()
     return record
 
 

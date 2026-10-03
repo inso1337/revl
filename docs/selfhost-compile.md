@@ -309,7 +309,7 @@ What Stage 4 still needs after this is no longer an emit gap:
   tier is missing;
 * `selfhost/emit_rust.rvl` does not mirror `_coerce_any_arg`, so no byte-agreement
   corpus document can reach the four crossings above without flipping the oracle
-  red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines.json` with
+  red. They stay recorded in `tests/fixtures/selfhost_uncovered_lines/` with
   that reason, which is the same shape the boxing coercion already carried.
 
 ## Files
