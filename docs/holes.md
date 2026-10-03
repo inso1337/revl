@@ -333,6 +333,37 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
   crossing, and `reason` says a completion that needs new host code cannot be
   written by this author.
 
+* **`fillable`**: whether THIS author can fill the hole, and from what.
+  `producers` lists every way to build the expected type at this position: a
+  literal (`"..."`, `0`, `[]`, `None`, a declared record or variant), a
+  binding of that type, a callable service operation, extern, crossing or
+  function returning it. One case is decided outright: a bare nominal type
+  no declaration builds (an extern's handle type, such as `LogHandle`) with
+  no producer in reach needs new host code (`needsHostCode: true`). A trusted
+  author can write that extern; an untrusted one may neither declare nor
+  reach one (G8), so the hole is `byThisAuthor: false` and `reason` says to
+  ask the operator for a granted service that returns the type, or for host
+  code trust. Anything the types do not decide is reported with `decided:
+  false`, never guessed: a `Str` that has to be a hash has a literal
+  producer as far as types can tell. `revl_check` and `revl_scaffold` list
+  the holes this author cannot fill under a top-level `unfillable`, so they
+  are flagged before any work starts, not handed out as fillable.
+
+* **`split`** (issue #1660): present when a hole is a provide-method's WHOLE
+  body and its `crossing.calls` span two or more capability tokens, a hole
+  whose obligation is three decisions (what crosses through each boundary,
+  and what is returned) behind one sentence. `split` is the decomposition,
+  each part already written: one `let <token>_step = hole[T] "the crossing
+  through <token>, if any (...); a pure value otherwise"` per token, then
+  `return hole[T] "the result of <method>, from the steps above"`. `T` is a
+  step's single call's return type when the token has one call, otherwise
+  the method's return type. Write the parts in place of the hole; inside that
+  body, the hole bound by `let <token>_step` lists only `<token>`'s calls, so
+  each part is one sentence. A hole is never split by operation (two
+  operations through one boundary are one sentence) and never in a pure
+  position. `revl scaffold` writes the split directly for an emission method
+  bound to two or more capabilities.
+
 `version` is `2`. A version-1 spec had no `version` key; every version-1 field
 is unchanged, so a reader of version 1 keeps working. The version moves only
 when a field's meaning changes: a new field, such as `externs`, is additive.

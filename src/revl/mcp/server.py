@@ -85,8 +85,9 @@ from . import quorum as _quorum
 from . import repair as _repair
 from . import runtime_gate as _runtime_gate
 from . import ship as _ship
+from . import undo_record as _undo_record
 from . import deploy as _mcp_deploy
-from .persist import RestoreError
+from .persist import RestoreError, admitted_name as _admitted_name
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
@@ -650,11 +651,15 @@ def _boundary_of(ir: dict) -> dict:
 # ---------------------------------------------------------------- tools
 
 SESSION = Session()
+# issue #1703: the session's reversible changes, newest last. Every successful
+# mutating call that has an exact inverse pushes its `undo` here, and
+# `revl_step_back` with no arguments runs the last one.
+UNDO_STACK = _undo_record.UndoStack()
 
 
-def _session_error(message: str, **extra) -> dict:
+def _session_error(message: str, category: str = "session", **extra) -> dict:
     return {"ok": False, "diagnostics": [{
-        "severity": "error", "code": "REVL", "category": "session",
+        "severity": "error", "code": "REVL", "category": category,
         "message": message,
     }], **extra}
 
@@ -1543,7 +1548,7 @@ def _restore_authoring_refusal(snap) -> dict | None:
     try:
         source = sources.get("source")
         if source is not None:
-            compile_source(source, "<snapshot>.rvl",
+            compile_source(source, _admitted_name(snap),
                            modules=sources.get("modules") or None, profile=profile)
         elif sources.get("files"):
             virtual = {os.path.abspath(path): text for path, text
@@ -1626,8 +1631,12 @@ def _tool_inspect_step(arguments: dict) -> dict:
 
 
 def _tool_step_back(arguments: dict) -> dict:
+    if not arguments:
+        return _step_back_last_change()
     if "to" not in arguments:
-        return _session_error("`to` is required (-1 unwinds everything recorded)")
+        return _session_error("`to` is required (-1 unwinds everything recorded); "
+                              "with no arguments at all, step_back reverts the "
+                              "last change this session made")
     try:
         return {"ok": True, **SESSION.step_back(arguments.get("component"),
                                                 arguments["to"],
@@ -1636,6 +1645,37 @@ def _tool_step_back(arguments: dict) -> dict:
         # a refused unwind is a *result*, not a crash: it means the range
         # contains an emission that cannot be undone
         return _session_error(str(error), refused=True)
+
+
+def _step_back_last_change() -> dict:
+    """`revl_step_back` with no arguments (issue #1703): revert the last
+    reversible change this session made, by running the exact undo that
+    change's response carried. The undo goes through the same gates as any
+    call, and is not itself pushed on the stack, so a second step back reverts
+    the change before it. The answer names what was reverted and carries the
+    call that would redo it."""
+    entry = UNDO_STACK.last()
+    if entry is None:
+        return _session_error(
+            "nothing to step back: this session has made no change with an exact "
+            "undo (a response with `undo: null` says why it has none)",
+            refused=True, undoDepth=0)
+    undo = entry["undo"]
+    result = _call_tool(undo["tool"], dict(undo["arguments"]), record=False)
+    if not result.get("ok"):
+        return {"ok": False, "steppedBack": False, "change": _change_of(entry),
+                "via": undo, "result": result, "undoDepth": UNDO_STACK.depth}
+    UNDO_STACK.pop()
+    return {"ok": True, "steppedBack": True, "change": _change_of(entry),
+            "via": undo, "result": result,
+            "redo": {"tool": entry["tool"], "arguments": entry["arguments"]},
+            "undo": None,
+            "undoReason": "a step back is reverted by its `redo` call",
+            "undoDepth": UNDO_STACK.depth}
+
+
+def _change_of(entry: dict) -> dict:
+    return {"tool": entry["tool"], "arguments": entry["arguments"]}
 
 
 def _tool_replay_bisect(arguments: dict) -> dict:
@@ -1782,9 +1822,14 @@ def _tool_check(arguments: dict) -> dict:
     inline = source is not None or bool(modules)
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
-    return {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-            "holes": holes,
-            "selfCheck": _authoring_loop.self_check(None, holes)}
+    result = {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
+              "holes": holes,
+              "selfCheck": _authoring_loop.self_check(None, holes)}
+    blocked = fillspec.unfillable(holes)
+    if blocked:
+        # flagged, not handed out: holes this author can never fill
+        result["unfillable"] = blocked
+    return result
 
 
 def _untrusted_author() -> bool:
@@ -3425,23 +3470,28 @@ TOOLS = [
     },
     {
         "name": "revl_step_back",
-        "description": "Unwind the accumulator to step k by running the registered "
-                       "inverses from the top down, newest first — leaving the "
-                       "component LIVE, not torn down. Refuses if the range crosses "
-                       "an emission with no `compensate` (an emission cannot be "
-                       "undone); `force` crosses anyway and reports what was crossed. "
-                       "The guarantee is 'the inverses ran in order', never 'state "
-                       "was restored'.",
+        "description": "With NO arguments: revert the last change this session "
+                       "made, by running the exact `undo` that change's response "
+                       "carried (issue #1703); each further call reverts the "
+                       "change before it, and the answer carries the `redo` call. "
+                       "With `to`: unwind the accumulator to step k by running the "
+                       "registered inverses from the top down, newest first — "
+                       "leaving the component LIVE, not torn down. Refuses if the "
+                       "range crosses an emission with no `compensate` (an "
+                       "emission cannot be undone); `force` crosses anyway and "
+                       "reports what was crossed. The guarantee is 'the inverses "
+                       "ran in order', never 'state was restored'.",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "component": {"type": "string"},
                 "to": {"type": "integer",
-                       "description": "unwind down to this step; -1 unwinds everything"},
+                       "description": "unwind down to this step; -1 unwinds "
+                                      "everything. Omit every argument to revert "
+                                      "the last change instead"},
                 "force": {"type": "boolean",
                           "description": "cross uncompensated emissions anyway"},
             },
-            "required": ["to"],
         },
         "annotations": {"readOnlyHint": False, "destructiveHint": True},
         "handler": _tool_step_back,
@@ -3850,56 +3900,9 @@ def handle(message: dict) -> dict | None:
     elif method == "tools/call":
         params = message.get("params") or {}
         name = params.get("name")
-        handler = _HANDLERS.get(name)
-        if handler is None:
+        if _HANDLERS.get(name) is None:
             return _error(request_id, -32602, f"unknown tool: {name}")
-        arguments = params.get("arguments") or {}
-        # the path jail and the authoring gate run BEFORE the operator gate and
-        # before any handler: a refusal here has read nothing, compiled nothing
-        # and run nothing, so neither can be used as an oracle.
-        payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
-        # operator capabilities (roadmap item 55): gate a mutating management
-        # verb against the session's bound operator before it can run. No
-        # profile bound -> ungated, today's behaviour unchanged. Skipped when the
-        # call is already refused, so a refused path is never even resolved
-        # against an operator's grants.
-        decision = None if payload is not None \
-            else _operator.decide(SESSION, name, arguments)
-        if payload is not None:
-            pass                    # refused above; the handler never runs
-        elif decision.gated and not decision.allowed:
-            payload = _refused_by_operator(decision)
-        elif not runtime_available() and _runtime_gate.is_refused(name, arguments):
-            # issue #1692: a verb that needs a live composition, on an
-            # interpreter that cannot boot one, refuses by name with the fix in
-            # `next`, instead of failing on an import error or on "nothing is
-            # loaded". After the operator gate: "you may not" outranks "this
-            # server cannot".
-            payload = _runtime_gate.refusal(name)
-        else:
-            ir_before = getattr(SESSION, "ir", None)
-            try:
-                payload = handler(arguments)
-                _remember_live_host_bodies()
-            except ApprovalRequired as exc:
-                # item 246: a class-(c) crossing the decision inside Session.call
-                # (or the activation gate in load/swap) refused. This is a result,
-                # not an error — shape the ticket two-step. Caught before the
-                # generic handler so it never reads as an internal fault.
-                payload = _approval_required(exc)
-            except Exception as exc:  # a tool failure is a result, not a transport error
-                payload = {"ok": False, "diagnostics": [{
-                    "severity": "error", "code": "REVL", "category": "internal",
-                    "message": f"{type(exc).__name__}: {exc}",
-                }]}
-            if decision.gated and decision.allowed:
-                _stamp_authority(payload, decision)
-            # issue #1738: the loop axes read every call that reached a handler
-            # (preflight queries, composition edits, and refusals before and at
-            # run time).
-            record_tool_call = getattr(SESSION, "record_tool_call", None)
-            if record_tool_call is not None:
-                record_tool_call(name, arguments, payload, ir_before)
+        payload = _call_tool(name, params.get("arguments") or {})
         result = {
             "content": [{"type": "text", "text": json.dumps(payload, indent=2)}],
             "isError": not payload.get("ok", False),
@@ -3917,6 +3920,98 @@ def handle(message: dict) -> dict | None:
     if request_id is None:
         return None
     return {"jsonrpc": "2.0", "id": request_id, "result": result}
+
+
+def _call_tool(name: str, arguments: dict, record: bool = True) -> dict:
+    """One gated tool call -> its payload. `handle` runs it for `tools/call`;
+    `revl_step_back` with no arguments runs an undo through it, so the undo
+    passes the same jail, authoring and operator gates any call does. With
+    `record`, a successful mutating call's exact undo is attached to the
+    payload and pushed on the session's undo stack (issue #1703)."""
+    # the path jail and the authoring gate run BEFORE the operator gate and
+    # before any handler: a refusal here has read nothing, compiled nothing
+    # and run nothing, so neither can be used as an oracle.
+    payload = _jail_refusal(arguments) or _authoring_refusal(arguments)
+    if payload is not None:
+        return payload
+    # operator capabilities (roadmap item 55): gate a mutating management
+    # verb against the session's bound operator before it can run. No
+    # profile bound -> ungated, today's behaviour unchanged. Skipped when the
+    # call is already refused, so a refused path is never even resolved
+    # against an operator's grants.
+    decision = _operator.decide(SESSION, name, arguments)
+    if decision.gated and not decision.allowed:
+        return _refused_by_operator(decision)
+    if not runtime_available() and _runtime_gate.is_refused(name, arguments):
+        # issue #1692: a verb that needs a live composition, on an
+        # interpreter that cannot boot one, refuses by name with the fix in
+        # `next`, instead of failing on an import error or on "nothing is
+        # loaded". After the operator gate: "you may not" outranks "this
+        # server cannot".
+        return _runtime_gate.refusal(name)
+    pre = _capture_undo_state(name, arguments)
+    ir_before = getattr(SESSION, "ir", None)
+    payload = _run_handler(name, arguments)
+    if decision.gated and decision.allowed:
+        _stamp_authority(payload, decision)
+    if payload.get("ok"):
+        _attach_undo(name, arguments, pre, payload, record)
+    # issue #1738: the loop axes read every call that reached a handler
+    # (preflight queries, composition edits, and refusals before and at
+    # run time).
+    record_tool_call = getattr(SESSION, "record_tool_call", None)
+    if record_tool_call is not None:
+        record_tool_call(name, arguments, payload, ir_before)
+    return payload
+
+
+def _capture_undo_state(name: str, arguments: dict):
+    """The pre-call state an undo is derived from; a failure to read it never
+    stops the call (the undo then names why it is missing)."""
+    try:
+        return _undo_record.capture(SESSION, name, arguments)
+    except Exception:  # noqa: BLE001 - see `_attach_undo`
+        return None
+
+
+def _run_handler(name: str, arguments: dict) -> dict:
+    """The handler itself; a failure is a result, never a transport error."""
+    try:
+        payload = _HANDLERS[name](arguments)
+        _remember_live_host_bodies()
+        return payload
+    except ApprovalRequired as exc:
+        # item 246: a class-(c) crossing the decision inside Session.call
+        # (or the activation gate in load/swap) refused. This is a result,
+        # not an error — shape the ticket two-step. Caught before the
+        # generic handler so it never reads as an internal fault.
+        return _approval_required(exc)
+    except Exception as exc:  # a tool failure is a result, not a transport error
+        return _session_error(f"{type(exc).__name__}: {exc}", category="internal")
+
+
+def _attach_undo(name: str, arguments: dict, pre, payload: dict,
+                 record: bool) -> None:
+    """Issue #1703: a successful mutating call answers with the one call that
+    reverts it (`undo: {tool, arguments}`), or `undo: null` with the reason
+    when no exact inverse exists. A reversible change is pushed on the undo
+    stack `revl_step_back` with no arguments pops; an undo run BY that step
+    back is not (`record=False`), so repeated step backs walk further back
+    instead of toggling."""
+    if "undo" in payload:          # the handler answered for itself (step back)
+        return
+    try:
+        fields = _undo_record.describe(SESSION, name, arguments, pre)
+    except Exception as exc:  # noqa: BLE001 - an undo is advice; the call stands
+        fields = {"undo": None,
+                  "undoReason": f"the undo could not be derived "
+                                f"({type(exc).__name__}: {exc})"}
+    if fields is None:
+        return
+    payload.update(fields)
+    if record and fields.get("undo") is not None:
+        UNDO_STACK.record(name, arguments, fields["undo"])
+    payload["undoDepth"] = UNDO_STACK.depth
 
 
 def _error(request_id, code: int, message: str) -> dict:
