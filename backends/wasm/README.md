@@ -156,7 +156,11 @@ boundary shapes the substrate carries, with the exact refusal each emits — is
   `test_v3_emit.py` / `test_canonical_abi.py` golden oracle guards this). The
   proof is `tests/test_wasm_crash_recovery.py` over `scenarios/crashproof`; the
   witness marshals as a Str (a non-Str witness is refused in record mode rather
-  than silently narrowed). This is the durable channel the `revl:teardown`
+  than silently narrowed). This frame is the one place the host reads module memory
+  into text, and the tier has no secret registry to scrub it, so a witnessed
+  extern that takes a `Secret[...]` parameter and returns an Ok witness not
+  declared confidential is refused by name (issue #1577, see
+  docs/wasm-capabilities.md). This is the durable channel the `revl:teardown`
   static section (a compile-time index of seq/kind/dispatch) always pointed at
   but deliberately did not itself carry: "a host wanting to build a real WAL on
   this tier" is exactly `run_wasm`'s drain.

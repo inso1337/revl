@@ -78,6 +78,7 @@ from . import fillspec
 from . import draft as _draft
 from . import proposal as _proposal
 from . import edit as _edit
+from . import effect_classes as _effect_classes
 from . import leases as _leases
 from . import operator as _operator
 from ..errors import RevlError
@@ -93,6 +94,7 @@ from .persist import RestoreError, admitted_name as _admitted_name
 from .approval import (ApprovalRequired, two_step_payload, _sha as _approval_sha,
                        _canon as _approval_canon)
 from .. import query as Q
+from ..plan import _merge_resulting_ir
 from .. import deploy as _deploy
 from .query_tools import HISTORY_QUERY_TOOLS, LIVE_QUERY_TOOLS, QUERY_TOOLS
 from . import authoring_loop as _authoring_loop
@@ -902,7 +904,7 @@ def _boot(ir: dict, source, modules, config, record: bool, origin: dict) -> dict
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
     _draft.discard(SESSION)
-    return {"ok": True, **_summary(ir), **state}
+    return {"ok": True, **_summary(ir), **state, **_effect_classes.report(ir)}
 
 
 def _boot_draft(vs: dict, config, record, verify=None) -> dict:
@@ -1018,6 +1020,7 @@ def _tool_swap(arguments: dict) -> dict:
                             "its own — pass the full source set to swap")
         return rejected
     authored = _authored_host_bodies(full, source, modules)
+    running = SESSION.ir
     try:
         state = SESSION.swap(full, origin=origin)
     except SessionError as error:
@@ -1029,7 +1032,9 @@ def _tool_swap(arguments: dict) -> dict:
     global _AUTHORED_HOST_BODIES
     _AUTHORED_HOST_BODIES = authored
     return _with_touched({"ok": True, "admitted": True, "swapped": True,
-                          **_summary(full), **state}, before)
+                          **_summary(full), **state,
+                          **_effect_classes.report(full, running, against=True)},
+                         before)
 
 
 def _with_touched(result: dict, before: dict) -> dict:
@@ -1107,12 +1112,14 @@ def _swap_server_side(replacing: tuple) -> dict:
         rejected["note"] = ("the server-side source admits but is not a complete "
                             "composition on its own")
         return rejected
+    running = SESSION.ir
     try:
         state = SESSION.swap(full, origin=_edit._origin_from(vs))
     except SessionError as error:
         return _session_error(error)
     return {"ok": True, "admitted": True, "swapped": True,
-            "fromServerSide": True, **_summary(full), **state}
+            "fromServerSide": True, **_summary(full), **state,
+            **_effect_classes.report(full, running, against=True)}
 
 
 def _tool_edit(arguments: dict, verify=None) -> dict:
@@ -2159,7 +2166,7 @@ def _tool_check(arguments: dict) -> dict:
     holes = (fillspec.enrich(ir, untrusted=inline and _untrusted_author())
              if ir.get("holes") else [])
     result = {"ok": True, **_summary(ir), "boundary": _boundary_of(ir),
-              "holes": holes,
+              "holes": holes, **_effect_classes.report(ir),
               "selfCheck": _authoring_loop.self_check(None, holes)}
     blocked = fillspec.unfillable(holes)
     if blocked:
@@ -2211,6 +2218,8 @@ def _tool_admit(arguments: dict) -> dict:
                 "G2/G3 hold across both and no interface drifted",
         **_summary(ir),
         "boundary": _boundary_of(ir),
+        **_effect_classes.report(_merge_resulting_ir(running, ir, set(replacing)),
+                                 running, against=True),
     }
 
 
@@ -2239,7 +2248,13 @@ def _tool_plan(arguments: dict) -> dict:
         manifest=running,
         modules=arguments.get("modules"),
         replacing=tuple(arguments.get("replacing") or ()),
+        include_ir=True,
     )
+    # issue #1707: the class diff reads the resulting composition; the IR
+    # itself is not part of a plan's answer.
+    resulting = result.pop("resultingIR", None)
+    if resulting is not None:
+        result.update(_effect_classes.report(resulting, running, against=True))
     # component leases (item 61): advise — never block — when this swap would
     # replace a component another operator leases. Surfaced so an agent sees
     # the race before it swaps; the plan itself is unchanged.
@@ -2641,7 +2656,9 @@ TOOLS = [
                        "each with file, line, expected type and message) on success, "
                        "or structured diagnostics (code, guarantee, expected/actual, "
                        "fix hint) on rejection. A draft with holes compiles; it is "
-                       "refused at admission until every hole is filled.",
+                       "refused at admission until every hole is filled. "
+                       "`effectClasses` gives each provided operation's effect class "
+                       "(a/b/c) and the crossings that set it.",
         "inputSchema": {"type": "object", "properties": dict(_SOURCE_INPUT)},
         "annotations": {"readOnlyHint": True, "destructiveHint": False},
         "handler": _tool_check,
@@ -2868,7 +2885,10 @@ TOOLS = [
                        "NONE of those and swap re-admits the source the server already "
                        "holds for the running composition — so an agent that edited "
                        "server-side with revl_edit, or wants to re-admit the running "
-                       "generation, need not re-serialize the whole file.",
+                       "generation, need not re-serialize the whole file. The answer "
+                       "carries `effectClassChanges` against the running composition and "
+                       "an `effectClassWarnings` entry for every operation whose effect "
+                       "class rose, naming the crossing that raised it.",
         "inputSchema": {
             "type": "object",
             "properties": {**_SOURCE_INPUT,
@@ -2906,7 +2926,8 @@ TOOLS = [
                        "and this loads it first, then edits it. {symbol, replacement} "
                        "replaces one top-level declaration by name (read it first with "
                        "revl_source). A response that edited lists the `touched` "
-                       "symbols.",
+                       "symbols, plus `effectClassChanges` and `effectClassWarnings` "
+                       "against the running composition, as revl_swap does.",
         "inputSchema": {
             "type": "object",
             "properties": {

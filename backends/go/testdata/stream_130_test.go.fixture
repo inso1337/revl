@@ -12,6 +12,7 @@ package stream130
 import (
 	stdctx "context"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -1219,6 +1220,259 @@ func TestEmitted_CombinatorChain_UnloadWhileParkedUnwindsTheWholeChain(t *testin
 		if marksIndex(marks, want) < 0 {
 			t.Fatalf("the chain did not unwind (%s missing): %v", want, marks)
 		}
+	}
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("stream residue after unload = %d, want 0", n)
+	}
+	if n := revlHostLive(); n != 0 {
+		t.Fatalf("live host resources after unload = %d, want 0 (R1)", n)
+	}
+}
+
+// -------------------------------------------------------------------------
+// §4.5: the provider-declared last-n backlog (`replay(<n>)`).
+//
+// Each case mirrors the py reference's own case in
+// backends/python/tests/test_stream_runtime.py: the provider holds its newest n
+// items whether or not anyone listens, a late subscriber receives the newest k
+// of them oldest first and BEFORE any live item, and the backlog rides the
+// provider's own forward path, so it takes the chain, the buffer and the
+// overflow policy exactly as a live item does. The durable `replay(from: …)`
+// cursor is refused by name at emit time and never reaches this runtime.
+// -------------------------------------------------------------------------
+
+func takeItems(t *testing.T, sub *Subscription, n int) []string {
+	t.Helper()
+	var out []string
+	for i := 0; i < n; i++ {
+		v, err := sub.Next()
+		if err != nil {
+			t.Fatalf("Next %d: %v", i, err)
+		}
+		s, ok := v.(string)
+		if !ok {
+			t.Fatalf("Next %d = %#v, want an item", i, v)
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func TestReplay_ALateSubscriberReceivesTheHeldBacklogThenLiveItems(t *testing.T) {
+	reset()
+	src := StreamSource(3)
+	for _, item := range []string{"a", "b", "c", "d"} {
+		src.Emit(item) // nobody is listening yet
+	}
+	sub := StreamSubscribeReplay(src, 3, "error", 0)
+	if got := takeItems(t, sub, 3); !reflect.DeepEqual(got, []string{"b", "c", "d"}) {
+		t.Fatalf("backlog = %v, want the last three held items oldest first", got)
+	}
+	src.Emit("e")
+	nextItem(t, sub, "e")
+	if got := drainMarks("stream.replay"); !reflect.DeepEqual(got, []string{
+		"stream.replay b", "stream.replay c", "stream.replay d"}) {
+		t.Fatalf("replay marks = %v, want one per replayed item", got)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+// The non-vacuity control: the same timing with no declaration sees nothing of
+// what was emitted before `subscribe`, which is §4.5's default.
+func TestReplay_WithoutADeclarationThereIsNoBacklog(t *testing.T) {
+	reset()
+	src := StreamSource()
+	for _, item := range []string{"a", "b", "c", "d"} {
+		src.Emit(item)
+	}
+	sub := StreamSubscribe(src, "error", 0)
+	src.Emit("e")
+	nextItem(t, sub, "e")
+	if got := drainMarks("stream.replay"); len(got) != 0 {
+		t.Fatalf("an undeclared provider replayed %v", got)
+	}
+	sub.Close()
+	src.Close()
+}
+
+func TestReplay_ASmallerRequestTakesTheNewestItems(t *testing.T) {
+	reset()
+	src := StreamSource(4)
+	for _, item := range []string{"1", "2", "3", "4", "5"} {
+		src.Emit(item) // the bounded backlog trims "1"
+	}
+	sub := StreamSubscribeReplay(src, 2, "error", 0)
+	if got := takeItems(t, sub, 2); !reflect.DeepEqual(got, []string{"4", "5"}) {
+		t.Fatalf("backlog = %v, want the newest two", got)
+	}
+	sub.Close()
+	src.Close()
+}
+
+// A replayed item is delivered through the provider's own forward path, so a
+// backlog larger than the buffer is ordinary `error`-policy overflow.
+func TestReplay_ABacklogTakesTheBufferAndThePolicy(t *testing.T) {
+	reset()
+	src := StreamSource(6)
+	for _, item := range []string{"0", "1", "2", "3", "4", "5"} {
+		src.Emit(item)
+	}
+	sub := StreamSubscribeReplay(src, 6, "error", 2)
+	if got := takeItems(t, sub, 2); !reflect.DeepEqual(got, []string{"0", "1"}) {
+		t.Fatalf("buffered backlog = %v, want [0 1]", got)
+	}
+	if _, err := sub.Next(); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("a backlog past the buffer = %v, want Faulted(overflow)", err)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+func TestReplay_TheBacklogRidesTheCombinatorChain(t *testing.T) {
+	reset()
+	src := StreamSource(4)
+	for _, item := range []string{"1", "2", "3", "4"} {
+		src.Emit(item)
+	}
+	chain := StreamFilter(src, func(x string) bool { return x == "2" || x == "4" })
+	sub := StreamSubscribeReplay(chain, 4, "error", 0)
+	if got := takeItems(t, sub, 2); !reflect.DeepEqual(got, []string{"2", "4"}) {
+		t.Fatalf("backlog through filter = %v, want [2 4]", got)
+	}
+	sub.Close()
+	src.Close()
+	if n := StreamPending(); n != 0 {
+		t.Fatalf("residue = %d, want 0", n)
+	}
+}
+
+func TestReplay_ADeclarationAloneReplaysNothing(t *testing.T) {
+	reset()
+	src := StreamSource(4)
+	src.Emit("old")
+	sub := StreamSubscribe(src, "error", 0)
+	src.Emit("new")
+	nextItem(t, sub, "new")
+	sub.Close()
+	src.Close()
+}
+
+// The one ordering the single-threaded reference cannot exhibit. Live
+// emissions racing a late subscriber land either BEFORE the subscribe (and so
+// inside the held backlog) or AFTER the whole backlog, never in the middle of it
+// and never twice: the consumer sees one contiguous, strictly increasing run of
+// the provider's sequence. Run under `-race`, repeatedly, with a backlog long
+// enough that an unserialised replay is overtaken in practice.
+func TestReplay_ALiveEmitNeverOvertakesTheBacklog(t *testing.T) {
+	const held, live = 48, 4000
+	for round := 0; round < 20; round++ {
+		reset()
+		src := StreamSource(held)
+		for i := 0; i < held; i++ {
+			src.Emit(strconv.Itoa(i))
+		}
+		var wg sync.WaitGroup
+		started := make(chan struct{})
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := held; i < held+live; i++ {
+				src.Emit(strconv.Itoa(i))
+				if i == held {
+					close(started)
+				}
+			}
+		}()
+		<-started // subscribe while the provider is emitting
+		sub := StreamSubscribeReplay(src, held, "error", 2*(held+live))
+		wg.Wait()
+		src.Close()
+		var got []int
+		for {
+			v, err := sub.Next()
+			if err != nil {
+				t.Fatalf("round %d: %v", round, err)
+			}
+			if IsStreamClosed(v) {
+				break
+			}
+			n, _ := strconv.Atoi(v.(string))
+			got = append(got, n)
+		}
+		if len(got) < held {
+			t.Fatalf("round %d: delivered %d items, want at least the %d held",
+				round, len(got), held)
+		}
+		for i := 1; i < len(got); i++ {
+			if got[i] != got[i-1]+1 {
+				t.Fatalf("round %d: delivered %v: a live item overtook the "+
+					"backlog or was delivered twice", round, got)
+			}
+		}
+		if got[len(got)-1] != held+live-1 {
+			t.Fatalf("round %d: the last live item is missing: %v", round, got)
+		}
+		sub.Close()
+	}
+}
+
+// The emitted `Replayed` component compiles against this runtime, runs its
+// loop over the declared provider, and still tears down with no residue. The
+// component is appended to testdata/stream_130.rvl by the Python driver
+// (test_stream_exec_130.py `_REPLAYED`) rather than written in the document,
+// which is a gate/reference census case.
+func TestEmitted_Replayed_RunsAndClosesItsBracket(t *testing.T) {
+	reset()
+	root := stc.New()
+	defer root.Close()
+
+	sink := &collectSink{}
+	provider := root.Load(sinkProvider(sink))
+	if err := provider.Ready(bg()); err != nil {
+		t.Fatalf("SinkProvider: %v", err)
+	}
+	type loaded struct {
+		f   *stc.Fiber
+		err error
+	}
+	done := make(chan loaded, 1)
+	go func() {
+		f := LoadReplayed(root)
+		done <- loaded{f, f.Ready(bg())}
+	}()
+	waitFor(t, "the replayed loop to subscribe", func() bool {
+		return StreamLiveSubscriptions() == 1
+	})
+	src := StreamProviders()[0]
+	if src.replayCap != 3 {
+		t.Fatalf("the emitted provider holds %d, want the declared 3", src.replayCap)
+	}
+	src.Emit("x")
+	src.Emit("y")
+	src.Close()
+
+	var got loaded
+	select {
+	case got = <-done:
+		if got.err != nil {
+			t.Fatalf("the replayed activation failed: %v", got.err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("the provider's Closed never ended the loop")
+	}
+	if g := sink.snapshot(); !reflect.DeepEqual(g, []string{"x", "y"}) {
+		t.Fatalf("delivered = %v, want [x y]", g)
+	}
+	got.f.Dispose()
+	if err := got.f.Gone(bg()); err != nil {
+		t.Fatalf("Gone: %v", err)
 	}
 	if n := StreamPending(); n != 0 {
 		t.Fatalf("stream residue after unload = %d, want 0", n)

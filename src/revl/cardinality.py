@@ -29,6 +29,8 @@ boundary surface it is joined to.
 
 from __future__ import annotations
 
+import re
+
 import math
 
 # --------------------------------------------------------------------------
@@ -185,8 +187,60 @@ def _max_iters(n0: int, c: int, k: int, op: str) -> int:
     return max(0, (n0 - c) // k + 1) if n0 >= c else 0
 
 
+_TYPE_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _type_mentions_fn(written, types: dict, seen: frozenset = frozenset()) -> bool:
+    """Whether a declared type can hold a function value: an arrow type, or a
+    record/variant whose fields or payloads can, transitively. Conservative: a
+    missing type, a generic parameter or any name this IR does not define is
+    treated as possibly a function, so a doubt can only keep the identity rule
+    (issue #1755)."""
+    from .resources import PRIMITIVE_TYPE_NAMES, _STRUCTURAL_HEADS  # noqa: PLC0415
+    if not isinstance(written, str) or "->" in written:
+        return True
+    for name in _TYPE_NAME.findall(written):
+        if name in PRIMITIVE_TYPE_NAMES or name in _STRUCTURAL_HEADS:
+            continue
+        defn = types.get(name)
+        if defn is None:
+            return True
+        if name in seen:
+            continue
+        inner = list((defn.get("fields") or {}).values())
+        inner += [case.get("payload") for case in defn.get("cases") or []
+                  if case.get("payload") is not None]
+        if any(_type_mentions_fn(t, types, seen | {name}) for t in inner):
+            return True
+    return False
+
+
+def _param_escapes(node, pname: str, fname: str, index: int) -> bool:
+    """Whether parameter `pname` (position `index` of `fname`) is used in any
+    way other than invoked directly (`pname(...)`) or threaded unchanged into
+    the self-call at its own position. Any other use (an alias, a field or
+    element read, a pass to another fn or position) carries the value
+    somewhere the per-iteration fold cannot follow, so an arrow riding it would
+    be dropped (issue #1755)."""
+    if isinstance(node, list):
+        return any(_param_escapes(item, pname, fname, index) for item in node)
+    if not isinstance(node, dict):
+        return False
+    if _is_param_call(node, pname):
+        return _param_escapes(node.get("args") or [], pname, fname, index)
+    if _is_self_call(node, fname):
+        args = node.get("args") or []
+        return any(_param_escapes(arg, pname, fname, index)
+                   for j, arg in enumerate(args)
+                   if not (j == index and _bare_name(arg) == pname))
+    if node.get("kind") == "var" and node.get("name") == pname:
+        return True
+    return any(_param_escapes(value, pname, fname, index) for value in node.values())
+
+
 def _certify_recursion(fname, decl, direct, recursive, closure,
-                       reach, fn_caps_map, has_loop, unknown_dispatch):
+                       reach, fn_caps_map, has_loop, unknown_dispatch,
+                       types=None):
     """Decide whether the self-recursive fn `fname` is a certifiable LINEAR
     iteration (docs/design/260 §2.2 clauses 1,2,4). On success returns a record
     `{ok: True, params, fuel_index, fuel_op, c, k, base, cont}`; on refusal
@@ -281,8 +335,15 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
         return refuse("noguard")
 
     # --- clause 1: every self-call strictly decreases the SAME fuel param by a
-    # positive literal, and threads every OTHER argument by identity (so an arrow
-    # parameter cannot be swapped for a wider dispatch on the back-edge).
+    # positive literal, and threads every FUNCTION-TYPED argument by identity,
+    # so an arrow parameter cannot be swapped for a wider dispatch on the
+    # back-edge. A data argument may change (issue #1755): an agent loop grows
+    # its history. Its new value is computed in the continuation, so every
+    # arrow invocation in it is already in `per_iter`, and any other fn call,
+    # host reach or capability in the body is refused above.
+    types = types or {}
+    fn_typed = [_type_mentions_fn(p.get("type"), types)
+                for p in decl.get("params") or []]
     k_min = None
     for call in self_calls:
         args = call.get("args") or []
@@ -298,13 +359,14 @@ def _certify_recursion(fname, decl, direct, recursive, closure,
             return refuse("nonfuel")
         k_min = k if k_min is None else min(k_min, k)
         for j, arg in enumerate(args):
-            if j == fuel_index:
+            if j == fuel_index or _bare_name(arg) == params[j]:
                 continue
-            if _bare_name(arg) != params[j]:
-                return refuse("nonfuel")
+            if fn_typed[j]:
+                return refuse("rebinds-fn")
 
     return {"ok": True, "params": params, "fuel_index": fuel_index,
-            "fuel_op": op, "c": c, "k": k_min, "base": base, "cont": cont}
+            "fuel_op": op, "c": c, "k": k_min, "base": base, "cont": cont,
+            "body": body}
 
 
 def _local_call_names(node, out: set) -> None:
@@ -350,6 +412,15 @@ def _cert_reason(kind: str, fname: str) -> str:
         "nonfuel": (f"recursion through `{fname}` has no fuel that strictly "
                     "decreases by a positive literal on every back-edge "
                     "(docs/design/260 §2.2 clause 1)"),
+        "rebinds-fn": (f"recursion through `{fname}` passes a different value "
+                       "for a function-typed parameter on a back-edge, so the "
+                       "dispatch one iteration invokes is not the one counted "
+                       "(docs/design/260 §2.2 clause 1)"),
+        "escape": (f"recursion through `{fname}` uses a parameter that carries a "
+                   "crossing other than by invoking it or passing it unchanged "
+                   "to the recursive call (an alias, a field or element read, "
+                   "or a pass elsewhere), so its per-iteration count is not "
+                   "provable (docs/design/260 §2.2, issue #1755)"),
         "noguard": (f"recursion through `{fname}` has no dominating base guard "
                     "`if (n <= c)` with a non-recursive base branch "
                     "(docs/design/260 §2.2 clause 2)"),
@@ -514,7 +585,8 @@ def cardinality(ir: dict) -> dict:
             else:
                 certify_cache[name] = _certify_recursion(
                     name, decl, direct, recursive, _closure(name), reach,
-                    fn_caps_map, has_loop, _UNKNOWN_DISPATCH)
+                    fn_caps_map, has_loop, _UNKNOWN_DISPATCH,
+                    types=ir.get("types") or {})
         return certify_cache[name]
 
     def _classify(name: str) -> tuple[str, str]:
@@ -714,6 +786,16 @@ def cardinality(ir: dict) -> dict:
                 return
 
             params = rec["params"]
+            escaped = [i for i, p in enumerate(params)
+                       if i < len(arg_vecs) and arg_vecs[i]
+                       and _param_escapes(rec["body"], p, fname, i)]
+            if escaped:
+                resolutions[id(node)] = {"int": {}}
+                reason = _cert_reason("escape", fname)
+                for vec in arg_vecs:
+                    for cap in vec:
+                        _record_cert_unbounded(cap, reason)
+                return
             per_iter = {p: _path_max_calls(
                 rec["cont"], lambda n, pp=p: _is_param_call(n, pp))
                 for p in params}
