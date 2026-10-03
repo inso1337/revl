@@ -79,25 +79,13 @@
 // ============================================================ WHAT IT DEFERS
 // Reported for follow-on TS-emitter slices, deliberately OUT of these slices:
 //   * the canonical ABI;
-//   * the component-body `timer` step; and the component-dialect expr kinds
-//     `spawn`/`instance-get` (unexercised);
-//   * the reference's `Stream.*` TIER-LIMIT refusal (roadmap 419e): the
-//     reference `_expr` now refuses a `Stream.*` host builtin, since this tier
-//     has no `Stream` runtime primitive and `host.Stream.source()` was a dead
-//     emit. Deliberately NOT ported: these emitters have no refusal channel at
-//     all (they render bytes over a slice-limited covered surface), and no
-//     fixture reaches a `Stream.*` host builtin, so the oracle cannot see it;
-//     a port would mean inventing a refusal channel for an unreached shape;
-//   * malformed IR and deferred component-runtime features remain refused or
-//     explicitly marked by the corresponding source branch;
-//   * in-file `test`/`fault_test`/`lifecycle test` emission; ROUTED requires
-//     (`realms(...)` + the `revlRouter` helper, its `realmLabel` import, and the
-//     routed-`req` proxy — see SLICE 7); the canonical ABI;
-//   * the COMPONENT-dialect async call surface: an async callable reached through
-//     the `fn` expr kind, or from an async PROVIDE method (its `async_names` are
-//     threaded EMPTY — byte-safe, since no covered component body names an async
-//     callable, but a follow-on slice must thread the doc set through to make the
-//     component tail faithful to the reference's provide-method awaiting);
+//   * witnessed transactions (`class=witnessed` acquisitions register through
+//     `Frame.transactional`; the port does not emit them);
+//   * `fault test` sections: the reference refuses the whole document, and the
+//     port names the section with an `<<UNSUPPORTED-FAULT-TEST:...>>` marker;
+//   * malformed IR: the reference raises `EmitError` on it, and the port, which
+//     has no refusal channel, answers with a named `<<UNSUPPORTED-...>>` marker
+//     where it notices and otherwise trusts the frontend's invariants.
 //
 // ============================================================ SLICE 5 (item 226)
 // The MODULE-FN async path, byte-exact:
@@ -133,14 +121,24 @@
 // ("compiles to irv2, which the port doesn't mirror"): the mirror already holds,
 // now verified by v1/v2-dispatch corpus fixtures rather than crutched off v3 by a
 // trivial top-level `fn`.
-//   * STILL DEFERRED — ROUTED requires (item 167): a routed require
-//     (`requires <k> in realms(...) strategy(...)`) also lowers to ir_version 2 but
-//     additionally needs the `_TS_ROUTER_SRC` runtime literal, the `realmLabel`
-//     runtime import, the `inject_keys = requires − routes` gate, the per-key
-//     `revlRouter` proxy built in `apply()`, and the routed-`req` read
-//     (`_revl_route_<key>`). The router literal embeds backtick templates and
-//     `${…}` the revl lexer reserves, so it is kept out to stay byte-VERIFIED; a
-//     routed v2 doc must NOT enter the corpus until it lands.
+//
+// ============================================================ SLICE 8 (issue #106)
+// The families the port used to refuse by name or diverge on silently, each now
+// byte-exact against the reference over the whole tree (the ts survey reads 0
+// divergences and 0 refusals):
+//   * ROUTED requires (item 167): the verbatim `_TS_ROUTER_SRC` helper on the
+//     v1/v2 path, the `realmLabel` import, the inject gate less the routed keys,
+//     one `revlRouter` proxy per routed key in `apply()`, and a routed `req`
+//     read through `_revl_route_<key>` (the `routes` field of `ACx`);
+//   * `@ts ref` externs (item 396 option B): the three `node:` imports, the ref
+//     runtime, and the lazy sync/async import thunks; config externs (item 378
+//     Stage 5): the plug-time config seam and the `_revl_config` bind;
+//   * the `Map` subscript (#957): `revlMapIndex`, gated by `key_type`;
+//   * in-file `test` and `lifecycle test` drivers, with the test-mode `assert`
+//     (the `test_mode` field of `ACx`);
+//   * the activation-body `timer` step (items 57 and 170), the stream surface
+//     (`subscribe`, `merge`, `every ... in`, `on ... as`; item 130), and the
+//     statement-block `do` arm (item 361).
 //
 // ------------------------------------------------------ the erased-IR boundary
 // Navigation reads the IR in PURE revl through stdlib/value.rvl (item 180): the
@@ -252,13 +250,18 @@ type StmtOut = { lines: List[Str], counter: Int }
 //     declared type is an async function type `(…) -> Async[T]` (item 92): a
 //     call through one returns a `Promise` and is awaited like a named callable.
 //     Per-body (a local name), so it is re-derived at each module-fn boundary.
+// `routes` (item 167) names this component's ROUTED requirement keys: a `req`
+// read of one goes through its `_revl_route_<key>` router proxy instead of
+// `ctx.<key>`. Empty outside a component that routes.
+// `test_mode` is set while an in-file `test` body renders: an `assert` there
+// lowers to vitest's `expect` rather than to a `throw`.
 // `empty_lists` (issue #273) is the body-local `[]`-binding annotation table
 // `empty_list_types` computes; it rides on ACx because a `let` can sit at any
 // depth of the statement tree `v3_stmt` walks.
-type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str] }
+type ACx = { in_async: Bool, in_arrow: Bool, ops: List[Str], async_names: List[Str], async_locals: List[Str], empty_lists: Map[Str, Str], routes: List[Str], test_mode: Bool, comps: List[Any] }
 
 // The sync, non-component context: the pure fn/test pass and every sync body.
-fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty() } }
+fn sync_acx() -> ACx { return { in_async: false, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] } }
 
 // The `"<reqKey>#<method>"` await-seed key.
 fn async_op_key(req_key: Str, method: Str) -> Str {
@@ -957,7 +960,7 @@ fn render_arrow(node: Any, counter: Int, acx: ACx) -> Rendered {
   // stays out of the arrow (its Promise flattens). `async_names`/`async_locals`
   // are inherited (the reference's `with_scope` leaves them untouched), so an
   // async callable invoked inside an async arrow is still awaited.
-  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists }
+  let body_acx = { in_async: is_async, in_arrow: true, ops: acx.ops, async_names: acx.async_names, async_locals: acx.async_locals, empty_lists: acx.empty_lists, routes: acx.routes, test_mode: acx.test_mode, comps: acx.comps }
   let br = expr(value_field(node, "body"), counter, body_acx)
   // Item 435(b): the `async` followed the DECLARED type, so `(msgs) =>
   // model.complete(msgs)` rendered `async (msgs: any) =>
@@ -1088,7 +1091,10 @@ fn render_call(node: Any, counter: Int, acx: ACx) -> Rendered {
     let tr = expr(target, counter, acx)
     var t = tr.text
     if (!is_component_atomic(target)) { t = `(${t})` }
-    let method = ident(value_str(value_field(node, "method")))
+    // issue #1512 (reference `_method_ident`): a service method keeps its
+    // contract name verbatim at every site; a JS/TS reserved word is a legal
+    // property name, so no rename.
+    let method = value_str(value_field(node, "method"))
     let ar = commajoin(value_list(value_field(node, "args")), tr.counter, acx)
     let rendered = `${t}.${method}(${ar.text})`
     // item 141 await-seed: an async service op reached through a req key returns
@@ -1206,6 +1212,15 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   if (kind == "index") {
     let tr = paren_target(value_field(node, "target"), counter, acx)
     let index = value_field(node, "index")
+    // A `Map` subscript reads by KEY, whatever the key's type (issue #957): the
+    // frontend stamps the node with the map's `key_type`, and the read goes
+    // through `revlMapIndex`, which faults on a miss. Checked before the
+    // string-literal arm, as in the reference: `m["alpha"]` on a `Map` is a
+    // keyed read, not a host property read.
+    if (!value_is_null(value_field(node, "key_type"))) {
+      let kr = expr(index, tr.counter, acx)
+      return { text: `revlMapIndex(${tr.text}, ${kr.text})`, counter: kr.counter }
+    }
     if (node_kind(index) == "lit" && value_kind(value_field(index, "value")) == "str") {
       return { text: `${tr.text}[${json_dumps(value_field(index, "value"))}]`, counter: tr.counter }
     }
@@ -1236,7 +1251,7 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
   // config_fields / requires); validation is deferred here exactly as `ident`
   // defers emitter-scaffolding rejection — the covered corpus is clean — so
   // these render the happy-path text only. `host`/`format`/`fn`/`adt` join below
-  // (slice 3); the routed-`req` proxy stays deferred.
+  // (slice 3); a routed `req` reads through its router proxy (slice 8).
   if (kind == "name") {
     return { text: ident(value_str(value_field(node, "id"))), counter: counter }
   }
@@ -1247,8 +1262,16 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
     return { text: member("config", value_str(value_field(node, "field")), false), counter: counter }
   }
   if (kind == "req") {
+    let rname = value_str(value_field(node, "name"))
+    // item 167: a routed require reads through its router proxy, which
+    // re-resolves a live per-realm worker on every call (failover). The proxy
+    // is a local `apply()` built; a provide method's `<key>.<op>(…)` closes
+    // over it.
+    if (list_contains(acx.routes, rname)) {
+      return { text: "_revl_route_".concat(ident(rname)), counter: counter }
+    }
     // Committed-view access: resolved through the fiber's snapshot (R3).
-    return { text: "ctx.".concat(ident(value_str(value_field(node, "name")))), counter: counter }
+    return { text: "ctx.".concat(ident(rname)), counter: counter }
   }
   // ---- slice-3 expr kinds ----
   // `fn` (`_fn_call`): a call to a top-level `fn`/`extern`, the component
@@ -1317,7 +1340,93 @@ fn expr_inner(node: Any, counter: Int, acx: ACx) -> Rendered {
     let key = value_str(value_field(node, "key"))
     return { text: `${r.text}.get(${json_dumps(key)})`, counter: r.counter }
   }
+  if (kind == "do") { return render_do(node, counter, acx) }
+  if (kind == "subscribe") { return render_subscribe(node, counter, acx) }
   return { text: `<<UNSUPPORTED-EXPR:${kind}>>`, counter: counter }
+}
+
+// `_v3_do_expr`: a statement-block match arm (`=> { let x = …; expr }`) in a
+// provide-method body (item 361), lowered to an immediately-invoked arrow so the
+// block's `let` bindings and its final value live in their own scope. In an
+// async method the arrow is `async` and its invocation awaited, so an async
+// callable reached in the block is awaited inside the method's in-flight window.
+// A step other than `let` is refused by name (the reference refuses it too).
+fn render_do(node: Any, counter: Int, acx: ACx) -> Rendered {
+  let stmts = value_list(value_field(node, "stmts"))
+  // issue #273: annotate the arm's `[]` bindings as a method body's are.
+  let elt = empty_list_types(stmts, [], "")
+  var parts = []
+  var c = counter
+  for (st of stmts) {
+    if (value_str(value_field(st, "step")) != "let") {
+      return { text: `<<UNSUPPORTED-DO-STEP:${value_str(value_field(st, "step"))}>>`, counter: c }
+    }
+    let r = expr(value_field(st, "value"), c, acx)
+    c = r.counter
+    var kw = "const"
+    if (value_bool(value_field(st, "mutable"))) { kw = "let" }
+    let ann = empty_list_ann(value_field(st, "value"), value_str(value_field(st, "name")), elt)
+    parts = parts.push(`${kw} ${ident(value_str(value_field(st, "name")))}${ann} = ${r.text};`)
+  }
+  let tr = expr(value_field(node, "tail"), c, acx)
+  parts = parts.push(`return ${tr.text};`)
+  var a = ""
+  if (acx.in_async) { a = "async " }
+  let call = `(${a}() => { ${parts.join(" ")} })()`
+  if (acx.in_async) { return { text: `(await ${call})`, counter: tr.counter } }
+  return { text: call, counter: tr.counter }
+}
+
+// `_stream_head`: the stream a `subscribe` acquires, a plain source or a
+// `merge(a, b)` fan-in (item 130 Slice 3). Recursive: a merged stream is itself
+// a stream, and every link is a derived stream the subscription owns.
+fn stream_head(node: Any, counter: Int, acx: ACx) -> Rendered {
+  if (node_kind(node) == "stream-merge") {
+    var parts = []
+    var c = counter
+    for (src of value_list(value_field(node, "sources"))) {
+      let r = stream_head(src, c, acx)
+      parts = parts.push(r.text)
+      c = r.counter
+    }
+    return { text: `host.Stream.merge(${parts.join(", ")})`, counter: c }
+  }
+  return expr(node, counter, acx)
+}
+
+// `subscribe <stream>` (item 130): a single-consumer subscription whose
+// `close()` is the bracket inverse. The derived combinator chain, the declared
+// buffer capacity and the `block`-policy drain window join an options object
+// only when declared, so a plain subscription is the three-argument call.
+fn render_subscribe(node: Any, counter: Int, acx: ACx) -> Rendered {
+  let sr = stream_head(value_field(node, "stream"), counter, acx)
+  var c = sr.counter
+  var policy = "error"
+  let pol = value_field(node, "policy")
+  if (!value_is_null(pol) && value_str(pol) != "") { policy = value_str(pol) }
+  var opts = []
+  let stages = value_list(value_field(node, "stages"))
+  if (stages.length() > 0) {
+    var rendered = []
+    for (stage of stages) {
+      let sname = value_str(value_field(stage, "stage"))
+      if (sname == "take") {
+        rendered = rendered.push(`["take", ${value_int(value_field(stage, "count"))}]`)
+      } else {
+        let fr = expr(value_field(stage, "fn"), c, acx)
+        rendered = rendered.push(`[${json_dumps(sname)}, ${fr.text}]`)
+        c = fr.counter
+      }
+    }
+    opts = opts.push(`stages: [${rendered.join(", ")}]`)
+  }
+  let buffer = value_field(node, "buffer")
+  if (!value_is_null(buffer)) { opts = opts.push(`capacity: ${value_int(buffer)}`) }
+  let drain = value_field(node, "drain")
+  if (!value_is_null(drain)) { opts = opts.push(`drainMs: ${value_int(drain)}`) }
+  let base = `host.Stream.subscribe(${sr.text}, ${json_dumps(policy)}, ctx`
+  if (opts.length() > 0) { return { text: `${base}, { ${opts.join(", ")} })`, counter: c } }
+  return { text: `${base})`, counter: c }
 }
 
 // The implicit widen markers (docs/arithmetic.md): Int -> Float is `Number(…)`,
@@ -1471,6 +1580,9 @@ fn surface_type(n: Any, known: Map[Str, Str]) -> Str {
     return value_str(value_field(n, "operands"))
   }
   if (kind == "index") {
+    // a Map subscript answers the map's declared VALUE type (#957)
+    let vt = value_field(n, "value_type")
+    if (!value_is_null(vt) && value_str(vt) != "") { return value_str(vt) }
     return list_element(surface_type(value_field(n, "target"), known))
   }
   if (kind == "builtin") {
@@ -1589,7 +1701,8 @@ fn empty_list_ann(value: Any, name: Str, known: Map[Str, Str]) -> Str {
 }
 
 // -------------------------------------------------------------- statements
-// `_v3_stmt` (test_mode = false): one fn-body step -> its emitted lines.
+// `_v3_stmt`: one fn-body or test-body step -> its emitted lines (`acx.test_mode`
+// selects the in-file test form of `assert`).
 fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   let step = value_str(value_field(node, "step"))
   let pad = ind(indent)
@@ -1700,6 +1813,7 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   if (step == "assert") {
     let e = value_field(node, "expr")
     let op = value_str(value_field(e, "op"))
+    if (a.test_mode) { return test_assert(e, pad, counter, a) }
     if (node_kind(e) == "bin" && list_contains(["==", "===", "!=", "!==", "<", ">", "<=", ">="], op)) {
       let left = expr(value_field(e, "left"), counter, a)
       let right = expr(value_field(e, "right"), left.counter, a)
@@ -1725,6 +1839,27 @@ fn v3_stmt(node: Any, indent: Int, counter: Int, acx: ACx) -> StmtOut {
   if (step == "break") { return { lines: [`${pad}break`], counter: counter } }
   if (step == "continue") { return { lines: [`${pad}continue`], counter: counter } }
   return { lines: [`${pad}<<UNSUPPORTED-STEP:${step}>>`], counter: counter }
+}
+
+// An `assert` inside an in-file `test` body. Equality lowers through `revlEq`
+// (revl's `==` is IEEE on Float, which vitest's `toStrictEqual` is not) inside
+// vitest's `expect`, with the rendered source and both values in the message;
+// the message shows the SOURCE operator. Anything else is `toBeTruthy()`.
+fn test_assert(e: Any, pad: Str, counter: Int, a: ACx) -> StmtOut {
+  let op = value_str(value_field(e, "op"))
+  if (node_kind(e) == "bin" && list_contains(["==", "===", "!=", "!=="], op)) {
+    let left = expr(value_field(e, "left"), counter, a)
+    let right = expr(value_field(e, "right"), left.counter, a)
+    var want = "true"
+    if (op == "!=" || op == "!==") { want = "false" }
+    let shown = json_dumps(`${left.text} ${op} ${right.text}`)
+    return { lines: [
+      `${pad}{ const $revl_l = ${left.text}, $revl_r = ${right.text};`,
+      `${pad}  expect(revlEq($revl_l, $revl_r), ${shown} + "\n  left  = " + revlShow($revl_l) + "\n  right = " + revlShow($revl_r)).toBe(${want}) }`
+    ], counter: right.counter }
+  }
+  let r = expr(e, counter, a)
+  return { lines: [`${pad}expect(${r.text}).toBeTruthy()`], counter: r.counter }
 }
 
 // `_emit_ts_functions`: each module fn as an exported TS `function`,
@@ -1761,7 +1896,7 @@ fn emit_functions(functions: List[Any], async_names: List[Str]) -> List[Str] {
     let sync_base = sync_acx()
     var body_acx = { sync_base | empty_lists = elt }
     if (value_bool(value_field(fnode, "async"))) {
-      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt }
+      body_acx = { in_async: true, in_arrow: false, ops: [], async_names: async_names, async_locals: locals, empty_lists: elt, routes: [], test_mode: false, comps: [] }
       out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
     } else {
       out = out.push(`export function ${name}(${params}): ${returns} {`)
@@ -1782,6 +1917,137 @@ fn emit_functions(functions: List[Any], async_names: List[Str]) -> List[Str] {
   return out
 }
 
+// `_ts_extern_config_scaffold`: the module-level config seam for config externs
+// (item 378 Stage 5), mirroring the py tier's: a module-global map a
+// composition driver fills at plug time, and a lookup that THROWS, naming the
+// extern, when a required field is absent.
+fn extern_config_scaffold() -> List[Str] {
+  var o = []
+  o = o.push("export const _REVL_EXTERN_CONFIG: Record<string, Record<string, unknown>> = {};")
+  o = o.push("")
+  o = o.push("function _revlExternConfig(")
+  o = o.push("  name: string, required: string[], defaults: Record<string, unknown>,")
+  o = o.push("): Record<string, unknown> {")
+  o = o.push("  const cfg = _REVL_EXTERN_CONFIG[name];")
+  o = o.push("  if (cfg === undefined) {")
+  o = o.push("    if (required.length > 0) {")
+  o = o.push("      throw new Error(")
+  o = o.push('        "config extern `" + name + "` called before plug-time " +')
+  o = o.push('        "configuration was installed (required config: " +')
+  o = o.push('        required.join(", ") + "); configure it through the run " +')
+  o = o.push("        \"driver's config seam\",")
+  o = o.push("      );")
+  o = o.push("    }")
+  o = o.push("    return { ...defaults };")
+  o = o.push("  }")
+  o = o.push("  const missing = required.filter((f) => !(f in cfg));")
+  o = o.push("  if (missing.length > 0) {")
+  o = o.push("    throw new Error(")
+  o = o.push('      "config extern `" + name + "` called before plug-time " +')
+  o = o.push('      "configuration was installed (missing required config: " +')
+  o = o.push('      missing.join(", ") + ")",')
+  o = o.push("    );")
+  o = o.push("  }")
+  o = o.push("  return { ...defaults, ...cfg };")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// `_ts_extern_config_bind`: the `const _revl_config = ...` first body line. It
+// passes the required (non-defaulted) field names and the defaults, both as
+// JSON built with json.dumps's own separators.
+fn extern_config_bind(name: Str, schema: List[Any]) -> Str {
+  var required = []
+  var defaults = []
+  for (f of schema) {
+    let fname = value_str(value_field(f, "name"))
+    let dflt = value_field(f, "default")
+    if (value_is_null(dflt)) { required = required.push(json_dumps(fname)) }
+    else { defaults = defaults.push(`${json_dumps(fname)}: ${json_dumps(dflt)}`) }
+  }
+  return `const _revl_config = _revlExternConfig(${json_dumps(name)}, [${required.join(", ")}], {${defaults.join(", ")}});`
+}
+
+// `uses_ts_refs`: does some extern carry a `@ts ref` (item 396 option B)? The
+// reference gates the three `node:` imports and the ref runtime on exactly
+// this, so a ref-free module stays byte-identical.
+fn uses_ts_refs(externs: List[Any]) -> Bool {
+  for (ext of externs) {
+    if (!value_is_null(value_field(value_field(ext, "refs"), "ts"))) { return true }
+  }
+  return false
+}
+
+// `_emit_ts_ref_runtime`: the module-level ref machinery. `_revl_ref_path` joins
+// a root the RUNNER provides at run time with the recorded root-relative path,
+// so the emitted text carries no machine-specific path; `_revl_ref_path_stdlib`
+// is the second, install-tree root a stdlib-origin ref resolves against (item
+// 410). No fallback in either direction.
+fn ref_runtime_lines() -> List[Str] {
+  var o = []
+  o = o.push("const _REVL_REFS = new Map<string, any>()")
+  o = o.push("const _revl_require = _revl_createRequire(import.meta.url)")
+  o = o.push("function _revl_ref_path(rel: string): string {")
+  o = o.push("  const root = (globalThis as any).__REVL_REF_ROOT__")
+  o = o.push("  if (root === undefined)")
+  o = o.push("    throw new Error('revl: no host-ref root set; the runner must set globalThis.__REVL_REF_ROOT__ (item 396 option B)')")
+  o = o.push("  return _revl_pathmod.resolve(root, rel)")
+  o = o.push("}")
+  o = o.push("function _revl_ref_path_stdlib(rel: string): string {")
+  o = o.push("  const root = (globalThis as any).__REVL_STDLIB_REF_ROOT__")
+  o = o.push("  if (root === undefined)")
+  o = o.push("    throw new Error('revl: no stdlib host-ref root set; the runner must set globalThis.__REVL_STDLIB_REF_ROOT__ (item 410 two-root scheme)')")
+  o = o.push("  return _revl_pathmod.resolve(root, rel)")
+  o = o.push("}")
+  o = o.push("")
+  return o
+}
+
+// `_emit_ts_ref_thunk`: the lazy import thunk for one `@ts ref` extern. Sync
+// loads through `createRequire` and refuses, at first call, a resolved symbol
+// that is an async function; async loads through a dynamic `import()`. A
+// declared `Secret[T]` return is marked where the value enters (item 421 F6).
+fn ref_thunk(ext: Any, name: Str, params: Str, arg_list: Str, returns: Str, ref: Any) -> List[Str] {
+  let rel = value_str(value_field(ref, "path"))
+  let symbol = ident(value_str(value_field(ref, "symbol")))
+  let where = rel.concat("#").concat(symbol)
+  var path_fn = "_revl_ref_path"
+  if (value_str(value_field(ref, "root")) == "stdlib") { path_fn = "_revl_ref_path_stdlib" }
+  var call = `_f(${arg_list})`
+  if (value_bool(value_field(ext, "secret_return"))) { call = `host.secretResult(${call})` }
+  let not_fn = json_dumps("revl extern `".concat(name).concat("`: ").concat(where).concat(" is not a function"))
+  var out = []
+  if (value_bool(value_field(ext, "async"))) {
+    out = out.push(`export async function ${name}(${params}): Promise<${returns}> {`)
+    out = out.push(`  let _f = _REVL_REFS.get(${json_dumps(name)})`)
+    out = out.push("  if (_f === undefined) {")
+    out = out.push(`    const _m = await import(_revl_pathToFileURL(${path_fn}(${json_dumps(rel)})).href)`)
+    out = out.push(`    _f = _m[${json_dumps(symbol)}]`)
+    out = out.push(`    if (typeof _f !== 'function') throw new Error(${not_fn})`)
+    out = out.push(`    _REVL_REFS.set(${json_dumps(name)}, _f)`)
+    out = out.push("  }")
+    out = out.push(`  return await ${call}`)
+    out = out.push("}")
+  } else {
+    let colour = json_dumps("revl extern `".concat(name).concat("` is declared sync but ").concat(where).concat(" is an async function; declare the extern async or ref a sync symbol"))
+    out = out.push(`export function ${name}(${params}): ${returns} {`)
+    out = out.push(`  let _f = _REVL_REFS.get(${json_dumps(name)})`)
+    out = out.push("  if (_f === undefined) {")
+    out = out.push(`    const _m = _revl_require(${path_fn}(${json_dumps(rel)}))`)
+    out = out.push(`    _f = _m[${json_dumps(symbol)}]`)
+    out = out.push(`    if (typeof _f !== 'function') throw new Error(${not_fn})`)
+    out = out.push("    if (_f.constructor && _f.constructor.name === 'AsyncFunction')")
+    out = out.push(`      throw new Error(${colour})`)
+    out = out.push(`    _REVL_REFS.set(${json_dumps(name)}, _f)`)
+    out = out.push("  }")
+    out = out.push(`  return ${call}`)
+    out = out.push("}")
+  }
+  out = out.push("")
+  return out
+}
+
 // `_emit_ts_externs`: each `extern fn` as an exported TS `function` carrying its
 // verbatim `@ts` body (dedented, each line re-indented two spaces). An `async`
 // extern (item 80) emits `export async function …: Promise<T>` — its body may
@@ -1790,6 +2056,13 @@ fn emit_functions(functions: List[Any], async_names: List[Str]) -> List[Str] {
 // in the covered corpus.
 fn emit_externs(externs: List[Any]) -> List[Str] {
   var out = []
+  // item 378 Stage 5: the plug-time config seam, once, before the externs,
+  // when any extern carries a config schema (byte-identical when none do).
+  var any_config = false
+  for (ext of externs) {
+    if (value_list(value_field(ext, "config")).length() > 0) { any_config = true }
+  }
+  if (any_config) { out = out.concat(extern_config_scaffold()) }
   for (ext of externs) {
     let name = ident(value_str(value_field(ext, "name")))
     var parts = []
@@ -1819,6 +2092,13 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
       impl = "_revl_secret_".concat(name)
       export_kw = ""
     }
+    // item 396 option B: a `@ts ref` extern (a ts ref and no verbatim ts body)
+    // emits a lazy import thunk that resolves the ref'd module at CALL time.
+    let ts_ref = value_field(value_field(ext, "refs"), "ts")
+    if (!value_is_null(ts_ref) && !value_has(bodies, "ts")) {
+      out = out.concat(ref_thunk(ext, name, params, arg_list, returns, ts_ref))
+      continue
+    }
     if (!value_has(bodies, "ts")) {
       out = out.push(`<<EXTERN-NO-TS-BODY:${name}>>`)
     } else {
@@ -1839,6 +2119,10 @@ fn emit_externs(externs: List[Any]) -> List[Str] {
         }
         out = out.push(`${export_kw}function ${impl}(${params}): ${returns} {`)
       }
+      // item 378 Stage 5: a config extern binds `_revl_config` as its first
+      // body line, through the fail-loud lookup.
+      let schema = value_list(value_field(ext, "config"))
+      if (schema.length() > 0) { out = out.push("  ".concat(extern_config_bind(value_str(value_field(ext, "name")), schema))) }
       let body = py_dedent(py_strip_nl(value_str(value_field(bodies, "ts"))))
       if (body == "") {
         out = out.push("  // (empty @ts body)")
@@ -1919,9 +2203,8 @@ fn emit_ts_types(types: Any) -> List[Str] {
 // fn-type + the declared-record `known_types` path in `ts_type_v1`).
 // The v1/v2 `_emit_v1` dispatch is COVERED byte-exact (slice 7, item 240) —
 // `emit_ts_src` is version-agnostic, so a component-only v1/v2 doc emits identically.
-// STILL DEFERRED (a divergence, not a bug, if fed one — excluded from the
-// corpus): ROUTED requires (`realms(...)` + the router + `realmLabel` + the
-// routed-`req` proxy), the canonical ABI, and the component-body `timer` step.
+// Routed requires and the component-body `timer` step joined in slice 8; the
+// canonical ABI is still deferred.
 
 // `TYPE_MAP` for a CONFIG field (`_config_interface`): the six scalar names, and
 // — unlike the service renderer — an unknown name falls back to `any`.
@@ -2216,14 +2499,14 @@ fn method_control(step: Any, level: Int, counter: Int, acx: ACx, frame_var: Str,
 // bind the body; the param TYPES come from the service declaration (arity must
 // agree). An operation the service declares `async` lowers to an `async` method
 // whose body renders in an async context (the await-seed's `ops`, item 219).
-fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str], async_names: List[Str], frame_var: Str, level: Int, counter: Int) -> StmtOut {
+fn provide_impl(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
   let svc_name = value_str(value_field(step, "service"))
   let declared = value_field(value_field(services, svc_name), "methods")
   var out = []
   var c = counter
   for (method of value_list(value_field(step, "methods"))) {
-    let name = ident(value_str(value_field(method, "name")))
+    let name = value_str(value_field(method, "name"))
     let spec = value_field(declared, value_str(value_field(method, "name")))
     let spec_params = value_list(value_field(spec, "params"))
     let param_names = value_list(value_field(method, "params"))
@@ -2252,10 +2535,11 @@ fn provide_impl(step: Any, services: Any, ops: List[Str], known_types: List[Str]
     // single source of truth for the operation's shape).
     let is_async = value_bool(value_field(spec, "async"))
     var prefix = ""
-    var body_acx = sync_acx()
+    let sync_base = sync_acx()
+    var body_acx = { sync_base | routes = routes, comps = comps }
     if (is_async) {
       prefix = "async "
-      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty() }
+      body_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false, comps: comps }
     }
     out = out.push(`${pad}${prefix}${name}(${sig_parts.join(", ")}) {`)
     // A param the service declared `Secret[T]` is a declared DISCLOSURE
@@ -2287,23 +2571,24 @@ fn crossing_key_name(target: Any) -> Str {
   return "?"
 }
 
-// `_component_step`: one activation-body step. Recursive (`if` branches hold
-// body steps). The activation body renders with `in_async` OFF (the reference's
+// `_component_step`: one activation-body step. Recursive (`if` branches and
+// `every ... in` loops hold body steps). The activation body renders with `in_async` OFF (the reference's
 // `_component_body` scopes on `doc_ctx`, whose `in_async` is false): an `await`
-// step supplies its own `await`, so no await-seed is needed here. `timer` is
-// deferred. `ops` is passed through to the provide-method bodies. `comp_name` is
+// step supplies its own `await`, so no await-seed is needed here. `ops` is
+// passed through to the provide-method bodies. `comp_name` is
 // this component's RAW name (for a compensation entry's `site`); `frame_var` is
 // the emitted `Frame` local (`$revl_frame`, "" when the component needs none) —
 // a compensation entry registers through it (item 243 Slice 2b).
-fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[Str], async_names: List[Str], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
+fn component_step(step: Any, services: Any, ops: List[Str], routes: List[Str], known_types: List[Str], async_names: List[Str], comps: List[Any], comp_name: Str, frame_var: Str, level: Int, counter: Int) -> StmtOut {
   let pad = ind(level)
-  let a = sync_acx()
+  let sync_base = sync_acx()
+  let a = { sync_base | routes = routes, comps = comps }
   let kind = value_str(value_field(step, "step"))
   if (kind == "let-effect" || kind == "effect") {
     let awaited = value_bool(value_field(step, "async"))
     var acquire_acx = a
     if (awaited && kind == "let-effect") {
-      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty() }
+      acquire_acx = { in_async: true, in_arrow: false, ops: ops, async_names: async_names, async_locals: [], empty_lists: Map.empty(), routes: routes, test_mode: false, comps: comps }
     }
     let ar = expr(value_field(step, "acquire"), counter, acquire_acx)
     var out = []
@@ -2352,7 +2637,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
   if (kind == "provide") {
     let name = value_str(value_field(step, "name"))
     var out = [`${pad}yield ctx.provide(${json_dumps(name)}, {`]
-    let pr = provide_impl(step, services, ops, known_types, async_names, frame_var, level + 1, counter)
+    let pr = provide_impl(step, services, ops, routes, known_types, async_names, comps, frame_var, level + 1, counter)
     out = out.concat(pr.lines)
     out = out.push(`${pad}} satisfies ${ident(value_str(value_field(step, "service")))})`)
     return { lines: out, counter: pr.counter }
@@ -2362,7 +2647,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     var out = [`${pad}if (${cr.text}) {`]
     var c = cr.counter
     for (s of value_list(value_field(step, "then"))) {
-      let r = component_step(s, services, ops, known_types, async_names, comp_name, frame_var, level + 1, c)
+      let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
       out = out.concat(r.lines)
       c = r.counter
     }
@@ -2370,7 +2655,7 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     if (els.length() > 0) {
       out = out.push(`${pad}} else {`)
       for (s of els) {
-        let r = component_step(s, services, ops, known_types, async_names, comp_name, frame_var, level + 1, c)
+        let r = component_step(s, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
         out = out.concat(r.lines)
         c = r.counter
       }
@@ -2382,7 +2667,124 @@ fn component_step(step: Any, services: Any, ops: List[Str], known_types: List[St
     let mr = expr(value_field(step, "message"), counter, a)
     return { lines: [`${pad}throw new Error(${mr.text})`], counter: mr.counter }
   }
+  if (kind == "timer") { return timer_step(step, ops, async_names, comp_name, frame_var, level, counter, a) }
+  if (kind == "stream-iter") {
+    // item 130 Slice 4: `every <x> in <sub> { … }`. The `yield` sits right after
+    // the await, so a divert while parked abandons the loop; a `Closed` terminal
+    // ends it; a `Faulted` one throws out of `next`. Slice 5's typed-event
+    // handler adds one gate after the terminal test, over a contract built ONCE
+    // above the loop (its dedup memory is constant in the stream's length). The
+    // event name and key stay raw: the runtime indexes by their source spelling.
+    let item = ident(value_str(value_field(step, "bind")))
+    let sr = expr(value_field(step, "subject"), counter, a)
+    var c = sr.counter
+    var out = []
+    let contract = value_field(step, "event")
+    var gate = ""
+    var where = ""
+    if (!value_is_null(contract)) {
+      let ev_name = value_str(value_field(contract, "name"))
+      c = c + 1
+      gate = `_revlEvent${c}`
+      where = `${comp_name}: on ${ev_name}`
+      out = out.push(`${pad}const ${gate} = host.Stream.contract(${json_dumps(ev_name)}, ${json_dumps(value_field(contract, "schema"))}, ${json_dumps(value_str(value_field(contract, "key")))}, ${value_int(value_field(contract, "window"))})`)
+    }
+    out = out.push(`${pad}while (true) {`)
+    out = out.push(`${pad}  const ${item} = await ${sr.text}.next()`)
+    out = out.push(`${pad}  yield () => {}  // iteration boundary (A1)`)
+    out = out.push(`${pad}  if (host.Stream.isClosed(${item})) break`)
+    if (gate != "") { out = out.push(`${pad}  if (!${gate}.admit(${item}, ${json_dumps(where)})) continue`) }
+    for (inner of value_list(value_field(step, "body"))) {
+      let r = component_step(inner, services, ops, routes, known_types, async_names, comps, comp_name, frame_var, level + 1, c)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    out = out.push(`${pad}}`)
+    return { lines: out, counter: c }
+  }
   return { lines: [`${pad}<<UNSUPPORTED-STEP:${kind}>>`], counter: counter }
+}
+
+// `_ts_emission_is_async`: does a timer-body emission return a `Promise` on
+// this tier (item 170)? The await-seed condition of the component `call`: a
+// req-target async service operation, or a call to an async callable.
+fn emission_is_async(e: Any, ops: List[Str], async_names: List[Str]) -> Bool {
+  if (node_kind(e) != "call") { return false }
+  if (value_has(e, "target")) {
+    let target = value_field(e, "target")
+    if (node_kind(target) == "req") {
+      return list_contains(ops, async_op_key(value_str(value_field(target, "name")), node_method(e)))
+    }
+    return false
+  }
+  let callee = value_field(e, "callee")
+  return node_kind(callee) == "var" && list_contains(async_names, value_str(value_field(callee, "name")))
+}
+
+// A timer (item 57): a revertible schedule. The firing closure holds the body's
+// emissions; `host.scheduleEvery`/`scheduleAfter` registers it with the clock
+// coeffect and returns a handle whose cancel is the derived inverse, yielded
+// through `Frame.bracket`. A timer the frontend coloured `async` (item 170)
+// spawns each async emission as a tracked in-flight task, and its inverse drops
+// the in-flight set along with the schedule. The timer number shares the
+// document counter with the compensation and match temps.
+fn timer_step(step: Any, ops: List[Str], async_names: List[Str], comp_name: Str, frame_var: Str, level: Int, counter: Int, a: ACx) -> StmtOut {
+  let pad = ind(level)
+  let n = counter + 1
+  let fname = `$revl_timer_${n}`
+  let handle = `$revl_timer_${n}_h`
+  var verb = "scheduleAfter"
+  if (value_str(value_field(step, "mode")) == "every") { verb = "scheduleEvery" }
+  let interval = value_int(value_field(step, "interval_ms"))
+  let site = json_dumps(`${comp_name}.body:${handle}`)
+  let crossing = `{ key: ${json_dumps(handle)}, method: ${json_dumps(verb)}, args: [], site: ${site} }`
+  var c = n
+  var out = []
+  if (!value_bool(value_field(step, "async"))) {
+    out = out.push(`${pad}const ${fname} = () => {`)
+    for (em of value_list(value_field(step, "body"))) {
+      let r = expr(value_field(em, "expr"), c, a)
+      out = out.push(`${pad}  ${r.text}`)
+      c = r.counter
+      let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
+      out = out.concat(tr.lines)
+      c = tr.counter
+    }
+    out = out.push(`${pad}}`)
+    out = out.push(`${pad}const ${handle} = host.${verb}(${interval}, ${fname})`)
+    out = out.push(`${pad}yield ${frame_var}.bracket(${crossing}, "cancel", () => ${handle}.cancel())`)
+    return { lines: out, counter: c }
+  }
+  let inflight = `$revl_timer_${n}_inflight`
+  out = out.push(`${pad}const ${inflight} = new Set<Promise<void>>()`)
+  out = out.push(`${pad}const ${fname} = () => {`)
+  for (em of value_list(value_field(step, "body"))) {
+    let e = value_field(em, "expr")
+    let r = expr(e, c, a)
+    c = r.counter
+    if (emission_is_async(e, ops, async_names)) {
+      out = out.push(`${pad}  const _revl_task: Promise<void> = Promise.resolve(${r.text}).then(() => { ${inflight}.delete(_revl_task) }, () => { ${inflight}.delete(_revl_task) })`)
+      out = out.push(`${pad}  ${inflight}.add(_revl_task)`)
+    } else {
+      out = out.push(`${pad}  ${r.text}`)
+      let tr = timer_compensation(em, n, comp_name, frame_var, level + 1, c, a)
+      out = out.concat(tr.lines)
+      c = tr.counter
+    }
+  }
+  out = out.push(`${pad}}`)
+  out = out.push(`${pad}const ${handle} = host.${verb}(${interval}, ${fname})`)
+  out = out.push(`${pad}yield ${frame_var}.bracket(${crossing}, "cancel", () => { ${handle}.cancel(); ${inflight}.clear() })`)
+  return { lines: out, counter: c }
+}
+
+// A timer firing registers the compensation an emitted extern declares, once
+// per firing, after the fire (item 254, issue #1592). A firing has no generator
+// to yield into, so it uses the provide-method form.
+fn timer_compensation(em: Any, n: Int, comp_name: Str, frame_var: Str, level: Int, counter: Int, a: ACx) -> StmtOut {
+  let idx = compensated_extern_index(value_field(em, "expr"), a.comps)
+  if (idx < 0) { return { lines: [], counter: counter } }
+  return register_compensation(value_field(a.comps[idx], "compensate"), true, level, counter, a, `${comp_name}.timer${n}`, comp_name, `${frame_var}.compensationMethod`)
 }
 
 // Both activation and method compensation snapshot arguments at registration.
@@ -2394,15 +2796,39 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
       emitted = `await ${emitted}`
     }
     var out = [`${pad}${emitted}`]
+    var c = er.counter
+    // the site-spelled clause, then the emitted extern's own declared one
+    // (item 254, issue #1592), each registered after the fire
     let comp = value_field(step, "compensate")
-    if (value_is_null(comp)) { return { lines: out, counter: er.counter } }
+    if (!value_is_null(comp)) {
+      let r = register_compensation(comp, false, level, c, a, site_prefix, scope_name, register)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    let idx = compensated_extern_index(value_field(step, "expr"), a.comps)
+    if (idx >= 0) {
+      let r = register_compensation(value_field(a.comps[idx], "compensate"), true, level, c, a, site_prefix, scope_name, register)
+      out = out.concat(r.lines)
+      c = r.counter
+    }
+    return { lines: out, counter: c }
+}
+
+// `_register_compensation`: one compensation registration, after its emission
+// fired. `declared` marks an extern's own slot, lowered in the pure-expression
+// call dialect: a bare named call there is read as the component `fn` node
+// (`_as_fn_call`), so its arguments are bound at registration and the Phase-2
+// closure replays the call.
+fn register_compensation(comp: Any, declared: Bool, level: Int, counter: Int, a: ACx, site_prefix: Str, scope_name: Str, register: Str) -> StmtOut {
+    let pad = ind(level)
+    var out = []
     // item 247/243 Slice 2b: a compensation entry — audit-facing, best-effort,
     // ABORT-ONLY, Phase 2. Args are bound to temps HERE, at registration (the
     // contract's "no data hazard"): a deferred Phase-2 closure never re-reads a
     // variable a later step might reassign. The crossing's `args` is captured
     // once, from those same `const` temps, and the replayed call is rebuilt from
     // them (no double evaluation).
-    var c = er.counter + 1
+    var c = counter + 1
     let n = c
     let site = `${site_prefix}#${n}`
     let target = value_field(comp, "target")
@@ -2425,17 +2851,24 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
         i += 1
       }
       let args_joined = temps.join(", ")
-      let run_ts = `${target_tmp}.${ident(method)}(${args_joined})`
+      let run_ts = `${target_tmp}.${method}(${args_joined})`
       let crossing = `{ key: ${json_dumps(crossing_key_name(target))}, method: ${json_dumps(method)}, args: [${args_joined}], site: ${json_dumps(site)} }`
       out = out.push(`${pad}${register}(${crossing}, ${json_dumps(method)}, [${args_joined}], () => ${run_ts})`)
       return { lines: out, counter: c }
     }
     let comp_kind = node_kind(comp)
-    if (comp_kind == "fn" || comp_kind == "host") {
+    var as_fn = false
+    if (declared && comp_kind == "call" && !value_has(comp, "target")) {
+      as_fn = node_kind(value_field(comp, "callee")) == "var"
+    }
+    if (comp_kind == "fn" || comp_kind == "host" || as_fn) {
       // a bare `fn` or `host` builtin call: no separate target.
       var name = ""
       if (comp_kind == "fn") { name = value_str(value_field(comp, "name")) }
-      else { name = value_str(value_field(comp, "fn")) }
+      else {
+        if (as_fn) { name = value_str(value_field(value_field(comp, "callee"), "name")) }
+        else { name = value_str(value_field(comp, "fn")) }
+      }
       var temps = []
       var i = 0
       for (arg of value_list(value_field(comp, "args"))) {
@@ -2476,7 +2909,7 @@ fn emit_compensated(step: Any, level: Int, counter: Int, a: ACx, site_prefix: St
 fn body_is_async(steps: List[Any]) -> Bool {
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
-    if (kind == "await") { return true }
+    if (kind == "await" || kind == "stream-iter") { return true }
     if ((kind == "effect" || kind == "let-effect" || kind == "emit") && value_bool(value_field(step, "async"))) { return true }
   }
   return false
@@ -2506,18 +2939,26 @@ fn config_interface(comp: Any) -> List[Str] {
 }
 
 // `_component`: one component's config interface + plugin object.
-fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], counter: Int) -> StmtOut {
+fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names: List[Str], comps: List[Any], counter: Int) -> StmtOut {
   let name = ident(value_str(value_field(comp, "name")))
   var out = config_interface(comp)
   out = out.push(`export const ${name} = {`)
   out = out.push(`  name: ${json_dumps(name)},`)
-  // inject: the requirement keys (routed keys are deferred, so all of them).
+  // inject: the requirement keys, less the routed ones.
   // With any `intercept` present the plugin switches from the array form to the
   // dict form — `{key: intercept.get(key) …}` — the non-null values copied into
   // the fiber context's intercept chain, `null` marking a required-but-not-
   // intercepted key. json.dumps of that dict equals a piecewise build (`, `
   // between entries, `": "` after each key), so the JSON stays pure revl.
-  let req_keys = value_keys(value_field(comp, "requires"))
+  // item 167: routed keys never enter the inject gate. They have no
+  // single-realm provider (the workers live in the named realms), so a fiber
+  // waiting on one would pend forever; the router proxy resolves them lazily.
+  let routes_node = value_field(comp, "routes")
+  let route_keys = value_keys(routes_node)
+  var req_keys = []
+  for (k of value_keys(value_field(comp, "requires"))) {
+    if (!list_contains(route_keys, k)) { req_keys = req_keys.push(k) }
+  }
   let icept = value_field(comp, "intercept")
   if (value_keys(icept).length() > 0) {
     var inj_parts = []
@@ -2589,11 +3030,23 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   // byte-identical to before this slice. `frame_var` is threaded to
   // `component_step`, where a compensation registers through it; "" otherwise.
   let raw_name = value_str(value_field(comp, "name"))
-  let needs_frame = component_needs_frame(comp)
+  let needs_frame = component_needs_frame(comp, comps)
   var frame_var = ""
   if (needs_frame || component_has_bracket(comp)) {
     frame_var = "$revl_frame"
     out = out.push(`    const ${frame_var} = new Frame(ctx, ${json_dumps(name)})`)
+  }
+  // item 167: one router proxy per routed key, built before the body, so a
+  // provide method reading `<key>` fans each call out across its worker realms
+  // (round-robin/least_loaded, re-resolving liveness per call).
+  for (k of route_keys) {
+    let route = value_field(routes_node, k)
+    var realm_parts = []
+    for (r of value_list(value_field(route, "realms"))) { realm_parts = realm_parts.push(json_dumps(r)) }
+    let strat = value_field(route, "strategy")
+    var strategy = "undefined"
+    if (!value_is_null(strat) && value_str(strat) != "") { strategy = json_dumps(strat) }
+    out = out.push(`    const _revl_route_${ident(k)} = revlRouter(ctx, ${json_dumps(k)}, [${realm_parts.join(", ")}], ${strategy})`)
   }
   // One generator per body (LIFO teardown). An async body compiles to an async
   // generator (v1/A1) and its `ctx.effect(...)` is `await`ed inside the `async
@@ -2617,7 +3070,7 @@ fn component_lines(comp: Any, services: Any, known_types: List[Str], async_names
   let ops = async_ops_of(value_field(comp, "requires"), services)
   var c = counter
   for (step of body) {
-    let r = component_step(step, services, ops, known_types, async_names, raw_name, frame_var, 3, c)
+    let r = component_step(step, services, ops, route_keys, known_types, async_names, comps, raw_name, frame_var, 3, c)
     out = out.concat(r.lines)
     c = r.counter
   }
@@ -2659,7 +3112,9 @@ fn service_interfaces(services: Any, known_types: List[Str]) -> List[Str] {
       if (value_bool(value_field(method, "idempotent"))) {
         out = out.push("  /** idempotent — safe to re-deliver; the runtime may auto-retry a transient failure (item 44) */")
       }
-      out = out.push(`  ${mname}(${sig_parts.join(", ")}): ${returns}`)
+      // quoted for a reserved word: in an interface, a bare `new(..)` is a
+      // construct signature, not a method named `new` (issue #1512)
+      out = out.push(`  ${prop_key(mname)}(${sig_parts.join(", ")}): ${returns}`)
     }
     out = out.push("}")
     out = out.push("")
@@ -2717,7 +3172,7 @@ fn emit_component_tail(ir: Any, async_names: List[Str]) -> List[Str] {
   out = out.concat(context_augmentation(components))
   var c = 0
   for (comp of components) {
-    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, c)
+    let r = component_lines(comp, value_field(ir, "services"), known_types, async_names, compensated_externs(ir), c)
     out = out.concat(r.lines)
     out = out.push("")
     c = r.counter
@@ -2926,6 +3381,85 @@ fn revl_index_helper() -> Str {
   return o.join(newline())
 }
 
+// `_TS_ROUTER_SRC`: the emitted realization of a routed require (item 167),
+// verbatim. Every line is a plain string: a plain string that carries a
+// backtick is template source held as DATA, so its `${...}` is not read as
+// an interpolation.
+fn revl_router_src() -> Str {
+  var o = []
+  o = o.push("// item 167: the emitted realization of a routed require (item 162's `routes`")
+  o = o.push("// IR), mirroring src/revl/run.py::_Router. A component that")
+  o = o.push('// `requires <k> in realms("w1"…"wN") strategy(...)` provides <k> once')
+  o = o.push("// downstream (G2) while fanning each call out across the worker realms. The")
+  o = o.push("// proxy holds no worker handle — it re-resolves the live per-realm handle on")
+  o = o.push("// every call (`ctx.root.isolate(k, realmLabel(w, k)).reflect.get(k)`, nullish for")
+  o = o.push("// a non-ACTIVE provider), so a withdrawn worker drops out and its calls go to")
+  o = o.push("// the survivors (reactive failover).")
+  o = o.push("function revlRouter(")
+  o = o.push("  ctx: Context,")
+  o = o.push("  key: string,")
+  o = o.push("  realms: string[],")
+  o = o.push("  strategy?: string,")
+  o = o.push("): any {")
+  o = o.push("  const root = ctx.root")
+  o = o.push("  const strat = strategy ?? 'round_robin'")
+  o = o.push("  let cursor = 0")
+  o = o.push("  const served: Record<string, number> = {}")
+  o = o.push("  for (const r of realms) served[r] = 0")
+  o = o.push("  const handle = (realm: string): any =>")
+  o = o.push("    (root as any).isolate(key, realmLabel(realm, key)).reflect.get(key)")
+  o = o.push("  const live = (): Array<[string, any]> =>")
+  o = o.push("    realms.map((r) => [r, handle(r)] as [string, any]).filter(([, h]) => h != null)")
+  o = o.push("  const select = (): any => {")
+  o = o.push("    const l = live()")
+  o = o.push("    if (l.length === 0) {")
+  o = o.push("      throw new Error(")
+  o = o.push("        `revl: router for ${JSON.stringify(key)} has no live worker: all ` +")
+  o = o.push("          `${realms.length} realm(s) (${realms.join(', ')}) have withdrawn`,")
+  o = o.push("      )")
+  o = o.push("    }")
+  o = o.push("    let chosen: [string, any] | undefined")
+  o = o.push("    if (strat === 'least_loaded') {")
+  o = o.push("      // route to the live realm served fewest; ties keep declaration order")
+  o = o.push("      chosen = l.reduce((a, b) => (served[b[0]] < served[a[0]] ? b : a))")
+  o = o.push("    } else {")
+  o = o.push("      // round_robin — next live realm in declaration order")
+  o = o.push("      const n = realms.length")
+  o = o.push("      for (let off = 0; off < n; off++) {")
+  o = o.push("        const cand = realms[(cursor + off) % n]")
+  o = o.push("        const m = l.find(([rlm]) => rlm === cand)")
+  o = o.push("        if (m) {")
+  o = o.push("          cursor = (cursor + off + 1) % n")
+  o = o.push("          chosen = m")
+  o = o.push("          break")
+  o = o.push("        }")
+  o = o.push("      }")
+  o = o.push("    }")
+  o = o.push("    served[chosen![0]]++")
+  o = o.push("    return chosen![1]")
+  o = o.push("  }")
+  o = o.push("  return new Proxy(")
+  o = o.push("    {},")
+  o = o.push("    {")
+  o = o.push("      get(_t, method) {")
+  o = o.push("        if (typeof method !== 'string') return undefined")
+  o = o.push("        return (...args: any[]) => (select() as any)[method](...args)")
+  o = o.push("      },")
+  o = o.push("    },")
+  o = o.push("  )")
+  o = o.push("}")
+  return o.join(newline())
+}
+
+fn revl_map_index_helper() -> Str {
+  var o = []
+  o = o.push("function revlMapIndex<K, V>(m: Map<K, V>, k: K): V {")
+  o = o.push(`  if (!m.has(k)) { throw new Error("revl: map index: no entry for key") }`)
+  o = o.push("  return m.get(k) as V")
+  o = o.push("}")
+  return o.join(newline())
+}
+
 fn revl_opt_to_int_helper() -> Str {
   var o = []
   o = o.push("function revlOptToInt(v: string | number): bigint | undefined {")
@@ -2994,32 +3528,73 @@ fn uses_spawn(n: Any) -> Bool {
 
 // `_needs_frame` (item 243 Slice 2b, docs/design/teardown-contract.md): true iff
 // this component's activation body registers a compensation entry (`emit …
-// compensate …`), the entry kind that needs the `Frame` two-phase teardown
-// apparatus. Walks `if` branches (the only nesting an activation-body step
-// reaches here); a `timer` body is emission-only, so it never contributes. A
+// compensate …`, or an emitted extern that declares its own `compensate`), the
+// entry kind that needs the `Frame` two-phase teardown apparatus. Walks `if`
+// branches and a `timer` step's emissions: a firing that emits such an extern
+// registers on the frame (issue #1592). A
 // component using only plain brackets emits with NO `Frame`, byte-identical to
 // before this slice. (The witnessed/transactional entry kind is Slice-2b too but
 // no covered document declares a witnessed extern, so it is out of this port —
 // see item 324; a re-enabled witnessed fixture would extend this walk.)
-fn body_needs_frame(steps: List[Any]) -> Bool {
+fn body_needs_frame(steps: List[Any], comps: List[Any]) -> Bool {
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
-    if (kind == "emit" && !value_is_null(value_field(step, "compensate"))) { return true }
+    if (kind == "emit" && emit_registers(step, comps)) { return true }
+    // a timer firing that emits an extern declaring its own `compensate`
+    // registers it on the activation frame (issue #1592)
+    if (kind == "timer") {
+      for (em of value_list(value_field(step, "body"))) {
+        if (emit_registers(em, comps)) { return true }
+      }
+    }
     if (kind == "provide") {
       for (method of value_list(value_field(step, "methods"))) {
-        if (body_needs_frame(value_list(value_field(method, "body")))) { return true }
+        if (body_needs_frame(value_list(value_field(method, "body")), comps)) { return true }
       }
     }
     if (kind == "if") {
-      if (body_needs_frame(value_list(value_field(step, "then")))) { return true }
-      if (body_needs_frame(value_list(value_field(step, "else")))) { return true }
+      if (body_needs_frame(value_list(value_field(step, "then")), comps)) { return true }
+      if (body_needs_frame(value_list(value_field(step, "else")), comps)) { return true }
     }
   }
   return false
 }
 
-fn component_needs_frame(comp: Any) -> Bool {
-  return body_needs_frame(value_list(value_field(comp, "body")))
+fn component_needs_frame(comp: Any, comps: List[Any]) -> Bool {
+  return body_needs_frame(value_list(value_field(comp, "body")), comps)
+}
+
+// `_ComponentEmitter.compensated` / `_Ctx.compensated` (item 254, issue #1592):
+// the emission externs that DECLARE their own `compensate`. Every `emit` of one
+// registers that compensation, at whatever site the emit sits.
+fn compensated_externs(ir: Any) -> List[Any] {
+  var out = []
+  for (ext of value_list(value_field(ir, "externs"))) {
+    if (value_str(value_field(ext, "class")) == "emission" && !value_is_null(value_field(ext, "compensate"))) {
+      out = out.push(ext)
+    }
+  }
+  return out
+}
+
+// `_compensated_extern`: the index in `comps` of the extern an emission calls
+// (a `fn`-kind call naming it), or -1.
+fn compensated_extern_index(e: Any, comps: List[Any]) -> Int {
+  if (node_kind(e) != "fn") { return -1 }
+  let nm = value_str(value_field(e, "name"))
+  var i = 0
+  for (ext of comps) {
+    if (value_str(value_field(ext, "name")) == nm) { return i }
+    i += 1
+  }
+  return -1
+}
+
+// `_emit_compensations` is non-empty: the step spells a `compensate`, or the
+// extern it emits declares one.
+fn emit_registers(step: Any, comps: List[Any]) -> Bool {
+  if (!value_is_null(value_field(step, "compensate"))) { return true }
+  return compensated_extern_index(value_field(step, "expr"), comps) >= 0
 }
 
 // `_has_bracket`: true iff this component's activation body yields at least one
@@ -3031,6 +3606,8 @@ fn body_has_bracket(steps: List[Any]) -> Bool {
   for (step of steps) {
     let kind = value_str(value_field(step, "step"))
     if (kind == "let-effect" || kind == "effect") { return true }
+    // a timer's cancel inverse is a bracket disposer too
+    if (kind == "timer") { return true }
     if (kind == "if") {
       if (body_has_bracket(value_list(value_field(step, "then")))) { return true }
       if (body_has_bracket(value_list(value_field(step, "else")))) { return true }
@@ -3101,16 +3678,26 @@ fn acquire_method_name(node: Any) -> Str {
 // registers a compensation entry.
 fn uses_frame(ir: Any) -> Bool {
   for (comp of value_list(value_field(ir, "components"))) {
-    if (component_needs_frame(comp)) { return true }
+    if (component_needs_frame(comp, compensated_externs(ir))) { return true }
+  }
+  return false
+}
+
+// `_uses_routes`: does some component carry a routed require (item 162's
+// `routes` IR)? Such a module imports `realmLabel` and, on the v1/v2 path, emits
+// the router helper.
+fn uses_routes(ir: Any) -> Bool {
+  for (comp of value_list(value_field(ir, "components"))) {
+    if (value_keys(value_field(comp, "routes")).length() > 0) { return true }
   }
   return false
 }
 
 // `_runtime_imports`: the `import { … } from '../runtime.ts'` line. `Frame`/
 // `record` are added when a component registers a compensation entry (item 243
-// Slice 2b); `spawn` when a spawn node is present. (routed-require `realmLabel`
-// and the lifecycle-test drivers are deferred — no covered document exercises
-// them. A routed require would need `realmLabel` here, hence it stays out.)
+// Slice 2b); `realmLabel` when a component routes a require (item 167), since
+// the router resolves its worker realms by label; `spawn` when a spawn node is
+// present.
 fn runtime_imports(ir: Any) -> Str {
   var names = ["host"]
   if (uses_frame(ir)) { names = names.push("Frame"); names = names.push("record") }
@@ -3120,7 +3707,13 @@ fn runtime_imports(ir: Any) -> Str {
     // witnessed/compensating extern's `@ts` body, so `record` stays out.
     if (uses_bracket_frame(ir)) { names = names.push("Frame") }
   }
+  if (uses_routes(ir)) { names = names.push("realmLabel") }
   if (uses_spawn(value_field(ir, "components"))) { names = names.push("spawn") }
+  if (uses_lifecycle_tests(ir)) {
+    names = names.push("plug")
+    names = names.push("snapshotRuntime")
+    names = names.push("assertNoResidue")
+  }
   return `import { ${names.join(", ")} } from '../runtime.ts'`
 }
 
@@ -3224,7 +3817,7 @@ fn uses_split(n: Any) -> Bool {
 // `revlIndex`)? A string-LITERAL key is a host/`Any` property read, not a List
 // subscript, so it does not pull the helper in (#549).
 fn uses_index(n: Any) -> Bool {
-  if (node_kind(n) == "index") {
+  if (node_kind(n) == "index" && value_is_null(value_field(n, "key_type"))) {
     let idx = value_field(n, "index")
     if (!(node_kind(idx) == "lit" && value_kind(value_field(idx, "value")) == "str")) {
       return true
@@ -3232,6 +3825,17 @@ fn uses_index(n: Any) -> Bool {
   }
   for (c of value_children(n)) {
     if (uses_index(c)) { return true }
+  }
+  return false
+}
+
+// `_uses_map_index`: does this IR read a `Map` subscript `m[k]` (issue #957)?
+// The frontend marks the node with the map's declared `key_type`; nothing else
+// carries it.
+fn uses_map_index(n: Any) -> Bool {
+  if (node_kind(n) == "index" && !value_is_null(value_field(n, "key_type"))) { return true }
+  for (c of value_children(n)) {
+    if (uses_map_index(c)) { return true }
   }
   return false
 }
@@ -3271,46 +3875,175 @@ fn revl_helpers(ir: Any) -> List[Str] {
   if (uses_parse_int(ir)) { out = out.push(revl_parse_int_helper()); out = out.push("") }
   if (uses_opt_to_int(ir)) { out = out.push(revl_opt_to_int_helper()); out = out.push("") }
   if (uses_index(ir)) { out = out.push(revl_index_helper()); out = out.push("") }
+  if (uses_map_index(ir)) { out = out.push(revl_map_index_helper()); out = out.push("") }
   return out
 }
 
-// ------------------------------------------ the deferred in-file test section
-// In-file `test` / `fault test` / `lifecycle test` emission is deferred out of
-// every self-host emitter slice (see WHAT IT DEFERS above). The reference emits
-// a vitest driver section for it — the `it(...)` blocks, the
-// `import { expect, it } from 'vitest'` line, and for a lifecycle driver the
-// value-form `import { Context }`, the `node:async_hooks` import and the
-// `_revl_settle` / `_revl_test_context` preamble. This port emits none of it.
+// ------------------------------------------------------ the in-file test section
+// `_emit_ts_tests` and `_emit_ts_lifecycle_tests`: the vitest driver section.
+// A plain `test` is an `it(name, () => { ... })` over the ordinary statement
+// renderer in test mode; a `lifecycle test` is an async case that drives a live
+// composition on a real cordis `Context` (load / call / unload / advance /
+// assert / assert no residue) inside the module's entry async context
+// (issue #1112). Each section numbers its `$revl_match_N` temps from zero, as
+// the reference builds a fresh render context per section.
 //
-// Emitting NOTHING made that divergence SILENT, which is the one failure mode
-// the marker convention exists to prevent: a deferred family that answers with
-// a named `<<UNSUPPORTED-...>>` marker is loud in the bytes and is pinned by a
-// boundary test, while a section that is simply skipped is invisible to the
-// byte oracle (no corpus document carries a test section) and is counted as
-// mirrored by tools/selfhost_coverage.py. So a deferred test section now names
-// itself, per test and per family, the way every other deferred family on this
-// tier does. Pinned by
-// tests/test_selfhost_emit_ts.py::test_deferred_families_remain_explicit.
-//
-// Markers, not emission: porting the drivers is the separate, larger half.
-//
-// The marker names the IR SECTION and the test's name, and deliberately does
-// NOT read the per-test `lifecycle` discriminant to tell a `lifecycle test`
-// from a plain one. That is not an oversight and not a gaming of a gate:
-// `tools/selfhost_coverage.py` reads "this tier ports construct X" straight off
-// the boolean-flag read spelling in the self-host source, so branching on the
-// per-test flag here would claim a port of the lifecycle-driver arm this slice
-// does not have, and would move that tier/construct pair out of the ledger's
-// `unported` baseline on the strength of a marker. A marker is a refusal, not
-// an implementation; it says only what it knows.
-//
-// (That scan is over the raw file text, comments included, so naming the
-// spelling in prose registers it too — which is why this note does not.)
-fn deferred_test_markers(ir: Any) -> List[Str] {
-  var out = []
+// `fault test` is not emitted: the reference refuses the whole document ("fault
+// tests do not lower"), and a pure self-host emitter fn has no refusal channel,
+// so the port names the section with a marker instead of dropping it.
+
+// `_uses_lifecycle_tests`: the value `Context` import, the plug/residue runtime
+// names, the `AsyncLocalStorage` import and the settle/context preamble all key
+// on this.
+fn uses_lifecycle_tests(ir: Any) -> Bool {
   for (t of value_list(value_field(ir, "tests"))) {
-    out = out.push(`<<UNSUPPORTED-TEST:${value_str(value_field(t, "name"))}>>`)
+    if (value_bool(value_field(t, "lifecycle"))) { return true }
   }
+  return false
+}
+
+fn pure_test_lines(tests: List[Any]) -> List[Str] {
+  var out = []
+  var c = 0
+  for (t of tests) {
+    if (!value_bool(value_field(t, "lifecycle"))) {
+      out = out.push(`it(${json_dumps(value_str(value_field(t, "name")))}, () => {`)
+      let body = value_list(value_field(t, "body"))
+      if (body.length() == 0) {
+        out = out.push("  // (empty test body)")
+      } else {
+        // issue #273: a `test` body binds locals too.
+        let base = sync_acx()
+        let acx = { base | empty_lists = empty_list_types(body, [], ""), test_mode = true }
+        for (st of body) {
+          let r = v3_stmt(st, 2, c, acx)
+          out = out.concat(r.lines)
+          c = r.counter
+        }
+      }
+      out = out.push("})")
+      out = out.push("")
+    }
+  }
+  return out
+}
+
+// One `lifecycle test` step, at driver depth (before the per-test context
+// wrapper adds its own indent). `provided` maps a provision key to its service.
+fn lifecycle_step(step: Any, services: Any, provided: Any, counter: Int, acx: ACx) -> StmtOut {
+  let kind = value_str(value_field(step, "step"))
+  if (kind == "load") {
+    let comp_name = value_str(value_field(step, "component"))
+    let cfg = value_field(step, "config")
+    var items = []
+    var c = counter
+    for (field of value_keys(cfg)) {
+      let r = expr(value_field(cfg, field), c, acx)
+      items = items.push(`${ident(field)}: ${r.text}`)
+      c = r.counter
+    }
+    return { lines: [
+      "  {",
+      `    const _f = plug(root, ${comp_name}, {${items.join(", ")}})`,
+      "    await _f",
+      `    _revl_fibers.set(${json_dumps(comp_name)}, await _f)`,
+      "    await _revl_settle()",
+      "  }"
+    ], counter: c }
+  }
+  if (kind == "unload") {
+    let comp_key = json_dumps(value_str(value_field(step, "component")))
+    return { lines: [
+      `  await (await _revl_fibers.get(${comp_key})).dispose()`,
+      `  _revl_fibers.delete(${comp_key})`,
+      "  await _revl_settle()"
+    ], counter: counter }
+  }
+  if (kind == "call") {
+    let key = value_str(value_field(step, "key"))
+    let mname = value_str(value_field(step, "method"))
+    let svc_name = value_str(value_field(provided, key))
+    let method = value_field(value_field(value_field(services, svc_name), "methods"), mname)
+    var args = []
+    var c = counter
+    for (arg of value_list(value_field(step, "args"))) {
+      let r = expr(arg, c, acx)
+      args = args.push(r.text)
+      c = r.counter
+    }
+    var await_kw = ""
+    if (value_bool(value_field(method, "async"))) { await_kw = "await " }
+    let call = `root.${ident(key)}.${mname}(${args.join(", ")})`
+    let bind = value_field(step, "bind")
+    var line = `  ${await_kw}${call}`
+    if (!value_is_null(bind)) { line = `  const ${ident(value_str(bind))} = ${await_kw}${call}` }
+    return { lines: [line, "  await _revl_settle()"], counter: c }
+  }
+  if (kind == "assert") {
+    return v3_stmt({ step: "assert", expr: value_field(step, "expr") }, 2, counter, acx)
+  }
+  if (kind == "advance") {
+    return { lines: [`  host.clockAdvance(${value_int(value_field(step, "ms"))})`, "  await _revl_settle()"], counter: counter }
+  }
+  if (kind == "assert_no_residue") {
+    return { lines: [
+      "  // R4 + R1: same introspection the py reference",
+      "  // tier's `assert no_residue` performs.",
+      "  assertNoResidue(root, _revl_baseline)"
+    ], counter: counter }
+  }
+  return { lines: [`  <<UNSUPPORTED-LIFECYCLE-STEP:${kind}>>`], counter: counter }
+}
+
+fn lifecycle_test_lines(tests: List[Any], services: Any, components: List[Any]) -> List[Str] {
+  var provided = Map.empty()
+  for (comp of components) {
+    let provs = value_field(comp, "provides")
+    for (k of value_keys(provs)) { provided = provided.set(k, value_str(value_field(provs, k))) }
+  }
+  let base = sync_acx()
+  let acx = { base | test_mode = true }
+  var out = []
+  var c = 0
+  for (t of tests) {
+    if (value_bool(value_field(t, "lifecycle"))) {
+      let steps = value_list(value_field(t, "body"))
+      var body = ["  const root = new Context()"]
+      var advances = false
+      for (st of steps) {
+        if (value_str(value_field(st, "step")) == "advance") { advances = true }
+      }
+      // item 102: the clock coeffect is module-global; reset it so this test's
+      // `advance` steps start from t=0 and see only its own timers.
+      if (advances) { body = body.push("  host.clockReset()") }
+      body = body.push("  const _revl_baseline = snapshotRuntime(root)")
+      body = body.push("  const _revl_fibers = new Map<string, any>()")
+      for (st of steps) {
+        let r = lifecycle_step(st, services, provided, c, acx)
+        body = body.concat(r.lines)
+        c = r.counter
+      }
+      out = out.push(`it(${json_dumps(value_str(value_field(t, "name")))}, async () => {`)
+      out = out.push("  // drives the composition on a real cordis context and")
+      out = out.push("  // proves no residue after LIFO teardown (FR-5 / §7.1). It runs with")
+      out = out.push("  // the module's entry async context restored, so ambient context an")
+      out = out.push("  // earlier test in this file bound with `AsyncLocalStorage.enterWith`")
+      out = out.push("  // is not in scope here — the py tier's per-`asyncio.run` per-test")
+      out = out.push("  // isolation, on this tier (issue #1112).")
+      out = out.push("  await _revl_test_context(async () => {")
+      // One level deeper, inside the per-test context wrapper. No driver line
+      // is empty, so every one takes the indent.
+      for (line of body) { out = out.push("  ".concat(line)) }
+      out = out.push("  })")
+      out = out.push("})")
+      out = out.push("")
+    }
+  }
+  return out
+}
+
+fn fault_test_markers(ir: Any) -> List[Str] {
+  var out = []
   for (t of value_list(value_field(ir, "fault_tests"))) {
     out = out.push(`<<UNSUPPORTED-FAULT-TEST:${value_str(value_field(t, "name"))}>>`)
   }
@@ -3327,10 +4060,39 @@ pub fn emit_ts_src(ir: Any) -> Str {
   var out = []
   out = out.push("// Generated by revl backends/typescript/emit.py — do not edit.")
   out = out.push("// Target runtime: cordis v4 (https://github.com/cordiverse/cordis).")
-  out = out.push("import type { Context } from 'cordis'")
+  let lifecycle = uses_lifecycle_tests(ir)
+  let tests = value_list(value_field(ir, "tests"))
+  // A lifecycle driver constructs a live `Context`, so it needs the value, not
+  // just the type.
+  if (lifecycle) { out = out.push("import { Context } from 'cordis'") }
+  else { out = out.push("import type { Context } from 'cordis'") }
   out = out.push(runtime_imports(ir))
+  if (tests.length() > 0) { out = out.push("import { expect, it } from 'vitest'") }
+  // issue #1112: per-test async-context isolation for the lifecycle drivers.
+  if (lifecycle) { out = out.push("import { AsyncLocalStorage } from 'node:async_hooks'") }
+  // item 396 option B: a `@ts ref` extern resolves its module lazily at call
+  // time, through these three `node:` imports and the ref runtime below.
+  let has_refs = uses_ts_refs(value_list(value_field(ir, "externs")))
+  if (has_refs) {
+    out = out.push("import { createRequire as _revl_createRequire } from 'node:module'")
+    out = out.push("import { pathToFileURL as _revl_pathToFileURL } from 'node:url'")
+    out = out.push("import * as _revl_pathmod from 'node:path'")
+  }
   out = out.push("")
+  if (has_refs) { out = out.concat(ref_runtime_lines()) }
   out = out.concat(revl_helpers(ir))
+  // item 167: the router helper a routed require needs. The reference emits it
+  // on the v1/v2 path (`_emit_v1`) only, after the helpers; its v3 path does
+  // not, so neither does this port.
+  if (value_int(value_field(ir, "ir_version")) != 3 && uses_routes(ir)) {
+    out = out.push(revl_router_src())
+    out = out.push("")
+  }
+  if (lifecycle) {
+    out = out.push("const _revl_settle = () => new Promise<void>((resolve) => setTimeout(resolve, 0))")
+    out = out.push("const _revl_test_context = AsyncLocalStorage.snapshot()")
+    out = out.push("")
+  }
   // Slice 3: v3 TYPE declarations (records) come right after the helpers, before
   // the functions — a service/config signature may render a declared record by
   // name, so its `interface` must precede the interface that references it.
@@ -3353,10 +4115,14 @@ pub fn emit_ts_src(ir: Any) -> Str {
   // awaited callee is already declared above it.
   if (externs.length() > 0) { out = out.concat(emit_externs(externs)) }
   if (functions.length() > 0) { out = out.concat(emit_functions(functions, async_names)) }
-  // The deferred in-file test section, where the reference emits its drivers:
-  // one named marker per test instead of silence (issue #1123).
-  let test_markers = deferred_test_markers(ir)
-  if (test_markers.length() > 0) { out = out.concat(test_markers); out = out.push("") }
+  // The in-file test section: plain tests, then lifecycle drivers. A `fault
+  // test` keeps its named marker (issue #1123).
+  if (tests.length() > 0) {
+    out = out.concat(pure_test_lines(tests))
+    out = out.concat(lifecycle_test_lines(tests, value_field(ir, "services"), value_list(value_field(ir, "components"))))
+  }
+  let fault_markers = fault_test_markers(ir)
+  if (fault_markers.length() > 0) { out = out.concat(fault_markers); out = out.push("") }
   // Slice 2: the component-dialect tail (service interfaces, context
   // augmentation, components). Emits nothing for a function-only document, so
   // the slice-1 corpus stays byte-identical.
@@ -3413,12 +4179,12 @@ test "the await-seed awaits a req-keyed async op only in an async, non-arrow bod
   let call = { kind: "call", target: { kind: "req", name: "store" }, method: "get",
                args: [{ kind: "name", id: "k" }] }
   let ops = [async_op_key("store", "get")]
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "(await ctx.store.get(k))"
   assert expr(call, 0, sync_acx()).text == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: true, ops: ops, async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "ctx.store.get(k)"
-  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty() }).text
+  assert expr(call, 0, { in_async: true, in_arrow: false, ops: [], async_names: [], async_locals: [], empty_lists: Map.empty(), routes: [], test_mode: false, comps: [] }).text
     == "ctx.store.get(k)"
 }
 

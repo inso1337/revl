@@ -1,0 +1,136 @@
+{
+  "about": "The blast-radius task set (issue #1702). Each task is a change to a composition of 20+ components plus its ground truth: the components that must change (`cascade`), the guarantees at stake, and for a question the answer. The ground truth is not hand-maintained: `python3 bench/blast_radius/blast_radius.py --check` recomputes every cascade and answer from the named compiler query and fails on any difference. `expected` names the final state a correct solution reaches; `null` means the composition must be left exactly as it is.",
+  "tasks": [
+    {
+      "id": "commerce-withdraw-cache",
+      "composition": "commerce",
+      "kind": "withdraw",
+      "prompt": "CacheTier is being decommissioned. Withdraw it, and withdraw every component that can no longer run without it. Leave every other component exactly as it is.",
+      "query": {"verb": "withdraw", "component": "CacheTier"},
+      "groundTruth": {
+        "cascade": ["AdminConsole", "AuthService", "CartService", "CatalogService", "InvoiceService", "NightlyScheduler", "OrderService", "PricingEngine", "Recommender", "ReportBuilder", "SearchIndex", "ShippingDesk", "Storefront"],
+        "guarantees": ["G2: each (key, realm) has exactly one provider, so a lost provision has no fallback", "G3: the provider graph is acyclic, so the cascade terminates"]
+      },
+      "expected": "expected/commerce-withdraw-cache.rvl"
+    },
+    {
+      "id": "commerce-withdraw-mail",
+      "composition": "commerce",
+      "kind": "withdraw",
+      "prompt": "The mail relay is being shut off. Withdraw MailRelay and every component that can no longer run without it. Leave every other component exactly as it is.",
+      "query": {"verb": "withdraw", "component": "MailRelay"},
+      "groundTruth": {
+        "cascade": ["Notifier", "ShippingDesk"],
+        "guarantees": ["G2: each (key, realm) has exactly one provider", "send_mail is an irreversible emission: a message that was sent cannot be unsent, so the components that reach it are the ones a careless swap would leave sending"]
+      },
+      "expected": "expected/commerce-withdraw-mail.rvl"
+    },
+    {
+      "id": "commerce-withdraw-metrics",
+      "composition": "commerce",
+      "kind": "withdraw",
+      "prompt": "Withdraw MetricsSink, and every component that can no longer run without it. Leave every other component exactly as it is.",
+      "query": {"verb": "withdraw", "component": "MetricsSink"},
+      "groundTruth": {
+        "cascade": [],
+        "guarantees": ["G2: each (key, realm) has exactly one provider; nothing injects `metrics`, so nothing else breaks"]
+      },
+      "expected": "expected/commerce-withdraw-metrics.rvl"
+    },
+    {
+      "id": "commerce-drift-orders-summary",
+      "composition": "commerce",
+      "kind": "interface",
+      "prompt": "The Orders service is dropping its `summary` operation. Remove it from the service, and change every component that implements or calls it so the composition still links. A caller of `summary` should use `read` instead.",
+      "query": {"verb": "drift", "service": "Orders", "loses": ["summary"]},
+      "groundTruth": {
+        "cascade": ["InvoiceService", "OrderService"],
+        "guarantees": ["admission: a provider implementing an operation its service no longer declares is refused", "admission: a call to an operation the service no longer declares does not resolve"]
+      },
+      "expected": "expected/commerce-drift-orders-summary.rvl"
+    },
+    {
+      "id": "commerce-try-payments-reports",
+      "composition": "commerce",
+      "kind": "try-and-revert",
+      "prompt": "Would withdrawing PaymentGateway take the `reports` key down? Find out, answer yes or no, and leave the composition exactly as it was.",
+      "query": {"verb": "withdraw", "component": "PaymentGateway"},
+      "groundTruth": {
+        "cascade": [],
+        "answer": "yes",
+        "answerRule": {"orphansKey": "reports"},
+        "guarantees": ["the composition is unchanged at the end: the trial withdrawal is reverted"]
+      },
+      "expected": null
+    },
+    {
+      "id": "commerce-nochange-admin-mail",
+      "composition": "commerce",
+      "kind": "no-change",
+      "prompt": "Make sure AdminConsole cannot send mail, directly or through anything it calls. Make the smallest change that guarantees it.",
+      "query": {"verb": "emitters", "target": "send_mail"},
+      "groundTruth": {
+        "cascade": [],
+        "answer": "no change needed",
+        "answerRule": {"absentFromEmitters": "AdminConsole"},
+        "guarantees": ["send_mail is irreversible; AdminConsole already reaches it through no path, so the correct change is none"]
+      },
+      "expected": null
+    },
+    {
+      "id": "tenants-withdraw-tenant-b-store",
+      "composition": "tenants",
+      "kind": "withdraw",
+      "prompt": "Tenant B is leaving. Withdraw TenantBStore and every component that can no longer run without it. Tenant A must keep running untouched.",
+      "query": {"verb": "withdraw", "component": "TenantBStore"},
+      "groundTruth": {
+        "cascade": ["TenantBApi", "TenantBCache", "TenantBSessions", "TenantBUsers", "TenantBWorker"],
+        "guarantees": ["G2 is per (key, realm): tenant A's `kv` is a different provision, so no tenant_a component loses anything", "a change that breaks the other tenant is the consequence this task is about"]
+      },
+      "expected": "expected/tenants-withdraw-tenant-b-store.rvl"
+    },
+    {
+      "id": "tenants-drift-billing-refund",
+      "composition": "tenants",
+      "kind": "interface",
+      "prompt": "Refunds are moving off the platform. Remove `refund` from the Billing service, and remove `refund` from the Api service, whose only job is to forward it. Change every component that implements or calls either so the composition still links.",
+      "query": [
+        {"verb": "drift", "service": "Billing", "loses": ["refund"]},
+        {"verb": "drift", "service": "Api", "loses": ["refund"]}
+      ],
+      "groundTruth": {
+        "cascade": ["BillingService", "TenantAApi", "TenantBApi"],
+        "guarantees": ["refund is an irreversible emission that reaches ledger_write: dropping it removes a crossing from both tenants", "admission refuses an implementation of an undeclared operation and an unresolved call"]
+      },
+      "expected": "expected/tenants-drift-billing-refund.rvl"
+    },
+    {
+      "id": "tenants-try-b-store-a-keys",
+      "composition": "tenants",
+      "kind": "try-and-revert",
+      "prompt": "Would withdrawing TenantBStore stop any tenant_a provision? Find out, answer yes or no, and leave the composition exactly as it was.",
+      "query": {"verb": "withdraw", "component": "TenantBStore"},
+      "groundTruth": {
+        "cascade": [],
+        "answer": "no",
+        "answerRule": {"orphansRealm": "tenant_a"},
+        "guarantees": ["the composition is unchanged at the end: the trial withdrawal is reverted"]
+      },
+      "expected": null
+    },
+    {
+      "id": "tenants-nochange-worker-isolation",
+      "composition": "tenants",
+      "kind": "no-change",
+      "prompt": "Make sure TenantBWorker does not depend on tenant A's sessions, so that withdrawing TenantASessions cannot break it. Make the smallest change that guarantees it.",
+      "query": {"verb": "withdraw", "component": "TenantASessions"},
+      "groundTruth": {
+        "cascade": [],
+        "answer": "no change needed",
+        "answerRule": {"absentFromCascade": "TenantBWorker"},
+        "guarantees": ["the realm already separates them: TenantBWorker resolves `api` in tenant_b, which never reaches tenant_a's sessions"]
+      },
+      "expected": null
+    }
+  ]
+}
