@@ -3035,7 +3035,7 @@
    ],
    [
     "selfhost/checker.rvl",
-    "e9761de5f1f13c7568b98ca5cec0dac6c06cdb05b25a6dc7e34e1bfb8a698a57",
+    "40fb5c1c7cd73b6d41f41e8460c6ae153042d4339b4ec001fbbfb4a649723317",
     "frontier-declined"
    ],
    [
@@ -5549,7 +5549,7 @@
    "tracked_buckets_agree": true,
    "what": "the committed crates/revl-gate, built by cargo and asked through a standalone consumer, over the same corpus"
   },
-  "run": "census-selfhost-8af876f6cb0e",
+  "run": "census-selfhost-2e58859c67ee",
   "schema": "GATE-CENSUS-1",
   "tracked_bucket_prefixes": [
    "false-admission",
@@ -5566,7 +5566,7 @@
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-8af876f6cb0e"
+    "run": "census-selfhost-2e58859c67ee"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5577,7 +5577,7 @@
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
     "reproduced_by": "tools/gate_reference_census.py --engine crate (crates/revl-gate, built by cargo)",
-    "run": "census-selfhost-8af876f6cb0e"
+    "run": "census-selfhost-2e58859c67ee"
    },
    "public": true,
    "rung": "demonstrated",
@@ -5587,7 +5587,7 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-8af876f6cb0e"
+    "run": "census-selfhost-2e58859c67ee"
    },
    "public": true,
    "rung": "measured",
@@ -5597,7 +5597,7 @@
    "evidence": {
     "compiler_commit": "src/revl@sha256:eb399b5f334c",
     "protocol": "EVAL-1",
-    "run": "census-selfhost-8af876f6cb0e"
+    "run": "census-selfhost-2e58859c67ee"
    },
    "public": true,
    "rung": "measured",
@@ -5606,7 +5606,7 @@
  ],
  "generator": {
   "name": "selfhost/lower.rvl admit_src behind crates/revl-gate",
-  "run": "census-selfhost-8af876f6cb0e",
+  "run": "census-selfhost-2e58859c67ee",
   "tool": "tools/gate_reference_census.py --engine selfhost"
  },
  "grader": {
