@@ -151,6 +151,8 @@ over a confidential channel is roadmap item 118's mTLS work
 than a second implementation of it.
 
 Signing off loopback needs the constant-time backend
+====================================================
+
 Both ends sign with ECDSA. `revl.tee_quote`'s pure-Python signer takes time
 that depends on the secret nonce, and a peer bound off loopback signs a receipt
 in answer to every task a remote party sends it, which is exactly the setting
@@ -1180,6 +1182,7 @@ class PeerRunner:
                  workspace: Path, timeout: float = 300.0,
                  network_exposed: bool = False,
                  seen_path: Optional[Path] = None):
+                 network_exposed: bool = False):
         #: Whether a remote party can time this runner's receipt signatures.
         #: Checked here, so a runner that would have to refuse at its first
         #: receipt refuses at construction instead, before it runs any work.
@@ -1256,6 +1259,13 @@ class PeerRunner:
         self.network_exposed = True
         self.seen: dict[str, str] = {}
 
+    def mark_network_exposed(self, purpose: str) -> None:
+        """Sign every later receipt as network-exposed, after checking that the
+        constant-time backend is there (``DispatchError`` naming the extra if
+        it is not)."""
+        _require_backend(purpose)
+        self.network_exposed = True
+
     def handle(self, record: Any) -> dict:
         """Check one task and, if it passes every check, run it and sign a
         receipt. Never raises: the wire is hostile.
@@ -1285,9 +1295,16 @@ class PeerRunner:
                 return _refusal(LINK_TASK_SHAPE,
                                 f"the frame could not be processed: "
                                 f"{type(error).__name__}: {error}")
+        try:
+            return self._handle(record)
+        except SigningBackendUnavailable as error:
+            return _refusal(LINK_TASK_SHAPE,
+                            f"the frame could not be processed: "
+                            f"{type(error).__name__}: {error}")
 
     def _handle(self, record: Any, received: datetime) -> dict:
         touch `seen`."""
+    def _handle(self, record: Any) -> dict:
         if pool_health.is_probe(record):
             return pool_health.answer_probe(
                 record, charter_record=self.charter_record,
@@ -1407,6 +1424,7 @@ class PeerRunner:
             bundle=_bundle_of(source), network_exposed=self.network_exposed,
             **binding)
             bundle=_bundle_of(source))
+            bundle=_bundle_of(source), network_exposed=self.network_exposed)
         self.seen[task_id] = pool_receipt.receipt_digest(receipt)
         return {"ok": True, "task_id": task_id, "receipt": receipt,
                 "result": result}
@@ -1710,6 +1728,7 @@ def verify_delivery(answer: Mapping[str, Any], *, charter_record: Mapping[str, A
                     network_exposed: bool = False,
                     task: Optional[Mapping[str, Any]] = None) -> dict:
                     when: Optional[datetime] = None) -> dict:
+                    network_exposed: bool = False) -> dict:
     """Check what came back: the hash first, then the receipt.
 
     In that order deliberately. A hash failure says the bytes in hand are not
@@ -1873,6 +1892,7 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
             network_exposed: bool = False,
             task: Optional[Mapping[str, Any]] = None) -> dict:
             attesting_identity: peer_identity.PeerIdentity) -> dict:
+            network_exposed: bool = False) -> dict:
     """Everything after the answer came back, as a second transaction under the
     pool lock.
 
@@ -1896,6 +1916,7 @@ def _settle(*, pool_dir, peer_id: str, task_id: str,
                                  network_exposed=network_exposed,
                                  task=task)
                                  attesting_identity=attesting_identity)
+                                 network_exposed=network_exposed)
         roster.outstanding = ledger.outstanding()
         peer_pool.save_roster(pool_dir, roster)
         save_ledger(pool_dir, ledger)
@@ -1979,6 +2000,7 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
     authority; the entry stays a record until a charter policy says otherwise.
     """
                    attesting_identity: peer_identity.PeerIdentity) -> dict:
+                   network_exposed: bool = False) -> dict:
     """Decide what the answer means and write it into ``ledger``."""
     if not answer.get("ok"):
         link = str(answer.get("link", LINK_RECEIPT_REFUSED))
@@ -1994,6 +2016,7 @@ def _record_answer(ledger: "DeliveryLedger", *, charter_record, directory,
                               attesting_identity=attesting_identity,
                               network_exposed=network_exposed, task=task)
                               attesting_identity=attesting_identity)
+                              network_exposed=network_exposed)
     if not verdict.get("ok"):
         _record_refusal_violation(roster, peer_id, verdict,
                                   receipt=answer.get("receipt"),
@@ -2056,13 +2079,15 @@ def dispatch_one(*, pool_dir, peer_id: str, host: str, port: int,
                       charter_digest=peer_pool.canonical_digest(charter_record),
                       peer_id=peer_id, task_id=task_id, artifact=source,
                       runner=runner, effect_class=effect_class)
-    answer = send_task(sign_task(body, dispatch_identity), host=host,
-                       port=port, timeout=timeout)
+    answer = send_task(sign_task(body, dispatch_identity,
+                                 network_exposed=exposed),
+                       host=host, port=port, timeout=timeout)
     outcome = _settle(pool_dir=pool_dir, peer_id=peer_id, task_id=task_id,
                       member=prepared["member"], answer=answer,
                       attesting_identity=attesting_identity,
                       network_exposed=exposed, task=task)
                       attesting_identity=attesting_identity)
+                      network_exposed=exposed)
     if answer.get("link") == LINK_PEER_UNREACHABLE:
         _note_contact(pool_dir, peer_id, pool_health.HEALTH_UNREACHABLE,
                       host, port, link=LINK_PEER_UNREACHABLE,
