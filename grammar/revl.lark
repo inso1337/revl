@@ -32,7 +32,7 @@ r__header_clause: ("requires" | "provides") (r__provision_key ":" r__capability_
 r__duration_literal: INT ("ms" | "s" | "m" | "h")?
 r_config_block: "config" "{" (r__name ":" r_type_ r__config_bound ("=" r_literal)? (",")?)* "}"
 r__misplaced_header_clause: ""
-r_stmt: IDENT ("=" | any_token any_token) r_pure_expr | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_effect_form | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_subscribe_form | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r__await_approval_expr | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_pure_expr (r__acting_clause)? | "verified" r_effect_form | r_effect_form | r_event_handler | r_stream_iter | r_timer | "fail" r_pure_expr | r__method_if | r_component_if | r__method_while | r__method_for | "emit" r__emit_stmt | "await" "emit" r__emit_stmt | "await" r_pure_expr | "return" | "return" r_pure_expr | "isolate" r__provision_key "in" r_realms_route | "isolate" r__provision_key "in" r_realm_label | r_model_route_stmt | "intercept" r__provision_key "with" r_record_literal | "handoff" r__provision_key ":" r_type_ | r_provide | "break" | "continue"
+r_stmt: IDENT ("=" | any_token any_token) r_pure_expr | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_effect_form | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_subscribe_form | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r__await_approval_expr | ("let" | "var") IDENT (":" r_type_)? "=" ("verified")? r_pure_expr (r__acting_clause)? | "verified" r_effect_form | r_effect_form | r_event_handler | r_stream_iter | r_timer | "fail" r_pure_expr | r__method_if | r_component_if | r__method_while | r__method_for | "emit" r__emit_stmt | "await" "emit" r__emit_stmt | "await" r_pure_expr | "return" | "return" r_pure_expr | "isolate" r__provision_key "in" r_realms_route | "isolate" r__provision_key "in" r_realm_placeholder | "isolate" r__provision_key "in" r_realm_label | r_model_route_stmt | "intercept" r__provision_key "with" r_record_literal | "handoff" r__provision_key ":" r_type_ | r_provide | "break" | "continue"
 r__record_key_name: IDENT | "component" | "config" | "in" | "intercept" | "isolate" | "realm" | "requires" | "with"
 r__type_suffix: "[" r__capability_token "]" r__type_suffix_tail | ("[" r_type_ ("," r_type_)* "]")? r__type_suffix_tail
 r__type_param_list: ("[" (IDENT (",")?)* "]")?
@@ -82,6 +82,7 @@ r__method_while: "while" "(" r_pure_expr ")" r__method_block_or_stmt
 r__method_for: "for" "(" IDENT "of" r_pure_expr ")" r__method_block_or_stmt
 r__emit_stmt: r_pure_expr ("compensate" r_pure_expr)? ("with" r_pure_expr)? (r__acting_clause)?
 r_realms_route: "realms" "(" (STRING ",")* STRING (",")? ")" ("strategy" "(" IDENT ")")?
+r_realm_placeholder: "realm" "(" "?" IDENT ")"
 r_realm_label: "realm" "(" STRING ")"
 r_model_route_stmt: IDENT IDENT IDENT IDENT "{" ((r__skip_semis ("*" | IDENT) "->" r__model_route_candidate ("|" r__model_route_candidate)* (",")?)* | (r__skip_semis ("*" | IDENT) "->" r__model_route_candidate ("|" r__model_route_candidate)* (",")?)* r__skip_semis) "}"
 r_record_literal: "{" (r__record_key_name ":" ("[" (r_literal (",")?)* "]" | r_literal) (",")?)* "}"

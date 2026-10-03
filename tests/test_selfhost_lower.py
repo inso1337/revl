@@ -316,6 +316,11 @@ def _classify(e: RevlError) -> str:
     # does not exist.
     if "state hand-off on `" in m:
         return "G2"
+    # issue #1728: an unbound realm placeholder, refused before lowering by
+    # `realm_placeholders.bind` with code G2, and spelled byte for byte by the
+    # gate's `realm_placeholder_scan`.
+    if m.startswith("realm placeholder `?") and " is not bound: the operator binds it" in m:
+        return "G2"
     # G3 (dependency-cycle / self-provision) and G1 (undeclared access) set no
     # code, so their message markers classify them. G3's two shapes both end
     # "(G3)"; G1 is the reference's postfix/var head-resolution refusal.
@@ -1765,6 +1770,26 @@ component Supervisor requires net: Kv provides sup: Sup {
 # reference's own text is the ground truth. Several are the documented
 # `expected error` of a checked-in rejection fixture.
 REJECTED_PROGRAMS = [
+    # ---- issue #1728: an unbound realm placeholder ---------------------------
+    # The reference binds `realm(?<name>)` before lowering and refuses an
+    # unbound one by name; the gate takes no bindings, so it refuses every one,
+    # with the same sentence. The second case puts a lowering refusal (G4) on a
+    # LATER component: the placeholder refusal still wins on both sides, since
+    # the binding runs before any of lowering does.
+    ("an unbound realm placeholder", """service KV { fn get(k: Str) -> Str }
+component Store provides kv: KV {
+  isolate kv in realm(?tenant)
+  provide kv { fn get(k) = k }
+}
+""", "G2"),
+    ("an unbound realm placeholder ahead of a lowering refusal", """service KV { fn get(k: Str) -> Str }
+service Bus { emission fn publish(topic: Str) }
+component Store provides kv: KV {
+  isolate kv in realm(?tenant)
+  provide kv { fn get(k) = k }
+}
+component Z requires bus: Bus { effect bus.publish("x") undo bus.publish("y") }
+""", "G2"),
     # ---- the qualified test heads, negative controls (item 391) ------------
     # Stepping over a test block must land on the NEXT declaration, not past
     # it: each of these puts a real refusal in the tail, so a step that

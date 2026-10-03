@@ -680,6 +680,12 @@ class IsolateStmt:
     key: str
     realm: str
     line: int
+    # issue #1728: `isolate <key> in realm(?<name>)` names a PLACEHOLDER the
+    # operator binds at admission, not a realm. `realm` holds `?<name>` until
+    # `realm_placeholders.bind` replaces it with the bound realm, which every
+    # compile does before lowering (an unbound placeholder is refused there).
+    # None for a literal `realm("<label>")`, so every existing node is unchanged.
+    placeholder: str | None = None
 
 
 @dataclass
@@ -6108,6 +6114,9 @@ class Parser:
             if self.at("ident", "realms"):
                 realms, strategy = self.realms_route()
                 return RouteStmt(key, realms, strategy, tok.line)
+            if self._at_realm_placeholder():
+                name = self.realm_placeholder()
+                return IsolateStmt(key, f"?{name}", tok.line, placeholder=name)
             return IsolateStmt(key, self.realm_label(), tok.line)
         if tok.kind == "ident" and tok.value == "route" \
                 and self.peek_ahead(1).kind == "ident" \
@@ -7123,6 +7132,29 @@ class Parser:
             stmts.append(self.stmt(in_method=False))
         self.expect("}")
         return stmts
+
+    def _at_realm_placeholder(self) -> bool:
+        """`realm(?<name>)`, the issue-#1728 placeholder, at the cursor."""
+        return (self.at("kw", "realm") and self.peek_ahead(1).kind == "("
+                and self.peek_ahead(2).kind == "?")
+
+    def realm_placeholder(self) -> str:
+        """`realm(?<name>)`: a realm the operator binds at admission (issue
+        #1728). The author names the placeholder, never the realm, so the
+        untrusted-author profile's G9 refusal of a literal realm does not apply;
+        `realm_placeholders.bind` maps it to a realm or refuses it by name."""
+        line = self.expect("kw", "realm").line
+        self.expect("(")
+        self.expect("?")
+        tok = self.peek()
+        if tok.kind != "ident":
+            raise self.err(
+                line,
+                "a realm placeholder is `?` followed by a name, as in `realm(?tenant)`",
+                hint="the operator binds the name to a realm at admission")
+        self.next()
+        self.expect(")")
+        return tok.value
 
     def realm_label(self) -> str:
         """`realm("<label>")` — static string literals only (v2)."""

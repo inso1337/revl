@@ -225,11 +225,12 @@ trusted`.
 
 | flag | what the operator is deciding |
 |---|---|
-| `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code, nor place a component into a named realm |
+| `--author-trust untrusted` (default) | the agent may compose granted services; it may neither author nor reach host code, nor place a component into a named realm (it may write a `realm(?NAME)` placeholder the operator binds with `--bind-realm`) |
 | `--author-trust trusted` | the agent MAY author host code, and name its own realms. Every class-(c) ticket then carries `unreviewedHostCode` and says the declared capabilities are not a bound on what those bodies do. On a ticket raised by a load, swap or edit, `unreviewedHostCode` is the host code of the composition the yes admits. A ticket that would replace a running composition also carries `runningHostCode` (what runs now) and `newHostCode` (the candidate's bodies the running composition does not already run byte for byte) |
 | `--provider MODULE.rvl` | operator-written host code the untrusted agent may compose the SERVICES of — item 334's granted-providers map. Reaching its externs directly is still refused |
 | `--grant SERVICE` | turn on the item-329 reach allowlist. With no grants the allowlist is off: there is no honest default for which of a running system's services an agent may reach |
 | `--root DIR` | a directory the agent's path arguments may name. Defaults to the directory the server was started in |
+| `--bind-realm NAME=REALM` | bind the realm placeholder `realm(?NAME)` to REALM for every source this server admits (repeatable, issue #1728). The untrusted agent may not name a realm, but it may write a placeholder, and only this flag says which realm it is. An unbound placeholder is refused by name, and G2 is checked after binding |
 | `--approval-record-values withheld` (default) | an approved crossing's caller-supplied resource target (`host=`, `path=`, `table=`) is recorded as UNRECORDED, so caller values stay out of the durable cross-session approval log. The cost is that such approvals no longer fold into a distilled rule; author-written literal targets are recorded either way |
 | `--approval-record-values bound` | it is recorded verbatim instead, so a distilled rule can name the destination (item 251 N1). Opt in when you want the fold and the targets are not sensitive |
 

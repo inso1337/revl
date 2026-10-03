@@ -1418,9 +1418,18 @@ def main(argv: list[str] | None = None) -> int:
     if ir is None:
         try:
             profile = None
-            if getattr(args, "taint_strict", False):
+            bind_realm = getattr(args, "bind_realm", None)
+            if getattr(args, "taint_strict", False) or bind_realm:
                 from .admit_profile import AdmissionProfile  # noqa: PLC0415 — lazy
-                profile = AdmissionProfile(taint_strict=True)
+                from .realm_placeholders import parse_bindings  # noqa: PLC0415
+                try:
+                    bindings = parse_bindings(bind_realm)
+                except ValueError as bad:
+                    print(f"error: {bad}", file=sys.stderr)
+                    return 2
+                profile = AdmissionProfile(
+                    taint_strict=bool(getattr(args, "taint_strict", False)),
+                    realm_bindings=bindings)
             ir = compile_files(args.files, profile=profile)
         except RevlError as error:
             if getattr(args, "json_diagnostics", False):

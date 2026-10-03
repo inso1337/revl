@@ -137,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
                           "untrusted input, and a web/net/fs/model/input emission mints "
                           "its origin. Additive — a program that already passes without "
                           "it is unaffected")
+    cmd.add_argument("--bind-realm", action="append", default=[],
+                     metavar="NAME=REALM",
+                     help="bind the realm placeholder `realm(?NAME)` to REALM "
+                          "(repeatable, issue #1728). An unbound placeholder is "
+                          "refused by name; G2 is checked after binding")
 
     # item 439: a COMPOSITION document argument is RESOLVED rather than
     # compiled as a module, so the written IR document holds the rows and the
@@ -1063,6 +1068,14 @@ def build_parser() -> argparse.ArgumentParser:
                                 "(repeatable). Naming any turns on the item-329 "
                                 "reach allowlist; omit them all and reach is not "
                                 "bounded by this flag")
+    mcp_serve.add_argument("--bind-realm", action="append", default=[],
+                           metavar="NAME=REALM",
+                           help="bind the realm placeholder `realm(?NAME)` to "
+                                "REALM for every source this server admits "
+                                "(repeatable, issue #1728). An untrusted agent may "
+                                "not name a realm (G9); it may write a placeholder, "
+                                "and only this operator flag says which realm it "
+                                "is. An unbound placeholder is refused by name")
     mcp_serve.add_argument("--root", action="append", default=[], metavar="DIR",
                            help="a directory the agent's path arguments (`files`, "
                                 "`candidateFiles`, `baselineFiles`, `traceFile`, "
