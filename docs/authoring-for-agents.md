@@ -56,7 +56,10 @@ scaffold  ->  fillSpec  ->  fmt  ->  explain  ->  admit
    hole) and whether you may write one at all: an untrusted author may not.
    Before filling, read `fillable`: a hole with `byThisAuthor: false` (also
    listed under the response's `unfillable`) needs host code this author can
-   never write, so stop and ask the operator rather than spend effort on it. Fill one hole against its spec, re-check,
+   never write, so stop and ask the operator rather than spend effort on it.
+   `grammarCategory` names the syntactic slot the fill must be (today
+   `expression` for every hole); pass it as `category` to `revl_grammar`
+   with a `format` to hold a constrained decoder to that slot. Fill one hole against its spec, re-check,
    repeat. This is the step that turns generate-whole/refuse/regenerate into
    scaffold/fill/fill: most wrong answers become unrepresentable before they
    are written.

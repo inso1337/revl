@@ -234,6 +234,7 @@ The `revl_check` MCP result enriches every open hole with one:
   "fillSpec": {
     "version": 2,
     "expected": "Str",
+    "grammarCategory": "expression",
     "capability": {"permitsCrossing": false, "mayEmit": false, "bound": [],
                    "reason": "a non-emission provide-method — pure"},
     "crossing": {"permitted": false, "required": false, "form": null,
@@ -256,6 +257,17 @@ reads `expected` and `message` keeps working; `fillSpec` is purely additive.
 
 * **`expected`** — the hole's type (§2). A fill that does not have it is a
   type error before it is a wrong answer.
+* **`grammarCategory`** (additive, still version 2): the syntactic category a fill is a
+  document of, one of `program`, `component-body`, `statements`, `expression`,
+  `type`. Pass it to `revl grammar --format lark|gbnf|ebnf --category <it>` or
+  to the MCP `revl_grammar` tool to constrain a decoder to this slot: a fill
+  outside the category cannot parse here. It is read off the grammar derived
+  from the parser (`revl.source_grammar.hole_category`), not a table: the
+  narrowest category every parse of the `hole` keyword passes through. The
+  parser reads `hole` only as a primary expression, so today it is
+  `expression` for every hole, and a fill such as `emit db.put(k, v)` or
+  `` k == "" ? "empty" : `key ${k}` `` is in it. A fill written inside a larger
+  expression replaces the hole as one operand, so parenthesise it there.
 * **`capability`** — the emission upper bound at this position, the G4 question
   (docs/capabilities.md). A hole is a pure expression and can never be `emit
   hole` (§2); the question is what the *fill that replaces it* may do. An
