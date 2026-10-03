@@ -2947,7 +2947,9 @@ TOOLS = [
                 "target": {"type": "string",
                            "description": "which server-side buffer to edit: omit for the "
                                           "main inline source (or the one loaded file), "
-                                          "name a loaded file by its path, or name an "
+                                          "name a loaded file by its path (or by a "
+                                          "basename or trailing path that matches "
+                                          "exactly one loaded file), or name an "
                                           "in-memory module"},
                 "replacing": {"type": "array", "items": {"type": "string"},
                               "description": "components withdrawn in this admission"},
@@ -3056,7 +3058,8 @@ TOOLS = [
                        "declaration's name (a component, service, type, fn, "
                        "extern...), `<buffer>:Name` when the name is not unique, or "
                        "`<buffer>:<line>` for the declaration containing that line; a "
-                       "buffer is a loaded file's path, an in-memory module's key, or "
+                       "buffer is a loaded file's path (or a basename or trailing path "
+                       "naming exactly one), an in-memory module's key, or "
                        "`source`. `with: [\"deps\"]` adds the declarations it names "
                        "(its services, the functions and types it uses), and "
                        "`comments: false` returns the code alone in canonical form. "

@@ -517,7 +517,9 @@ components, where the top-level `touched` above names symbols:
   replacement}` / `{anchor, replacement, count?}` / `{symbol, replacement}`,
   each with an optional `target`); `target` (which server-side buffer to edit: omit for the main
   inline source or the one loaded file, a loaded file's path, or an in-memory
-  module); `replacing`; with nothing loaded, `files` / `source` / `modules` /
+  module. A loaded file can also be named by its basename or a trailing part
+  of its path when that matches exactly one loaded file; one matching several
+  is refused, listing them); `replacing`; with nothing loaded, `files` / `source` / `modules` /
   `config` to load first.
 
 ### `revl_change`

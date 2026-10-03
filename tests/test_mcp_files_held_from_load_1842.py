@@ -95,3 +95,42 @@ def test_a_files_swap_records_the_text_it_swapped_in(loaded):
     lib.write_text('pub fn label() -> Str { return "later" }\n', encoding="utf-8")
     assert _call("revl_swap", {})["swapped"] is True
     assert _describe() == "v3"
+
+
+# ------------------------------------- naming a buffer the way a file is named
+
+
+def test_an_edit_names_a_buffer_by_its_basename(loaded):
+    edited = _call("revl_edit", {"target": "lib.rvl", "edits": [
+        {"anchor": '"v1"', "replacement": '"by-name"'}]})
+    assert edited["ok"] is True and edited["swapped"] is True, edited
+    assert edited["applied"][0]["target"] == str(loaded[1])
+    assert _describe() == "by-name"
+
+
+def test_an_edit_names_a_buffer_by_a_trailing_path(loaded):
+    trailing = f"{loaded[1].parent.name}/lib.rvl"
+    edited = _call("revl_edit", {"target": trailing, "edits": [
+        {"anchor": '"v1"', "replacement": '"by-suffix"'}]})
+    assert edited["ok"] is True, edited
+    assert _describe() == "by-suffix"
+
+
+def test_a_suffix_matching_two_buffers_is_refused_with_both():
+    from revl.mcp.edit import EditError, _resolve_buffer
+
+    vs = {"source": None, "files": ["/w/a/util.rvl", "/w/b/util.rvl", "/w/main.rvl"],
+          "files_content": {}, "modules": {}}
+    with pytest.raises(EditError) as caught:
+        _resolve_buffer(vs, "util.rvl")
+    assert "/w/a/util.rvl" in str(caught.value) and "/w/b/util.rvl" in str(caught.value)
+    assert _resolve_buffer(vs, "b/util.rvl") == ("file", "/w/b/util.rvl")
+    assert _resolve_buffer(vs, "main.rvl") == ("file", "/w/main.rvl")
+
+
+def test_a_partial_basename_is_not_a_match():
+    from revl.mcp.edit import EditError, _resolve_buffer
+
+    vs = {"source": None, "files": ["/w/plain.rvl"], "files_content": {}, "modules": {}}
+    with pytest.raises(EditError, match="no server-side source buffer"):
+        _resolve_buffer(vs, "lain.rvl")
