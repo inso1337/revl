@@ -3421,6 +3421,7 @@ def _refuse_cross_module_compound(key: str, op: str, param_types: list,
     if compound:
         raise EmitError(
             f"{where}: {key}.{op}: {compound[0]}, and only scalar (Int/Bool/Float) "
+            f"{where}: {key}.{op}: {compound[0]}, and only scalar (Int/Bool) "
             f"values cross a service another component provides on this tier. "
             f"The provider is another module with its own linear memory and the runtime passes "
             f"a compound value as an address, so the other side would read its "
@@ -7269,6 +7270,11 @@ def _peer_keys(components: list) -> frozenset:
     """Every key a component of this composition provides (issue #1601)."""
     return frozenset(key for c in components for key in (c.get("provides") or {}))
         return "\n".join(lines) + "\n"
+
+
+def _peer_keys(components: list) -> frozenset:
+    """Every key a component of this composition provides (issue #1601)."""
+    return frozenset(key for c in components for key in (c.get("provides") or {}))
 
 
 def _emit_v1(ir: dict, record: bool = False) -> dict[str, str]:
