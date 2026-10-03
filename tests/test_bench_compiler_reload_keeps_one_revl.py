@@ -22,6 +22,22 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 BENCH = ROOT / "bench"
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from _load_by_path import load_by_path  # noqa: E402
+
+# `import run` is not bench/run.py in a whole-suite run: the tree has several
+# `run.py` files and another test registers one under the bare name first, so
+# both bench modules are loaded by path under the names the other bench tests
+# use (tests/test_framework_bench.py's `bench_run`).
+sys.path.insert(0, str(BENCH))
+
+
+def _bench_run():
+    return load_by_path("bench_run", BENCH / "run.py")
+
+
+def _rescore():
+    return load_by_path("rescore", BENCH / "rescore.py")
 
 BAD = "component C {\n  let = 1\n}\n"   # a syntax refusal
 DRAFT = (
@@ -45,12 +61,18 @@ def _refused_by_the_first_revl(error_class, compile_source) -> bool:
 # Each case is the body of a test that reaches one loader in-process.
 REACHERS = {
     "rescore.load_compiler": """
-        import rescore
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("reach_rescore", ROOT / "bench" / "rescore.py")
+        rescore = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(rescore)
         rescore.load_compiler(ROOT)
     """,
     "run.compile_check": """
-        import run
-        assert run.compile_check("component C {\\n  let = 1\\n}\\n", "bad.rvl")[0] is False
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("reach_bench_run", ROOT / "bench" / "run.py")
+        bench_run = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(bench_run)
+        assert bench_run.compile_check("component C {\\n  let = 1\\n}\\n", "bad.rvl")[0] is False
     """,
 }
 
@@ -91,8 +113,7 @@ def test_a_reaching_test_then_a_dependent_test_in_one_session(tmp_path, reacher)
 
 
 def test_compile_check_puts_the_process_revl_back():
-    sys.path.insert(0, str(BENCH))
-    import run as bench_run  # noqa: PLC0415
+    bench_run = _bench_run()
     from revl import RevlError, compile_source  # noqa: PLC0415
 
     before = sys.modules["revl"]
@@ -104,8 +125,7 @@ def test_compile_check_puts_the_process_revl_back():
 
 
 def test_load_compiler_reuses_this_process_revl_for_the_same_root():
-    sys.path.insert(0, str(BENCH))
-    import rescore  # noqa: PLC0415
+    rescore = _rescore()
     from revl import RevlError  # noqa: PLC0415
 
     before = sys.modules["revl"]
