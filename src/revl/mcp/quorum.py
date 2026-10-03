@@ -245,8 +245,9 @@ class Cast:
     """A cast whose identity is BOUND: who it counts for, which principal
     supplied it, and what bound it.
 
-    `how` is `"session"` (the serve-time operator binding) or `"credential"` (a
-    proven vote credential). It is recorded on the decision graph so an audit
+    `how` is `"session"` (the serve-time operator binding), `"transport"` (the
+    operator the HTTP transport authenticated for this request, issue #1463) or
+    `"credential"` (a proven vote credential). It is recorded on the decision graph so an audit
     reads what each cast rested on rather than assuming."""
 
     voter: str
@@ -321,7 +322,8 @@ def _lifetime_refusal(operator, now_ms):
 
 
 def resolve_cast(*, as_token, as_secret=None, bound, registry,
-                 as_proof=None, binding=None, now_ms=None):
+                 as_proof=None, binding=None, now_ms=None,
+                 bound_by: str = "session"):
     """Bind one cast's identity, or refuse it.
 
     Returns a :class:`Cast` when the identity is bound and an
@@ -386,7 +388,10 @@ def resolve_cast(*, as_token, as_secret=None, bound, registry,
             lapsed_session = _lifetime_refusal(bound, now_ms)
             if lapsed_session is not None:
                 return lapsed_session
-        return Cast(bound_token or "", f"session:{bound_token or ''}", "session")
+        # `bound_by` is provenance only: WHAT established the bound identity
+        # (the serve-time binding, or the HTTP transport's per-request
+        # authentication). The principal and every decision are unchanged.
+        return Cast(bound_token or "", f"session:{bound_token or ''}", bound_by)
 
     if as_token is None or as_token == "":
         if secret is not None or proof is not None:
