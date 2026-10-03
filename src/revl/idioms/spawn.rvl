@@ -1,0 +1,18 @@
+// idiom: spawn
+// summary: start an instance of a component at activation, torn down with its spawner
+// rule: G4: a spawn is an acquisition, so it carries its inverse: `undo <handle>.dispose()`
+// rule: the spawned component's config is passed by field: `with { field: value }`
+// fill: effect spawn Worker with { id: 1 } undo w.dispose()
+
+service Work { fn id() -> Int }
+
+component Worker provides work: Work {
+  config { id: Int }
+  provide work {
+    fn id() = config.id
+  }
+}
+
+component Pool {
+  let w = effect spawn Worker with { id: 1 } undo w.dispose()
+}

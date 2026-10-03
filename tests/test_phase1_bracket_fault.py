@@ -150,7 +150,7 @@ async def _drive(source: str, name: str, deliver: bool = False) -> _Run:
         # channel so a swallowed raise is visible to the assertions.
         root.logger.error = lambda *args, **kwargs: run.logged.append(args)
         run.probe = runtime.arm_fault_probe("C")
-        seen = {id(f) for f in runtime._FRAME_BY_CTX.values()}
+        seen = {id(f) for f in runtime._live_frames()}
         try:
             fiber = root.plugin(module.C)
             await _flush()
@@ -163,7 +163,7 @@ async def _drive(source: str, name: str, deliver: bool = False) -> _Run:
         # is the merged residue list every tier-py entry kind records into, and
         # it predates this fix — so these assertions are meaningful against the
         # OLD runtime too (there it stays empty, which is the bug).
-        run.frame = next(f for f in runtime._FRAME_BY_CTX.values()
+        run.frame = next(f for f in runtime._live_frames()
                          if f.name == "C" and id(f) not in seen)
         await fiber.dispose()
         await _flush()
